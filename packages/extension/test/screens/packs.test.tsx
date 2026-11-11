@@ -114,6 +114,30 @@ describe('the Packs and settings screen', () => {
   });
 });
 
+describe('the GitHub page section', () => {
+  const section = () => within(screen.getByRole('region', { name: 'GitHub page' }));
+  it('says no jump was made before any jump', async () => {
+    show({ kind: 'no-pr' });
+    await openPacks();
+    expect(section().getByText('No jump made yet.')).toBeTruthy();
+  });
+  it('says which view the last jump recognised', async () => {
+    const { unmount } = show({ kind: 'no-pr' }, { pageReport: { view: 'classic', missing: [] } });
+    await openPacks();
+    expect(section().getByText('Recognised as the classic view.')).toBeTruthy();
+    unmount();
+    show({ kind: 'no-pr' }, { pageReport: { view: 'react', missing: [] } });
+    await openPacks();
+    expect(section().getByText('Recognised as the newer view.')).toBeTruthy();
+  });
+  it('names the selectors that found nothing when the page was not recognised, as text', async () => {
+    show({ kind: 'no-pr' }, { pageReport: { view: null, missing: ['classic-file', '<b>react-file</b>'] } });
+    await openPacks();
+    expect(section().getByText('Not recognised. Selectors that found nothing: classic-file, <b>react-file</b>.')).toBeTruthy();
+    expect(document.querySelector('.packs-screen b')).toBeNull();
+  });
+});
+
 describe('the Ready screen and the stored default depth', () => {
   const depthOf = (): Depth => (['quick', 'standard', 'deep'] as const).find((d) => (screen.getByRole('radio', { name: new RegExp(`^${d}`, 'i') }) as HTMLInputElement).checked)!;
   it('preselects the stored default, or the suggested depth without one', () => {

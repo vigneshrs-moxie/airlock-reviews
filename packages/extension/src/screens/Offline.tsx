@@ -3,7 +3,7 @@ import type { Timers } from '../client/timers';
 import type { PanelState, UserAction } from '../state/reduce';
 import { BriefBlock } from './BriefBlock';
 import { CommandBox } from './CommandBox';
-import type { OnJump } from './FindingDetail';
+import type { Jump } from '../state/jump';
 import { MapBlock } from './MapBlock';
 import { Verdict } from './Verdict';
 
@@ -11,7 +11,7 @@ export function Offline({ state, dispatch, timers, onJump, onDismiss }: {
   state: Extract<PanelState, { kind: 'offline' }>;
   dispatch: (action: UserAction) => void;
   timers?: Timers;
-  onJump?: OnJump;
+  onJump?: Jump;
   onDismiss?: (finding: Finding) => void;
 }) {
   const { progress, review } = state;

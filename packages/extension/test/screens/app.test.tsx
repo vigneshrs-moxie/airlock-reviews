@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { App } from '../../src/panel/App';
+import { App, type PanelServices } from '../../src/panel/App';
 import type { PanelState, UserAction } from '../../src/state/machine';
 import { prSummary } from './fixtures';
+import { finding, reviewState } from './review-fixtures';
 
 afterEach(cleanup);
 
@@ -33,5 +34,22 @@ describe('App', () => {
     view.unmount();
     expect(f.stop).toHaveBeenCalledTimes(1);
     expect(f.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the jump to the review with its pull request, and shows the last jump\'s report on the Packs screen', async () => {
+    const f = fakeStart();
+    const jump = vi.fn<NonNullable<PanelServices['jump']>>(async (_pr, place, onReport) => {
+      onReport({ view: 'react', missing: [] });
+      return `Showing ${place.path}:${String(place.line)}.`;
+    });
+    const services: PanelServices = { settings: { getToken: async () => null, setToken: async () => undefined, getDefaultDepth: async () => null, setDefaultDepth: async () => undefined }, fetchStatus: () => new Promise(() => undefined), jump };
+    render(<App start={f.start} services={services} />);
+    f.send(reviewState([finding(1)]));
+    fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Jump to line' }));
+    expect(await screen.findByText('Showing src/file1.ts:10.')).toBeTruthy();
+    expect(jump).toHaveBeenCalledWith(expect.objectContaining({ repo: 'acme/widgets', number: 1 }), { path: 'src/file1.ts', line: 10, kind: 'changed' }, expect.any(Function));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
+    expect(screen.getByText('Recognised as the newer view.')).toBeTruthy();
   });
 });

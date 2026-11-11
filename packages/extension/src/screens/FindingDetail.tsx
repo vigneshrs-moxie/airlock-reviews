@@ -1,15 +1,15 @@
 import type { Finding, PrSummary } from '@airlock/shared';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Timers } from '../client/timers';
+import { connectedPlace, COULD_NOT_JUMP, ownPlace, type Jump, type JumpPlace } from '../state/jump';
 import { CopyButton } from './CopyButton';
 import { useVisible } from './visible';
 import { fromText, locationText, placeText, severityWord } from './words';
 
-export interface JumpTarget { path: string; line: number | null }
-/** Takes the person to a place and says in a sentence what it did. */
-export type OnJump = (place: JumpTarget) => Promise<string>;
+/** Takes the person to a place in the reviewed pull request and says in a sentence what it did. */
+export type OnJump = (place: JumpPlace) => Promise<string>;
 
-export const notConnected: OnJump = () => Promise.resolve('Jumping is not connected yet.');
+export const notConnected: Jump = () => Promise.resolve('Jumping is not connected yet.');
 
 function Part({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -31,12 +31,14 @@ export interface FindingDetailProps {
   onBack: () => void;
   onOpen: (finding: Finding) => void;
   onJump: OnJump;
+  /** The paths of the review's files: a place among them is on the Files changed page. */
+  changedPaths: ReadonlySet<string>;
   onDismiss: (finding: Finding) => void;
   timers?: Timers;
 }
 
 /** One finding in full. Keyed by the caller on the finding's id, so each finding starts with its own focus and notes. */
-export function FindingDetail({ finding, packs, previous, next, canDismiss, fixPrompt, onBack, onOpen, onJump, onDismiss, timers }: FindingDetailProps) {
+export function FindingDetail({ finding, packs, previous, next, canDismiss, fixPrompt, onBack, onOpen, onJump, changedPaths, onDismiss, timers }: FindingDetailProps) {
   const title = useRef<HTMLHeadingElement>(null);
   const [note, setNote] = useState<{ key: string; text: string } | null>(null);
   const visible = useVisible();
@@ -47,9 +49,9 @@ export function FindingDetail({ finding, packs, previous, next, canDismiss, fixP
     title.current?.focus();
   }, [visible]);
 
-  const jump = (key: string, place: JumpTarget): void => {
+  const jump = (key: string, place: JumpPlace): void => {
     const said = (text: string): void => setNote({ key, text });
-    const failed = (): void => said('Airlock could not jump to that place.');
+    const failed = (): void => said(COULD_NOT_JUMP);
     try {
       Promise.resolve(onJump(place)).then(said, failed);
     } catch {
@@ -74,7 +76,7 @@ export function FindingDetail({ finding, packs, previous, next, canDismiss, fixP
             <ul className="plain">
               {finding.connected.map((place, i) => (
                 <li key={i}>
-                  <button type="button" className="place" onClick={() => jump(`place-${i}`, { path: place.path, line: place.line })}>
+                  <button type="button" className="place" onClick={() => jump(`place-${i}`, connectedPlace(place, changedPaths))}>
                     <code className="path">{placeText(place.path, place.line)}</code>
                     <span className="muted">{place.role}</span>
                   </button>
@@ -90,7 +92,7 @@ export function FindingDetail({ finding, packs, previous, next, canDismiss, fixP
       </section>
       <div className="actions">
         <div className="action">
-          <button type="button" className="btn" onClick={() => jump('own', { path: finding.path, line: finding.anchor.startLine })}>Jump to line</button>
+          <button type="button" className="btn" onClick={() => jump('own', ownPlace(finding, changedPaths))}>Jump to line</button>
           {noteFor('own')}
         </div>
         <div className="action"><CopyButton text={fixPrompt} label="Copy fix prompt" {...(timers ? { timers } : {})} /></div>

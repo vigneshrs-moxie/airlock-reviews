@@ -8,7 +8,7 @@ import { Problem } from './Problem';
 import { Ready } from './Ready';
 import { Running } from './Running';
 import { Verdict } from './Verdict';
-import type { OnJump } from './FindingDetail';
+import type { Jump, PageReport } from '../state/jump';
 import type { Depth, Finding, PackRef, PrSummary, ServiceStatus } from '@airlock/shared';
 import { DismissSheet, focusAfterClose, newDraft, type SheetDraft, type SheetView } from './DismissSheet';
 import { Packs } from './Packs';
@@ -21,8 +21,10 @@ export interface PanelScreenProps {
   onOpenPacks?: () => void;
   /** For the Copy buttons' two seconds; the real clock unless a test passes its own. */
   timers?: Timers;
-  /** Takes the person to a line on the GitHub page; until a later task supplies it, it says it is not connected. */
-  onJump?: OnJump;
+  /** Takes the person to a place on GitHub; without it the finding screen says jumping is not connected. */
+  onJump?: Jump;
+  /** What the last jump found on the GitHub page, for the Packs screen; null before any jump. */
+  pageReport?: PageReport | null;
   /** Asks the service for its status, for the Packs screen. */
   fetchStatus?: () => Promise<ServiceStatus>;
   /** The depth stored in the Packs screen; null when none is stored. */
@@ -92,7 +94,7 @@ function FinishedAnnouncer({ kind }: { kind: PanelState['kind'] }) {
 }
 
 /** The frame and the screen for one state, with the Packs screen and the dismiss sheet over it. */
-export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, fetchStatus = unreachable, defaultDepth = null, onDefaultDepth, depthFailed = false }: PanelScreenProps) {
+export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, pageReport = null, fetchStatus = unreachable, defaultDepth = null, onDefaultDepth, depthFailed = false }: PanelScreenProps) {
   const [packsOpen, setPacksOpen] = useState(false);
   // What is in the sheet outlives the sheet being out of sight; only Cancel and Done drop it.
   const [draft, setDraft] = useState<SheetDraft | null>(null);
@@ -136,7 +138,7 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, fetc
       {packsOpen && (
         <Packs
           pr={known.pr} packVersions={known.packs} paired={pairedOf(state)} fetchStatus={fetchStatus}
-          defaultDepth={defaultDepth} onDefaultDepth={onDefaultDepth ?? (() => undefined)} depthFailed={depthFailed}
+          defaultDepth={defaultDepth} onDefaultDepth={onDefaultDepth ?? (() => undefined)} depthFailed={depthFailed} page={pageReport}
           onBack={() => setPacksOpen(false)} {...(timers ? { timers } : {})}
         />
       )}

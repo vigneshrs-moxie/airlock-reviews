@@ -1,6 +1,7 @@
 import type { Depth, PackRef, PrSummary, ServiceStatus } from '@airlock/shared';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { Timers } from '../client/timers';
+import { pageWords, type PageReport } from '../state/jump';
 import { CommandBox } from './CommandBox';
 
 export const UNREACHABLE = 'Airlock could not reach its service.';
@@ -53,7 +54,7 @@ function ServiceSection({ fetchStatus }: { fetchStatus: () => Promise<ServiceSta
 }
 
 /** Which packs apply and how the panel is connected; replaces the panel's content until Back. */
-export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onDefaultDepth, depthFailed = false, onBack, timers }: {
+export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onDefaultDepth, depthFailed = false, page = null, onBack, timers }: {
   pr: PrSummary | null;
   /** The packs of the review on screen with their versions; empty when no review is on screen. */
   packVersions: readonly PackRef[];
@@ -63,6 +64,8 @@ export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onD
   defaultDepth: Depth | null;
   onDefaultDepth: (depth: Depth | null) => void;
   depthFailed?: boolean;
+  /** What the last jump found on the GitHub page; null before any jump. */
+  page?: PageReport | null;
   onBack: () => void;
   timers?: Timers;
 }) {
@@ -113,6 +116,10 @@ export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onD
           ))}
         </div>
         {depthFailed && <p role="alert" className="notice">Airlock could not save that setting.</p>}
+      </section>
+      <section className="card" aria-labelledby="packs-page">
+        <h3 className="label" id="packs-page">GitHub page</h3>
+        <p className={page === null ? 'muted' : undefined}>{pageWords(page)}</p>
       </section>
     </div>
   );

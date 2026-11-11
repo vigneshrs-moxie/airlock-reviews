@@ -11,7 +11,8 @@ import { useVisible } from './visible';
 import { DismissedList } from './DismissedList';
 import { DroppedSheet } from './DroppedSheet';
 import { FindingCard } from './FindingCard';
-import { FindingDetail, notConnected, type OnJump } from './FindingDetail';
+import type { Jump } from '../state/jump';
+import { FindingDetail, notConnected } from './FindingDetail';
 import { useAnnounce } from './Frame';
 import { MapBlock } from './MapBlock';
 import { StageErrors } from './StageErrors';
@@ -23,7 +24,8 @@ export interface VerdictProps {
   dispatch: (action: UserAction) => void;
   /** Shown from before the service stopped: everything that needs the service is disabled. */
   readOnly?: boolean;
-  onJump?: OnJump;
+  /** Called with the reviewed pull request and the place; works read-only too, as it needs no service. */
+  onJump?: Jump;
   onDismiss?: (finding: Finding) => void;
   /** For the Copy buttons' two seconds. */
   timers?: Timers;
@@ -45,6 +47,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const visible = useVisible();
   const t = timers ? { timers } : {};
   const lists = useMemo(() => listFindings(doc.findings, latest.dismissals), [doc.findings, latest.dismissals]);
+  const changedPaths = useMemo(() => new Set(doc.files.map((f) => f.path)), [doc.files]);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [openId, setOpenId] = useState<string | null>(null);
   const [folds, setFolds] = useState<ReadonlySet<string>>(new Set());
@@ -129,7 +132,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
       <FindingDetail
         key={detail.id} finding={detail} packs={pr.packs} previous={previous} next={next} canDismiss={!disabled}
         fixPrompt={promptFor([detail])} onBack={() => setOpenId(null)} onOpen={(f) => setOpenId(f.id)}
-        onJump={onJump} onDismiss={onDismiss} {...t}
+        onJump={(place) => onJump(doc.pr, place)} changedPaths={changedPaths} onDismiss={onDismiss} {...t}
       />
       </>
     );

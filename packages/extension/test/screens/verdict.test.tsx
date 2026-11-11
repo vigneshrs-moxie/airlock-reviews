@@ -19,6 +19,8 @@ function show(state: PanelState, extra: Partial<PanelScreenProps> = {}) {
 }
 
 const review = (findings: Finding[], opts: ReviewOptions = {}) => show(reviewState(findings, opts));
+/** The pull request a jump is for: the reviewed one, at the reviewed commit. */
+const REVIEWED = expect.objectContaining({ repo: 'acme/widgets', number: 1, headSha: 'c'.repeat(40) });
 const button = (name: string | RegExp) => screen.getByRole('button', { name });
 const queryButton = (name: string | RegExp) => screen.queryByRole('button', { name });
 const heading = (name: string | RegExp) => screen.getByRole('heading', { name });
@@ -266,7 +268,7 @@ describe('the detail of a finding', () => {
     expect(button(/src\/lib\.ts/).textContent).not.toContain(':');
     expect(document.querySelector('a')).toBeNull();
     fireEvent.click(place);
-    expect(onJump).toHaveBeenCalledWith({ path: 'src/other.ts', line: 7 });
+    expect(onJump).toHaveBeenCalledWith(REVIEWED, { path: 'src/other.ts', line: 7, kind: 'elsewhere' });
     expect(await screen.findByText('Jumped to src/other.ts line 7.')).toBeTruthy();
     expect(place.parentElement?.textContent).toContain('Jumped to src/other.ts line 7.');
   });
@@ -275,12 +277,34 @@ describe('the detail of a finding', () => {
     show(reviewState([full]), { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
     fireEvent.click(button('Jump to line'));
-    expect(onJump).toHaveBeenCalledWith({ path: 'src/file1.ts', line: 10 });
+    expect(onJump).toHaveBeenCalledWith(REVIEWED, { path: 'src/file1.ts', line: 10, kind: 'changed' });
     cleanup();
     review([full]);
     fireEvent.click(within(cards()[0]!).getByRole('button'));
     fireEvent.click(button('Jump to line'));
     expect(await screen.findByText('Jumping is not connected yet.')).toBeTruthy();
+  });
+  it('says what kind of place each jump is: changed, outside the changed lines, or not in the pull request', () => {
+    const onJump = vi.fn().mockResolvedValue('Done.');
+    const files = [{ path: 'src/file1.ts', tier: 'read' as const, reason: '' }, { path: 'src/lib.ts', tier: 'read' as const, reason: '' }];
+    const outside = { ...full, anchor: { status: 'outside-diff' as const, startLine: 40, endLine: 40 } };
+    show(reviewState([outside], { doc: { files } }), { onJump });
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    fireEvent.click(button('Jump to line'));
+    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/file1.ts', line: 40, kind: 'outside' });
+    fireEvent.click(button(/src\/lib\.ts/));
+    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/lib.ts', line: null, kind: 'changed' });
+    fireEvent.click(button(/src\/other\.ts:7/));
+    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/other.ts', line: 7, kind: 'elsewhere' });
+  });
+  it('jumps from a review shown read-only while the service is away', async () => {
+    const onJump = vi.fn().mockResolvedValue('Showing src/file1.ts:10.');
+    const kept = reviewState([full]);
+    show({ kind: 'offline', review: { pr: kept.pr, latest: kept.latest, stale: false } }, { onJump });
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    fireEvent.click(button('Jump to line'));
+    expect(onJump).toHaveBeenCalledWith(REVIEWED, { path: 'src/file1.ts', line: 10, kind: 'changed' });
+    expect(await screen.findByText('Showing src/file1.ts:10.')).toBeTruthy();
   });
   it('Dismiss opens the dismiss sheet for the finding', () => {
     show(reviewState([full]));
