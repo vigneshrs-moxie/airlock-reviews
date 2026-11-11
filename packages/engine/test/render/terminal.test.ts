@@ -209,6 +209,19 @@ describe('renderReview', () => {
     expect(out).toContain('Also found\n\n');
   });
 
+  it('prints every ignored file under Not reviewed with its reason', () => {
+    const doc = fullDocument();
+    doc.files = [
+      { path: 'src/total.ts', tier: 'read', reason: 'logic' },
+      { path: 'yarn.lock', tier: 'ignored', reason: 'lock file (built-in: **/yarn.lock)' },
+      { path: 'img/a.png', tier: 'ignored', reason: 'binary file' },
+    ];
+    const out = renderReview(doc);
+    expect(out).toContain('\nNot reviewed\n\n- yarn.lock: lock file (built-in: **/yarn.lock)\n- img/a.png: binary file\n');
+    expect(out.indexOf('\nChange map\n')).toBeLessThan(out.indexOf('\nNot reviewed\n'));
+    expect(renderReview(minimalDocument())).not.toContain('Not reviewed');
+  });
+
   it('shows 5 files per layer and a count of the rest past 40 files', () => {
     const doc = minimalDocument();
     const files = Array.from({ length: 41 }, (_, i) => `src/f${i}.ts`);

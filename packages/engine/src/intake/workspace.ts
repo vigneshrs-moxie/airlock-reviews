@@ -4,7 +4,14 @@ import type { ReviewRange } from '@airlock/shared';
 import { must, type Exec } from '../util/exec.js';
 import { airlockHome, repoSlug } from '../util/paths.js';
 
-export interface Workspace { headDir: string; baseDir: string; range: ReviewRange; dispose(): Promise<void> }
+export interface Workspace {
+  headDir: string;
+  baseDir: string;
+  /** The bare mirror's git folder: the diff is computed here, where no file of the pull request can change how git reads it. */
+  gitDir: string;
+  range: ReviewRange;
+  dispose(): Promise<void>;
+}
 
 export interface WorkspaceRequest {
   repo: string;
@@ -77,7 +84,7 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   must(await addWorktree(baseDir, range.baseSha), 'git worktree add (base)');
 
   return {
-    headDir, baseDir, range,
+    headDir, baseDir, gitDir: mirror, range,
     async dispose() {
       await rm(reviewDir, { recursive: true, force: true });
       await exec('git', ['--git-dir', mirror, 'worktree', 'prune']);

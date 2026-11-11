@@ -81,6 +81,13 @@ describe('safeRead', () => {
     expect(await safeRead(root, 'big.bin')).toBeNull();
   });
 
+  it('reads only the first bytes when asked, from a file of any size, with the same path checks', async () => {
+    expect(await safeRead(root, 'big.bin', { firstBytes: 8 })).toBe('aaaaaaaa');
+    expect(await safeRead(root, 'src/a.ts', { firstBytes: 8000 })).toBe('export const a = 1;\n');
+    expect(await safeRead(root, 'src/link.ts', { firstBytes: 8 })).toBeNull();
+    expect(await safeRead(root, '../outside/secret.txt', { firstBytes: 8 })).toBeNull();
+  });
+
   it('refuses anything under .git at the root, whatever the letter case', async () => {
     expect(await safeRead(root, '.git/config')).toBeNull();
     expect(await safeRead(root, '.GIT/config')).toBeNull();

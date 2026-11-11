@@ -34,7 +34,7 @@ describe('classifyFiles', () => {
       [p],
     );
     expect(out.map((f) => f.reason)).toEqual([
-      'built-in: **/package-lock.json', 'web: vendor/**', 'web: prisma/migrations/**', 'web: docs/**',
+      'lock file (built-in: **/package-lock.json)', 'web: vendor/**', 'web: prisma/migrations/**', 'web: docs/**',
       'built-in: **/*.spec.*', 'binary file', 'default',
     ]);
   });

@@ -1,8 +1,14 @@
 import { readFileSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { FileDiff } from '@airlock/shared';
-import { describe, expect, it } from 'vitest';
-import { lineInDiff, loadDiff, parseDiff } from '../../src/diff/parse.js';
-import type { Exec } from '../../src/util/exec.js';
+import { afterEach, describe, expect, it } from 'vitest';
+import { lineInDiff, loadDiff, parseDiff, recheckBinary } from '../../src/diff/parse.js';
+import { realExec, type Exec } from '../../src/util/exec.js';
+import { safeRead } from '../../src/util/safe-read.js';
+import { commitFiles } from '../helpers/change-repo.js';
+import { makeTempRepo, type TempRepo } from '../helpers/temp-repo.js';
 
 const fx = (name: string): string => readFileSync(new URL(`../fixtures/diffs/${name}.diff`, import.meta.url), 'utf8');
 
@@ -110,13 +116,84 @@ describe('loadDiff', () => {
       calls.push({ cmd, args, cwd: opts?.cwd });
       return { stdout: fx('added'), stderr: '', code: 0 };
     };
-    const files = await loadDiff(exec, '/repo', range);
-    expect(calls).toEqual([{ cmd: 'git', args: ['diff', '--no-color', '-M', '--unified=3', 'aaa', 'bbb'], cwd: '/repo' }]);
+    const files = await loadDiff(exec, '/mirror.git', range);
+    expect(calls).toEqual([{
+      cmd: 'git',
+      args: ['--git-dir', '/mirror.git', 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '-M', '--unified=3', 'aaa', 'bbb'],
+      cwd: '/mirror.git',
+    }]);
     expect(files[0]?.path).toBe('src/new.ts');
   });
 
   it('throws with stderr when git fails', async () => {
     const exec: Exec = async () => ({ stdout: '', stderr: 'fatal: bad object', code: 128 });
     await expect(loadDiff(exec, '/repo', range)).rejects.toThrow(/fatal: bad object/);
+  });
+});
+
+describe('loadDiff on a real repository', () => {
+  const made: string[] = [];
+  afterEach(async () => {
+    for (const dir of made.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+  async function repo(): Promise<TempRepo> {
+    const r = await makeTempRepo();
+    made.push(r.dir);
+    return r;
+  }
+  async function bareClone(r: TempRepo): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'airlock-mirror-'));
+    made.push(dir);
+    const mirror = join(dir, 'm.git');
+    await realExec('git', ['clone', '--bare', r.dir, mirror]);
+    return mirror;
+  }
+
+  it('ignores a .gitattributes the pull request adds, so it cannot hide its own files', async () => {
+    const r = await repo();
+    const baseSha = await commitFiles(r, { 'src/auth.ts': 'export const ok = () => check();\n' }, 'base');
+    const headSha = await commitFiles(r, {
+      'src/auth.ts': 'export const ok = () => true;\n', 'src/pay.ts': 'export const pay = 1;\n', '.gitattributes': '* -diff\n',
+    }, 'head');
+    const files = await loadDiff(realExec, await bareClone(r), { baseSha, headSha, kind: 'full' });
+    expect(files.map((f) => [f.path, f.binary])).toEqual([['.gitattributes', false], ['src/auth.ts', false], ['src/pay.ts', false]]);
+    expect(files[1]!.hunks[0]!.lines.map((l) => `${l.kind} ${l.text}`)).toEqual([
+      'del export const ok = () => check();', 'add export const ok = () => true;',
+    ]);
+  });
+});
+
+describe('recheckBinary', () => {
+  const made: string[] = [];
+  afterEach(async () => {
+    for (const dir of made.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+
+  it('turns a text file git calls binary back into text with a fact, and leaves a real binary file alone', async () => {
+    const r = await makeTempRepo();
+    made.push(r.dir);
+    const baseSha = await commitFiles(r, { 'src/a.ts': 'export const a = 1;\n' }, 'base');
+    await writeFile(join(r.dir, 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]));
+    const headSha = await commitFiles(r, { 'src/a.ts': 'export const a = 2;\n' }, 'head');
+    // The person's own git settings (here the repository's info/attributes) can still mark a text file as binary.
+    await writeFile(join(r.dir, '.git', 'info', 'attributes'), '*.ts -diff\n');
+    const files = await loadDiff(realExec, join(r.dir, '.git'), { baseSha, headSha, kind: 'full' });
+    expect(files.map((f) => [f.path, f.binary])).toEqual([['logo.png', true], ['src/a.ts', true]]);
+
+    const out = await recheckBinary(files, (path, bytes) => safeRead(r.dir, path, { firstBytes: bytes }));
+    expect(out.files.map((f) => [f.path, f.binary])).toEqual([['logo.png', true], ['src/a.ts', false]]);
+    expect(out.facts).toEqual([{
+      checkId: 'diff-not-available', path: 'src/a.ts', line: null,
+      message: 'src/a.ts: the diff is not available (git was told to treat it as binary); read the file itself',
+    }]);
+  });
+
+  it('keeps a deleted binary file and one that cannot be read as binary', async () => {
+    const file = (path: string, status: FileDiff['status']): FileDiff => ({
+      path, oldPath: null, status, binary: true, additions: 0, deletions: 0, hunks: [],
+    });
+    const out = await recheckBinary([file('gone.ts', 'deleted'), file('huge.ts', 'modified')], async () => null);
+    expect(out.files.map((f) => f.binary)).toEqual([true, true]);
+    expect(out.facts).toEqual([]);
   });
 });

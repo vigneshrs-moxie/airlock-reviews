@@ -2,10 +2,12 @@ import type { FileDiff, FileFact, Tier } from '@airlock/shared';
 import picomatch from 'picomatch';
 import type { Pack } from '../packs/types.js';
 
-const BUILT_IN_IGNORE = [
-  '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/*.snap', '**/*.min.js', '**/dist/**',
-  '**/*.generated.*',
-];
+/** Each built-in ignore glob with what it ignores, in words, for the reason shown under "Not reviewed". */
+const BUILT_IN_IGNORE_WORDS: Record<string, string> = {
+  '**/package-lock.json': 'lock file', '**/pnpm-lock.yaml': 'lock file', '**/yarn.lock': 'lock file', '**/*.snap': 'test snapshot',
+  '**/*.min.js': 'minified file', '**/dist/**': 'build output', '**/*.generated.*': 'generated file',
+};
+const BUILT_IN_IGNORE = Object.keys(BUILT_IN_IGNORE_WORDS);
 const BUILT_IN_TRUST = ['**/*.test.*', '**/*.spec.*', '**/*.dbtest.*', '**/__tests__/**'];
 
 const matches = (glob: string, path: string): boolean => picomatch(glob, { dot: true })(path);
@@ -24,7 +26,10 @@ function classify(file: FileDiff, packs: Pack[]): FileFact {
   const fact = (tier: Tier, reason: string): FileFact => ({ path: file.path, tier, reason });
   if (file.binary) return fact('ignored', 'binary file');
   const ignored = firstMatch(file.path, packs, (p) => p.tiers.ignore, BUILT_IN_IGNORE);
-  if (ignored) return fact('ignored', ignored);
+  if (ignored) {
+    const words = ignored.startsWith('built-in: ') ? BUILT_IN_IGNORE_WORDS[ignored.slice('built-in: '.length)] : undefined;
+    return fact('ignored', words === undefined ? ignored : `${words} (${ignored})`);
+  }
   const read = firstMatch(file.path, packs, (p) => p.tiers.read, []);
   if (read) return fact('read', read);
   const trust = firstMatch(file.path, packs, (p) => p.tiers.trust, BUILT_IN_TRUST);

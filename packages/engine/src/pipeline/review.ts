@@ -11,7 +11,7 @@ import { fingerprint } from '../anchor/fingerprint.js';
 import { buildBrief } from '../brief/brief.js';
 import { challenge, type KeptCandidate } from '../challenge/challenge.js';
 import type { ReadFile } from '../challenge/proof.js';
-import { loadDiff } from '../diff/parse.js';
+import { loadDiff, recheckBinary } from '../diff/parse.js';
 import { runChecks } from '../facts/checks.js';
 import { classifyFiles } from '../facts/classify.js';
 import { fetchPr } from '../intake/pr.js';
@@ -19,6 +19,7 @@ import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
 import { runCohortLenses, runnableLenses } from '../lenses/cohort-lens.js';
 import { emptyResult, type LensContext, type LensStageResult } from '../lenses/context.js';
 import { runSeams } from '../lenses/seams.js';
+import { placeablePaths } from '../map/check.js';
 import { findLinks } from '../map/links.js';
 import { fallbackMap, buildChangeMap } from '../map/mapper.js';
 import { findNeighbours } from '../map/neighbours.js';
@@ -133,6 +134,20 @@ function fallbackSelection(
 const unreviewedMerge = (changed: number): string =>
   `This pull request only merges another branch in. Airlock did not review it: ${changed === 1 ? '1 changed file was' : `${changed} changed files were`} not looked at.`;
 
+/** Most paths named in the stage error for a pull request none of whose changed files could be reviewed. */
+const MAX_UNREVIEWED_NAMED = 5;
+
+/**
+ * Nothing looked at is never clean: when the pull request changes files and every one of them is ignored, the sentence
+ * for a stage error naming them; otherwise null.
+ */
+function notReviewed(files: FileDiff[], tiers: FileFact[]): string | null {
+  if (files.length === 0 || placeablePaths(files, tiers).length > 0) return null;
+  const named = files.slice(0, MAX_UNREVIEWED_NAMED).map((f) => f.path).join(', ');
+  const more = files.length > MAX_UNREVIEWED_NAMED ? '…' : '';
+  return `${files.length === 1 ? '1 changed file was' : `${files.length} changed files were`} not reviewed: ${named}${more}`;
+}
+
 interface Settings { depth: Depth; models: ModelConfig; parallel: number }
 
 interface Reviewed {
@@ -143,7 +158,7 @@ interface Reviewed {
 /** Every stage from packs to select, inside the workspace. */
 async function reviewInWorkspace(
   req: ReviewRequest, deps: EngineDeps, log: StageLog, settings: Settings, pr: PrInfo, ws: Workspace, files: FileDiff[],
-  chosen: { packs: Pack[]; errors: StageError[]; ms: number },
+  diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; ms: number },
 ): Promise<Reviewed> {
   const { exec, runner } = deps;
   const { depth, models } = settings;
@@ -175,7 +190,9 @@ async function reviewInWorkspace(
 
   const gathered = (await log.run('facts', async (rec) => {
     const tiers = await rec.attempt(() => classifyFiles(files, packs), [] as FileFact[]);
-    const facts = await rec.attempt(() => runChecks(files, packs, readHead), [] as Fact[]);
+    const unreviewed = notReviewed(files, tiers);
+    if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
+    const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead), [] as Fact[])];
     const found = await rec.attempt(() => findLinks(exec, ws.headDir, files, packs), { links: [] as Link[], skippedNames: 0 });
     const neighbours = await rec.attempt(() => findNeighbours(exec, ws.headDir, files, found.links, packs), [] as Neighbour[]);
     return { tiers, facts, links: found.links, neighbours, skippedNames: found.skippedNames };
@@ -306,13 +323,18 @@ export async function runReview(req: ReviewRequest, deps: EngineDeps, onEvent?: 
     const fetched = await fetchPr(deps.exec, req.repo, req.number, stageRulesOf(chosen.packs));
     const ws = await openWorkspace(deps.exec, req, fetched, id);
     const pr = req.explicit ? { ...fetched, baseSha: ws.range.baseSha, headSha: ws.range.headSha } : fetched;
-    const files = await rec.attempt(() => loadDiff(deps.exec, ws.headDir, ws.range), [] as FileDiff[]);
-    return { pr, ws, files };
+    const loaded = await rec.attempt(async () => recheckBinary(
+      await loadDiff(deps.exec, ws.gitDir, ws.range),
+      (path, bytes) => safeRead(ws.headDir, path, { firstBytes: bytes }),
+    ), { files: [] as FileDiff[], facts: [] as Fact[] });
+    return { pr, ws, files: loaded.files, diffFacts: loaded.facts };
   }, { rethrow: true }))!;
 
   let reviewed: Reviewed;
   try {
-    reviewed = await reviewInWorkspace(req, deps, log, settings, intake.pr, intake.ws, intake.files, { ...chosen, ms: choiceMs });
+    reviewed = await reviewInWorkspace(
+      req, deps, log, settings, intake.pr, intake.ws, intake.files, intake.diffFacts, { ...chosen, ms: choiceMs },
+    );
   } finally {
     await intake.ws.dispose().catch(() => undefined);
   }

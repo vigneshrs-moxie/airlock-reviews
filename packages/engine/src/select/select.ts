@@ -372,6 +372,9 @@ export function decideVerdict(
   return { label, sentence, counts };
 }
 
+/** The self-review text's sentence, in place of "No findings.", for a review that did not finish. */
+export const INCOMPLETE_TEXT = 'Airlock could not finish reviewing this pull request.';
+
 export function selfReviewText(pr: PrInfo, depth: Depth, packTitles: string[], verdict: Verdict): string {
   const { counts } = verdict;
   const total = counts.block + counts.fix + counts.ask + counts.note;
@@ -379,12 +382,13 @@ export function selfReviewText(pr: PrInfo, depth: Depth, packTitles: string[], v
     [counts.block, 'block', 'blocks'], [counts.fix, 'fix', 'fixes'], [counts.ask, 'question', 'questions'], [counts.note, 'note', 'notes'],
   ];
   const tally = words.filter(([n]) => n > 0).map(([n, one, many]) => plural(n, one, many)).join(', ');
-  const parts = [
-    `Reviewed with Airlock at ${pr.headSha.slice(0, 7)} (${[depth, ...packTitles].join(', ')}).`,
-    total === 0 ? 'No findings.' : `${plural(total, 'finding', 'findings')}: ${tally}.`,
-  ];
+  const incomplete = verdict.label === 'incomplete';
+  const parts = [`Reviewed with Airlock at ${pr.headSha.slice(0, 7)} (${[depth, ...packTitles].join(', ')}).`];
+  // A review that did not finish never says "No findings.": nothing found is not the same as nothing there.
+  if (total > 0) parts.push(`${plural(total, 'finding', 'findings')}: ${tally}.`);
+  else parts.push(incomplete ? INCOMPLETE_TEXT : 'No findings.');
   if (pr.stage === 'pr1') parts.push('No checks ran at PR #1.');
-  if (verdict.label === 'incomplete') parts.push('The review did not finish.');
+  if (incomplete && total > 0) parts.push('The review did not finish.');
   return parts.join(' ');
 }
 

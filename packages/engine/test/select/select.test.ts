@@ -480,6 +480,13 @@ describe('select', () => {
     const r = await select(runner, ctx({ pr: { ...own, headSha: 'abcdef0123', stage: 'pr1' } }), [], [], []);
     expect(r.selfReviewText).toBe('Reviewed with Airlock at abcdef0 (standard, Pack core). No findings. No checks ran at PR #1.');
   });
+
+  it('never says no findings for a review that did not finish', async () => {
+    const runner = createFakeRunner(() => answer());
+    const r = await select(runner, ctx({ pr: { ...own, headSha: 'abcdef0123', stage: 'pr2' } }), [], [], [stageError('facts')]);
+    expect(r.verdict.label).toBe('incomplete');
+    expect(r.selfReviewText).toBe('Reviewed with Airlock at abcdef0 (standard, Pack core). Airlock could not finish reviewing this pull request.');
+  });
 });
 
 describe('decideVerdict', () => {

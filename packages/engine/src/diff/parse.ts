@@ -1,4 +1,4 @@
-import type { DiffLine, FileDiff, Hunk, ReviewRange } from '@airlock/shared';
+import type { DiffLine, Fact, FileDiff, Hunk, ReviewRange } from '@airlock/shared';
 import type { Exec } from '../util/exec.js';
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
@@ -155,10 +155,46 @@ export function parseDiff(text: string): FileDiff[] {
   return files;
 }
 
-export async function loadDiff(exec: Exec, cwd: string, range: ReviewRange): Promise<FileDiff[]> {
-  const res = await exec('git', ['diff', '--no-color', '-M', '--unified=3', range.baseSha, range.headSha], { cwd, maxBuffer: 256 * 1024 * 1024 });
+/**
+ * The diff between the two commits, computed from the repository's git folder (the bare mirror), never inside a checkout:
+ * a bare repository has no work tree, so a `.gitattributes` in the pull request cannot mark its own files as binary.
+ * External diff drivers and text conversions from the person's git settings are turned off too.
+ */
+export async function loadDiff(exec: Exec, gitDir: string, range: ReviewRange): Promise<FileDiff[]> {
+  const args = [
+    '--git-dir', gitDir, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '-M', '--unified=3', range.baseSha, range.headSha,
+  ];
+  const res = await exec('git', args, { cwd: gitDir, maxBuffer: 256 * 1024 * 1024 });
   if (res.code !== 0) throw new Error(`git diff ${range.baseSha} ${range.headSha} failed (exit ${res.code}): ${res.stderr}`);
   return parseDiff(res.stdout);
+}
+
+/** How much of a file git calls binary is read to check: git itself looks for a NUL byte in the same span. */
+const BINARY_CHECK_BYTES = 8000;
+export const DIFF_NOT_AVAILABLE = 'diff-not-available';
+
+/**
+ * Git's word that a file is binary is not taken on trust. For each binary file that exists at the head, its first bytes are
+ * read; with no NUL byte it is a text file whose diff is not available: it stops being binary (so it is classified and
+ * reviewed like any other file) and gains a fact telling the reviewer to read the file itself. `readStart` returns the
+ * first bytes of a head file, or null when it cannot be read; such a file stays binary.
+ */
+export async function recheckBinary(
+  files: FileDiff[], readStart: (path: string, bytes: number) => Promise<string | null>,
+): Promise<{ files: FileDiff[]; facts: Fact[] }> {
+  const facts: Fact[] = [];
+  const out = await Promise.all(files.map(async (f) => {
+    if (!f.binary || f.status === 'deleted') return f;
+    const start = await readStart(f.path, BINARY_CHECK_BYTES);
+    if (start === null || start.includes('\0')) return f;
+    facts.push({
+      checkId: DIFF_NOT_AVAILABLE, path: f.path, line: null,
+      message: `${f.path}: the diff is not available (git was told to treat it as binary); read the file itself`,
+    });
+    return { ...f, binary: false };
+  }));
+  facts.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return { files: out, facts };
 }
 
 /** True when newLine is an added or context line inside one of the file's hunks. */
