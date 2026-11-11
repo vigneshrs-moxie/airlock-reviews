@@ -372,11 +372,13 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
 
   out.push('## Time and tokens', '');
   const time = (ms: number, summed: boolean): string => `${summed ? 'about ' : ''}${duration(ms)}`;
+  const usage = (u: { inputTokens: number; outputTokens: number; agentRuns: number; usageAbout: boolean }): string[] =>
+    [u.inputTokens, u.outputTokens, u.agentRuns].map((n) => `${u.usageAbout ? 'about ' : ''}${count(n)}`);
   out.push(...table(
     ['Pull request', 'Time', 'Tokens in', 'Tokens out', 'Agent runs'],
     [
-      ...summary.cases.map((s) => [prName(caseById.get(s.caseId), s.caseId), time(s.ms, s.msSummed), count(s.inputTokens), count(s.outputTokens), count(s.agentRuns)]),
-      ['Total', time(summary.totals.ms, summary.totals.msSummed), count(summary.totals.inputTokens), count(summary.totals.outputTokens), count(summary.totals.agentRuns)],
+      ...summary.cases.map((s) => [prName(caseById.get(s.caseId), s.caseId), time(s.ms, s.msSummed), ...usage(s)]),
+      ['Total', time(summary.totals.ms, summary.totals.msSummed), ...usage(summary.totals)],
     ],
   ), '');
   const timeNotes: string[] = [];
@@ -389,6 +391,15 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
     timeNotes.push('A time marked about adds up steps that can run side by side, so it can be more than the time that passed.');
   }
   if (timeNotes.length > 0) out.push(timeNotes.join(' '), '');
+  const tokens = summary.totals.inputTokens + summary.totals.outputTokens;
+  const spentNotes: string[] = [];
+  if (tokens > 0) {
+    const { unfinishedTokens: unfinished, judgeTokens: judge } = summary.totals;
+    spentNotes.push(`Of the ${count(tokens)} tokens spent, ${count(unfinished)} (${percent(unfinished / tokens)}) went on reviews that did not finish ` +
+      `and ${count(judge)} (${percent(judge / tokens)}) on the judge.`);
+  }
+  if (summary.totals.usageAbout) spentNotes.push("A token count marked about is only the kept review's own: earlier attempts and the judge are not in it.");
+  if (spentNotes.length > 0) out.push(spentNotes.join(' '), '');
 
   out.push('## How to read this', '');
   out.push(

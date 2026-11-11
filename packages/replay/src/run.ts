@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, writeFile } from 
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { limiter, runReview } from '@airlock/engine';
-import type { EngineDeps, ReviewRequest } from '@airlock/engine';
+import type { AgentRequest, AgentResult, AgentRunner, EngineDeps, ReviewRequest } from '@airlock/engine';
 import { DepthSchema, ReviewDocumentSchema } from '@airlock/shared';
 import type { Depth, ReviewDocument } from '@airlock/shared';
 import { z } from 'zod';
@@ -110,6 +110,21 @@ const RUN_FORMAT = 2;
 
 /** A run folder made by an earlier version of the replay was given to `run`: it can be reported, never continued. */
 export class EarlierRunFolderError extends Error {}
+
+/**
+ * What a case folder's spent.json holds: one entry per review attempt, finished or not, and one per judge request, each
+ * with what it spent. Appended to, never rewritten.
+ */
+const SpentSchema = z.array(z.object({
+  step: z.enum(['review', 'judge']),
+  /** For a review: it returned a document whose verdict is not `incomplete`. For the judge: its answer was usable. */
+  finished: z.boolean(),
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  agentRuns: z.number(),
+}));
+type Spent = z.infer<typeof SpentSchema>[number];
+type Usage = Pick<Spent, 'inputTokens' | 'outputTokens' | 'agentRuns'>;
 
 const RunFileSchema = z.object({
   /** Absent in a run.json written before format 2. */
@@ -237,6 +252,41 @@ async function readOutcome(dir: string, c: ReplayCase): Promise<Outcome> {
 }
 
 /**
+ * Adds an entry to the case folder's spent.json, replacing the file atomically. A spent.json that cannot be read is
+ * left as it is, so the case's counts fall back to its kept review's, marked about, rather than lose the earlier entries.
+ */
+async function recordSpent(dir: string, entry: Spent): Promise<void> {
+  const path = join(dir, 'spent.json');
+  const saved = await readSavedFile(path, SpentSchema);
+  if (saved === 'unreadable') return;
+  await writeAtomic(path, json([...(saved === 'missing' ? [] : saved), entry]));
+}
+
+/** A review document's own usage: the sum over its stages. */
+const usageOf = (doc: ReviewDocument): Usage => ({
+  inputTokens: doc.timings.reduce((n, t) => n + t.inputTokens, 0),
+  outputTokens: doc.timings.reduce((n, t) => n + t.outputTokens, 0),
+  agentRuns: doc.timings.reduce((n, t) => n + t.agentRuns, 0),
+});
+
+/** Wraps a runner to add up what its requests spend: for a review that rejects, and for the judge. */
+function counting(inner: AgentRunner): { runner: AgentRunner; used: Usage; lastOk: () => boolean } {
+  const used: Usage = { inputTokens: 0, outputTokens: 0, agentRuns: 0 };
+  let ok = false;
+  const runner: AgentRunner = {
+    async run<T>(req: AgentRequest<T>): Promise<AgentResult<T>> {
+      used.agentRuns++;
+      const result = await inner.run(req);
+      used.inputTokens += result.usage.inputTokens;
+      used.outputTokens += result.usage.outputTokens;
+      ok = result.ok;
+      return result;
+    },
+  };
+  return { runner, used, lastOk: () => ok };
+}
+
+/**
  * A valid document for a case whose review did not finish: verdict `incomplete`, no findings and one intake stage error.
  * Never saved; the run and `loadRun` both build it from the case and error.txt.
  */
@@ -281,6 +331,32 @@ type Scored = { score: CaseScore; detail: { doc: ReviewDocument; matches: Match[
 type RunInfo = { model: string; sweepModel: string; effort: ReplayEffort; depth: Depth; createdAt: string };
 
 /** How a run's cases are scored; a run.json written before effort and sweep model were recorded reads as `high` and the main model (`report` only). */
+/**
+ * A case's score and details from its outcome, with what it spent from its folder's spent.json. Without a readable
+ * spent.json the counts are the kept review's own, marked about; a case with no review of its own spent nothing known.
+ */
+async function scoreFolder(dir: string, c: ReplayCase, o: Outcome, run: RunInfo): Promise<Scored> {
+  const scored = scoreOutcome(c, o, run);
+  const spent = await readSavedFile(join(dir, 'spent.json'), SpentSchema);
+  if (typeof spent === 'string') {
+    const ownReview = o.kind !== 'not-done' || o.doc !== null;
+    return { ...scored, score: { ...scored.score, usageAbout: ownReview } };
+  }
+  const tokens = (entries: Spent[]): number => entries.reduce((n, e) => n + e.inputTokens + e.outputTokens, 0);
+  return {
+    ...scored,
+    score: {
+      ...scored.score,
+      inputTokens: spent.reduce((n, e) => n + e.inputTokens, 0),
+      outputTokens: spent.reduce((n, e) => n + e.outputTokens, 0),
+      agentRuns: spent.reduce((n, e) => n + e.agentRuns, 0),
+      unfinishedTokens: tokens(spent.filter((e) => e.step === 'review' && !e.finished)),
+      judgeTokens: tokens(spent.filter((e) => e.step === 'judge')),
+      usageAbout: false,
+    },
+  };
+}
+
 const runInfo = (run: RunFile): RunInfo =>
   ({ model: run.model, sweepModel: run.sweepModel ?? run.model, effort: run.effort ?? 'high', depth: run.depth, createdAt: run.startedAt });
 
@@ -461,8 +537,8 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   const emit = (e: CaseEvent): void => {
     try { onCase?.(e); } catch { /* a listener's failure is not the case's */ }
   };
-  const finish = (c: ReplayCase, o: Outcome, status: CaseEvent['status'], message?: string): Scored => {
-    const scored = scoreOutcome(c, o, scoring);
+  const finish = async (c: ReplayCase, o: Outcome, status: CaseEvent['status'], message?: string): Promise<Scored> => {
+    const scored = await scoreFolder(join(runDir, c.id), c, o, scoring);
     emit({ caseId: c.id, status, ...(message === undefined ? {} : { message }), score: scored.score });
     return scored;
   };
@@ -497,15 +573,15 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
     const stop = async (): Promise<Scored> => {
       stoppedBySignal = true;
       if (made) await rmdir(dir).catch(() => undefined);
-      return finish(c, await readOutcome(dir, c), 'stopped');
+      return await finish(c, await readOutcome(dir, c), 'stopped');
     };
     try {
       const saved = await readOutcome(dir, c);
-      if (saved.kind === 'done') return finish(c, saved, 'skipped');
+      if (saved.kind === 'done') return await finish(c, saved, 'skipped');
       if (limitReachedIn !== null || exitSignal()) {
         notStarted.add(c.id);
         if (exitSignal()) stoppedBySignal = true;
-        return scoreOutcome(c, saved, scoring);
+        return await scoreFolder(dir, c, saved, scoring);
       }
 
       firstStart = earlier(firstStart, stamp());
@@ -517,34 +593,51 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
         kept = saved.doc;
       } else {
         lead = 'The review failed';
-        const doc = ReviewDocumentSchema.parse(await review(reviewRequest(c, opts), engineDeps));
+        const counted = counting(deps.runner);
+        let doc: ReviewDocument;
+        try {
+          doc = ReviewDocumentSchema.parse(await review(reviewRequest(c, opts), { ...engineDeps, runner: counted.runner }));
+        } catch (err) {
+          // No document says what this attempt spent, so its requests do; an attempt that sent none spent nothing.
+          if (counted.used.agentRuns > 0) await recordSpent(dir, { step: 'review', finished: false, ...counted.used }).catch(() => undefined);
+          throw err;
+        }
         lead = 'Saving the review failed';
         // What the folder says about an earlier review goes before the new review is saved, so it is never read with it.
         await rm(join(dir, 'matches.json'), { force: true });
         await rm(join(dir, 'error.txt'), { recursive: true, force: true });
         await writeAtomic(join(dir, 'review.json'), json(doc));
+        await recordSpent(dir, { step: 'review', finished: doc.verdict.label !== 'incomplete', ...usageOf(doc) });
         emit({ caseId: c.id, status: 'reviewed' });
         if (hitUsageLimit(doc)) limitReachedIn ??= c.id;
         if (doc.verdict.label === 'incomplete') {
           const reason = didNotFinish(doc);
-          return finish(c, { kind: 'not-done', doc, reason }, 'failed', reason);
+          return await finish(c, { kind: 'not-done', doc, reason }, 'failed', reason);
         }
         kept = doc;
       }
 
       if (exitSignal()) return await stop();
       lead = 'The judge failed';
-      const matches = await judgeCase(deps.runner, c, kept, judgeModel, judgeDir, deps.signal);
+      const judging = counting(deps.runner);
+      let matches: Match[];
+      try {
+        matches = await judgeCase(judging.runner, c, kept, judgeModel, judgeDir, deps.signal);
+      } finally {
+        if (judging.used.agentRuns > 0) {
+          await recordSpent(dir, { step: 'judge', finished: judging.lastOk(), ...judging.used }).catch(() => undefined);
+        }
+      }
       lead = 'Saving the matches failed';
       await writeAtomic(join(dir, 'matches.json'), json(matches));
       await rm(join(dir, 'error.txt'), { recursive: true, force: true });
-      return finish(c, { kind: 'done', doc: kept, matches }, 'judged');
+      return await finish(c, { kind: 'done', doc: kept, matches }, 'judged');
     } catch (err) {
       if (exitSignal()) return await stop();
       if (err instanceof UsageLimitError) limitReachedIn ??= c.id;
       const error = failureText(lead, err);
       await writeAtomic(join(dir, 'error.txt'), `${error}\n`).catch(() => undefined);
-      return finish(c, kept ? { kind: 'not-judged', doc: kept, reason: error } : { kind: 'not-done', doc: null, reason: error }, 'failed', error);
+      return await finish(c, kept ? { kind: 'not-judged', doc: kept, reason: error } : { kind: 'not-done', doc: null, reason: error }, 'failed', error);
     } finally {
       if (started) lastEnd = later(lastEnd, stamp());
     }
@@ -556,7 +649,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   try {
     settled = await Promise.allSettled(opened.cases.map((c) => (selected.has(c.id)
       ? slot(() => processCase(c))
-      : readOutcome(join(runDir, c.id), c).then((o) => scoreOutcome(c, o, scoring)))));
+      : readOutcome(join(runDir, c.id), c).then((o) => scoreFolder(join(runDir, c.id), c, o, scoring)))));
   } finally {
     await rm(judgeDir, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -597,7 +690,10 @@ export async function loadRun(runDir: string, cases: ReplayCase[]): Promise<{ su
   const selected = inDatasetOrder(run.caseIds, cases, runDir);
   checkCases(selected);
   const scoring = runInfo(run);
-  const results = await Promise.all(selected.map(async (c) => scoreOutcome(c, await readOutcome(join(runDir, c.id), c), scoring)));
+  const results = await Promise.all(selected.map(async (c) => {
+    const dir = join(runDir, c.id);
+    return scoreFolder(dir, c, await readOutcome(dir, c), scoring);
+  }));
   const summary = summarise(run.runId, run.model, run.depth, results.map((r) => r.score), selected, cases, {
     spans: run.spans ?? [], madeByEarlierVersion: madeByEarlierVersion(run),
   });

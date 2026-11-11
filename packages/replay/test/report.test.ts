@@ -458,6 +458,15 @@ describe('renderReport', () => {
     expect(time).toMatch(/\| Total \| about 3 min 6 s \| 170,100 \| 10,010 \| 15 \|/);
   });
 
+  it('says in one line how much of the tokens went on reviews that did not finish and on the judge', () => {
+    const c = replayCase({ id: 'a', pr: 10, title: 'Spent', known: [], kind: 'negative' });
+    const s = { ...scoreCase(c, doc(), []), inputTokens: 900, outputTokens: 100, unfinishedTokens: 250, judgeTokens: 40 };
+    const summary = summarise('r', 'm', 'standard', [s], [c]);
+    const time = section(renderReport(summary, [c], { a: { doc: doc(), matches: [] } }), 'Time and tokens');
+    expect(time).toContain('Of the 1,000 tokens spent, 250 (25%) went on reviews that did not finish and 40 (4%) on the judge.');
+    expect(time).not.toContain('about 900');
+  });
+
   it('gives elapsed time for a review that records its start, and the time the run took as the total', () => {
     const c = replayCase({ id: 'a', pr: 10, title: 'Timed', known: [] , kind: 'negative' });
     const d = doc({ startedAt: '2026-11-10T09:00:00.000Z', createdAt: '2026-11-10T09:07:10.000Z', timings: [timing(900_000, 1, 1, 1)] });
