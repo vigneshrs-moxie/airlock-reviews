@@ -11,6 +11,9 @@ import type { Pack } from '../../src/packs/types.js';
 const FROM_A = 'Generic line saved on repository A says this project has no logins at all.';
 const BY_HAND = 'Generic line written by hand with no repository says dates are stored in UTC.';
 const NAMED = 'Named pack line saved on repository A says refunds are always made by hand.';
+const DOT_GIT = 'Generic line with a .git repository says the cache is cleared every night.';
+const SPACED = 'Generic line with a spaced repository says invoices are sent in batches.';
+const EMPTY = 'Generic line with an empty repository says weekends are not working days.';
 
 async function packsFolder(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'airlock-choose-'));
@@ -22,7 +25,10 @@ async function packsFolder(): Promise<string> {
       `id: ${id}\ntitle: ${id}\nrepos: [${repos.join(', ')}]\nlenses:\n  - { id: q, title: Q, file: lenses/q.md }\n`);
     await writeFile(join(dir, id, 'learned', 'wrong.md'), wrong);
   };
-  await pack('generic', [], `# Wrong\n\n2026-11-01 · acme/repo-a · ${FROM_A}\n2026-11-02 · - · ${BY_HAND}\n`);
+  await pack('generic', [], [
+    '# Wrong', '', `2026-11-01 · acme/repo-a · ${FROM_A}`, `2026-11-02 · - · ${BY_HAND}`,
+    `2026-11-04 · acme/repo-a.git · ${DOT_GIT}`, `2026-11-05 · acme/ repo-a · ${SPACED}`, `2026-11-06 ·  · ${EMPTY}`, '',
+  ].join('\n'));
   await pack('mine', ['acme/repo-a', 'acme/repo-c'], `2026-11-03 · acme/repo-a · ${NAMED}\n`);
   return dir;
 }
@@ -73,5 +79,28 @@ describe('choosePacks and learned lines', () => {
     expect(seen.lenses).toContain(NAMED);
     expect(seen.lenses).toContain(BY_HAND);
     expect(seen.lenses).not.toContain(FROM_A);
+  });
+});
+
+describe('a learned line whose repository field is malformed (second round)', () => {
+  it('is in no review and is reported with its file and line; - and an empty field are in every review', async () => {
+    const dir = await packsFolder();
+    for (const repo of ['acme/repo-a', 'acme/repo-b', 'ACME/REPO-A.GIT']) {
+      const chosen = await choosePacks(dir, repo);
+      const seen = seenBy(chosen.packs);
+      for (const text of [DOT_GIT, SPACED]) {
+        expect(seen.lenses, repo).not.toContain(text);
+        expect(seen.challenger, repo).not.toContain(text);
+      }
+      for (const text of [BY_HAND, EMPTY]) {
+        expect(seen.lenses, repo).toContain(text);
+        expect(seen.challenger, repo).toContain(text);
+      }
+      const file = join(dir, 'generic', 'learned', 'wrong.md');
+      expect(chosen.errors.map((e) => [e.stage, e.message])).toEqual([
+        ['packs', `${file}:5: the repository "acme/repo-a.git" is not a repository name, "-" or empty, so this line is left out of every review.`],
+        ['packs', `${file}:6: the repository "acme/ repo-a" is not a repository name, "-" or empty, so this line is left out of every review.`],
+      ]);
+    }
   });
 });

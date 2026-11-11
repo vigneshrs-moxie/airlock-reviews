@@ -20,15 +20,26 @@ export const ENGINE_SOURCE: Source = { pack: 'airlock', lens: null, ruleId: null
 const packsError = (message: string): StageError => ({ stage: 'packs', cohortId: null, message });
 const question = (text: string): Question => ({ text, cohortId: null, source: ENGINE_SOURCE });
 
+/** A learned line written by hand for no repository: its repository field is empty or `-`. */
+const forNoRepo = (field: string): boolean => field.trim() === '' || field.trim() === '-';
+
 /**
  * A pack selected for every repository keeps only the learned lines saved on this repository (letter case ignored) and
- * the lines with no repository recorded (written by hand); a line saved on another repository is not given to this
- * review. A named pack's lines apply to every repository the pack is selected for, so they are left alone.
+ * the lines with no repository recorded (written by hand, the field empty or `-`); a line saved on another repository is
+ * not given to this review. A line whose field is none of these is given to no review and reported. A named pack's
+ * lines apply to every repository the pack is selected for, so they are left alone.
  */
-function learnedFor(pack: Pack, repo: string): Pack {
+function learnedFor(pack: Pack, repo: string, errors: StageError[]): Pack {
   if (!appliesToEveryRepo(pack)) return pack;
   const here = repo.toLowerCase();
-  return { ...pack, learned: pack.learned.filter((e) => !isRepo(e.repo) || e.repo.toLowerCase() === here) };
+  const learned = pack.learned.filter((e) => {
+    if (forNoRepo(e.repo)) return true;
+    if (isRepo(e.repo)) return e.repo.toLowerCase() === here;
+    errors.push(packsError(
+      `${e.where ?? pack.dir}: the repository "${e.repo}" is not a repository name, "-" or empty, so this line is left out of every review.`));
+    return false;
+  });
+  return { ...pack, learned };
 }
 
 /**
@@ -55,7 +66,7 @@ export async function choosePacks(packsDir: string, repo: string, packIds?: stri
     }
   }
   try {
-    return { packs: selectPacks(all, repo, packIds).map((p) => learnedFor(p, repo)), errors };
+    return { packs: selectPacks(all, repo, packIds).map((p) => learnedFor(p, repo, errors)), errors };
   } catch (err) {
     errors.push(packsError(messageOf(err)));
     return { packs: [], errors };

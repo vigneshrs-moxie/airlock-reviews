@@ -224,8 +224,8 @@ describe('POST /dismissals', () => {
     await s.post(s.dismissBody({ findingId: FINDING_B, reason: 'intended', text: 'This is how the product works.' }));
     const pack = await loadPack(join(s.packsDir, 'acme'));
     expect(pack.learned).toEqual(expect.arrayContaining([
-      { date: '2026-11-11', repo: REPO, kind: 'wrong', text: TEXT },
-      { date: '2026-11-11', repo: REPO, kind: 'intended', text: 'This is how the product works.' },
+      { date: '2026-11-11', repo: REPO, kind: 'wrong', text: TEXT, where: expect.stringMatching(/wrong\.md:\d+$/) },
+      { date: '2026-11-11', repo: REPO, kind: 'intended', text: 'This is how the product works.', where: expect.stringMatching(/product-knowledge\.md:\d+$/) },
     ]));
     expect(pack.learned).toHaveLength(2);
   });

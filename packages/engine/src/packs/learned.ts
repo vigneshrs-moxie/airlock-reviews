@@ -4,7 +4,8 @@ import { basename, dirname, join } from 'node:path';
 import type { LearnedEntry } from './types.js';
 
 const SEP = ' · ';
-const LINE = /^(\d{4}-\d{2}-\d{2}) · (.+?) · (.+)$/;
+// The repository field may be empty: a line written by hand for no repository.
+const LINE = /^(\d{4}-\d{2}-\d{2}) · (.*?) · (.+)$/;
 
 export const learnedFileName = (kind: LearnedEntry['kind']): string =>
   kind === 'wrong' ? 'wrong.md' : 'product-knowledge.md';
@@ -23,7 +24,7 @@ export function parseLearned(text: string, kind: LearnedEntry['kind'], file: str
     if (line.trim() === '' || line.startsWith('#')) return;
     const m = LINE.exec(line);
     if (!m) throw new Error(`${file}:${i + 1}: not a learned entry (expected "YYYY-MM-DD${SEP}<repo>${SEP}<text>")`);
-    entries.push({ date: m[1]!, repo: m[2]!, kind, text: m[3]! });
+    entries.push({ date: m[1]!, repo: m[2]!, kind, text: m[3]!, where: `${file}:${i + 1}` });
   });
   return entries;
 }

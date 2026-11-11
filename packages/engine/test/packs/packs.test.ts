@@ -44,8 +44,8 @@ describe('loadPack', () => {
     expect(pack.checks[0]!.id).toBe('no-console');
     expect(pack.linkRules[0]!.transform).toBe('pascal');
     expect(pack.learned).toEqual([
-      { date: '2026-10-19', repo: 'acme/web', kind: 'wrong', text: 'Flagged a thing that was fine' },
-      { date: '2026-10-29', repo: 'acme/web', kind: 'intended', text: 'Refunds are manual' },
+      { date: '2026-10-19', repo: 'acme/web', kind: 'wrong', text: 'Flagged a thing that was fine', where: `${join(sampleDir, 'learned', 'wrong.md')}:3` },
+      { date: '2026-10-29', repo: 'acme/web', kind: 'intended', text: 'Refunds are manual', where: `${join(sampleDir, 'learned', 'product-knowledge.md')}:1` },
     ]);
   });
 
