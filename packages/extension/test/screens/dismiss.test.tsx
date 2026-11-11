@@ -86,6 +86,13 @@ describe('the dismiss sheet', () => {
     expect(document.querySelector('.sheet img')).toBeNull();
   });
 
+  it('builds the draft only from characters the person can see', () => {
+    const title = 'Odd\u200b title\u202e\ufe0f\u{e0100}\u{e0041}\u3164\u115f\u1160\uffa0\u2800 here\u001b';
+    open([finding(1, { title, path: 'src/\u200dfile1\u2800.ts\u3164' })]);
+    fireEvent.click(radio('Wrong'));
+    expect(field().value).toBe('Flagged "Odd title here" in src/file1.ts. Wrong because: ');
+  });
+
   it('intended starts empty with a placeholder', () => {
     open();
     fireEvent.click(radio('Intended'));

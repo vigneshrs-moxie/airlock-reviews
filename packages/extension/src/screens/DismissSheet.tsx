@@ -1,4 +1,4 @@
-import { checkLearnedText, LEARNED_TEXT_MAX, type DismissReason, type Finding, type LatestReply, type PrSummary } from '@airlock/shared';
+import { checkLearnedText, LEARNED_TEXT_MAX, visibleText, type DismissReason, type Finding, type LatestReply, type PrSummary } from '@airlock/shared';
 import { useEffect, useId, useRef, useState } from 'react';
 import type { UserAction } from '../state/reduce';
 import { dismissalOf, listFindings } from '../state/selection';
@@ -17,12 +17,18 @@ const REASONS: { reason: DismissReason; name: string; line: string }[] = [
 export const INTENDED_PLACEHOLDER = 'The product fact the reviewer did not know';
 export const INSTRUCTION_NOTE = 'This line is given to the reviewer as an instruction in every later review of this repository. Write it so it is true on its own.';
 
+/** Letters that show as blank space: the Hangul fillers and the braille blank. */
+const BLANK_LETTERS = /[\u115F\u1160\u3164\uFFA0\u2800]/g;
+
+/** Only what the person can see, so the line they are asked to save holds nothing they could not read. */
+const seen = (text: string): string => visibleText(text).text.replace(BLANK_LETTERS, '');
+
 /** The line the sheet starts from for a reason; built by code, then the person's to edit. */
 export function draftFor(reason: DismissReason, finding: Pick<Finding, 'title' | 'path'>): string {
   if (reason !== 'wrong') return '';
-  const chars = [...finding.title.replace(/\s+/g, ' ').trim()];
+  const chars = [...seen(finding.title).replace(/\s+/g, ' ').trim()];
   const title = chars.length <= TITLE_IN_DRAFT_MAX ? chars.join('') : `${chars.slice(0, TITLE_IN_DRAFT_MAX).join('')}…`;
-  return `Flagged "${title}" in ${finding.path}. Wrong because: `;
+  return `Flagged "${title}" in ${seen(finding.path)}. Wrong because: `;
 }
 
 /** A line break typed or pasted becomes a space; nothing else is changed. */
