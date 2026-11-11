@@ -361,4 +361,17 @@ describe('runCohortLenses', () => {
     expect(instructions).toMatch(/base branch/);
     expect(instructions).not.toMatch(/\{\{/);
   });
+
+  it('appends the extra sentence right after the lens instructions when one is given, and nothing otherwise', async () => {
+    const extra = 'This is a second, closer pass over one layer: read every non-test file in it in full.';
+    const plain = createFakeRunner(empty);
+    await runCohortLenses(plain, ctx());
+    const withExtra = createFakeRunner(empty);
+    await runCohortLenses(withExtra, ctx({ extraInstructions: extra }));
+    expect(plain.calls[0]!.instructions).not.toContain(extra);
+    for (const call of withExtra.calls) {
+      expect(call.instructions).toContain(`Instructions for the boundary lens.\n\n${extra}`);
+    }
+    expect(withExtra.calls.map((c) => c.material)).toEqual(plain.calls.map((c) => c.material));
+  });
 });

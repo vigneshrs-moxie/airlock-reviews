@@ -1,0 +1,5 @@
+id: raj-standard
+title: Team standard
+repos: [acme/app]
+lenses:
+  - { id: boundary, title: Boundary, file: lenses/boundary.md }

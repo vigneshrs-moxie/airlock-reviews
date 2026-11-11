@@ -23,6 +23,8 @@ export interface LensContext {
   baseDir: string;
   models: ModelConfig;
   run: <T>(fn: () => Promise<T>) => Promise<T>;
+  /** One more sentence for every cohort lens request, added after the lens's own instructions (the deep pass uses it). */
+  extraInstructions?: string;
 }
 
 export interface LensStageResult {

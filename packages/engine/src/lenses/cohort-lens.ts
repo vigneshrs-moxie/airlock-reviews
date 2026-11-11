@@ -116,10 +116,13 @@ export async function runCohortLenses(
 
   const template = await loadTemplate('lens');
   const reader = readerOf(ctx.pr);
+  const extra = ctx.extraInstructions?.trim() ?? '';
   const briefs = lenses.map(({ pack, lens }) => ({
     pack, lens, name: `${pack.id}/${lens.id}`,
     instructions: instructionsFor(
-      fill(template, { reader, lensTitle: lens.title, lensInstructions: lens.instructions.trim() }),
+      fill(template, {
+        reader, lensTitle: lens.title, lensInstructions: extra === '' ? lens.instructions.trim() : `${lens.instructions.trim()}\n\n${extra}`,
+      }),
       ctx.packs,
       ctx.missingHelpers,
     ),
