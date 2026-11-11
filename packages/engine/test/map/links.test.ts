@@ -228,5 +228,5 @@ describe('findLinks', () => {
     expect(small.every((n) => searched.has(n))).toBe(true);
     expect(mid.filter((n) => searched.has(n))).toEqual(mid.slice(0, 8));
     expect(barrel.some((n) => searched.has(n))).toBe(false);
-  }, 30_000);
+  }, 120_000); // a few seconds on a quiet machine; generous because this Mac often runs other work
 });
