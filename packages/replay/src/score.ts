@@ -37,6 +37,9 @@ export interface CaseScore {
   verdict: VerdictLabel;
 }
 
+/** The time one call of the run spent on its cases: from its first case start to its last case end. */
+export interface RunSpan { startedAt: string; finishedAt: string }
+
 export interface RunSummary {
   runId: string;
   model: string;
@@ -69,9 +72,9 @@ export interface RunSummary {
    * whose judge saw where each finding was placed: its first test then has no answer that can be compared.
    */
   madeByEarlierVersion: boolean;
-  /** From the first case start to the last case end of the run, over every call that worked on it; null when not known. */
-  wallClock: { startedAt: string; finishedAt: string } | null;
-  /** `ms` is the wall clock when there is one, else the sum of the cases' times (`msSummed`). */
+  /** One per call of the run that started a case: from its first case start to its last case end. Empty when not known. */
+  spans: RunSpan[];
+  /** `ms` is the sum of the spans when there are any, else the sum of the cases' times (`msSummed`). */
   totals: { ms: number; msSummed: boolean; inputTokens: number; outputTokens: number; agentRuns: number };
   /**
    * Present when the run stopped early: because Claude's usage limit was reached during `caseId`, when the cases in
@@ -190,13 +193,13 @@ function sum<T>(items: T[], pick: (item: T) => number): number {
  * Totals a run. Recalls are over positive cases only (0 when there are none); the kind of
  * each case is taken from `cases`, and a score with no case there is an error. `dataset` is the
  * whole dataset (default `cases`): the summary says how much of it the run covers, and `recorded` what the run folder
- * records: its wall clock, and whether an earlier version of the replay made it.
+ * records: the span of each call that worked on it, and whether an earlier version of the replay made it.
  */
 export function summarise(
   runId: string, model: string, depth: Depth, scores: CaseScore[], cases: ReplayCase[], dataset: ReplayCase[] = cases,
-  recorded: { wallClock?: RunSummary['wallClock']; madeByEarlierVersion?: boolean } = {},
+  recorded: { spans?: RunSpan[]; madeByEarlierVersion?: boolean } = {},
 ): RunSummary {
-  const wallClock = recorded.wallClock ?? null;
+  const spans = recorded.spans ?? [];
   const madeByEarlierVersion = recorded.madeByEarlierVersion ?? false;
   const kindOf = new Map(cases.map((c) => [c.id, c.kind]));
   const kind = (s: CaseScore): ReplayCase['kind'] => {
@@ -218,7 +221,9 @@ export function summarise(
   const positivesNotRun = datasetPositives.filter((c) => !run.has(c.id)).map((c) => c.id);
   const wholeDataset = positivesNotRun.length === 0 && !positive.some(incomplete);
   const half = recallTop >= 0.5;
-  const wallMs = wallClock === null ? null : between(wallClock.startedAt, wallClock.finishedAt);
+  // The time the replay was running: a wait between a stop and a resume is not counted. Unknown if a span cannot be read.
+  const spanMs = spans.map((s) => between(s.startedAt, s.finishedAt));
+  const runningMs = spans.length > 0 && spanMs.every((ms) => ms !== null) ? sum(spanMs, (ms) => ms!) : null;
   return {
     runId, model, depth, cases: scores, secondary: scores.filter((s) => kind(s) === 'secondary'),
     datasetKnownTotal: sum(datasetPositives, (c) => c.known.length), datasetPositives: datasetPositives.length, positivesNotRun,
@@ -232,9 +237,9 @@ export function summarise(
     positivesIncomplete: positive.filter(incomplete).length,
     negativesIncomplete,
     madeByEarlierVersion,
-    wallClock,
+    spans,
     totals: {
-      ms: wallMs ?? sum(scores, (s) => s.ms), msSummed: wallMs === null, inputTokens: sum(scores, (s) => s.inputTokens),
+      ms: runningMs ?? sum(scores, (s) => s.ms), msSummed: runningMs === null, inputTokens: sum(scores, (s) => s.inputTokens),
       outputTokens: sum(scores, (s) => s.outputTokens), agentRuns: sum(scores, (s) => s.agentRuns),
     },
     meets: {

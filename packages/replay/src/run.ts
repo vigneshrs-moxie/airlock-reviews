@@ -128,9 +128,8 @@ const RunFileSchema = z.object({
   combine: z.enum(REPLAY_COMBINE).optional(),
   caseIds: z.array(z.string()),
   startedAt: z.string(),
-  /** When the first case the run worked on started, and when the last one ended, over every call. */
-  casesStartedAt: z.string().optional(),
-  casesFinishedAt: z.string().optional(),
+  /** One per call that started at least one case, from its first case start to its last case end. */
+  spans: z.array(z.object({ startedAt: z.string(), finishedAt: z.string() })).optional(),
 });
 type RunFile = z.infer<typeof RunFileSchema>;
 
@@ -381,16 +380,11 @@ async function openRunFolder(runDir: string, run: RunFile, dataset: ReplayCase[]
   checkCases(cases);
   const merged: RunFile = {
     ...run, caseIds: [...cases.map((c) => c.id), ...unknown], startedAt: previous?.startedAt ?? run.startedAt,
-    ...(previous?.casesStartedAt === undefined ? {} : { casesStartedAt: previous.casesStartedAt }),
-    ...(previous?.casesFinishedAt === undefined ? {} : { casesFinishedAt: previous.casesFinishedAt }),
+    ...(previous?.spans === undefined ? {} : { spans: previous.spans }),
   };
   await writeAtomic(path, json(merged));
   return { run: merged, cases };
 }
-
-/** The run's wall clock from run.json, when it has both ends. */
-const wallClockOf = (run: RunFile): RunSummary['wallClock'] =>
-  run.casesStartedAt !== undefined && run.casesFinishedAt !== undefined ? { startedAt: run.casesStartedAt, finishedAt: run.casesFinishedAt } : null;
 
 /** The earlier or later of two ISO times, either of which may be missing. */
 function earlier(a: string | undefined, b: string | undefined): string | undefined {
@@ -483,7 +477,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   const exitSignal = (): boolean => deps.signal?.aborted === true;
   let stoppedBySignal = false;
 
-  // The run's own wall clock: from the first case this call works on to the last one's end.
+  // This call's span: from the first case it works on to the last one's end.
   let firstStart: string | undefined;
   let lastEnd: string | undefined;
   const stamp = (): string => deps.now().toISOString();
@@ -572,18 +566,12 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
     const c = opened.cases[i]!;
     return scoreOutcome(c, { kind: 'not-done', doc: null, reason: failureText('The case failed', r.reason) }, scoring);
   });
-  const casesStartedAt = earlier(run.casesStartedAt, firstStart);
-  const casesFinishedAt = later(run.casesFinishedAt, lastEnd);
-  if (casesStartedAt !== run.casesStartedAt || casesFinishedAt !== run.casesFinishedAt) {
-    run = {
-      ...run,
-      ...(casesStartedAt === undefined ? {} : { casesStartedAt }),
-      ...(casesFinishedAt === undefined ? {} : { casesFinishedAt }),
-    };
+  if (firstStart !== undefined) {
+    run = { ...run, spans: [...(run.spans ?? []), { startedAt: firstStart, finishedAt: lastEnd ?? firstStart }] };
     await writeAtomic(join(runDir, 'run.json'), json(run));
   }
   const summary: RunSummary = {
-    ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases, opts.dataset ?? opts.cases, { wallClock: wallClockOf(run) }),
+    ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases, opts.dataset ?? opts.cases, { spans: run.spans ?? [] }),
     ...(stoppedBySignal ? { stopped: { reason: 'exit-signal' } } : limitReachedIn === null ? {} : {
       stopped: { reason: 'usage-limit', caseId: limitReachedIn, notStarted: opened.cases.filter((c) => notStarted.has(c.id)).map((c) => c.id) },
     }),
@@ -611,7 +599,7 @@ export async function loadRun(runDir: string, cases: ReplayCase[]): Promise<{ su
   const scoring = runInfo(run);
   const results = await Promise.all(selected.map(async (c) => scoreOutcome(c, await readOutcome(join(runDir, c.id), c), scoring)));
   const summary = summarise(run.runId, run.model, run.depth, results.map((r) => r.score), selected, cases, {
-    wallClock: wallClockOf(run), madeByEarlierVersion: madeByEarlierVersion(run),
+    spans: run.spans ?? [], madeByEarlierVersion: madeByEarlierVersion(run),
   });
   const details: RunDetails = Object.fromEntries(selected.map((c, i) => [c.id, results[i]!.detail]));
   return { summary, details };

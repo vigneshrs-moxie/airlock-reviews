@@ -437,15 +437,30 @@ describe('renderReport', () => {
     expect(time).toMatch(/\| Total \| about 3 min 6 s \| 170,100 \| 10,010 \| 15 \|/);
   });
 
-  it('gives elapsed time for a review that records its start, and the run\'s wall clock as the total', () => {
+  it('gives elapsed time for a review that records its start, and the time the run took as the total', () => {
     const c = replayCase({ id: 'a', pr: 10, title: 'Timed', known: [] , kind: 'negative' });
     const d = doc({ startedAt: '2026-11-10T09:00:00.000Z', createdAt: '2026-11-10T09:07:10.000Z', timings: [timing(900_000, 1, 1, 1)] });
-    const wallClock = { startedAt: '2026-11-10T08:59:58.000Z', finishedAt: '2026-11-10T09:08:00.000Z' };
-    const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, [])], [c], [c], { wallClock });
+    const spans = [{ startedAt: '2026-11-10T08:59:58.000Z', finishedAt: '2026-11-10T09:08:00.000Z' }];
+    const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, [])], [c], [c], { spans });
     const time = section(renderReport(summary, [c], { a: { doc: d, matches: [] } }), 'Time and tokens');
     expect(time).toMatch(/\| #10 Timed \| 7 min 10 s \|/);
     expect(time).toMatch(/\| Total \| 8 min 2 s \|/);
     expect(time).toContain('The total is the time from the first case\'s start to the last case\'s end');
+    expect(time).not.toContain('runs of the command');
+  });
+
+  it('over several calls, the total is the time the replay was running and the note says over how many', () => {
+    const c = replayCase({ id: 'a', pr: 10, title: 'Timed', known: [] , kind: 'negative' });
+    const d = doc({ startedAt: '2026-11-10T09:00:00.000Z', createdAt: '2026-11-10T09:07:10.000Z', timings: [timing(900_000, 1, 1, 1)] });
+    const spans = [
+      { startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:08:00.000Z' },
+      { startedAt: '2026-11-10T11:00:00.000Z', finishedAt: '2026-11-10T11:02:00.000Z' },
+    ];
+    const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, [])], [c], [c], { spans });
+    const time = section(renderReport(summary, [c], { a: { doc: d, matches: [] } }), 'Time and tokens');
+    expect(time).toMatch(/\| Total \| 10 min 0 s \|/);
+    expect(time).toContain('Total time is the time the replay was running, over 2 runs of the command.');
+    expect(time).not.toContain('first case\'s start');
   });
 
   it('closes with how to read the numbers', () => {

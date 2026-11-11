@@ -230,7 +230,7 @@ describe('runReplay', () => {
       format: 2, runId, model: MODEL, depth: 'standard', judgeModel: 'claude-opus-5-5', kitSha: KIT_SHA,
       effort: 'high', sweepModel: MODEL, combine: 'never',
       caseIds: ['pr1', 'pr2', 'pr3'], startedAt: NOW.toISOString(),
-      casesStartedAt: NOW.toISOString(), casesFinishedAt: NOW.toISOString(),
+      spans: [{ startedAt: NOW.toISOString(), finishedAt: NOW.toISOString() }],
     });
   });
 
@@ -439,12 +439,14 @@ describe('runReplay', () => {
     expect(review.requests).toHaveLength(0);
     expect(runner.calls).toHaveLength(1); // pr2 is judged again, and only that
     expect(new Set(events.map((e) => e.caseId))).toEqual(new Set(['pr2']));
-    expect(second).toEqual(first);
-    expect(await readJson(join(outDir, 'run-a', 'summary.json'))).toEqual(first);
+    // The same summary, apart from the second call's own span.
+    expect(second.spans).toHaveLength(2);
+    expect({ ...second, spans: first.spans }).toEqual(first);
+    expect(await readJson(join(outDir, 'run-a', 'summary.json'))).toEqual(second);
     expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ caseIds: ['pr1', 'pr2', 'pr3'] });
     const loaded = await loadRun(join(outDir, 'run-a'), cases());
     expect(await readFile(join(outDir, 'run-a', 'report.md'), 'utf8')).toBe(renderReport(loaded.summary, cases(), loaded.details));
-    expect(loaded.summary).toEqual(first);
+    expect(loaded.summary).toEqual(second);
   });
 
   it('a resume that adds a case runs it and keeps the earlier ones, in dataset order', async () => {
@@ -871,27 +873,43 @@ describe('runReplay', () => {
     expect(events.at(-1)!.message).toBe('The review did not finish (merged into another finding).');
   });
 
-  it('the run\'s total time is its wall clock from the first case start to the last case end, kept across a resume', async () => {
+  it('the run\'s total time is the time each call was working on cases, added up across resumes', async () => {
     let t = Date.parse('2026-11-10T09:00:00.000Z');
     const clock = (): Date => new Date(t);
     const review = fakeReview(async (req) => { t += 60_000; return reviewFor(req); });
     const first = await runReplay(options({ parallelCases: 3 }), { ...deps(review), now: clock });
-    // The clock moves a minute in each review: the total is the clock from the first case start to the last case end.
-    expect(first.wallClock).toEqual({ startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:03:00.000Z' });
+    // The clock moves a minute in each review: one call gives its own duration, from its first case start to its last case end.
+    const span1 = { startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:03:00.000Z' };
+    expect(first.spans).toEqual([span1]);
     expect(first.totals).toMatchObject({ ms: 180_000, msSummed: false });
-    expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({
-      casesStartedAt: '2026-11-10T09:00:00.000Z', casesFinishedAt: '2026-11-10T09:03:00.000Z',
-    });
+    expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ spans: [span1] });
 
-    // A resume that works on one case later moves the end, not the start; a call that only skips cases moves neither.
+    // A resume an hour later that reviews one case adds its own span: the hour between is not counted.
     await rm(join(caseDir('pr2'), 'matches.json'));
-    t = Date.parse('2026-11-10T10:00:00.000Z');
-    const second = await runReplay(options(), { ...deps(fakeReview()), now: clock });
-    expect(second.wallClock).toEqual({ startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T10:00:00.000Z' });
+    await rm(join(caseDir('pr2'), 'review.json'));
+    t = Date.parse('2026-11-10T10:03:00.000Z');
+    const second = await runReplay(options(), { ...deps(fakeReview(async (req) => { t += 60_000; return reviewFor(req); })), now: clock });
+    const span2 = { startedAt: '2026-11-10T10:03:00.000Z', finishedAt: '2026-11-10T10:04:00.000Z' };
+    expect(second.spans).toEqual([span1, span2]);
+    expect(second.totals).toMatchObject({ ms: 240_000, msSummed: false });
+    expect(await readFile(join(outDir, 'run-a', 'report.md'), 'utf8')).toContain('Total time is the time the replay was running, over 2 runs of the command.');
+
+    // A call that only skips cases adds nothing.
     t = Date.parse('2026-11-11T10:00:00.000Z');
     const third = await runReplay(options(), { ...deps(fakeReview()), now: clock });
-    expect(third.wallClock).toEqual(second.wallClock);
+    expect(third.spans).toEqual(second.spans);
     expect((await loadRun(join(outDir, 'run-a'), cases())).summary).toEqual(third);
+  });
+
+  it('a run folder without spans gives the summed case times, marked about', async () => {
+    await runReplay(options(), deps(fakeReview()));
+    const path = join(outDir, 'run-a', 'run.json');
+    const { spans: _s, ...without } = await readJson(path) as Record<string, unknown>;
+    await writeFile(path, JSON.stringify({ ...without, casesStartedAt: '2026-11-10T09:00:00.000Z', casesFinishedAt: '2026-11-11T09:00:00.000Z' }));
+    const { summary, details } = await loadRun(join(outDir, 'run-a'), cases());
+    expect(summary.spans).toEqual([]);
+    expect(summary.totals).toMatchObject({ ms: 3_000, msSummed: true });
+    expect(renderReport(summary, cases(), details)).toMatch(/\| Total \| about 3 s \|/);
   });
 
   it('the judge runs in a fresh, empty folder made for the run and removed at the end', async () => {

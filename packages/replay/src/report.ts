@@ -369,7 +369,11 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
     ],
   ), '');
   const timeNotes: string[] = [];
-  if (summary.wallClock !== null) timeNotes.push("The total is the time from the first case's start to the last case's end, not the sum of the cases.");
+  if (!summary.totals.msSummed) {
+    timeNotes.push(summary.spans.length > 1
+      ? `Total time is the time the replay was running, over ${summary.spans.length} runs of the command.`
+      : "The total is the time from the first case's start to the last case's end, not the sum of the cases.");
+  }
   if (summary.totals.msSummed || summary.cases.some((s) => s.msSummed)) {
     timeNotes.push('A time marked about adds up steps that can run side by side, so it can be more than the time that passed.');
   }
