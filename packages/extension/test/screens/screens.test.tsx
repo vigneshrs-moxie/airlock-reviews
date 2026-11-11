@@ -289,14 +289,6 @@ describe('problem and review', () => {
     show({ kind: 'review', pr, latest: latestFor(pr), stale: false, busy: true });
     expect((screen.getByRole('button', { name: 'Review again' }) as HTMLButtonElement).disabled).toBe(true);
   });
-  it('the review placeholder shows the title and Review again', () => {
-    const pr = prSummary({ title: 'Add totals' });
-    const { dispatch } = show({ kind: 'review', pr, latest: latestFor(pr), stale: false });
-    expect(screen.getByText('Add totals')).toBeTruthy();
-    expect(within(document.querySelector('main') as HTMLElement).getByText('Review finished.')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Review again' }));
-    expect(dispatch).toHaveBeenCalledWith({ type: 'start', depth: pr.suggestedDepth });
-  });
 });
 
 describe('text from the state', () => {
@@ -314,11 +306,5 @@ describe('text from the state', () => {
     expect(document.querySelector('script')).toBeNull();
     expect(document.querySelector('a')).toBeNull();
     expect(document.querySelector('img')).toBeNull();
-  });
-  it('shows a pull request title with markup as characters on the placeholder', () => {
-    const pr = prSummary({ title: '<script>x</script>' });
-    show({ kind: 'review', pr, latest: latestFor(pr), stale: false });
-    expect(screen.getByText('<script>x</script>')).toBeTruthy();
-    expect(document.querySelector('script')).toBeNull();
   });
 });

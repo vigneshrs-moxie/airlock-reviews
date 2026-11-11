@@ -65,3 +65,33 @@ p { margin: 4px 0; overflow-wrap: anywhere; }
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .masked { -webkit-text-security: disc; }
 .row { flex-wrap: wrap; }
+.verdict .title { font-size: 16px; }
+.banner { border-color: var(--accent); }
+.sev { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+[data-severity='block'] .sev { color: var(--danger); }
+.cards { display: flex; flex-direction: column; gap: 8px; }
+.finding-card { display: flex; gap: 8px; align-items: flex-start; }
+.pick { flex: 0 0 auto; margin: 3px 0 0; }
+.open, .line, .place, .fold { font: inherit; color: inherit; text-align: left; background: none; border: 0; padding: 0; cursor: pointer; }
+.open { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.line, .place { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; width: 100%; padding: 3px 0; overflow-wrap: anywhere; }
+.fold { font-size: inherit; font-weight: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; }
+.fold::before { content: '▸ '; }
+.fold[aria-expanded='true']::before { content: '▾ '; }
+.head-line { display: flex; gap: 8px; align-items: baseline; }
+.rank { font-size: 11px; font-weight: 700; color: var(--muted); }
+.bar, .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 6px 0; }
+.action { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
+.part { margin-top: 8px; }
+.quote { margin: 4px 0; padding: 6px 8px; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; white-space: pre; max-width: 100%; }
+div.quote { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible; }
+.steps { margin: 0; padding-left: 20px; }
+.steps > li { padding: 3px 0; overflow-wrap: anywhere; }
+.timing { width: 100%; border-collapse: collapse; font-size: 12px; }
+.timing th, .timing td { padding: 2px 4px; text-align: right; border-bottom: 1px solid var(--border); }
+.timing th[scope='row'], .timing th[scope='col']:first-child { text-align: left; overflow-wrap: anywhere; }
+.sheet { position: fixed; inset: 0; z-index: 10; display: flex; background: rgba(0, 0, 0, 0.45); }
+.sheet-body { flex: 1; margin: 12px; padding: 12px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+.sheet-body > .row { justify-content: space-between; align-items: center; }
+.sheet-body li { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.proof { margin-top: 4px; overflow-wrap: anywhere; }

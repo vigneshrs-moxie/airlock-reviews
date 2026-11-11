@@ -1,15 +1,13 @@
 import type { ChangeMap, Tier } from '@airlock/shared';
 
-const TIER_WORDS: Record<Tier, string> = { read: 'Read', skim: 'Skim', trust: 'Trust', ignored: 'Ignored' };
-
-/** The change map in reading order: each group, its layers, their files. `tiers` (path to tier) is shown when the review's facts are known. */
+/** The change map in reading order: each group, its layers, their files. `tiers` (path to tier) is shown, as written, when the review's facts are known. */
 export function MapBlock({ map, tiers }: { map: ChangeMap; tiers?: ReadonlyMap<string, Tier> }) {
   const file = (path: string) => {
     const tier = tiers?.get(path);
     return (
       <li key={path} className="file">
         <code className="path">{path}</code>
-        {tier !== undefined && <span className="tag">{TIER_WORDS[tier]}</span>}
+        {tier !== undefined && <span className="tag">{tier}</span>}
       </li>
     );
   };

@@ -5,8 +5,10 @@ import { Offline } from './Offline';
 import { Pair } from './Pair';
 import { Problem } from './Problem';
 import { Ready } from './Ready';
-import { ReviewPlaceholder } from './ReviewPlaceholder';
 import { Running } from './Running';
+import { Verdict } from './Verdict';
+import type { OnJump } from './FindingDetail';
+import type { Finding } from '@airlock/shared';
 
 export interface PanelScreenProps {
   state: PanelState;
@@ -14,28 +16,34 @@ export interface PanelScreenProps {
   onOpenPacks: () => void;
   /** For the Copy buttons' two seconds; the real clock unless a test passes its own. */
   timers?: Timers;
+  /** Takes the person to a line on the GitHub page; until a later task supplies it, it says it is not connected. */
+  onJump?: OnJump;
+  /** Starts dismissing a finding; until a later task supplies it, it does nothing. */
+  onDismiss?: (finding: Finding) => void;
 }
 
-function Body({ state, dispatch, timers }: Pick<PanelScreenProps, 'state' | 'dispatch' | 'timers'>) {
+function Body({ state, dispatch, timers, onJump, onDismiss }: Omit<PanelScreenProps, 'onOpenPacks'>) {
   const t = timers ? { timers } : {};
+  const review = { ...(onJump ? { onJump } : {}), ...(onDismiss ? { onDismiss } : {}) };
   switch (state.kind) {
     case 'loading': return <p className="muted">Looking at this pull request…</p>;
     case 'no-pr': return <p className="muted">Open a pull request on GitHub and Airlock will appear here.</p>;
-    case 'offline': return <Offline state={state} {...t} />;
+    case 'offline': return <Offline state={state} dispatch={dispatch} {...t} {...review} />;
     case 'unpaired': return <Pair state={state} dispatch={dispatch} {...t} />;
     // Keyed so a different pull request or a new head starts with its own choices.
     case 'ready': return <Ready key={`${state.pr.repo}#${state.pr.number}@${state.pr.headSha}`} state={state} dispatch={dispatch} />;
     case 'running': return <Running state={state} />;
     case 'problem': return <Problem state={state} dispatch={dispatch} />;
-    case 'review': return <ReviewPlaceholder state={state} dispatch={dispatch} />;
+    // Keyed so a new review starts with nothing selected and nothing open.
+    case 'review': return <Verdict key={state.latest.document.id} state={state} dispatch={dispatch} {...t} {...review} />;
   }
 }
 
 /** The frame and the screen for one state. */
-export function PanelScreen({ state, dispatch, onOpenPacks, timers }: PanelScreenProps) {
+export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, onDismiss }: PanelScreenProps) {
   return (
     <Frame status={connectionOf(state)} onOpenPacks={onOpenPacks}>
-      <Body state={state} dispatch={dispatch} timers={timers} />
+      <Body state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={onDismiss} />
     </Frame>
   );
 }

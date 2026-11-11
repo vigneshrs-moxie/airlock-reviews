@@ -177,9 +177,4 @@ describe('markup-looking text from the state', () => {
     expect(screen.getAllByText(evil).length).toBeGreaterThan(0);
     noMarkup();
   });
-  it('on a review placeholder title', () => {
-    render(<PanelScreen state={{ kind: 'review', pr, latest: latestFor(pr), stale: false }} dispatch={noop} onOpenPacks={noop} />);
-    expect(screen.getByText(evil)).toBeTruthy();
-    noMarkup();
-  });
 });
