@@ -11,7 +11,7 @@ const loose = z.string().optional();
  * Every field is optional, so the request does not fail when one candidate is incomplete. acceptCandidates checks each
  * candidate on its own against the shared CandidateSchema.
  */
-const RawCandidateSchema = z.object({
+export const RawCandidateSchema = z.object({
   severity: loose, title: loose, path: loose, quote: loose, lineHint: z.number().nullable().optional(),
   happens: loose, why: loose, suggestedChange: loose,
   connected: z.array(z.object({ path: loose, quote: loose, role: loose })).optional(),

@@ -1,7 +1,7 @@
 import type { Brief, ChangeMap, Cohort, FileDiff, FileFact, Hunk, ModelConfig, PrInfo, Tier } from '@airlock/shared';
 import { minimalDocument } from '@airlock/shared';
 import type { LensContext } from '../../src/lenses/context.js';
-import type { LensDef, Pack } from '../../src/packs/types.js';
+import type { LensDef, Pack, Rule } from '../../src/packs/types.js';
 
 /** One hunk of `n` added lines, each `<prefix> <i>`. */
 export function hunk(n: number, prefix: string): Hunk {
@@ -93,3 +93,7 @@ export function block(material: string, label: string): string | null {
 }
 
 export const labels = (material: string): string[] => [...material.matchAll(/<material label="([^"]*)">/g)].map((m) => m[1]!);
+
+export const rule = (id: string, paths: string[], over: Partial<Rule> = {}): Rule => ({
+  id, title: `Rule ${id}`, paths, severityFloor: 'note', sourcePrs: [], origin: 'test', body: `Body of ${id}.`, packId: 'core', ...over,
+});

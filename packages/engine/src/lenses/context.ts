@@ -178,9 +178,19 @@ export interface LensCall {
   material: string;
 }
 
+/** Sends one request through the parallel cap. A runner that throws becomes a failed result, so one request never stops the others. */
+export async function sendRequest<T>(runner: AgentRunner, ctx: LensContext, req: AgentRequest<T>): Promise<AgentResult<T>> {
+  try {
+    return await ctx.run(() => runner.run(req));
+  } catch (err) {
+    const usage: AgentUsage = { ms: 0, inputTokens: 0, outputTokens: 0, costUsd: null, turns: 0 };
+    return { ok: false, error: err instanceof Error ? err.message : String(err), usage };
+  }
+}
+
 /** Sends one request through the parallel cap and turns its answer into candidates, questions and dropped extras. */
 export async function runLensCall(runner: AgentRunner, ctx: LensContext, call: LensCall, taken: Set<string>): Promise<LensStageResult> {
-  const req: AgentRequest<LensOutput> = {
+  const result = await sendRequest<LensOutput>(runner, ctx, {
     role: call.role,
     instructions: call.instructions,
     material: call.material,
@@ -189,15 +199,7 @@ export async function runLensCall(runner: AgentRunner, ctx: LensContext, call: L
     extraDirs: [ctx.baseDir],
     model: ctx.models.main,
     effort: ctx.models.effort,
-  };
-  let result: AgentResult<LensOutput>;
-  try {
-    result = await ctx.run(() => runner.run(req));
-  } catch (err) {
-    // A runner should never throw; if one does, this request fails and the others carry on.
-    const usage: AgentUsage = { ms: 0, inputTokens: 0, outputTokens: 0, costUsd: null, turns: 0 };
-    result = { ok: false, error: err instanceof Error ? err.message : String(err), usage };
-  }
+  });
   const out = emptyResult();
   out.usage.push(result.usage);
   if (!result.ok) {
