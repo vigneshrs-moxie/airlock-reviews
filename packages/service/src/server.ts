@@ -1,10 +1,14 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
-import type { EngineDeps, runReview } from '@airlock/engine';
-import type { Hello, PairReply } from '@airlock/shared';
+import {
+  createSdkRunner, realExec, withRetry, type AgentRequest, type AgentResult, type AgentRunner, type EngineDeps, type runReview,
+} from '@airlock/engine';
+import type { Dismissal, Hello, PairReply } from '@airlock/shared';
 import { pair, pairedOrigin, readOrCreateToken, type ServiceConfig } from './config.js';
 import { createRouter, type Auth, type Route } from './http.js';
+import { reviewRoutes } from './routes.js';
+import type { Timers } from './runs.js';
 
 export interface ServiceDeps {
   config: ServiceConfig;
@@ -14,13 +18,30 @@ export interface ServiceDeps {
   log: (line: string) => void;
   /** Shorter limits for tests; the defaults are 30 s and 15 s. */
   limits?: { requestTimeoutMs: number; headersTimeoutMs: number };
+  /** The keep-alive and the dropping of finished runs; real timers by default. */
+  timers?: Timers;
+  /** The dismissals recorded for a pull request; none by default. */
+  dismissals?: (repo: string, number: number) => Promise<Dismissal[]>;
+}
+
+/**
+ * The engine's dependencies for real use: real commands, the Claude runner with one retry, the real clock. The runner
+ * is built on the first model call, so nothing touches Claude until a review runs.
+ */
+export function defaultEngineDeps(): EngineDeps {
+  let runner: AgentRunner | undefined;
+  return {
+    exec: realExec,
+    runner: { run: <T>(req: AgentRequest<T>): Promise<AgentResult<T>> => (runner ??= withRetry(createSdkRunner(), 1)).run(req) },
+    now: () => new Date(),
+  };
 }
 
 export const LISTEN_HOST = '127.0.0.1';
 const PAIRED_ELSEWHERE =
   'Airlock is already paired with another copy of the extension. Run "airlock-service unpair" and pair again.';
 
-function routesFor(deps: ServiceDeps): Route[] {
+function routesFor(deps: ServiceDeps, hidePaths: readonly string[]): Route[] {
   const { home, version } = deps.config;
   return [
     {
@@ -40,6 +61,7 @@ function routesFor(deps: ServiceDeps): Route[] {
         return { status: 200, json: reply };
       },
     },
+    ...reviewRoutes(deps, hidePaths),
   ];
 }
 
@@ -49,7 +71,8 @@ export function createServer(deps: ServiceDeps): { listen(): Promise<{ port: num
     async listen() {
       const token = await readOrCreateToken(deps.config.home);
       const auth: Auth = { token, port: deps.config.port, pairedOrigin: () => pairedOrigin(deps.config.home) };
-      const created = http.createServer({ connectionsCheckingInterval: 5_000 }, createRouter(routesFor(deps), auth, deps.log, { hidePaths: [deps.config.home, homedir()] }));
+      const hidePaths = [deps.config.home, homedir()];
+      const created = http.createServer({ connectionsCheckingInterval: 5_000 }, createRouter(routesFor(deps, hidePaths), auth, deps.log, { hidePaths }));
       created.requestTimeout = deps.limits?.requestTimeoutMs ?? 30_000;
       created.headersTimeout = deps.limits?.headersTimeoutMs ?? 15_000;
       created.keepAliveTimeout = 5_000;

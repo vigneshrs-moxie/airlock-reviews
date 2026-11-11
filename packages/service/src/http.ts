@@ -12,9 +12,15 @@ export interface Req {
   origin: string | null;
 }
 
+/**
+ * A stream handler gets `send` (one `data:` line per value), `closed` (aborted when the client goes away) and
+ * `comment` (one `: <text>` line, for keep-alives; line breaks in the text become spaces).
+ */
+export type StreamWriter = (send: (e: unknown) => void, closed: AbortSignal, comment: (text: string) => void) => Promise<void>;
+
 export type Res =
   | { status: number; json: unknown }
-  | { status: 200; stream: (send: (e: unknown) => void, closed: AbortSignal) => Promise<void> };
+  | { status: 200; stream: StreamWriter };
 
 export type Handler = (req: Req) => Promise<Res>;
 
@@ -131,8 +137,7 @@ function writeJson(res: ServerResponse, status: number, json: unknown, extra: Re
 }
 
 async function writeStream(
-  res: ServerResponse, stream: (send: (e: unknown) => void, closed: AbortSignal) => Promise<void>,
-  failure: (e: unknown) => string, log: (e: unknown) => void,
+  res: ServerResponse, stream: StreamWriter, failure: (e: unknown) => string, log: (e: unknown) => void,
 ): Promise<void> {
   const gone = new AbortController();
   res.on('close', () => gone.abort());
@@ -142,8 +147,12 @@ async function writeStream(
     if (gone.signal.aborted || res.writableEnded) return;
     res.write(`data: ${JSON.stringify(e)}\n\n`);
   };
+  const comment = (text: string): void => {
+    if (gone.signal.aborted || res.writableEnded) return;
+    res.write(`: ${text.replace(/[\r\n]+/g, ' ')}\n\n`);
+  };
   try {
-    await stream(send, gone.signal);
+    await stream(send, gone.signal, comment);
   } catch (e) {
     log(e);
     send({ type: 'failed', message: failure(e) });
@@ -153,7 +162,7 @@ async function writeStream(
 }
 
 /** An error message made safe to send: absolute paths under the given folders become `<path>`. */
-function plainMessage(e: unknown, hidePaths: readonly string[]): string {
+export function plainMessage(e: unknown, hidePaths: readonly string[]): string {
   let message = e instanceof Error ? e.message : String(e);
   for (const folder of hidePaths) {
     if (folder === '') continue;
