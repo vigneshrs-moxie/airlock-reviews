@@ -5,7 +5,7 @@ export { asMaterial, fill } from './agent/prompt.js';
 export { createSdkRunner } from './agent/sdk-runner.js';
 export { runReview, type EngineDeps, type ReviewRequest } from './pipeline/review.js';
 export { latestReview, saveReview } from './store/store.js';
-export { renderReview } from './render/terminal.js';
+export { cleanForTerminal, renderReview } from './render/terminal.js';
 export { parseArgs, usage } from './cli-args.js';
 export { parsePrRef } from './intake/pr.js';
 export { loadPack } from './packs/load.js';

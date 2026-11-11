@@ -3,11 +3,11 @@ import { realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { createSdkRunner, realExec, syncKit, withRetry } from '@airlock/engine';
+import { cleanForTerminal, createSdkRunner, realExec, syncKit, withRetry } from '@airlock/engine';
 import { DepthSchema } from '@airlock/shared';
 import { loadCases, pickCases } from './dataset.js';
 import type { ReplayCase } from './dataset.js';
-import { checkRunId, loadRun, runReplay, saveRunReport } from './run.js';
+import { checkRunId, HOME_FOLDER, loadRun, runReplay, saveRunReport } from './run.js';
 import type { CaseEvent, ReplayDeps } from './run.js';
 
 export interface ReplayCliOverrides { deps?: ReplayDeps; packsDir?: string; kit?: { dir: string; sha: string }; cases?: ReplayCase[] }
@@ -42,6 +42,9 @@ export function usage(): string {
 class UsageError extends Error {}
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/** Text from outside (errors, case ids, paths) as one line with no terminal control characters. */
+const clean = cleanForTerminal;
 
 const defaultDeps = (): ReplayDeps => ({ exec: realExec, runner: withRetry(createSdkRunner(), 1), now: () => new Date() });
 
@@ -84,10 +87,11 @@ function parseRun(args: string[]) {
 
 function progress(io: Io): (e: CaseEvent) => void {
   return (e) => {
-    io.err(e.message === undefined ? `${e.caseId}: ${e.status}` : `${e.caseId}: ${e.status}: ${e.message}`);
+    const id = clean(e.caseId);
+    io.err(e.message === undefined ? `${id}: ${e.status}` : `${id}: ${e.status}: ${clean(e.message)}`);
     if (e.score) {
       const s = e.score;
-      io.err(`${s.caseId}: ${s.inTop}/${s.known} in the top list, ${s.findingsShown} shown, verdict ${s.verdict}`);
+      io.err(`${id}: ${s.inTop}/${s.known} in the top list, ${s.findingsShown} shown, verdict ${s.verdict}`);
     }
   };
 }
@@ -98,7 +102,7 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
   try {
     all = overrides.cases ?? await loadCases();
   } catch (err) {
-    io.err(messageOf(err));
+    io.err(clean(messageOf(err)));
     return 1;
   }
   let cases: ReplayCase[];
@@ -110,19 +114,19 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
   if (cases.length === 0) throw new UsageError(`No replay cases selected by "${opts.selection}".`);
 
   // Replay reviews run with rules withheld: they must never be stored among the person's own reviews.
-  const home = join(opts.out, 'home');
+  const home = join(opts.out, HOME_FOLDER);
   process.env.AIRLOCK_HOME = home;
-  io.err(`Replay reviews and clones are kept in ${home}, apart from your own reviews.`);
+  io.err(`Replay reviews and clones are kept in ${clean(home)}, apart from your own reviews.`);
 
   const deps = overrides.deps ?? defaultDeps();
   let kit = overrides.kit;
   if (kit === undefined) {
     try {
       const synced = await syncKit(deps.exec);
-      if (synced.stale) io.err(`The review kit could not be refreshed; using the cached version ${synced.sha}.`);
+      if (synced.stale) io.err(`The review kit could not be refreshed; using the cached version ${clean(synced.sha)}.`);
       kit = { dir: synced.dir, sha: synced.sha };
     } catch (err) {
-      io.err(messageOf(err));
+      io.err(clean(messageOf(err)));
       io.err('Stopping: a replay without the team standard would not measure the real configuration.');
       return 1;
     }
@@ -131,21 +135,21 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
   let summary;
   try {
     summary = await runReplay({
-      cases, model: opts.model, depth: opts.depth, outDir: opts.out, packsDir: overrides.packsDir ?? process.env.AIRLOCK_PACKS_DIR ?? DEFAULT_PACKS,
+      cases, dataset: all, model: opts.model, depth: opts.depth, outDir: opts.out, packsDir: overrides.packsDir ?? process.env.AIRLOCK_PACKS_DIR ?? DEFAULT_PACKS,
       kitDir: kit.dir, kitSha: kit.sha, judgeModel: opts.judgeModel, parallelCases: opts.parallel,
       ...(opts.runId === undefined ? {} : { runId: opts.runId }),
     }, deps, progress(io));
   } catch (err) {
-    io.err(messageOf(err));
+    io.err(clean(messageOf(err)));
     return 1;
   }
 
   const unfinished = summary.incompleteCases;
   if (unfinished.length > 0) {
     const n = unfinished.length;
-    io.err(`${n} ${n === 1 ? 'case' : 'cases'} did not finish: ${unfinished.join(', ')}. The report lists ${n === 1 ? 'it' : 'them'}.`);
+    io.err(`${n} ${n === 1 ? 'case' : 'cases'} did not finish: ${clean(unfinished.join(', '))}. The report lists ${n === 1 ? 'it' : 'them'}.`);
   }
-  io.out(join(opts.out, summary.runId, 'report.md'));
+  io.out(clean(join(opts.out, summary.runId, 'report.md')));
   io.out(`Half of the known problems in the top list: ${word(summary.meets.halfInTop)}`);
   io.out(`Clean pull requests stay clean: ${word(summary.meets.cleanControls)}`);
   return 0;
@@ -163,10 +167,10 @@ async function reportCommand(args: string[], io: Io, overrides: ReplayCliOverrid
   try {
     const cases = overrides.cases ?? await loadCases();
     const { summary, details } = await loadRun(runDir, cases);
-    io.out(await saveRunReport(runDir, summary, cases, details));
+    io.out(clean(await saveRunReport(runDir, summary, cases, details)));
     return 0;
   } catch (err) {
-    io.err(messageOf(err));
+    io.err(clean(messageOf(err)));
     return 1;
   }
 }
@@ -193,10 +197,10 @@ export async function main(argv: string[], io: Io, overrides: ReplayCliOverrides
     }
   } catch (err) {
     if (err instanceof UsageError) {
-      io.err(`${err.message}\n\n${usage()}`);
+      io.err(`${clean(err.message)}\n\n${usage()}`);
       return 2;
     }
-    io.err(messageOf(err));
+    io.err(clean(messageOf(err)));
     return 1;
   }
 }

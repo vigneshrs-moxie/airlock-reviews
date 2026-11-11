@@ -170,6 +170,41 @@ describe('renderReport', () => {
     expect(first).toContain('The review of 1 of these pull requests did not finish (#11 Failed); its known problems are counted as missed.');
   });
 
+  it('a case the replay could not judge says so instead of listing its problems as never found', () => {
+    const failed = replayCase({ id: 'b', pr: 11, title: 'Failed', known: [problem({ id: 'B1' }), problem({ id: 'B2' })] });
+    const clean = replayCase({ id: 'n', pr: 12, title: 'Clean', kind: 'negative', known: [] });
+    const failedDoc = doc({ verdict: { label: 'incomplete', sentence: 's', counts: { block: 0, fix: 0, ask: 0, note: 0 } } });
+    const none = [match('B1', 'none', null, 'Not judged.'), match('B2', 'none', null, 'Not judged.')];
+    // How the runner scores a case it could not judge: incomplete, and not lost at any stage.
+    const lostAt = { lenses: 0, schema: 0, anchor: 0, challenge: 0, select: 0 };
+    const scores = [{ ...scoreCase(failed, failedDoc, none), lostAt }, scoreCase(clean, failedDoc, [])];
+    const details = { b: { doc: failedDoc, matches: none }, n: { doc: failedDoc, matches: [] } };
+    const text = renderReport(summarise('r', 'm', 'standard', scores, [failed, clean]), [failed, clean], details);
+
+    const missed = section(text, 'What was missed');
+    expect(missed).toContain('### #11 Failed\n\nNot judged: this review did not finish; see Incomplete reviews.\n');
+    expect(missed).not.toContain('never found by a lens');
+    expect(missed).not.toContain('B1');
+    const findings = section(text, 'Findings on clean pull requests');
+    expect(findings).toContain('### #12 Clean\n\nNot judged: this review did not finish; see Incomplete reviews.\n');
+    expect(findings).not.toContain('No findings shown.');
+  });
+
+  it('a review that finished with a failed stage but was judged still lists its misses, and a clean one its findings', () => {
+    const c = replayCase({ id: 'b', pr: 11, title: 'Partly', known: [problem({ id: 'B1' })] });
+    const n = replayCase({ id: 'n', pr: 12, title: 'Flagged', kind: 'negative', known: [] });
+    const incomplete = { label: 'incomplete', sentence: 's', counts: { block: 0, fix: 1, ask: 0, note: 0 } } as const;
+    const d = doc({ verdict: incomplete });
+    const flagged = doc({ verdict: incomplete, findings: [finding('f1', 'top', { severity: 'fix', title: 'Wrong total' })] });
+    const details = { b: { doc: d, matches: [match('B1', 'none', null)] }, n: { doc: flagged, matches: [] } };
+    const scores = [scoreCase(c, d, details.b.matches), scoreCase(n, flagged, [])];
+    const text = renderReport(summarise('r', 'm', 'standard', scores, [c, n]), [c, n], details);
+    expect(section(text, 'What was missed')).toContain('never found by a lens');
+    const findings = section(text, 'Findings on clean pull requests');
+    expect(findings).toContain('Not judged: this review did not finish; see Incomplete reviews.');
+    expect(findings).toContain('**Fix**: Wrong total');
+  });
+
   it('says clean reviews that did not finish cannot be counted as clean', () => {
     const n1 = replayCase({ id: 'n1', pr: 5, title: 'Fine', kind: 'negative', known: [] });
     const n2 = replayCase({ id: 'n2', pr: 6, title: 'Broke', kind: 'negative', known: [] });

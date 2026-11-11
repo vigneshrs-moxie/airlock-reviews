@@ -111,6 +111,13 @@ describe('airlock-replay', () => {
       expect(code).toBe(0);
       expect(h.homes).toEqual([join(work, 'home')]);
       expect(t.err.join('\n')).toContain(join(work, 'home'));
+
+      // The kit is fetched after the variable is set: syncKit's first command sees it.
+      const seen: (string | undefined)[] = [];
+      const fetching = harness({ kit: null, deps: { exec: async () => { seen.push(process.env.AIRLOCK_HOME); return { stdout: '', stderr: 'offline', code: 1 }; } } });
+      process.env.AIRLOCK_HOME = join(work, 'the-persons-real-home');
+      expect(await main(['run', '--cases', 'pr1', '--out', join(work, 'second')], io().io, fetching.overrides)).toBe(1);
+      expect(seen[0]).toBe(join(work, 'second', 'home'));
     } finally {
       if (savedHome === undefined) delete process.env.AIRLOCK_HOME;
       else process.env.AIRLOCK_HOME = savedHome;
@@ -204,5 +211,18 @@ describe('airlock-replay', () => {
     expect(t.out[0]).toBe(join(work, RUN_ID, 'report.md'));
     expect(t.out[1]).toBe('Half of the known problems in the top list: yes');
     expect((await stat(join(work, RUN_ID, 'report.md'))).isFile()).toBe(true);
+  });
+
+  it('prints text from outside without terminal control characters, each message on one line', async () => {
+    const h = harness({ review: (req) => { if (req.number === 2) throw new Error('bad\u001b[2K\rthing\nsecond line'); return reviewFor(req); } });
+    const t = io();
+    const out = join(work, 'odd\u001b[31m\rfolder');
+    expect(await keepingEnv(() => main(['run', '--cases', 'pr1,pr2', '--out', out], t.io, h.overrides))).toBe(0);
+    for (const line of [...t.err, ...t.out]) {
+      expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    }
+    expect(t.err.some((l) => l.startsWith('pr2: failed: ') && l.includes('bad') && l.includes('thing second line'))).toBe(true);
+    // The carriage return becomes a space and the escape character is removed.
+    expect(t.out[0]).toBe(join(work, 'odd[31m folder', RUN_ID, 'report.md'));
   });
 });

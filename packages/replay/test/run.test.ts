@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { readdirSync } from 'node:fs';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createFakeRunner } from '@airlock/engine';
+import { createFakeRunner, withRetry } from '@airlock/engine';
 import type { AgentRequest, ReviewRequest } from '@airlock/engine';
 import { ReviewDocumentSchema } from '@airlock/shared';
 import type { ReviewDocument } from '@airlock/shared';
@@ -39,6 +40,7 @@ function reviewFor(req: ReviewRequest): ReviewDocument {
   const base = doc();
   return doc({
     pr: { ...base.pr, repo: req.repo, number: req.number, baseSha: req.explicit!.baseSha, headSha: req.explicit!.headSha },
+    range: { baseSha: req.explicit!.baseSha, headSha: req.explicit!.headSha, kind: 'explicit' },
     findings: [finding('f1', 'top', { severity: 'note' })],
     timings: [{ stage: 'lenses', ms: 1000, agentRuns: 2, inputTokens: 300, outputTokens: 40, costUsd: null }],
   });
@@ -77,7 +79,7 @@ function options(over: Partial<ReplayOptions> = {}): ReplayOptions {
   };
 }
 
-function deps(review: FakeReview, runner = createFakeRunner(judgeAnswer)): ReplayDeps {
+function deps(review: FakeReview, runner: ReplayDeps['runner'] = createFakeRunner(judgeAnswer)): ReplayDeps {
   return { exec: async () => ({ stdout: '', stderr: 'no commands in tests', code: 1 }), runner, now: () => NOW, review };
 }
 
@@ -188,7 +190,8 @@ describe('runReplay', () => {
     expect(review.requests).toHaveLength(3);
     const failed = summary.cases.find((s) => s.caseId === 'pr2')!;
     expect(failed).toMatchObject({ known: 1, inTop: 0, shown: 0, raised: 0, findingsShown: 0, verdict: 'incomplete' });
-    expect(failed.lostAt.lenses).toBe(1);
+    // Not judged, so not lost anywhere: the problem still counts as known and as not found.
+    expect(Object.values(failed.lostAt)).toEqual([0, 0, 0, 0, 0]);
     expect(summary.incompleteCases).toEqual(['pr2']);
     expect(summary.cases.find((s) => s.caseId === 'pr1')).toMatchObject({ inTop: 1, verdict: 'approve' });
 
@@ -208,8 +211,9 @@ describe('runReplay', () => {
     const { events, onCase } = recorder();
     const summary = await runReplay(options(), deps(fakeReview(), failing), onCase);
 
-    expect(failing.calls.filter((r) => isFor(r, 'K1'))).toHaveLength(2); // the retry ran too
+    expect(failing.calls.filter((r) => isFor(r, 'K1'))).toHaveLength(1); // deps.runner is used as it is: no second retry
     expect(summary.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 0, raised: 0, findingsShown: 1, verdict: 'incomplete' });
+    expect(Object.values(summary.cases[0]!.lostAt)).toEqual([0, 0, 0, 0, 0]);
     expect(summary.incompleteCases).toEqual(['pr1']);
     expect((await readdir(caseDir('pr1'))).sort()).toEqual(['error.txt', 'review.json']);
     // The saved review stays the real one.
@@ -243,6 +247,8 @@ describe('runReplay', () => {
     await mkdir(join(outDir, 'run-b', 'pr1'), { recursive: true });
     await expect(runReplay(options({ runId: 'run-b' }), deps(review))).rejects.toThrow(/run\.json/);
     // So are run ids and case ids that are not plain folder names.
+    await expect(runReplay(options({ runId: 'home' }), deps(review))).rejects.toThrow(/home.*Airlock's own data/);
+    await expect(runReplay(options({ runId: 'Home' }), deps(review))).rejects.toThrow(/Airlock's own data/);
     for (const runId of ['..', '.', 'a/b', '', 'x'.repeat(101)]) {
       await expect(runReplay(options({ runId }), deps(review))).rejects.toThrow(/run id/);
     }
@@ -294,6 +300,15 @@ describe('runReplay', () => {
     expect(renderReport(loaded.summary, cases(), loaded.details)).toBe(await readFile(join(outDir, 'run-a', 'report.md'), 'utf8'));
   });
 
+  it('loadRun gives a listed case with no folder as unfinished', async () => {
+    await runReplay(options(), deps(fakeReview()));
+    await rm(caseDir('pr2'), { recursive: true });
+    const loaded = await loadRun(join(outDir, 'run-a'), cases());
+    expect(loaded.summary.cases.map((s) => [s.caseId, s.verdict])).toEqual([['pr1', 'approve'], ['pr2', 'incomplete'], ['pr3', 'approve']]);
+    expect(loaded.summary.incompleteCases).toEqual(['pr2']);
+    expect(loaded.details.pr2!.doc.stageErrors).toEqual([{ stage: 'intake', cohortId: null, message: 'This case has not been run.' }]);
+  });
+
   it('nothing from the known problems appears in any review request', async () => {
     const review = fakeReview();
     await runReplay(options(), deps(review));
@@ -310,10 +325,121 @@ describe('runReplay', () => {
   it('the judge runs through a retry: one failed attempt followed by a success is a success', async () => {
     let attempts = 0;
     const runner = createFakeRunner(() => (++attempts === 1 ? new Error('not the expected form') : judgeAnswer()));
-    const summary = await runReplay(options({ cases: [cases()[0]!] }), deps(fakeReview(), runner));
+    const retrying = withRetry(runner, 1);
+    const summary = await runReplay(options({ cases: [cases()[0]!] }), { ...deps(fakeReview()), runner: retrying });
     expect(runner.calls).toHaveLength(2);
     expect(runner.calls[1]!.instructions).toContain('not the expected form');
     expect(summary.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 1, verdict: 'approve' });
     expect(await exists(join(caseDir('pr1'), 'error.txt'))).toBe(false);
+  });
+  it('a resume with a narrower selection keeps the whole run: the other cases are scored from their folders', async () => {
+    const first = await runReplay(options(), deps(fakeReview()));
+    await rm(join(caseDir('pr2'), 'matches.json'));
+
+    const review = fakeReview(() => { throw new Error('must not review again'); });
+    const runner = createFakeRunner(judgeAnswer);
+    const { events, onCase } = recorder();
+    const second = await runReplay(options({ cases: [cases()[1]!], dataset: cases() }), deps(review, runner), onCase);
+
+    expect(review.requests).toHaveLength(0);
+    expect(runner.calls).toHaveLength(1); // pr2 is judged again, and only that
+    expect(new Set(events.map((e) => e.caseId))).toEqual(new Set(['pr2']));
+    expect(second).toEqual(first);
+    expect(await readJson(join(outDir, 'run-a', 'summary.json'))).toEqual(first);
+    expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ caseIds: ['pr1', 'pr2', 'pr3'] });
+    const loaded = await loadRun(join(outDir, 'run-a'), cases());
+    expect(await readFile(join(outDir, 'run-a', 'report.md'), 'utf8')).toBe(renderReport(loaded.summary, cases(), loaded.details));
+    expect(loaded.summary).toEqual(first);
+  });
+
+  it('a resume that adds a case runs it and keeps the earlier ones, in dataset order', async () => {
+    await runReplay(options({ cases: [cases()[0]!, cases()[2]!] }), deps(fakeReview()));
+    const review = fakeReview();
+    const summary = await runReplay(options({ cases: [cases()[1]!], dataset: cases() }), deps(review));
+    expect(review.requests.map((r) => r.number)).toEqual([2]);
+    expect(summary.cases.map((s) => [s.caseId, s.verdict])).toEqual([['pr1', 'approve'], ['pr2', 'approve'], ['pr3', 'approve']]);
+    expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ caseIds: ['pr1', 'pr2', 'pr3'] });
+
+    // An earlier case that the dataset no longer has cannot be scored, so the run folder is refused.
+    await expect(runReplay(options({ cases: [cases()[1]!] }), deps(fakeReview()))).rejects.toThrow(/pr1.*not in the dataset/);
+  });
+
+  it('a case whose folder cannot be written is unfinished, and the other cases still finish', async () => {
+    await mkdir(join(outDir, 'run-a'), { recursive: true });
+    await writeFile(join(outDir, 'run-a', 'pr2'), 'a file where the case folder should be');
+    const { events, onCase } = recorder();
+    const summary = await runReplay(options(), deps(fakeReview()), onCase);
+    expect(summary.cases.map((s) => [s.caseId, s.verdict])).toEqual([['pr1', 'approve'], ['pr2', 'incomplete'], ['pr3', 'approve']]);
+    expect(summary.incompleteCases).toEqual(['pr2']);
+    expect(events.filter((e) => e.caseId === 'pr2').map((e) => e.status)).toEqual(['failed']);
+    expect(await exists(join(outDir, 'run-a', 'report.md'))).toBe(true);
+  });
+
+  it('rejects for a problem with the run folder itself only after every case has settled', async () => {
+    await runReplay(options(), deps(fakeReview()));
+    await rm(join(outDir, 'run-a', 'report.md'));
+    await mkdir(join(outDir, 'run-a', 'report.md')); // the report cannot be written
+    await rm(join(caseDir('pr1'), 'matches.json'));
+    const runner = createFakeRunner(judgeAnswer);
+    await expect(runReplay(options(), deps(fakeReview(), runner))).rejects.toThrow();
+    expect(runner.calls).toHaveLength(1);
+    expect(await readJson(join(caseDir('pr1'), 'matches.json'))).toHaveLength(2);
+  });
+
+  it('a saved review for another pull request or other commits is reviewed again', async () => {
+    await runReplay(options(), deps(fakeReview()));
+    await writeFile(join(caseDir('pr2'), 'review.json'), await readFile(join(caseDir('pr1'), 'review.json')));
+    const pr3 = ReviewDocumentSchema.parse(await readJson(join(caseDir('pr3'), 'review.json')));
+    await writeFile(join(caseDir('pr3'), 'review.json'), JSON.stringify({ ...pr3, range: { ...pr3.range, headSha: 'f'.repeat(40) } }));
+    const review = fakeReview();
+    await runReplay(options(), deps(review));
+    expect(review.requests.map((r) => r.number)).toEqual([2, 3]);
+  });
+
+  it('a corrupt or schema-invalid review.json is reviewed again', async () => {
+    await runReplay(options(), deps(fakeReview()));
+    await writeFile(join(caseDir('pr1'), 'review.json'), '{ not json');
+    await writeFile(join(caseDir('pr2'), 'review.json'), JSON.stringify({ schemaVersion: 1, id: 'r_0123456789' }));
+    const review = fakeReview();
+    const summary = await runReplay(options(), deps(review));
+    expect(review.requests.map((r) => r.number)).toEqual([1, 2]);
+    expect(summary.incompleteCases).toEqual([]);
+  });
+
+  it('a document from review that does not match the schema counts as a failed review', async () => {
+    const review = fakeReview((req) =>
+      req.number === 2 ? ({ ...reviewFor(req), verdict: { label: 'great' } } as unknown as ReviewDocument) : reviewFor(req));
+    const summary = await runReplay(options(), deps(review));
+    expect(summary.incompleteCases).toEqual(['pr2']);
+    expect(await readdir(caseDir('pr2'))).toEqual(['error.txt']);
+    expect(await readFile(join(caseDir('pr2'), 'error.txt'), 'utf8')).toMatch(/^The review failed: /);
+  });
+
+  it('a matches.json whose known ids do not match the case is judged again', async () => {
+    await runReplay(options(), deps(fakeReview()));
+    await writeFile(join(caseDir('pr1'), 'matches.json'), JSON.stringify([
+      { knownId: 'K9', where: 'none', itemId: null, partial: false, reason: 'x' },
+      { knownId: 'K2', where: 'none', itemId: null, partial: false, reason: 'x' },
+    ]));
+    const review = fakeReview();
+    const runner = createFakeRunner(judgeAnswer);
+    const summary = await runReplay(options(), deps(review, runner));
+    expect(review.requests).toHaveLength(0);
+    expect(runner.calls).toHaveLength(1);
+    expect(summary.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 1 });
+  });
+
+  it('the judge runs in a fresh, empty folder made for the run and removed at the end', async () => {
+    const seen: { cwd: string; entries: string[] }[] = [];
+    const runner = createFakeRunner((req) => {
+      seen.push({ cwd: req.cwd, entries: readdirSync(req.cwd) });
+      return judgeAnswer();
+    });
+    await runReplay(options(), deps(fakeReview(), runner));
+    expect(seen).toHaveLength(2);
+    expect(seen[0]!.cwd).not.toBe(tmpdir());
+    expect(seen[1]!.cwd).toBe(seen[0]!.cwd);
+    expect(seen.map((s) => s.entries)).toEqual([[], []]);
+    await expect(stat(seen[0]!.cwd)).rejects.toThrow(/ENOENT/);
   });
 });
