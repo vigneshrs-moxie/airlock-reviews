@@ -3,7 +3,7 @@ import type { ChangeMap } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
 import { createFakeRunner } from '../../src/agent/fake-runner.js';
 import { runSeams } from '../../src/lenses/seams.js';
-import { block, ctx, diff, labels, lens, pack, rawCandidate, tier, twoCohorts } from '../helpers/lens-context.js';
+import { block, ctx, diff, labels, lens, pack, pr, rawCandidate, tier, twoCohorts } from '../helpers/lens-context.js';
 
 const empty = () => ({ candidates: [], questions: [] });
 const soFar = [
@@ -100,6 +100,25 @@ describe('runSeams', () => {
     expect(r.errors).toEqual([{ stage: 'seams', cohortId: null, message: 'airlock/seams: model timed out' }]);
     expect(r.candidates).toEqual([]);
     expect(r.usage).toHaveLength(1);
+  });
+
+  it('names the reader from who opened the pull request and who is reviewing it', async () => {
+    const own = createFakeRunner(empty);
+    await runSeams(own, ctx({ pr: { ...pr, author: 'alice', viewer: 'alice' } }), []);
+    expect(own.calls[0]!.instructions).toContain('The reader is the author, who will fix what you find before a senior reviewer sees the pull request.');
+    const other = createFakeRunner(empty);
+    await runSeams(other, ctx({ pr: { ...pr, author: 'alice', viewer: 'bob' } }), []);
+    expect(other.calls[0]!.instructions).toContain('The reader is a reviewer deciding whether to ask the author for changes, who will pass on what you find in their own words.');
+    expect(other.calls[0]!.instructions).toMatch(/Write so the reader can act/);
+  });
+
+  it('cuts a long description at 20,000 characters and says so', async () => {
+    const runner = createFakeRunner(empty);
+    await runSeams(runner, ctx({ pr: { ...pr, body: 'a'.repeat(20_500) } }), []);
+    const text = block(runner.calls[0]!.material, 'pull request')!;
+    expect(text).toContain('a'.repeat(20_000));
+    expect(text).not.toContain('a'.repeat(20_001));
+    expect(text).toContain('(description cut at 20000 characters)');
   });
 
   it('goes through the parallel cap', async () => {

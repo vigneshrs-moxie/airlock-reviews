@@ -135,7 +135,7 @@ describe('loadPack validation', () => {
     expect(pack.lenses.map((l) => [l.id, l.onlyWhenAlone])).toEqual([['alone', true], ['always', false], ['off', false]]);
   });
 
-  it.each([['yes', 'yes'], ['a string', '"true"'], ['a number', '1']])(
+  it.each([['yes', 'yes'], ['a string', '"true"'], ['a number', '1'], ['null', 'null'], ['blank', '']])(
     'rejects a lens whose onlyWhenAlone is %s', async (_n, value) => {
       const dir = await tmp();
       await mkdir(join(dir, 'lenses'));

@@ -4,7 +4,7 @@ A cohort is one unit of behaviour, with its changed files ordered into layers. A
 
 ## Who reads your findings
 
-The author reads them first. They will fix what you find before a senior reviewer sees the pull request. Write so they can act on each finding without asking what you meant.
+{{reader}} Write so the reader can act on each finding without asking what you meant.
 
 ## What you are given
 

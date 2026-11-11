@@ -4,8 +4,8 @@ import type { AgentRunner } from '../agent/runner.js';
 import { formatForPrompt } from '../diff/format.js';
 import type { LensDef, Pack } from '../packs/types.js';
 import {
-  briefBlock, cohortFiles, cohortOutline, factsBlock, instructionsFor, mergeResults, prBlock, reviewedCohorts, runLensCall,
-  tierOf,
+  briefBlock, cohortFiles, cohortOutline, factsBlock, instructionsFor, mergeResults, prBlock, readerOf, reviewedCohorts,
+  runLensCall, tierOf,
 } from './context.js';
 import type { LensCall, LensContext, LensStageResult } from './context.js';
 
@@ -115,10 +115,13 @@ export async function runCohortLenses(
   if (cohorts.length === 0 || lenses.length === 0) return mergeResults([]);
 
   const template = await loadTemplate('lens');
+  const reader = readerOf(ctx.pr);
   const briefs = lenses.map(({ pack, lens }) => ({
     pack, lens, name: `${pack.id}/${lens.id}`,
     instructions: instructionsFor(
-      fill(template, { lensTitle: lens.title, lensInstructions: lens.instructions.trim() }), ctx.packs, ctx.missingHelpers,
+      fill(template, { reader, lensTitle: lens.title, lensInstructions: lens.instructions.trim() }),
+      ctx.packs,
+      ctx.missingHelpers,
     ),
   }));
   const tier = tierOf(ctx.tiers);
@@ -141,7 +144,11 @@ export async function runCohortLenses(
     try {
       return await runLensCall(runner, ctx, call, taken);
     } finally {
-      onDone?.(cohortId, call.name);
+      try {
+        onDone?.(cohortId, call.name);
+      } catch {
+        // a broken progress listener must not stop the review
+      }
     }
   }));
   return mergeResults(results);

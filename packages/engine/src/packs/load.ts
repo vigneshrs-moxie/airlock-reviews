@@ -63,7 +63,7 @@ function section<T extends z.ZodType>(doc: Obj, key: string, schema: T, file: st
 }
 
 function onlyWhenAlone(l: Obj, file: string): boolean {
-  if (l.onlyWhenAlone === undefined || l.onlyWhenAlone === null) return false;
+  if (!Object.hasOwn(l, 'onlyWhenAlone')) return false;
   if (typeof l.onlyWhenAlone !== 'boolean') throw new Error(`${file}: "onlyWhenAlone" must be true or false (lens "${String(l.id)}")`);
   return l.onlyWhenAlone;
 }

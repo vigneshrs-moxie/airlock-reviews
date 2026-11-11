@@ -2,8 +2,8 @@ import type { Candidate } from '@airlock/shared';
 import { asMaterial, fill, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner } from '../agent/runner.js';
 import {
-  briefBlock, candidateLines, emptyResult, factsBlock, hasFilesToRead, instructionsFor, mapBlock, prBlock, runLensCall,
-  standaloneCohort, tierOf,
+  briefBlock, candidateLines, emptyResult, factsBlock, hasFilesToRead, instructionsFor, mapBlock, prBlock, readerOf,
+  runLensCall, standaloneCohort, tierOf,
 } from './context.js';
 import type { LensContext, LensStageResult } from './context.js';
 
@@ -26,6 +26,7 @@ export async function runSeams(runner: AgentRunner, ctx: LensContext, soFar: Can
 
   return runLensCall(runner, ctx, {
     role: 'seams', name: 'airlock/seams', stage: 'seams', source: { pack: 'airlock', lens: 'seams', ruleId: null },
-    cohortId: null, instructions: instructionsFor(fill(await loadTemplate('seams'), {}), ctx.packs, null), material,
+    cohortId: null, material,
+    instructions: instructionsFor(fill(await loadTemplate('seams'), { reader: readerOf(ctx.pr) }), ctx.packs, null),
   }, new Set(soFar.map((c) => c.id)));
 }

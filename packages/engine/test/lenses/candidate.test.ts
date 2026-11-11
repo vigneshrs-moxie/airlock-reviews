@@ -89,10 +89,44 @@ describe('acceptCandidates', () => {
     expect(r).toEqual({ candidates: [], dropped: [], questions: [] });
   });
 
-  it('rejects a connected place without its own quote', () => {
-    const r = acceptCandidates([raw({ title: 'Loose', connected: [{ path: 'src/a.ts', role: 'here' }] })], source, 'k1');
+  it('keeps the candidate and drops a connected place without its own quote', () => {
+    const good = { path: 'src/b.ts', quote: 'save(plan);', role: 'saved here' };
+    const r = acceptCandidates([raw({ title: 'Loose', connected: [{ path: 'src/a.ts', role: 'here' }, good] })], source, 'k1');
+    expect(r.questions).toEqual([]);
+    expect(r.candidates[0]!.connected).toEqual([{ ...good, line: null }]);
+  });
+
+  it('drops a connected place without a path or with a blank quote', () => {
+    const r = acceptCandidates([raw({ connected: [{ quote: 'x', role: 'r' }, { path: 'src/a.ts', quote: '  ', role: 'r' }, 'junk'] })], source, 'k1');
+    expect(r.questions).toEqual([]);
+    expect(r.candidates[0]!.connected).toEqual([]);
+  });
+
+  it('gives a connected place without a role an empty role', () => {
+    const r = acceptCandidates([raw({ connected: [{ path: 'src/a.ts', quote: 'x = 1;' }] })], source, 'k1');
+    expect(r.candidates[0]!.connected).toEqual([{ path: 'src/a.ts', quote: 'x = 1;', role: '', line: null }]);
+  });
+
+  it.each([
+    ['connected', { connected: [] }],
+    ['suggestedChange', { suggestedChange: '' }],
+    ['wouldBeWrongIf', { wouldBeWrongIf: '' }],
+  ])('keeps a candidate with no %s', (key, expected) => {
+    const rest = raw();
+    delete rest[key];
+    const r = acceptCandidates([rest], source, 'k1');
+    expect(r.questions).toEqual([]);
+    expect(r.candidates).toHaveLength(1);
+    expect(r.candidates[0]).toMatchObject(expected);
+  });
+
+  it.each(['title', 'path', 'quote', 'happens', 'why'])('turns a candidate with a blank %s into a question', (key) => {
+    const missing = raw({ title: key === 'title' ? '' : 'Asked' });
+    delete missing[key];
+    const blank = raw({ [key]: '   ', title: key === 'title' ? '   ' : 'Asked' });
+    const r = acceptCandidates([missing, blank], source, 'k1');
     expect(r.candidates).toEqual([]);
-    expect(r.questions.map((q) => q.text)).toEqual(['Loose']);
+    expect(r.questions).toHaveLength(2);
   });
 
   it('never reuses an id already taken', () => {

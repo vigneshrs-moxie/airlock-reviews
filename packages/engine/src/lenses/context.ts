@@ -36,7 +36,8 @@ export interface LensStageResult {
 export const emptyResult = (): LensStageResult => ({ candidates: [], questions: [], dropped: [], errors: [], usage: [] });
 
 export const STANDALONE_ID = 'standalone';
-const MAX_DESCRIPTION_CHARS = 6_000;
+/** Lenses cannot fetch the description with their tools, so it is cut late. */
+const MAX_DESCRIPTION_CHARS = 20_000;
 
 const orNone = (lines: string[]): string => (lines.length === 0 ? '(none)' : lines.join('\n'));
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
@@ -71,6 +72,13 @@ export function reviewedCohorts(ctx: LensContext): Cohort[] {
 }
 
 // ---- Instructions: the reviewer's own standard ----
+
+/** Who reads the findings: the author on their own pull request, otherwise a reviewer who passes them on. */
+export function readerOf(pr: PrInfo): string {
+  return pr.author === pr.viewer
+    ? 'The reader is the author, who will fix what you find before a senior reviewer sees the pull request.'
+    : 'The reader is a reviewer deciding whether to ask the author for changes, who will pass on what you find in their own words.';
+}
 
 /** Every standard of every pack, each under a heading naming the pack and the standard. */
 function standardsText(packs: Pack[]): string {

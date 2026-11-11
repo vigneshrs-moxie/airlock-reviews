@@ -4,7 +4,7 @@ import { createFakeRunner } from '../../src/agent/fake-runner.js';
 import { runCohortLenses } from '../../src/lenses/cohort-lens.js';
 import { applyHoldout } from '../../src/packs/holdout.js';
 import {
-  block, cohort, ctx, diff, labels, layer, lens, pack, rawCandidate, tier, twoCohorts,
+  block, cohort, ctx, diff, labels, layer, lens, pack, pr, rawCandidate, tier, twoCohorts,
 } from '../helpers/lens-context.js';
 
 const empty = () => ({ candidates: [], questions: [] });
@@ -294,6 +294,54 @@ describe('runCohortLenses', () => {
     const done: string[] = [];
     await runCohortLenses(runner, ctx({ packs }), (cohortId, lensId) => done.push(`${cohortId} ${lensId}`));
     expect(done.sort()).toEqual(['k1 core/boundary', 'k1 extra/jobs', 'k2 core/boundary', 'k2 extra/jobs']);
+  });
+
+  it('finishes the stage when onDone throws', async () => {
+    const runner = createFakeRunner(() => ({ candidates: [rawCandidate()], questions: [] }));
+    let calls = 0;
+    const r = await runCohortLenses(runner, ctx(), () => { calls++; throw new Error('listener broke'); });
+    expect(calls).toBe(2);
+    expect(r.candidates).toHaveLength(2);
+    expect(r.errors).toEqual([]);
+  });
+
+  it('names the author as the reader on their own pull request', async () => {
+    const runner = createFakeRunner(empty);
+    await runCohortLenses(runner, ctx({ pr: { ...pr, author: 'alice', viewer: 'alice' } }));
+    const { instructions } = runner.calls[0]!;
+    expect(instructions).toContain('The reader is the author, who will fix what you find before a senior reviewer sees the pull request.');
+    expect(instructions).not.toContain('deciding whether to ask the author for changes');
+    expect(instructions).toMatch(/Write so the reader can act/);
+  });
+
+  it('names a reviewer as the reader on someone else\'s pull request', async () => {
+    const runner = createFakeRunner(empty);
+    await runCohortLenses(runner, ctx({ pr: { ...pr, author: 'alice', viewer: 'bob' } }));
+    const { instructions } = runner.calls[0]!;
+    expect(instructions).toContain('The reader is a reviewer deciding whether to ask the author for changes, who will pass on what you find in their own words.');
+    expect(instructions).not.toContain('before a senior reviewer sees');
+  });
+
+  it('cuts a long description at 20,000 characters and says so', async () => {
+    const runner = createFakeRunner(empty);
+    await runCohortLenses(runner, ctx({ pr: { ...pr, body: 'a'.repeat(20_500) } }));
+    const text = block(runner.calls[0]!.material, 'pull request')!;
+    expect(text).toContain('a'.repeat(20_000));
+    expect(text).not.toContain('a'.repeat(20_001));
+    expect(text).toContain('(description cut at 20000 characters)');
+  });
+
+  it('keeps every file title and its not-shown line when there are too many files for the budget', async () => {
+    const paths = Array.from({ length: 800 }, (_, i) => `src/f${String(i).padStart(3, '0')}.ts`);
+    const map: ChangeMap = { cohorts: [cohort('k1', 'Huge', [layer('k1.l1', 'other', paths)])], standalone: [], links: [] };
+    const runner = createFakeRunner(empty);
+    await runCohortLenses(runner, ctx({ map, files: paths.map((p) => diff(p, 10)), tiers: paths.map((p) => tier(p)) }));
+    const lines = diffLines(runner.calls[0]!.material);
+    expect(lines).toHaveLength(1_600);
+    paths.forEach((p, i) => {
+      expect(lines[2 * i]).toBe(`## File: ${p}`);
+      expect(lines[2 * i + 1]).toBe('… 10 more changed lines not shown; read the file');
+    });
   });
 
   it('makes no request when there is nothing to read', async () => {
