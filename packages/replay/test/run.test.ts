@@ -88,6 +88,16 @@ const caseDir = (caseId: string, runId = 'run-a'): string => join(outDir, runId,
 const readJson = async (path: string): Promise<unknown> => JSON.parse(await readFile(path, 'utf8'));
 const exists = async (path: string): Promise<boolean> => readFile(path).then(() => true, () => false);
 
+/** Every file under `dir` with its bytes, and every folder, by path relative to `dir`. */
+async function snapshot(dir: string): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const path of (await readdir(dir, { recursive: true })).sort()) {
+    const full = join(dir, path);
+    out[path] = (await stat(full)).isDirectory() ? '(folder)' : (await readFile(full)).toString('base64');
+  }
+  return out;
+}
+
 function recorder(): { events: CaseEvent[]; onCase: (e: CaseEvent) => void } {
   const events: CaseEvent[] = [];
   return { events, onCase: (e) => events.push(e) };
@@ -124,14 +134,57 @@ describe('runReplay', () => {
     });
   });
 
-  it('reads a run.json written before effort, sweep model and combine were recorded as the defaults', async () => {
-    await runReplay(options(), deps(fakeReview()));
-    const path = join(outDir, 'run-a', 'run.json');
-    const { effort: _e, sweepModel: _s, combine: _c, ...older } = JSON.parse(await readFile(path, 'utf8'));
-    await writeFile(path, JSON.stringify(older));
-    await expect(runReplay(options(), deps(fakeReview()))).resolves.toBeDefined();
-    await writeFile(path, JSON.stringify(older));
-    await expect(runReplay(options({ effort: 'low' }), deps(fakeReview()))).rejects.toThrow(/effort high, not low/);
+  describe('a run folder made by an earlier version of the replay', () => {
+    const REFUSED = 'The run folder run-a was made by an earlier version of the replay: its reviews read today\'s descriptions ' +
+      'and its judge saw where each finding was placed. Start a new run with another --run id.';
+
+    /** A run folder as an earlier version left it: run.json without `format` (or with `format`), effort, sweep model or combine. */
+    async function earlierFolder(format?: number): Promise<void> {
+      await runReplay(options(), deps(fakeReview()));
+      const path = join(outDir, 'run-a', 'run.json');
+      const { format: _f, effort: _e, sweepModel: _s, combine: _c, ...older } = await readJson(path) as Record<string, unknown>;
+      await writeFile(path, JSON.stringify(format === undefined ? older : { ...older, format }));
+      // A case with work left to do, so a resume would have touched it.
+      await rm(join(caseDir('pr2'), 'matches.json'));
+    }
+
+    it('a new run writes format 2 in run.json and is resumed', async () => {
+      await runReplay(options(), deps(fakeReview()));
+      expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ format: 2 });
+      await rm(join(caseDir('pr2'), 'matches.json'));
+      const runner = createFakeRunner(judgeAnswer);
+      const resumed = await runReplay(options(), deps(fakeReview(), runner));
+      expect(runner.calls).toHaveLength(1);
+      expect(resumed.incompleteCases).toEqual([]);
+      expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ format: 2 });
+    });
+
+    for (const format of [undefined, 1]) {
+      it(`is refused for a run when run.json has ${format === undefined ? 'no format' : `format ${format}`}, and nothing in it changes`, async () => {
+        await earlierFolder(format);
+        const before = await snapshot(join(outDir, 'run-a'));
+        const review = fakeReview();
+        const runner = createFakeRunner(judgeAnswer);
+        const { events, onCase } = recorder();
+        await expect(runReplay(options(), deps(review, runner), onCase)).rejects.toThrow(REFUSED);
+        expect(review.requests).toHaveLength(0);
+        expect(runner.calls).toHaveLength(0);
+        expect(events).toEqual([]);
+        expect(await snapshot(join(outDir, 'run-a'))).toEqual(before);
+      });
+    }
+
+    it('is read by loadRun with the old defaults, and its report says it is not comparable', async () => {
+      await earlierFolder();
+      const { summary, details } = await loadRun(join(outDir, 'run-a'), cases());
+      expect(summary.madeByEarlierVersion).toBe(true);
+      expect(summary.meets.halfInTop).toBe('not comparable');
+      expect(details.pr1!.doc.verdict.label).toBe('approve');
+      const report = renderReport(summary, cases(), details);
+      const first = report.split('\n').find((l) => l.startsWith('1. '))!;
+      expect(first).toContain(' were (33%). Not comparable: see How to read this. ');
+      expect(report).toContain('The run folder run-a was made by an earlier version of the replay');
+    });
   });
 
   it('every request carries the pull request\'s title and description as they stood at review time', async () => {
@@ -174,7 +227,7 @@ describe('runReplay', () => {
       c.id, { doc: ReviewDocumentSchema.parse(await readJson(join(runDir, c.id, 'review.json'))), matches: await readJson(join(runDir, c.id, 'matches.json')) },
     ])))));
     expect(await readJson(join(runDir, 'run.json'))).toEqual({
-      runId, model: MODEL, depth: 'standard', judgeModel: 'claude-opus-5-5', kitSha: KIT_SHA,
+      format: 2, runId, model: MODEL, depth: 'standard', judgeModel: 'claude-opus-5-5', kitSha: KIT_SHA,
       effort: 'high', sweepModel: MODEL, combine: 'never',
       caseIds: ['pr1', 'pr2', 'pr3'], startedAt: NOW.toISOString(),
       casesStartedAt: NOW.toISOString(), casesFinishedAt: NOW.toISOString(),

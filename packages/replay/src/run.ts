@@ -102,13 +102,27 @@ const MatchesSchema = z.array(z.object({
   })).optional(),
 }));
 
+/**
+ * The version of the run folder's rules. 2: each review reads the description as it stood at review time, and the judge
+ * does not see where an item ended up. A folder of an earlier version is never continued, only reported.
+ */
+const RUN_FORMAT = 2;
+
+/** A run folder made by an earlier version of the replay was given to `run`: it can be reported, never continued. */
+export class EarlierRunFolderError extends Error {}
+
 const RunFileSchema = z.object({
+  /** Absent in a run.json written before format 2. */
+  format: z.number().int().optional(),
   runId: z.string(),
   model: z.string(),
   depth: DepthSchema,
   judgeModel: z.string(),
   kitSha: z.string(),
-  /** Absent in a run.json written before they were recorded: then `high`, the main model and `never`, as those runs used. */
+  /**
+   * Absent in a run.json written before they were recorded, which is always before format 2: `report` then reads the
+   * effort as `high` and the sweep model as the main model, as those runs used.
+   */
   effort: z.enum(REPLAY_EFFORTS).optional(),
   sweepModel: z.string().optional(),
   combine: z.enum(REPLAY_COMBINE).optional(),
@@ -267,15 +281,9 @@ const NOT_LOST: CaseScore['lostAt'] = { lenses: 0, schema: 0, anchor: 0, merge: 
 type Scored = { score: CaseScore; detail: { doc: ReviewDocument; matches: Match[] } };
 type RunInfo = { model: string; sweepModel: string; effort: ReplayEffort; depth: Depth; createdAt: string };
 
-/** The settings of a run, with the defaults filled in for a run.json written before they were recorded. */
-function settingsOf(run: RunFile): { effort: ReplayEffort; sweepModel: string; combine: ReplayCombine } {
-  return { effort: run.effort ?? 'high', sweepModel: run.sweepModel ?? run.model, combine: run.combine ?? 'never' };
-}
-
-const runInfo = (run: RunFile): RunInfo => {
-  const { effort, sweepModel } = settingsOf(run);
-  return { model: run.model, sweepModel, effort, depth: run.depth, createdAt: run.startedAt };
-};
+/** How a run's cases are scored; a run.json written before effort and sweep model were recorded reads as `high` and the main model (`report` only). */
+const runInfo = (run: RunFile): RunInfo =>
+  ({ model: run.model, sweepModel: run.sweepModel ?? run.model, effort: run.effort ?? 'high', depth: run.depth, createdAt: run.startedAt });
 
 /**
  * The score and report details of one case. A case that is not done is scored `incomplete` with every known problem
@@ -313,8 +321,12 @@ function defaultRunId(now: Date, model: string, depth: Depth): string {
   return `${stamp}-${model}-${depth}`.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100);
 }
 
-const COMPARED = [['model', 'model'], ['depth', 'depth'], ['judgeModel', 'judge model'], ['kitSha', 'kit version']] as const;
-const COMPARED_SETTINGS = [['effort', 'effort'], ['sweepModel', 'sweep model'], ['combine', 'combine']] as const;
+const COMPARED = [
+  ['model', 'model'], ['depth', 'depth'], ['judgeModel', 'judge model'], ['kitSha', 'kit version'],
+  ['effort', 'effort'], ['sweepModel', 'sweep model'], ['combine', 'combine'],
+] as const;
+
+const madeByEarlierVersion = (run: RunFile): boolean => (run.format ?? 1) < RUN_FORMAT;
 
 /** The dataset's cases with these ids, in dataset order; throws for an id the dataset does not have. */
 function inDatasetOrder(ids: Iterable<string>, dataset: ReplayCase[], runDir: string): ReplayCase[] {
@@ -325,8 +337,9 @@ function inDatasetOrder(ids: Iterable<string>, dataset: ReplayCase[], runDir: st
 }
 
 /**
- * Creates the run folder and writes run.json, or checks an existing run.json against this run. Refuses a folder made
- * with another model, depth, judge model or kit version, and a folder with case folders but no run.json. A resumed run
+ * Creates the run folder and writes run.json, or checks an existing run.json against this run. Refuses, before writing
+ * anything, a folder made by an earlier version of the replay, a folder made with another model, depth, judge model,
+ * kit version, effort, sweep model or combine setting, and a folder with case folders but no run.json. A resumed run
  * keeps its start time and its cases: run.json lists the earlier cases and this call's, in dataset order. Without a
  * `dataset`, earlier cases that are not among this call's cannot be scored: they stay in run.json, after the others,
  * and are left out of the cases returned.
@@ -347,12 +360,14 @@ async function openRunFolder(runDir: string, run: RunFile, dataset: ReplayCase[]
     } catch {
       throw new Error(`The run folder ${runDir} has a run.json that cannot be read. Use another run id.`);
     }
+    if (madeByEarlierVersion(previous)) {
+      throw new EarlierRunFolderError(
+        `The run folder ${run.runId} was made by an earlier version of the replay: its reviews read today's descriptions ` +
+          'and its judge saw where each finding was placed. Start a new run with another --run id.',
+      );
+    }
     const prev = previous;
-    const [was, now] = [settingsOf(prev), settingsOf(run)];
-    const differences = [
-      ...COMPARED.filter(([key]) => prev[key] !== run[key]).map(([key, words]) => `${words} ${prev[key]}, not ${run[key]}`),
-      ...COMPARED_SETTINGS.filter(([key]) => was[key] !== now[key]).map(([key, words]) => `${words} ${was[key]}, not ${now[key]}`),
-    ];
+    const differences = COMPARED.filter(([key]) => prev[key] !== run[key]).map(([key, words]) => `${words} ${prev[key]}, not ${run[key]}`);
     if (differences.length > 0) {
       throw new Error(
         `The run folder ${runDir} was made with ${differences.join('; ')}. ` +
@@ -440,7 +455,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   const judgeModel = opts.judgeModel ?? DEFAULT_JUDGE_MODEL;
   const runDir = join(opts.outDir, runId);
   const opened = await openRunFolder(runDir, {
-    runId, model: opts.model, depth: opts.depth, judgeModel, kitSha: opts.kitSha,
+    format: RUN_FORMAT, runId, model: opts.model, depth: opts.depth, judgeModel, kitSha: opts.kitSha,
     effort: opts.effort ?? 'high', sweepModel: opts.sweepModel ?? opts.model, combine: opts.combine ?? 'never',
     caseIds: opts.cases.map((c) => c.id), startedAt: now.toISOString(),
   }, opts.dataset, opts.cases);
@@ -552,7 +567,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
     await writeAtomic(join(runDir, 'run.json'), json(run));
   }
   const summary: RunSummary = {
-    ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases, opts.dataset ?? opts.cases, wallClockOf(run)),
+    ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases, opts.dataset ?? opts.cases, { wallClock: wallClockOf(run) }),
     ...(limitReachedIn === null ? {} : {
       stopped: { reason: 'usage-limit', caseId: limitReachedIn, notStarted: opened.cases.filter((c) => notStarted.has(c.id)).map((c) => c.id) },
     }),
@@ -562,7 +577,10 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   return summary;
 }
 
-/** Rebuilds the summary and the report details of a finished or part-finished run from its folder. */
+/**
+ * Rebuilds the summary and the report details of a finished or part-finished run from its folder, including one made
+ * by an earlier version of the replay, whose first test then reads `not comparable`.
+ */
 export async function loadRun(runDir: string, cases: ReplayCase[]): Promise<{ summary: RunSummary; details: RunDetails }> {
   const text = await readText(join(runDir, 'run.json'));
   if (text === null) throw new Error(`${runDir} is not a replay run folder: it has no run.json.`);
@@ -576,7 +594,9 @@ export async function loadRun(runDir: string, cases: ReplayCase[]): Promise<{ su
   checkCases(selected);
   const scoring = runInfo(run);
   const results = await Promise.all(selected.map(async (c) => scoreOutcome(c, await readOutcome(join(runDir, c.id), c), scoring)));
-  const summary = summarise(run.runId, run.model, run.depth, results.map((r) => r.score), selected, cases, wallClockOf(run));
+  const summary = summarise(run.runId, run.model, run.depth, results.map((r) => r.score), selected, cases, {
+    wallClock: wallClockOf(run), madeByEarlierVersion: madeByEarlierVersion(run),
+  });
   const details: RunDetails = Object.fromEntries(selected.map((c, i) => [c.id, results[i]!.detail]));
   return { summary, details };
 }

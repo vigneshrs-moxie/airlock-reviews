@@ -246,7 +246,7 @@ describe('summarise', () => {
     const scores = [score({ caseId: 'a', ms: 600_000 }), score({ caseId: 'b', ms: 600_000 })];
     const cases = [replayCase({ id: 'a' }), replayCase({ id: 'b' })];
     const wallClock = { startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:15:00.000Z' };
-    const s = summarise('r', 'm', 'standard', scores, cases, cases, wallClock);
+    const s = summarise('r', 'm', 'standard', scores, cases, cases, { wallClock });
     expect(s.totals).toMatchObject({ ms: 900_000, msSummed: false });
     expect(s.wallClock).toEqual(wallClock);
   });

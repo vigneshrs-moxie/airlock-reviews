@@ -441,7 +441,7 @@ describe('renderReport', () => {
     const c = replayCase({ id: 'a', pr: 10, title: 'Timed', known: [] , kind: 'negative' });
     const d = doc({ startedAt: '2026-11-10T09:00:00.000Z', createdAt: '2026-11-10T09:07:10.000Z', timings: [timing(900_000, 1, 1, 1)] });
     const wallClock = { startedAt: '2026-11-10T08:59:58.000Z', finishedAt: '2026-11-10T09:08:00.000Z' };
-    const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, [])], [c], [c], wallClock);
+    const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, [])], [c], [c], { wallClock });
     const time = section(renderReport(summary, [c], { a: { doc: d, matches: [] } }), 'Time and tokens');
     expect(time).toMatch(/\| #10 Timed \| 7 min 10 s \|/);
     expect(time).toMatch(/\| Total \| 8 min 2 s \|/);
@@ -455,5 +455,25 @@ describe('renderReport', () => {
     expect(how).toContain('rule sheet');
     expect(how).toContain('next pull requests');
     expect(how).toContain('title and description as they stood when the senior reviewer reviewed it');
+    expect(how).not.toContain('earlier version');
+  });
+
+  it('a run folder made by an earlier version says so first under how to read this, and its first test is not comparable', () => {
+    const { cases, details } = scenario();
+    const scores = cases.map((c) => scoreCase(c, details[c.id]!.doc, details[c.id]!.matches));
+    const summary = summarise('old-run', 'claude-opus-5-5', 'standard', scores, cases, cases, { madeByEarlierVersion: true });
+    expect(summary.meets.halfInTop).toBe('not comparable');
+    const text = renderReport(summary, cases, details);
+    const how = section(text, 'How to read this').split('\n').filter((l) => l !== '');
+    expect(how[1]).toBe(
+      'The run folder old-run was made by an earlier version of the replay: its reviews read today\'s descriptions and its judge ' +
+        'saw where each finding was placed, so these numbers cannot be compared with a run made today. ' +
+        'When a pull request was replayed, the rules written from that pull request were withheld, so the review could not simply remember the answer. ' +
+        "The team's rule sheet was written after these reviews and could not be withheld, so these numbers may be better than real use. " +
+        'The true test is the next pull requests the senior reviewer comments on.',
+    );
+    expect(how.join('\n')).not.toContain('as they stood when the senior reviewer reviewed it');
+    const first = section(text, 'The two tests').split('\n').find((l) => l.startsWith('1. '))!;
+    expect(first).toBe('1. At least half of the known problems should be in the top five. 1 of 8 were (13%). Not comparable: see How to read this.');
   });
 });

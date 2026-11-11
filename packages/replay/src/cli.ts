@@ -7,8 +7,9 @@ import { abortOnExitSignals, cleanForTerminal, createSdkRunner, realExec, syncKi
 import { DepthSchema } from '@airlock/shared';
 import { loadCases, pickCases } from './dataset.js';
 import type { ReplayCase } from './dataset.js';
+import type { RunSummary } from './score.js';
 import { coverage, halfInTopWord } from './report.js';
-import { checkRunId, HOME_FOLDER, loadRun, REPLAY_COMBINE, REPLAY_EFFORTS, runReplay, saveRunReport } from './run.js';
+import { checkRunId, EarlierRunFolderError, HOME_FOLDER, loadRun, REPLAY_COMBINE, REPLAY_EFFORTS, runReplay, saveRunReport } from './run.js';
 import type { CaseEvent, ReplayDeps } from './run.js';
 
 export interface ReplayCliOverrides { deps?: ReplayDeps; packsDir?: string; kit?: { dir: string; sha: string }; cases?: ReplayCase[] }
@@ -100,6 +101,15 @@ function parseRun(args: string[]) {
   };
 }
 
+/** The two answers, for the last lines a command prints. */
+function closingLines(summary: RunSummary, all: ReplayCase[]): string[] {
+  const covered = coverage(summary, all);
+  return [
+    `Half of the known problems in the top list: ${halfInTopWord(summary.meets.halfInTop).toLowerCase()}${covered === null ? '' : `: ${clean(covered)}.`}`,
+    `Clean pull requests stay clean: ${word(summary.meets.cleanControls)}`,
+  ];
+}
+
 function progress(io: Io): (e: CaseEvent) => void {
   return (e) => {
     const id = clean(e.caseId);
@@ -157,7 +167,7 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
     }, deps, progress(io));
   } catch (err) {
     io.err(clean(messageOf(err)));
-    return 1;
+    return err instanceof EarlierRunFolderError ? 2 : 1;
   }
 
   const unfinished = summary.incompleteCases;
@@ -173,9 +183,7 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
     );
   }
   io.out(clean(join(opts.out, summary.runId, 'report.md')));
-  const covered = coverage(summary, all);
-  io.out(`Half of the known problems in the top list: ${halfInTopWord(summary.meets.halfInTop).toLowerCase()}${covered === null ? '' : `: ${clean(covered)}.`}`);
-  io.out(`Clean pull requests stay clean: ${word(summary.meets.cleanControls)}`);
+  for (const line of closingLines(summary, all)) io.out(line);
   return 0;
 }
 
@@ -192,6 +200,7 @@ async function reportCommand(args: string[], io: Io, overrides: ReplayCliOverrid
     const cases = overrides.cases ?? await loadCases();
     const { summary, details } = await loadRun(runDir, cases);
     io.out(clean(await saveRunReport(runDir, summary, cases, details)));
+    for (const line of closingLines(summary, cases)) io.out(line);
     return 0;
   } catch (err) {
     io.err(clean(messageOf(err)));
@@ -199,7 +208,10 @@ async function reportCommand(args: string[], io: Io, overrides: ReplayCliOverrid
   }
 }
 
-/** The airlock-replay command. Returns the exit code: 0 when the run finished, 2 for a usage error, 1 otherwise. */
+/**
+ * The airlock-replay command. Returns the exit code: 0 when the run finished, 2 for a usage error or a run folder made
+ * by an earlier version, 1 otherwise.
+ */
 export async function main(argv: string[], io: Io, overrides: ReplayCliOverrides = {}): Promise<number> {
   const [command, ...rest] = argv;
   try {

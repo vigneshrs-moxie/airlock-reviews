@@ -167,11 +167,16 @@ const NOT_JUDGED = 'Not judged: this review did not finish; see Incomplete revie
 const notJudged = (s: CaseScore): boolean =>
   s.verdict === 'incomplete' && s.raised + Object.values(s.lostAt).reduce((n, x) => n + x, 0) < s.known;
 
-/** The answer to the first test as a word: Yes, No, Yes so far, No so far or Not tested. */
+/** The answer to the first test as a word: Yes, No, Yes so far, No so far, Not tested or Not comparable. */
 export function halfInTopWord(half: RunSummary['meets']['halfInTop']): string {
-  if (half === true) return 'Yes';
-  if (half === false) return 'No';
-  return half === 'not tested' ? 'Not tested' : half === 'yes so far' ? 'Yes so far' : 'No so far';
+  switch (half) {
+    case true: return 'Yes';
+    case false: return 'No';
+    case 'yes so far': return 'Yes so far';
+    case 'no so far': return 'No so far';
+    case 'not tested': return 'Not tested';
+    case 'not comparable': return 'Not comparable';
+  }
 }
 
 /**
@@ -228,7 +233,7 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
   if (half === 'not tested') {
     first += 'Not tested in this run: there were no pull requests with known problems.';
   } else {
-    const covered = coverage(summary, cases);
+    const covered = half === 'not comparable' ? 'see How to read this' : coverage(summary, cases);
     first += `${summary.inTopTotal} of ${summary.knownTotal} were (${percent(summary.recallTop)}). ${halfInTopWord(half)}${covered === null ? '' : `: ${md(covered)}`}.`;
     const failed = unfinished(positives);
     if (failed.length > 0) {
@@ -372,8 +377,14 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
 
   out.push('## How to read this', '');
   out.push(
-    'When a pull request was replayed, the rules written from that pull request were withheld, so the review could not simply remember the answer. ' +
-      'Each pull request was reviewed with its title and description as they stood when the senior reviewer reviewed it, not as they read today. ' +
+    (summary.madeByEarlierVersion
+      ? `The run folder ${md(summary.runId)} was made by an earlier version of the replay: its reviews read today's descriptions ` +
+        'and its judge saw where each finding was placed, so these numbers cannot be compared with a run made today. '
+      : '') +
+      'When a pull request was replayed, the rules written from that pull request were withheld, so the review could not simply remember the answer. ' +
+      (summary.madeByEarlierVersion
+        ? ''
+        : 'Each pull request was reviewed with its title and description as they stood when the senior reviewer reviewed it, not as they read today. ') +
       "The team's rule sheet was written after these reviews and could not be withheld, so these numbers may be better than real use. " +
       'The true test is the next pull requests the senior reviewer comments on.',
   );

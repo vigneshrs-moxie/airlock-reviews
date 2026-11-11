@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFakeRunner } from '@airlock/engine';
@@ -215,7 +215,11 @@ describe('airlock-replay', () => {
     const t = io();
     const code = await keepingEnv(() => main(['report', runDir], t.io, again.overrides));
     expect(code).toBe(0);
-    expect(t.out).toEqual([join(runDir, 'report.md')]);
+    expect(t.out).toEqual([
+      join(runDir, 'report.md'),
+      "Half of the known problems in the top list: yes so far: this run covers 2 of the dataset's 2 known problems.",
+      'Clean pull requests stay clean: yes',
+    ]);
     expect(await readFile(join(runDir, 'report.md'), 'utf8')).toBe(before);
     expect(await readFile(join(runDir, 'summary.json'), 'utf8')).toBe(summaryBefore);
     expect(again.requests).toHaveLength(0);
@@ -224,6 +228,35 @@ describe('airlock-replay', () => {
     const missing = io();
     expect(await keepingEnv(() => main(['report', join(work, 'nothing-here')], missing.io, again.overrides))).toBe(1);
     expect(await keepingEnv(() => main(['report'], io().io, again.overrides))).toBe(2);
+  });
+
+  it('refuses to continue a run folder made by an earlier version, and reports it as not comparable', async () => {
+    const h = harness();
+    expect(await keepingEnv(() => main(['run', '--cases', 'all', '--out', work, '--run', 'old'], io().io, h.overrides))).toBe(0);
+    const runDir = join(work, 'old');
+    const { format: _f, ...older } = JSON.parse(await readFile(join(runDir, 'run.json'), 'utf8'));
+    await writeFile(join(runDir, 'run.json'), JSON.stringify(older));
+    await rm(join(runDir, 'pr2', 'matches.json'));
+    const before = await readFile(join(runDir, 'run.json'));
+    const listing = (await readdir(runDir, { recursive: true })).sort();
+
+    const again = harness();
+    const t = io();
+    expect(await keepingEnv(() => main(['run', '--cases', 'all', '--out', work, '--run', 'old'], t.io, again.overrides))).toBe(2);
+    expect(t.err).toContain(
+      'The run folder old was made by an earlier version of the replay: its reviews read today\'s descriptions and its judge saw ' +
+        'where each finding was placed. Start a new run with another --run id.',
+    );
+    expect(t.out).toEqual([]);
+    expect(again.requests).toHaveLength(0);
+    expect(again.runner.calls).toHaveLength(0);
+    expect(await readFile(join(runDir, 'run.json'))).toEqual(before);
+    expect((await readdir(runDir, { recursive: true })).sort()).toEqual(listing);
+
+    const r = io();
+    expect(await keepingEnv(() => main(['report', runDir], r.io, again.overrides))).toBe(0);
+    expect(r.out).toEqual([join(runDir, 'report.md'), 'Half of the known problems in the top list: not comparable', 'Clean pull requests stay clean: yes']);
+    expect(await readFile(join(runDir, 'report.md'), 'utf8')).toContain('The run folder old was made by an earlier version of the replay');
   });
 
   it('returns 0 and says so when a case failed', async () => {

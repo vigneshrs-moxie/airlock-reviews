@@ -64,6 +64,11 @@ export interface RunSummary {
   /** Positive cases whose review did not finish; their known problems stay in the recall denominator. */
   positivesIncomplete: number;
   negativesIncomplete: number;
+  /**
+   * True when the run folder was made by an earlier version of the replay, whose reviews read today's descriptions and
+   * whose judge saw where each finding was placed: its first test then has no answer that can be compared.
+   */
+  madeByEarlierVersion: boolean;
   /** From the first case start to the last case end of the run, over every call that worked on it; null when not known. */
   wallClock: { startedAt: string; finishedAt: string } | null;
   /** `ms` is the wall clock when there is one, else the sum of the cases' times (`msSummed`). */
@@ -75,10 +80,11 @@ export interface RunSummary {
   stopped?: { reason: 'usage-limit'; caseId: string; notStarted: string[] };
   meets: {
     /**
-     * 'not tested' when the run has no positive cases. true or false only when every positive case in the dataset is
-     * in the run and finished; otherwise 'yes so far' or 'no so far'.
+     * 'not tested' when the run has no positive cases; 'not comparable' when the run folder was made by an earlier
+     * version. true or false only when every positive case in the dataset is in the run and finished; otherwise
+     * 'yes so far' or 'no so far'.
      */
-    halfInTop: boolean | 'yes so far' | 'no so far' | 'not tested';
+    halfInTop: boolean | 'yes so far' | 'no so far' | 'not tested' | 'not comparable';
     /**
      * 'not tested' with no negative cases; else 'needs a human look' when one shows a Block or Fix;
      * else 'incomplete' when one's review did not finish; else true.
@@ -182,12 +188,15 @@ function sum<T>(items: T[], pick: (item: T) => number): number {
 /**
  * Totals a run. Recalls are over positive cases only (0 when there are none); the kind of
  * each case is taken from `cases`, and a score with no case there is an error. `dataset` is the
- * whole dataset (default `cases`): the summary says how much of it the run covers.
+ * whole dataset (default `cases`): the summary says how much of it the run covers, and `recorded` what the run folder
+ * records: its wall clock, and whether an earlier version of the replay made it.
  */
 export function summarise(
   runId: string, model: string, depth: Depth, scores: CaseScore[], cases: ReplayCase[], dataset: ReplayCase[] = cases,
-  wallClock: RunSummary['wallClock'] = null,
+  recorded: { wallClock?: RunSummary['wallClock']; madeByEarlierVersion?: boolean } = {},
 ): RunSummary {
+  const wallClock = recorded.wallClock ?? null;
+  const madeByEarlierVersion = recorded.madeByEarlierVersion ?? false;
   const kindOf = new Map(cases.map((c) => [c.id, c.kind]));
   const kind = (s: CaseScore): ReplayCase['kind'] => {
     const k = kindOf.get(s.caseId);
@@ -221,13 +230,16 @@ export function summarise(
     incompleteCases: scores.filter(incomplete).map((s) => s.caseId),
     positivesIncomplete: positive.filter(incomplete).length,
     negativesIncomplete,
+    madeByEarlierVersion,
     wallClock,
     totals: {
       ms: wallMs ?? sum(scores, (s) => s.ms), msSummed: wallMs === null, inputTokens: sum(scores, (s) => s.inputTokens),
       outputTokens: sum(scores, (s) => s.outputTokens), agentRuns: sum(scores, (s) => s.agentRuns),
     },
     meets: {
-      halfInTop: positive.length === 0 ? 'not tested' : wholeDataset ? half : half ? 'yes so far' : 'no so far',
+      halfInTop: positive.length === 0 ? 'not tested'
+        : madeByEarlierVersion ? 'not comparable'
+          : wholeDataset ? half : half ? 'yes so far' : 'no so far',
       cleanControls: negative.length === 0 ? 'not tested'
         : negativesWithBlockOrFix > 0 ? 'needs a human look'
           : negativesIncomplete > 0 ? 'incomplete'
