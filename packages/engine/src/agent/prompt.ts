@@ -7,6 +7,7 @@ const cache = new Map<string, string>();
 export async function loadTemplate(name: string): Promise<string> {
   const hit = cache.get(name);
   if (hit !== undefined) return hit;
+  if (!/^[\w-]+$/.test(name)) throw new Error(`Invalid prompt template name "${name}"`);
   let text: string;
   try {
     text = await readFile(new URL(`${name}.md`, PROMPTS_DIR), 'utf8');
@@ -25,9 +26,15 @@ export function fill(template: string, vars: Record<string, string>): string {
   });
 }
 
-/** Wraps text in a material block. A closing tag inside the text is broken with a zero-width space so it cannot end the block. */
+/** Puts a zero-width space after the `<` of any material tag (opening or closing, any case) so it cannot open or close a block. */
+const breakTags = (text: string): string => text.replace(/<(\/?material)/gi, '<\u200B$1');
+
+/** Wraps text in a material block. Material tags inside the text are broken so they cannot open or close a block; the label is flattened to one safe line. */
 export function asMaterial(label: string, text: string): string {
-  const safeLabel = label.replaceAll('"', "'");
-  const safeText = text.replace(/<(\/material)/gi, '<​$1');
-  return `<material label="${safeLabel}">\n${safeText}\n</material>`;
+  const safeLabel = breakTags(label)
+    .replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ')
+    .replaceAll('"', "'")
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+  return `<material label="${safeLabel}">\n${breakTags(text)}\n</material>`;
 }

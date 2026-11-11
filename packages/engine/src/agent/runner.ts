@@ -56,7 +56,7 @@ export function withRetry(inner: AgentRunner, retries: 1): AgentRunner {
   return {
     async run<T>(req: AgentRequest<T>): Promise<AgentResult<T>> {
       const first = await attempt(inner, req);
-      if (first.ok) return first;
+      if (first.ok || req.signal?.aborted) return first;
       const instructions = `${req.instructions}\n\nYour previous reply could not be used: ${first.error}. Reply again, following the output format exactly.`;
       const second = await attempt(inner, { ...req, instructions });
       const usage = addUsage(first.usage, second.usage);

@@ -74,6 +74,19 @@ describe('withRetry', () => {
   });
 });
 
+describe('withRetry and abort', () => {
+  it('does not retry after the request was aborted', async () => {
+    const ac = new AbortController();
+    const fake = createFakeRunner(() => {
+      ac.abort();
+      return new Error('aborted');
+    });
+    const r = await withRetry(fake, 1).run(req({ signal: ac.signal }));
+    expect(r).toMatchObject({ ok: false, error: 'aborted' });
+    expect(fake.calls).toHaveLength(1);
+  });
+});
+
 describe('createFakeRunner', () => {
   it('records every request', async () => {
     const fake = createFakeRunner(() => ({ n: 1 }));
