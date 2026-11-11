@@ -11,10 +11,10 @@ export interface Refutation { path: string; quote: string; where: 'head' | 'base
 export type ReadFile = (where: 'head' | 'base', path: string) => Promise<string | null>;
 
 /**
- * The proved place and, in words, where it was found; or none, with `ownCode` saying the quote was the finding's own
- * lines on the head.
+ * The proved place and, in words, where it was found, with `added` set when the proof is code this pull request added;
+ * or none, with `ownCode` saying the quote was the finding's own lines on the head.
  */
-export type Proof = { place: Place; source: string } | { place: null; ownCode: boolean };
+export type Proof = { place: Place; source: string; added?: boolean } | { place: null; ownCode: boolean };
 
 /**
  * A recorded decision that can prove documented intent, quoted whole: one dated entry of a corrections log or one
@@ -121,15 +121,32 @@ const insideHunk = (file: FileDiff, lines: Lines): boolean =>
 const pathKey = (path: string): string => posix.normalize(path).toLowerCase();
 const samePath = (a: string, b: string): boolean => pathKey(a) === pathKey(b);
 
-/** Grounds 1 and 3: code on the head, other than the finding's own lines, quoted in full. */
-async function proveOnHead(item: Item, ref: Refutation, { read }: Evidence): Promise<Proof> {
-  if (ref.where !== 'head' || !isSafePath(ref.path) || !hasSubstance(ref.quote)) return NO_PROOF;
+// A line that is only a comment: one starting with //, #, --, /*, * (which covers the closing */ too) or a JSX {/* comment.
+const COMMENT_LINE = /^(?:\/\/|#|--|\/\*|\*|\{\s*\/\*)/;
+/** True when every non-blank line of the quote is a comment: a comment states a claim, it does not enforce one. */
+const onlyComments = (quote: string): boolean => {
+  const lines = quote.split('\n').map((l) => l.trim()).filter((l) => l !== '');
+  return lines.length > 0 && lines.every((l) => COMMENT_LINE.test(l));
+};
+
+/** True when any of `lines` of the head file is a line this pull request added. */
+const addedByThisPr = (files: Evidence['files'], path: string, lines: Lines): boolean =>
+  (files.get(pathKey(path)) ?? []).some((f) => f.hunks.some((h) => h.lines.some((l) =>
+    l.kind === 'add' && l.newNo !== null && l.newNo >= lines.startLine && l.newNo <= lines.endLine)));
+
+/**
+ * Grounds 1 and 3: code on the head, other than the finding's own lines, quoted in full. A quote made only of comments
+ * proves nothing. A proof on lines this pull request added still counts, marked `added` so the reason says so.
+ */
+async function proveOnHead(item: Item, ref: Refutation, { read, files }: Evidence): Promise<Proof> {
+  if (ref.where !== 'head' || !isSafePath(ref.path) || !hasSubstance(ref.quote) || onlyComments(ref.quote)) return NO_PROOF;
   const path = posix.normalize(ref.path);
   const found = findQuote(await read('head', path), ref.quote);
   if (found.length === 0) return NO_PROOF;
   if (samePath(path, item.path) && found.some((f) => overlaps(f, item.anchor))) return OWN_CODE;
   const line = found[0]!.startLine;
-  return { place: { path, line, role: 'head', quote: ref.quote }, source: `${path}:${line} on the head` };
+  const added = addedByThisPr(files, path, found[0]!);
+  return { place: { path, line, role: 'head', quote: ref.quote }, source: `${path}:${line} on the head`, ...(added ? { added } : {}) };
 }
 
 /**

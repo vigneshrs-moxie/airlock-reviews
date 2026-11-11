@@ -127,7 +127,8 @@ async function applyAnswer(item: Item, answer: ChallengeOutput, evidence: Eviden
         return { kept: { ...item, checked: `${asSentence(said)}${UNCONFIRMED}` } };
       }
       const { anchor: _anchor, ...candidate } = item;
-      const reason = `${answer.ground}: ${answer.explanation.trim()} (proof: ${proof.source})`;
+      const note = proof.added === true ? ' (the proof is code this pull request added)' : '';
+      const reason = `${answer.ground}: ${answer.explanation.trim()} (proof: ${proof.source})${note}`;
       return { dropped: { candidate, stage: 'challenge', reason, refutation: proof.place } };
     }
     case 'downgrade':

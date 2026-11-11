@@ -112,6 +112,50 @@ describe('challenge', () => {
     expect(r.dropped[0]!.reason).toBe('guarded-elsewhere: The nightly job skips paused plans. (proof: src/charge.ts:4 on the head)');
   });
 
+  describe('a line the pull request wrote is not proof', () => {
+    const GUARD = 'for (const p of plans.filter((x) => !x.paused)) charge(p);';
+    const headDrop = (quote: string, explanation = 'Callers check first.') => answer({
+      outcome: 'drop', ground: 'guarded-elsewhere', explanation, refutation: { path: 'src/charge.ts', quote, where: 'head' },
+    });
+    const withComments = (lines: string[]) => memoryRead({ 'head:src/charge.ts': [...HEAD_CHARGE.split('\n'), ...lines].join('\n') });
+
+    it.each([
+      ['a line comment', ['// SAFE: the caller always checks canEdit(user) before calling save']],
+      ['a block comment', ['/**', ' * SAFE: the caller always checks canEdit(user) first.', ' */']],
+      ['a hash comment', ['# SAFE: the caller always checks canEdit(user) first']],
+      ['an SQL comment', ['-- SAFE: the caller always checks canEdit(user) first']],
+      ['a JSX comment', ['{/* SAFE: only admins ever reach this page at all */}']],
+    ])('refuses %s as proof and keeps the finding', async (_name, lines) => {
+      const runner = createFakeRunner(() => headDrop(lines.join('\n')));
+      const { read } = withComments(lines);
+      const r = await challenge(runner, ctx(), [item('c1', 'fix')], read);
+      expect(r.dropped).toEqual([]);
+      expect(r.kept[0]!.checked).toBe(`Read src/pause.ts and its caller src/charge.ts.${UNCONFIRMED}`);
+    });
+
+    it('still accepts a real guard in code the pull request did not change, with no note', async () => {
+      const runner = createFakeRunner(() => headDrop(GUARD, 'The nightly job skips paused plans.'));
+      const { read } = memoryRead();
+      const r = await challenge(runner, ctx(), [item('c1', 'fix')], read);
+      expect(r.dropped[0]!.reason).toBe('guarded-elsewhere: The nightly job skips paused plans. (proof: src/charge.ts:4 on the head)');
+    });
+
+    it('honours a guard this pull request added, and says so in the reason', async () => {
+      const added = diff('src/charge.ts', 0, {
+        hunks: [{
+          oldStart: 3, oldLines: 0, newStart: 4, newLines: 1, header: '@@ -3,0 +4,1 @@',
+          lines: [{ kind: 'add', oldNo: null, newNo: 4, text: `  ${GUARD}` }],
+        }],
+      });
+      const runner = createFakeRunner(() => headDrop(GUARD, 'The nightly job skips paused plans.'));
+      const { read } = memoryRead();
+      const r = await challenge(runner, ctx({ files: [diff('src/pause.ts'), added] }), [item('c1', 'fix')], read);
+      expect(r.dropped[0]!.reason).toBe(
+        'guarded-elsewhere: The nightly job skips paused plans. (proof: src/charge.ts:4 on the head) (the proof is code this pull request added)',
+      );
+    });
+  });
+
   it('keeps a candidate when the refutation quote cannot be found', async () => {
     const runner = createFakeRunner(() => answer({
       outcome: 'drop', ground: 'guarded-elsewhere', explanation: 'A guard exists.',
