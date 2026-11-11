@@ -1,4 +1,4 @@
-import { chmod, mkdir, symlink, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, symlink, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -13,6 +13,7 @@ import { FakeClock, send, type Reply } from './helpers.js';
 
 const REPO = 'acme/widgets';
 const ELSEWHERE = 'someone/else';
+const KIT_ONLY = 'kit/only';
 const REVIEW = 'r_0123456789';
 const FINDING_A = 'c_aaaaaaaa';
 const FINDING_B = 'c_bbbbbbbb';
@@ -65,10 +66,12 @@ async function startService(): Promise<Rig> {
   process.env['AIRLOCK_HOME'] = home;
   const packsDir = join(home, 'packs');
   await writePack(packsDir, 'generic', 'id: generic\ntitle: Generic\nrepos: []\n');
-  await writePack(packsDir, 'raj-standard', `id: raj-standard\ntitle: Raj standard\nrepos: [${REPO}]\n`);
-  await writePack(packsDir, 'acme', `id: acme\ntitle: Acme pack\nrepos: [${REPO}]\n`);
+  await writePack(packsDir, 'raj-standard', `id: raj-standard\ntitle: Raj standard\nrepos: [${REPO}, ${KIT_ONLY}]\n`);
+  await writePack(packsDir, 'acme', `id: acme\ntitle: Acme pack\nrepos: [${REPO}, Acme/Widgets]\n`);
   await saveReview(review());
   await saveReview(review(ELSEWHERE, 9, 'r_9999999999'));
+  await saveReview(review(REPO, 8, 'r_8888888888'));
+  await saveReview(review(KIT_ONLY, 3, 'r_3333333333'));
   const clock = new FakeClock();
   const log: string[] = [];
   const engine: EngineDeps = {
@@ -256,17 +259,129 @@ describe('POST /dismissals', () => {
     expect(JSON.parse(await readFile(s.dismissalsFile(), 'utf8'))).toEqual([r.json]);
     expect(names.filter((n) => n.endsWith('.tmp'))).toEqual([]);
   });
+});
 
-  it('a failure while saving the dismissals takes the new line out of the pack again', async () => {
+describe('fix round 1', () => {
+  const direct = (s: Rig, extra: Record<string, unknown> = {}) =>
+    ({ config: { home: s.home, packsDir: s.packsDir }, now: s.clock.date, log: () => undefined, ...extra });
+  const body = { repo: REPO, number: 7, reviewId: REVIEW, findingId: FINDING_A, reason: 'wrong' as const, text: TEXT };
+
+  it('a restore on one pull request and a dismiss on another that share a pack leave the new line and drop the old', async () => {
     const s = await startService();
-    // A folder that cannot be written to makes the last step fail, after the line was appended.
+    for (let round = 0; round < 12; round += 1) {
+      const mine = `Pull request seven, round ${round}, is fine.`;
+      const yours = `Pull request eight, round ${round}, is fine.`;
+      expect((await s.post(s.dismissBody({ text: mine }))).status).toBe(200);
+      const [restored, made] = await Promise.all([
+        s.call('POST', '/dismissals/restore', s.restoreBody()),
+        s.post(s.dismissBody({ number: 8, reviewId: 'r_8888888888', text: yours })),
+      ]);
+      expect([restored.status, made.status]).toEqual([200, 200]);
+      expect(await s.file('acme', 'wrong.md'), `round ${round}`).toBe(`2026-11-11 · ${REPO} · ${yours}\n`);
+      expect((await s.call('POST', '/dismissals/restore', { repo: REPO, number: 8, fingerprint: FP_A })).status).toBe(200);
+    }
+  });
+
+  it('a dismiss and a restore that spell the repository in different letter case act on the same record', async () => {
+    const s = await startService();
+    const made = await s.post(s.dismissBody({ repo: 'ACME/WIDGETS' }));
+    expect(made.status).toBe(200);
+    expect(await s.file('acme', 'wrong.md')).toBe(`2026-11-11 · ${REPO} · ${TEXT}\n`);
+    const r = await s.call('POST', '/dismissals/restore', { repo: REPO, number: 7, fingerprint: FP_A });
+    expect(r.json).toEqual({ restored: true, note: null });
+    expect(await s.file('acme', 'wrong.md')).toBe('');
+    expect(JSON.parse(await readFile(s.dismissalsFile(), 'utf8'))).toEqual([]);
+  });
+
+  it('two dismissals of the same finding sent together leave one line and one record', async () => {
+    const s = await startService();
+    const [a, b] = await Promise.all([
+      s.post(s.dismissBody({ text: 'First wording of the same dismissal.' })),
+      s.post(s.dismissBody({ text: 'Second wording of the same dismissal.' })),
+    ]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    const stored = JSON.parse(await readFile(s.dismissalsFile(), 'utf8')) as Dismissal[];
+    expect(stored).toHaveLength(1);
+    expect(await s.file('acme', 'wrong.md')).toBe(`2026-11-11 · ${REPO} · ${stored[0]!.text}\n`);
+  });
+
+  it('a repository listed only by the team kit writes to generic and never into the kit folder', async () => {
+    const s = await startService();
+    const r = await s.post(s.dismissBody({ repo: KIT_ONLY, number: 3, reviewId: 'r_3333333333' }));
+    expect((r.json as Dismissal).learned?.packId).toBe('generic');
+    expect(await s.file('generic', 'wrong.md')).toBe(`2026-11-11 · ${KIT_ONLY} · ${TEXT}\n`);
+    expect(await readdir(join(s.packsDir, 'raj-standard'))).toEqual(['lenses', 'pack.yaml']);
+  });
+
+  it('the rollback after a failed save needs no file permissions', async () => {
+    const s = await startService();
+    const failing = { write: async (): Promise<void> => { throw new Error('disk full'); } };
+    await expect(dismiss(direct(s, failing), body)).rejects.toThrow('disk full');
+    expect(await s.file('acme', 'wrong.md')).toBe('');
+    await expect(readFile(s.dismissalsFile(), 'utf8')).rejects.toThrow();
+  });
+
+  it('a failed save during a replace puts the old line back', async () => {
+    const s = await startService();
+    await s.post(s.dismissBody());
+    const failing = { write: async (): Promise<void> => { throw new Error('disk full'); } };
+    await expect(dismiss(direct(s, failing), { ...body, text: 'A different wording of the same thing.' })).rejects.toThrow('disk full');
+    expect(await s.file('acme', 'wrong.md')).toBe(`2026-11-11 · ${REPO} · ${TEXT}\n`);
+    expect(((JSON.parse(await readFile(s.dismissalsFile(), 'utf8')) as Dismissal[])[0])?.text).toBe(TEXT);
+  });
+
+  it('stops with a 500 and changes nothing when the pack of an earlier line cannot be opened, on replace and on restore', async () => {
+    const s = await startService();
+    await s.post(s.dismissBody());
+    const before = await readFile(s.dismissalsFile(), 'utf8');
+    await rm(join(s.packsDir, 'acme', 'pack.yaml'));
+    const message = 'Airlock could not open the pack acme to undo an earlier line. Fix the pack and try again.';
+    const replaced = await s.post(s.dismissBody({ text: 'A different wording of the same thing.' }));
+    expect([replaced.status, replaced.json]).toEqual([500, { error: message }]);
+    const restored = await s.call('POST', '/dismissals/restore', s.restoreBody());
+    expect([restored.status, restored.json]).toEqual([500, { error: message }]);
+    expect(await readFile(s.dismissalsFile(), 'utf8')).toBe(before);
+    expect(await s.file('acme', 'wrong.md')).toBe(`2026-11-11 · ${REPO} · ${TEXT}\n`);
+  });
+
+  it('a replace removes the old line under the old review\'s repository', async () => {
+    const s = await startService();
+    // The old record was made through a review stored under another spelling of the repository.
+    await saveReview(review('Acme/Widgets', 5, 'r_5555555555'));
+    const first = await s.post(s.dismissBody({ number: 5, reviewId: 'r_5555555555', repo: 'Acme/Widgets' }));
+    expect(first.status).toBe(200);
+    expect(await s.file('acme', 'wrong.md')).toBe(`2026-11-11 · Acme/Widgets · ${TEXT}\n`);
+    const second = await s.post(s.dismissBody({ number: 5, reviewId: 'r_5555555555', repo: 'Acme/Widgets', text: 'Another wording of the same thing.' }));
+    expect(second.status).toBe(200);
+    expect(await s.file('acme', 'wrong.md')).toBe('2026-11-11 · Acme/Widgets · Another wording of the same thing.\n');
+  });
+
+  it('restore answers restored false when the dismissal\'s review belongs to another repository or number', async () => {
+    const s = await startService();
+    await s.post(s.dismissBody());
+    const file = JSON.parse(await readFile(s.dismissalsFile(), 'utf8')) as Dismissal[];
+    // Another pull request's file holds a record whose review is pull request 7's.
+    await mkdir(join(s.home, 'dismissals', 'acme__widgets'), { recursive: true });
+    await writeFile(s.dismissalsFile(REPO, 8), JSON.stringify(file));
+    // ... and pull request 8's folder holds that review, which says it is for 7.
+    const folder = join(s.home, 'reviews', 'acme__widgets');
+    await copyFile(join(folder, '7', `${'b'.repeat(40)}-${REVIEW}.json`), join(folder, '8', `${'b'.repeat(40)}-${REVIEW}.json`));
+    const r = await s.call('POST', '/dismissals/restore', { repo: REPO, number: 8, fingerprint: FP_A });
+    expect(r.json).toEqual({ restored: false, note: null });
+    expect(await s.file('acme', 'wrong.md')).toBe(`2026-11-11 · ${REPO} · ${TEXT}\n`);
+  });
+
+  it('the set-aside name of a broken file cannot collide', async () => {
+    const s = await startService();
     const folder = join(s.home, 'dismissals', 'acme__widgets');
     await mkdir(folder, { recursive: true });
-    await chmod(folder, 0o500);
-    cleanups.unshift(() => chmod(folder, 0o700));
-    const r = await s.post(s.dismissBody());
-    expect(r.status).toBe(500);
-    expect(await s.file('acme', 'wrong.md')).toBe('');
+    for (let i = 0; i < 2; i += 1) {
+      await writeFile(s.dismissalsFile(), '{ not json');
+      expect((await s.post(s.dismissBody({ reason: 'not-now', text: '' }))).status).toBe(200);
+    }
+    const aside = (await readdir(folder)).filter((n) => n.includes('.broken-'));
+    expect(aside).toHaveLength(2);
+    for (const n of aside) expect(n).toMatch(/^7\.json\.broken-\d+-[0-9a-f]{8}$/);
   });
 });
 
