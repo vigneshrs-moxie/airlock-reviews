@@ -3,6 +3,7 @@ import type {
   StageError, Tier,
 } from '@airlock/shared';
 import { asMaterial } from '../agent/prompt.js';
+import { UNKNOWN_USAGE } from '../agent/runner.js';
 import type { AgentRequest, AgentResult, AgentRunner, AgentUsage } from '../agent/runner.js';
 import type { Pack } from '../packs/types.js';
 import { LensOutputSchema, acceptCandidates } from './candidate.js';
@@ -220,8 +221,7 @@ export async function sendRequest<T>(runner: AgentRunner, ctx: LensContext, req:
   try {
     return await ctx.run(() => runner.run(req));
   } catch (err) {
-    const usage: AgentUsage = { ms: 0, inputTokens: 0, outputTokens: 0, costUsd: null, turns: 0 };
-    return { ok: false, error: err instanceof Error ? err.message : String(err), usage };
+    return { ok: false, error: err instanceof Error ? err.message : String(err), kind: 'other', usage: { ...UNKNOWN_USAGE } };
   }
 }
 
@@ -240,7 +240,7 @@ export async function runLensCall(runner: AgentRunner, ctx: LensContext, call: L
   const out = emptyResult();
   out.usage.push(result.usage);
   if (!result.ok) {
-    out.errors.push({ stage: call.stage, cohortId: call.cohortId, message: `${call.name}: ${result.error}` });
+    out.errors.push({ stage: call.stage, cohortId: call.cohortId, message: `${call.name}: ${result.error}`, kind: result.kind });
     return out;
   }
   const accepted = acceptCandidates(result.output.candidates, call.source, call.cohortId, taken);

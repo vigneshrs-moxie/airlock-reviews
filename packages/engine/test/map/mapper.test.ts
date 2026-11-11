@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import type { Cohort, FileDiff, FileFact, Layer, Link, Neighbour, PrInfo, Tier } from '@airlock/shared';
 import { minimalDocument } from '@airlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createFakeRunner } from '../../src/agent/fake-runner.js';
+import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
+import { withRetry } from '../../src/agent/runner.js';
 import { checkChangeMap } from '../../src/map/check.js';
 import { buildChangeMap, fallbackMap } from '../../src/map/mapper.js';
 import type { MapInput } from '../../src/map/mapper.js';
@@ -92,16 +93,34 @@ describe('buildChangeMap', () => {
     expect(block(second!.material, PROBLEMS)).toBe('- src/c.ts is not placed in any cohort or in standalone');
     expect(outsideMaterial(second!.material)).not.toContain('src/c.ts');
     expect(first!.material).not.toContain('src/c.ts is not placed');
-    expect({ ...second!, material: '' }).toEqual({ ...first!, material: '' });
+    expect(second!.noRetry).toBe(true);
+    expect({ ...second!, material: '', noRetry: undefined }).toEqual({ ...first!, material: '' });
   });
 
-  it('retries after an unusable answer too, passing the error on inside a material block', async () => {
-    let i = 0;
-    const runner = createFakeRunner(() => (i++ === 0 ? new Error('the reply was not JSON') : goodAnswer));
+  it('does not retry a failed request itself: retrying an unusable answer is withRetry\'s job', async () => {
+    const runner = createFakeRunner(() => failure('turn limit reached', 'turn-limit'));
     const r = await buildChangeMap(runner, input());
+    expect(runner.calls).toHaveLength(1);
+    expect(r.error).toBe('mapper failed: turn limit reached');
+    expect(r.errorKind).toBe('turn-limit');
+  });
+
+  it('through withRetry, an answer that fails the check is retried once in total', async () => {
+    let i = 0;
+    const fake = createFakeRunner(() => (i++ === 0 ? missingC : failure('the reply was not JSON', 'invalid-output')));
+    const r = await buildChangeMap(withRetry(fake, 1), input());
+    expect(fake.calls).toHaveLength(2);
+    expect(r.error).toBe('mapper failed twice: the reply was not JSON');
+    expect(r.errorKind).toBe('invalid-output');
+  });
+
+  it('through withRetry, an unusable first answer is retried, and a check failure after it once more', async () => {
+    let i = 0;
+    const fake = createFakeRunner(() => [failure('not JSON', 'invalid-output'), missingC, goodAnswer][i++]!);
+    const r = await buildChangeMap(withRetry(fake, 1), input());
+    expect(fake.calls).toHaveLength(3);
     expect(r.error).toBeNull();
-    expect(runner.calls[1]!.instructions).toBe(runner.calls[0]!.instructions);
-    expect(block(runner.calls[1]!.material, PROBLEMS)).toContain('the reply was not JSON');
+    expect(block(fake.calls[2]!.material, PROBLEMS)).toContain('src/c.ts is not placed');
   });
 
   it('a changed file whose name carries a line break and an instruction reaches the retry only as material', async () => {
@@ -129,10 +148,10 @@ describe('buildChangeMap', () => {
     expect(r.map.standalone).toEqual(['src/c.ts']);
   });
 
-  it('records a runner error on one line when the fallback follows two runner failures', async () => {
+  it('records a runner error on one line', async () => {
     const runner = createFakeRunner(() => new Error('bad\n  output'));
     const r = await buildChangeMap(runner, input());
-    expect(r.error).toBe('mapper failed twice: bad output');
+    expect(r.error).toBe('mapper failed: bad output');
   });
 
   it('a single-file pull request never calls the agent', async () => {

@@ -117,7 +117,7 @@ export async function runSweep(runner: AgentRunner, ctx: LensContext): Promise<L
     if (!result.ok) {
       const failed = emptyResult();
       failed.usage.push(result.usage);
-      failed.errors.push({ stage: 'sweep', cohortId: batch.cohortId, message: `batch ${n}: ${result.error}` });
+      failed.errors.push({ stage: 'sweep', cohortId: batch.cohortId, message: `batch ${n}: ${result.error}`, kind: result.kind });
       failed.limits.push(...limits);
       return failed;
     }

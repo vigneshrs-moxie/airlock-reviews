@@ -1,7 +1,7 @@
 import { mkdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ReviewRange } from '@airlock/shared';
-import { must, type Exec } from '../util/exec.js';
+import { must, SLOW_EXEC_TIMEOUT_MS, TIMED_OUT, type Exec } from '../util/exec.js';
 import { airlockHome, repoSlug } from '../util/paths.js';
 
 export interface Workspace {
@@ -33,15 +33,18 @@ const exists = (p: string) => stat(p).then(() => true, () => false);
 
 async function ensureMirror(exec: Exec, mirror: string, remoteUrl: string): Promise<void> {
   if (await exists(mirror)) {
-    must(await exec('git', ['--git-dir', mirror, 'fetch', '--prune', 'origin', '+refs/heads/*:refs/heads/*']), 'git fetch');
+    const fetchArgs = ['--git-dir', mirror, 'fetch', '--prune', 'origin', '+refs/heads/*:refs/heads/*'];
+    must(await exec('git', fetchArgs, { timeoutMs: SLOW_EXEC_TIMEOUT_MS }), 'git fetch');
     return;
   }
   await mkdir(join(mirror, '..'), { recursive: true });
-  must(await exec('git', ['clone', '--bare', remoteUrl, mirror]), 'git clone --bare');
+  must(await exec('git', ['clone', '--bare', remoteUrl, mirror], { timeoutMs: SLOW_EXEC_TIMEOUT_MS }), 'git clone --bare');
 }
 
 async function requireCommit(exec: Exec, mirror: string, sha: string): Promise<void> {
   const r = await exec('git', ['--git-dir', mirror, 'rev-parse', '--verify', '--quiet', `${sha}^{commit}`]);
+  // A lookup that timed out says nothing about the commit.
+  if (r.code === TIMED_OUT) throw new Error(`git rev-parse ${sha}: ${r.stderr}`);
   if (r.code !== 0) throw new Error(`Commit ${sha} was not found in the mirror of this repository`);
 }
 
@@ -60,7 +63,8 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   } else if (req.pr) {
     const { number, baseRef, headSha } = req.pr;
     // The head lands in FETCH_HEAD; a remote without pull refs is fine when the commit is already here.
-    await exec('git', ['--git-dir', mirror, 'fetch', 'origin', `pull/${number}/head`]);
+    const fetched = await exec('git', ['--git-dir', mirror, 'fetch', 'origin', `pull/${number}/head`], { timeoutMs: SLOW_EXEC_TIMEOUT_MS });
+    if (fetched.code === TIMED_OUT) throw new Error(`git fetch pull/${number}/head: ${fetched.stderr}`);
     await requireCommit(exec, mirror, headSha);
     const baseSha = must(await exec('git', ['--git-dir', mirror, 'merge-base', baseRef, headSha]), `git merge-base ${baseRef} ${headSha}`).trim();
     range = { baseSha, headSha, kind: 'full' };
@@ -87,7 +91,8 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     headDir, baseDir, gitDir: mirror, range,
     async dispose() {
       await rm(reviewDir, { recursive: true, force: true });
-      await exec('git', ['--git-dir', mirror, 'worktree', 'prune']);
+      // Cleanup runs even after the review was stopped, so it never carries the review's signal.
+      await exec('git', ['--git-dir', mirror, 'worktree', 'prune'], { signal: undefined });
     },
   };
 }

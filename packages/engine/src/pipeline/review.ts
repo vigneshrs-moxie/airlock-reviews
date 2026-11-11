@@ -5,7 +5,8 @@ import type {
   Anchor, Brief, Candidate, ChangeMap, Depth, Dropped, Fact, FileDiff, FileFact, Finding, Link, ModelConfig, Neighbour, PrInfo,
   Question, ReviewDocument, ReviewEvent, ReviewRange, StageError,
 } from '@airlock/shared';
-import type { AgentRequest, AgentRunner } from '../agent/runner.js';
+import { UNKNOWN_USAGE } from '../agent/runner.js';
+import type { AgentRequest, AgentResult, AgentRunner } from '../agent/runner.js';
 import { anchorCandidates } from '../anchor/anchor.js';
 import { fingerprint } from '../anchor/fingerprint.js';
 import { buildBrief } from '../brief/brief.js';
@@ -56,7 +57,39 @@ export interface ReviewRequest {
   kitSha?: string;
 }
 
-export interface EngineDeps { exec: Exec; runner: AgentRunner; now: () => Date }
+export interface EngineDeps {
+  exec: Exec;
+  runner: AgentRunner;
+  now: () => Date;
+  /** Stops the review: every command and request is given it, and an aborted review rejects with REVIEW_STOPPED. */
+  signal?: AbortSignal;
+}
+
+/** What runReview rejects with when its signal was aborted; the workspace has been disposed by then. */
+export const REVIEW_STOPPED = 'The review was stopped.';
+
+/** A runner that stops sending requests after the first usage-limit failure, and says why. */
+interface UsageGate extends AgentRunner {
+  /** The usage-limit message once a request has hit the limit, else null. */
+  stoppedBy(): string | null;
+}
+
+/**
+ * Wraps the runner for one review: each request carries the review's signal, and once any request fails on the usage
+ * limit no further request is sent; each later one fails at once with the same message and kind.
+ */
+function usageGate(inner: AgentRunner, signal: AbortSignal | undefined): UsageGate {
+  let stopped: string | null = null;
+  return {
+    stoppedBy: () => stopped,
+    async run<T>(req: AgentRequest<T>): Promise<AgentResult<T>> {
+      if (stopped !== null) return { ok: false, error: stopped, kind: 'usage-limit', usage: { ...UNKNOWN_USAGE } };
+      const result = await inner.run(signal === undefined ? req : { ...req, signal });
+      if (!result.ok && result.kind === 'usage-limit' && stopped === null) stopped = result.error;
+      return result;
+    },
+  };
+}
 
 const DEFAULT_MODELS: ModelConfig = { main: 'claude-opus-5-5', challenger: 'claude-opus-5-5', sweep: 'claude-opus-5-5', effort: 'high' };
 const DEFAULT_PARALLEL = 4;
@@ -159,10 +192,17 @@ interface Reviewed {
 
 /** Every stage from packs to select, inside the workspace. */
 async function reviewInWorkspace(
-  req: ReviewRequest, deps: EngineDeps, log: StageLog, settings: Settings, pr: PrInfo, ws: Workspace, files: FileDiff[],
-  diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; ms: number },
+  req: ReviewRequest, deps: EngineDeps & { gate: UsageGate }, log: StageLog, settings: Settings, pr: PrInfo, ws: Workspace,
+  files: FileDiff[], diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; ms: number },
 ): Promise<Reviewed> {
   const { exec, runner } = deps;
+  /** After the usage limit, a stage that needs a model records once why it did not run, and is skipped. */
+  const limitedOut = async (stage: StageName): Promise<boolean> => {
+    const why = deps.gate.stoppedBy();
+    if (why === null) return false;
+    await log.run(stage, async (rec) => rec.error({ stage, cohortId: null, message: `${why}. This stage was not run.`, kind: 'usage-limit' }));
+    return true;
+  };
   const { depth, models } = settings;
   const run = limiter(settings.parallel);
   const capped: AgentRunner = { run: <T>(r: AgentRequest<T>) => run(() => runner.run(r)) };
@@ -219,22 +259,22 @@ async function reviewInWorkspace(
     log.skip('brief', skipWhy);
     brief = SYNC_MERGE_BRIEF;
   } else {
-    map = (await log.run('map', async (rec) => {
+    map = ((await limitedOut('map')) ? undefined : await log.run('map', async (rec) => {
       const r = await buildChangeMap(capped, {
         pr, files, facts: tiers, links: gathered.links, neighbours: gathered.neighbours, headDir: ws.headDir,
         model: models.main, effort: models.effort,
       });
       rec.usage(r.usage);
       limits.push(...r.limits);
-      if (r.error !== null) rec.error({ stage: 'map', cohortId: null, message: r.error });
+      if (r.error !== null) rec.error({ stage: 'map', cohortId: null, message: r.error, ...(r.errorKind ? { kind: r.errorKind } : {}) });
       return r.map;
     })) ?? fallbackMap(files, tiers, gathered.links);
     log.emit({ type: 'map', map });
-    brief = (await log.run('brief', async (rec) => {
+    brief = ((await limitedOut('brief')) ? undefined : await log.run('brief', async (rec) => {
       const r = await buildBrief(capped, { pr, map, files, headDir: ws.headDir, baseDir: ws.baseDir, model: models.main, effort: models.effort });
       rec.usage(r.usage);
       limits.push(...r.limits);
-      if (r.error !== null) rec.error({ stage: 'brief', cohortId: null, message: r.error });
+      if (r.error !== null) rec.error({ stage: 'brief', cohortId: null, message: r.error, ...(r.errorKind ? { kind: r.errorKind } : {}) });
       return r.brief;
     })) ?? EMPTY_BRIEF;
   }
@@ -252,12 +292,17 @@ async function reviewInWorkspace(
     for (const stage of ['lenses', 'sweep', 'seams'] as const) log.skip(stage, skipWhy);
   } else {
     // Lenses and sweep run side by side; both go through the same parallel cap.
-    [lensR, sweepR] = await Promise.all([
-      lensStage(log, 'lenses', () => runCohortLenses(runner, quick ? { ...ctx, packs: firstLensOnly(packs) } : ctx)),
-      quick ? (log.skip('sweep', skipWhy), emptyResult()) : lensStage(log, 'sweep', () => runSweep(runner, ctx)),
-    ]);
+    // Checked without waiting, so the two stages start in the same order as always.
+    const limited = (): boolean => deps.gate.stoppedBy() !== null;
+    const lenses = (): Promise<LensStageResult> => (limited() ? limitedOut('lenses').then(emptyResult)
+      : lensStage(log, 'lenses', () => runCohortLenses(runner, quick ? { ...ctx, packs: firstLensOnly(packs) } : ctx)));
+    const sweep = (): Promise<LensStageResult> => (limited() ? limitedOut('sweep').then(emptyResult)
+      : lensStage(log, 'sweep', () => runSweep(runner, ctx)));
+    [lensR, sweepR] = await Promise.all([lenses(), quick ? (log.skip('sweep', skipWhy), emptyResult()) : sweep()]);
     if (quick) log.skip('seams', skipWhy);
-    else seamsR = await lensStage(log, 'seams', () => runSeams(runner, ctx, [...lensR.candidates, ...sweepR.candidates]));
+    else if (!(await limitedOut('seams'))) {
+      seamsR = await lensStage(log, 'seams', () => runSeams(runner, ctx, [...lensR.candidates, ...sweepR.candidates]));
+    }
     // Every request from the lenses on carries the description through prBlock, cut at the same length.
     const cut = descriptionCutSentence('lenses and the stages after them', pr.body, MAX_DESCRIPTION_CHARS);
     if (cut !== null) limits.push(cut);
@@ -282,6 +327,8 @@ async function reviewInWorkspace(
   if (sync || quick) {
     log.skip('challenge', skipWhy);
     kept = anchored.map((c) => ({ ...c, checked: QUICK_CHECKED }));
+  } else if (await limitedOut('challenge')) {
+    kept = anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED }));
   } else {
     const r = await log.run('challenge', async (rec) => {
       const out = await challenge(runner, ctx, anchored, readBoth);
@@ -294,15 +341,16 @@ async function reviewInWorkspace(
     challengeDropped.push(...(r?.dropped ?? []));
   }
 
-  if (depth === 'deep' && !sync) {
+  if (depth === 'deep' && !sync && !(await limitedOut('lenses-deep'))) {
     const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...challengeDropped].map((d) => d.candidate)];
     await log.run('lenses-deep', (rec) => deepPass(rec, {
       runner, ctx, seen: new Set(known.map(fingerprint)), uniqueIds: (c) => withUniqueIds(c, usedIds), readHead, readBoth,
     }, { candidates, questions, schemaDropped, anchorDropped, challengeDropped, kept, limits }));
   }
 
-  // Select always runs, so the document has a verdict; it is told every error so far. On a sync merge it asks no model.
-  const selection = (await log.run('select', async (rec) => {
+  // Select always runs, so the document has a verdict; it is told every error so far. On a sync merge it asks no model,
+  // and after the usage limit it is replaced by the fallback, which asks none either.
+  const selection = ((await limitedOut('select')) ? undefined : await log.run('select', async (rec) => {
     const r = await select(runner, ctx, kept, questions, [...log.errors], depth, sync);
     rec.usage(r.usage);
     rec.error(...r.errors);
@@ -321,37 +369,56 @@ async function reviewInWorkspace(
  * workspace that cannot be prepared rejects. The workspace is always disposed.
  */
 export async function runReview(req: ReviewRequest, deps: EngineDeps, onEvent?: (e: ReviewEvent) => void): Promise<ReviewDocument> {
+  const { signal } = deps;
+  if (signal?.aborted) throw new Error(REVIEW_STOPPED);
+  try {
+    return await reviewOnce(req, deps, onEvent);
+  } catch (err) {
+    if (signal?.aborted) throw new Error(REVIEW_STOPPED);
+    throw err;
+  }
+}
+
+async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: ReviewEvent) => void): Promise<ReviewDocument> {
   const parallel = req.parallel ?? DEFAULT_PARALLEL;
   if (!Number.isInteger(parallel) || parallel < 1) throw new RangeError(`parallel must be a whole number of at least 1, got ${parallel}`);
-  const given = Object.fromEntries(Object.entries(req.models ?? {}).filter(([, v]) => v !== undefined)) as Partial<ModelConfig>;
-  const settings: Settings = { depth: req.depth ?? 'standard', models: { ...DEFAULT_MODELS, ...given }, parallel };
+  const models = Object.fromEntries(Object.entries(req.models ?? {}).filter(([, v]) => v !== undefined)) as Partial<ModelConfig>;
+  const settings: Settings = { depth: req.depth ?? 'standard', models: { ...DEFAULT_MODELS, ...models }, parallel };
   const id = hexId('r_', 5);
-  const createdAt = deps.now().toISOString();
-  const log = createStageLog(onEvent);
+  const createdAt = given.now().toISOString();
+  const { signal } = given;
+  const log = createStageLog(onEvent, signal);
+  // Every command and every request carries the review's signal; every request goes through the usage gate.
+  const exec: Exec = signal === undefined ? given.exec : (cmd, args, opts) => given.exec(cmd, args, { signal, ...opts });
+  const gate = usageGate(given.runner, signal);
+  const deps: EngineDeps & { gate: UsageGate } = { ...given, exec, runner: gate, gate };
 
   // Packs are chosen first because their stage rules are needed to fetch the pull request; the time counts under packs.
   const choiceStarted = performance.now();
   const chosen = await choosePacks(req.packsDir, req.repo, req.packIds);
   const choiceMs = performance.now() - choiceStarted;
 
-  const intake = (await log.run('intake', async (rec) => {
-    const fetched = await fetchPr(deps.exec, req.repo, req.number, stageRulesOf(chosen.packs));
-    const ws = await openWorkspace(deps.exec, req, fetched, id);
-    const pr = req.explicit ? { ...fetched, baseSha: ws.range.baseSha, headSha: ws.range.headSha } : fetched;
-    const loaded = await rec.attempt(async () => recheckBinary(
-      await loadDiff(deps.exec, ws.gitDir, ws.range),
-      (path, bytes) => safeRead(ws.headDir, path, { firstBytes: bytes }),
-    ), { files: [] as FileDiff[], facts: [] as Fact[] });
-    return { pr, ws, files: loaded.files, diffFacts: loaded.facts };
-  }, { rethrow: true }))!;
-
+  // Kept outside the stage so a workspace opened just before a stop is still disposed.
+  let opened: Workspace | undefined;
+  let intake: { pr: PrInfo; ws: Workspace; files: FileDiff[]; diffFacts: Fact[] };
   let reviewed: Reviewed;
   try {
+    intake = (await log.run('intake', async (rec) => {
+      const fetched = await fetchPr(exec, req.repo, req.number, stageRulesOf(chosen.packs));
+      const ws = await openWorkspace(exec, req, fetched, id);
+      opened = ws;
+      const pr = req.explicit ? { ...fetched, baseSha: ws.range.baseSha, headSha: ws.range.headSha } : fetched;
+      const loaded = await rec.attempt(async () => recheckBinary(
+        await loadDiff(exec, ws.gitDir, ws.range),
+        (path, bytes) => safeRead(ws.headDir, path, { firstBytes: bytes }),
+      ), { files: [] as FileDiff[], facts: [] as Fact[] });
+      return { pr, ws, files: loaded.files, diffFacts: loaded.facts };
+    }, { rethrow: true }))!;
     reviewed = await reviewInWorkspace(
       req, deps, log, settings, intake.pr, intake.ws, intake.files, intake.diffFacts, { ...chosen, ms: choiceMs },
     );
   } finally {
-    await intake.ws.dispose().catch(() => undefined);
+    await (opened as Workspace | undefined)?.dispose().catch(() => undefined);
   }
 
   const { selection } = reviewed;

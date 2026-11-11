@@ -1,6 +1,6 @@
 import type { ChangeMap } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
-import { createFakeRunner } from '../../src/agent/fake-runner.js';
+import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import { runCohortLenses } from '../../src/lenses/cohort-lens.js';
 import { applyHoldout } from '../../src/packs/holdout.js';
 import {
@@ -260,9 +260,9 @@ describe('runCohortLenses', () => {
   it('a failed lens becomes a stage error naming the cohort and the lens', async () => {
     const packs = [pack('core', [lens('boundary'), lens('money')])];
     const runner = createFakeRunner((req) => (req.role === 'lens:core/money' && req.material.includes('Invoice totals')
-      ? new Error('model timed out') : { candidates: [rawCandidate()], questions: [] }));
+      ? failure('model timed out', 'timeout') : { candidates: [rawCandidate()], questions: [] }));
     const r = await runCohortLenses(runner, ctx({ packs }));
-    expect(r.errors).toEqual([{ stage: 'lenses', cohortId: 'k2', message: 'core/money: model timed out' }]);
+    expect(r.errors).toEqual([{ stage: 'lenses', cohortId: 'k2', message: 'core/money: model timed out', kind: 'timeout' }]);
     expect(r.candidates).toHaveLength(3);
     expect(r.usage).toHaveLength(4);
   });

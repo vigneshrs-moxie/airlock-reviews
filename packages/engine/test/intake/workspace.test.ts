@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { prepareWorkspace, type WorkspaceRequest } from '../../src/intake/workspace.js';
-import { realExec } from '../../src/util/exec.js';
+import { realExec, type Exec } from '../../src/util/exec.js';
 import { makeTempRepo, type TempRepo } from '../helpers/temp-repo.js';
 
 let home: string;
@@ -152,5 +152,35 @@ describe('prepareWorkspace', () => {
         repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: 'deadbeef', headSha: 'deadbeef' }, reviewId: 'r6',
       }),
     ).rejects.toThrow(/deadbeef/);
+  });
+
+  it('treats a timed-out commit lookup as a failure, not as a commit that is missing', async () => {
+    const r = await remote();
+    await r.write('a.txt', '1');
+    const sha = await r.commit('one');
+    const exec: Exec = async (cmd, args, opts) =>
+      (args.includes('rev-parse') ? { stdout: '', stderr: 'timed out after 60 s', code: 124 } : realExec(cmd, args, opts));
+    const req: WorkspaceRequest = { repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: sha, headSha: sha }, reviewId: 't1' };
+    const err = await prepareWorkspace(exec, req).then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toMatch(/timed out after 60 s/);
+    expect(err?.message).not.toMatch(/was not found/);
+  });
+
+  it('gives clone and fetch ten minutes and other git commands the default', async () => {
+    const r = await remote();
+    await r.write('a.txt', '1');
+    const sha = await r.commit('one');
+    const seen: { args: string[]; timeoutMs: number | undefined }[] = [];
+    const exec: Exec = async (cmd, args, opts) => {
+      seen.push({ args, timeoutMs: opts?.timeoutMs });
+      return realExec(cmd, args, opts);
+    };
+    const req = (id: string): WorkspaceRequest => ({ repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: sha, headSha: sha }, reviewId: id });
+    await (await prepareWorkspace(exec, req('t2'))).dispose();
+    await (await prepareWorkspace(exec, req('t3'))).dispose();
+    const slow = seen.filter((s) => s.args.includes('clone') || s.args.includes('fetch'));
+    expect(slow.map((s) => s.args.find((a) => a === 'clone' || a === 'fetch'))).toEqual(['clone', 'fetch']);
+    expect(slow.every((s) => s.timeoutMs === 600_000)).toBe(true);
+    expect(seen.filter((s) => !slow.includes(s)).every((s) => s.timeoutMs === undefined)).toBe(true);
   });
 });

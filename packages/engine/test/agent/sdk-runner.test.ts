@@ -5,7 +5,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { loadTemplate } from '../../src/agent/prompt.js';
 import type { AgentRequest } from '../../src/agent/runner.js';
-import { createSdkRunner, findClaude } from '../../src/agent/sdk-runner.js';
+import { createSdkRunner, findClaude, roleLimits } from '../../src/agent/sdk-runner.js';
 import type { SdkRunnerDeps } from '../../src/agent/sdk-runner.js';
 
 type Opts = Record<string, unknown>;
@@ -224,6 +224,68 @@ describe('createSdkRunner results', () => {
     })]);
     const r = await createSdkRunner({ query: fake.query, claudePath: null }).run(req());
     expect(r.usage).toMatchObject({ inputTokens: 10 + 3000 + 400 + 1200 + 5, outputTokens: 230 });
+  });
+});
+
+describe('createSdkRunner limits and failure kinds', () => {
+  const run = (fake: ReturnType<typeof fakeQuery>, r = req()) => createSdkRunner({ query: fake.query, claudePath: null }).run(r);
+  /** A run that yields `first` and then never ends until it is aborted. */
+  const hanging = (first: unknown[] = [{ type: 'system', subtype: 'init', apiKeySource: 'none' }]) => fakeQuery(async function* (options) {
+    for (const m of first) yield m;
+    const signal = (options.abortController as AbortController).signal;
+    await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+    throw new Error('Claude Code process aborted by user');
+  });
+
+  it('ends a run that never finishes at its timeout with kind timeout', async () => {
+    const r = await run(hanging(), req({ timeoutMs: 50 }));
+    expect(r).toMatchObject({ ok: false, kind: 'timeout', error: 'timed out after 0.05 s' });
+    expect(r.usage.costUsd).toBeNull();
+  });
+
+  it('keeps a result that arrived before the timeout', async () => {
+    const r = await run(hanging([resultMsg({ structured_output: { files: ['a.ts'] } })]), req({ timeoutMs: 50 }));
+    expect(r).toMatchObject({ ok: true, output: { files: ['a.ts'] } });
+  });
+
+  it('sets the time and turn limits by role', () => {
+    const minutes = (role: string) => roleLimits(role).timeoutMs / 60_000;
+    expect(['lens:core/a', 'sweep:k1#1', 'challenge:c_1', 'mapper', 'seams', 'brief', 'select', 'judge', 'other'].map(minutes))
+      .toEqual([10, 10, 10, 15, 15, 5, 5, 5, 10]);
+    expect(['select', 'judge', 'challenge:c_1', 'brief', 'mapper', 'lens:core/a', 'seams'].map((r) => roleLimits(r).maxTurns))
+      .toEqual([6, 6, 20, 25, 25, 40, 40]);
+  });
+
+  it('sends the role\'s turn limit unless the request names one', async () => {
+    expect((await optionsFor(req({ role: 'select' }))).options.maxTurns).toBe(6);
+    expect((await optionsFor(req({ role: 'challenge:c_1' }))).options.maxTurns).toBe(20);
+    expect((await optionsFor(req({ role: 'select', maxTurns: 9 }))).options.maxTurns).toBe(9);
+  });
+
+  it('names the kind of each failure', async () => {
+    expect(await run(yielding([resultMsg({ subtype: 'error_max_turns', is_error: true, errors: ['Reached maximum number of turns (40)'] })])))
+      .toMatchObject({ ok: false, kind: 'turn-limit' });
+    expect(await run(yielding([resultMsg({ structured_output: { files: 'a.ts' } })]))).toMatchObject({ ok: false, kind: 'invalid-output' });
+    expect(await run(yielding([resultMsg({ subtype: 'error_max_structured_output_retries', is_error: true, errors: [] })])))
+      .toMatchObject({ ok: false, kind: 'invalid-output' });
+    expect(await run(yielding([], new Error('Claude Code process exited with code 1')))).toMatchObject({ ok: false, kind: 'other' });
+  });
+
+  it('recognises a rejected rate-limit event as the usage limit and gives the reset time', async () => {
+    const resetsAt = Math.floor(new Date('2026-11-11T17:00:00').getTime() / 1000);
+    const fake = yielding([
+      { type: 'system', subtype: 'init', apiKeySource: 'none' },
+      { type: 'rate_limit_event', rate_limit_info: { status: 'allowed' } },
+      { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt, rateLimitType: 'five_hour' } },
+      resultMsg({ is_error: true, result: 'API Error: 429' }),
+    ]);
+    const time = new Date(resetsAt * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    expect(await run(fake)).toMatchObject({ ok: false, kind: 'usage-limit', error: `Claude's usage limit was reached; it resets at ${time}` });
+  });
+
+  it('recognises the usage limit from the result text when there is no event', async () => {
+    const fake = yielding([resultMsg({ is_error: true, result: 'Claude AI usage limit reached' })]);
+    expect(await run(fake)).toMatchObject({ ok: false, kind: 'usage-limit', error: "Claude's usage limit was reached" });
   });
 });
 

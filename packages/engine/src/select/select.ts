@@ -434,7 +434,7 @@ export async function select(
     });
     usage.push(result.usage);
     if (result.ok) answer = result.output;
-    else errors.push({ stage: 'select', cohortId: null, message: result.error });
+    else errors.push({ stage: 'select', cohortId: null, message: result.error, kind: result.kind });
   }
 
   const { merged, dropped } = answer ? mergeDuplicates(kept, answer.sameAs) : distinct;

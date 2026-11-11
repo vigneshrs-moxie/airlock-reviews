@@ -1,7 +1,7 @@
 import type { Anchor, Candidate, Severity } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
 import type { AgentRequest } from '../../src/agent/runner.js';
-import { createFakeRunner } from '../../src/agent/fake-runner.js';
+import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import { challenge } from '../../src/challenge/challenge.js';
 import { block, ctx, diff, labels, lens, models, pack } from '../helpers/lens-context.js';
 
@@ -233,14 +233,14 @@ describe('challenge', () => {
   });
 
   it('keeps the candidate and records a stage error when the agent fails', async () => {
-    const runner = createFakeRunner((req) => (idOf(req) === 'c1' ? new Error('timed out') : answer()));
+    const runner = createFakeRunner((req) => (idOf(req) === 'c1' ? failure('timed out after 600 s', 'timeout') : answer()));
     const { read } = memoryRead();
     const r = await challenge(runner, ctx(), [item('c1', 'block', { cohortId: 'k2' }), item('c2', 'fix')], read);
     expect(r.kept.map((k) => [k.id, k.severity, k.checked])).toEqual([
       ['c1', 'block', 'challenge did not complete'],
       ['c2', 'fix', 'Read src/pause.ts and its caller src/charge.ts.'],
     ]);
-    expect(r.errors).toEqual([{ stage: 'challenge', cohortId: 'k2', message: 'c1: timed out' }]);
+    expect(r.errors).toEqual([{ stage: 'challenge', cohortId: 'k2', message: 'c1: timed out after 600 s', kind: 'timeout' }]);
     expect(r.usage).toHaveLength(2);
   });
 

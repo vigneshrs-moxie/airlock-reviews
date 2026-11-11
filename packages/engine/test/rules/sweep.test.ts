@@ -101,7 +101,7 @@ describe('runSweep', () => {
   it('a failed batch becomes a stage error naming the batch and the others carry on', async () => {
     const runner = createFakeRunner((req) => (req.role.endsWith('#1') ? new Error('boom') : { candidates: [sweepCandidate({ ruleId: 'mem-1', path: 'src/members/m.ts' })], questions: [] }));
     const r = await runSweep(runner, sweepCtx());
-    expect(r.errors).toEqual([{ stage: 'sweep', cohortId: 'k1', message: 'batch 1: boom' }]);
+    expect(r.errors).toEqual([{ stage: 'sweep', cohortId: 'k1', message: 'batch 1: boom', kind: 'invalid-output' }]);
     expect(r.candidates).toHaveLength(1);
     expect(r.usage).toHaveLength(2);
   });

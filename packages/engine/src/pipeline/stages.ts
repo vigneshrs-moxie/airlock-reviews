@@ -45,8 +45,14 @@ function timingOf(stage: StageName, ms: number, usage: AgentUsage[]): StageTimin
   };
 }
 
-/** Records the stages of one review and reports them to `onEvent`; a listener that throws is ignored. */
-export function createStageLog(onEvent?: (e: ReviewEvent) => void): StageLog {
+/** What a stage throws, and runReview rejects with, once the review's signal is aborted. */
+const stopped = (): Error => new Error('The review was stopped.');
+
+/**
+ * Records the stages of one review and reports them to `onEvent`; a listener that throws is ignored. Once `signal` is
+ * aborted no stage starts, and the stage that was running throws instead of returning, so the review ends.
+ */
+export function createStageLog(onEvent?: (e: ReviewEvent) => void, signal?: AbortSignal): StageLog {
   const errors: StageError[] = [];
   const done = new Map<StageName, StageTiming>();
   const open = new Map<StageName, () => StageTiming>();
@@ -61,6 +67,7 @@ export function createStageLog(onEvent?: (e: ReviewEvent) => void): StageLog {
   async function run<T>(
     stage: StageName, fn: (rec: StageRecorder) => Promise<T>, opts: { extraMs?: number; rethrow?: boolean } = {},
   ): Promise<T | undefined> {
+    if (signal?.aborted) throw stopped();
     emit({ type: 'stage', stage, status: 'start', detail: '' });
     const started = performance.now() - (opts.extraMs ?? 0);
     const usage: AgentUsage[] = [];
@@ -92,6 +99,7 @@ export function createStageLog(onEvent?: (e: ReviewEvent) => void): StageLog {
     emit(mine.length === 0
       ? { type: 'stage', stage, status: 'done', detail: '' }
       : { type: 'stage', stage, status: 'error', detail: `${mine[0]!.message}${more}` });
+    if (signal?.aborted) throw stopped();
     if (thrown && opts.rethrow) throw thrown.err;
     return value;
   }

@@ -1,4 +1,4 @@
-import type { Anchor, Candidate, Dropped, Severity, StageError, Tier } from '@airlock/shared';
+import type { Anchor, Candidate, Dropped, Severity, StageError, StageErrorKind, Tier } from '@airlock/shared';
 import { SeveritySchema } from '@airlock/shared';
 import { z } from 'zod';
 import { asMaterial, loadTemplate } from '../agent/prompt.js';
@@ -163,9 +163,9 @@ export async function challenge(
   const evidence = createEvidence(read, ctx.files, ctx.packs);
   const tier = tierOf(ctx.tiers);
   type ItemResult = Outcome & { usage?: AgentUsage; error?: StageError; limit?: string };
-  const failed = (item: Item, message: string, usage: AgentUsage | undefined): ItemResult => ({
+  const failed = (item: Item, message: string, usage: AgentUsage | undefined, kind?: StageErrorKind): ItemResult => ({
     kept: { ...item, checked: DID_NOT_COMPLETE }, ...(usage ? { usage } : {}),
-    error: { stage: 'challenge', cohortId: item.cohortId, message: `${item.id}: ${message}` },
+    error: { stage: 'challenge', cohortId: item.cohortId, message: `${item.id}: ${message}`, ...(kind ? { kind } : {}) },
   });
   const results = await Promise.all(items.map(async (item): Promise<ItemResult> => {
     if (!isChallenged(item)) return { kept: { ...item, checked: NOT_CHALLENGED } };
@@ -186,7 +186,7 @@ export async function challenge(
       });
       usage = result.usage;
       const noted = limit === undefined ? {} : { limit };
-      if (!result.ok) return { ...failed(item, result.error, usage), ...noted };
+      if (!result.ok) return { ...failed(item, result.error, usage, result.kind), ...noted };
       return { ...(await applyAnswer(item, result.output, evidence)), usage, ...noted };
     } catch (err) {
       return { ...failed(item, err instanceof Error ? err.message : String(err), usage), ...(limit === undefined ? {} : { limit }) };
