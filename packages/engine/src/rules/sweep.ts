@@ -24,10 +24,15 @@ type SweepOutput = z.infer<typeof SweepOutputSchema>;
 
 /** Higher is more serious: block > fix > ask > note. */
 export const SEVERITY_RANK: Record<Severity, number> = { note: 0, ask: 1, fix: 2, block: 3 };
-const raised = (severity: Severity, floor: Severity): Severity => (SEVERITY_RANK[severity] < SEVERITY_RANK[floor] ? floor : severity);
+/**
+ * A definite breach (`note`, `fix` or `block`) is at least the rule's floor; a doubt (`ask`) stays a doubt whatever the
+ * floor, since the model could not confirm the breach.
+ */
+const floored = (severity: Severity, floor: Severity): Severity =>
+  (severity === 'ask' || SEVERITY_RANK[severity] >= SEVERITY_RANK[floor] ? severity : floor);
 
 function rulesText(rules: Rule[]): string {
-  const parts = rules.map((r) => `### ${r.id}: ${r.title}\n\n${r.body.trim()}\n\nApplies to: ${r.paths.join(', ')}`);
+  const parts = rules.map((r) => `### ${r.id}: ${r.title}\n\n${r.body.trim()}\n\nApplies to: ${r.paths.join(', ')}\nFloor: ${r.severityFloor}`);
   return `# The rules to check\n\n${parts.join('\n\n')}`;
 }
 
@@ -49,7 +54,7 @@ function batchMaterial(ctx: LensContext, batch: SweepBatch): { material: string;
   return { material, cut: diff.cut, title: cohort.title };
 }
 
-/** Checks one batch's raw candidates against its rules: unknown rule ids are dropped, severity is raised to the rule's floor. */
+/** Checks one batch's raw candidates against its rules: unknown rule ids are dropped, a definite breach is raised to the rule's floor. */
 function acceptSweep(output: SweepOutput, batch: SweepBatch, taken: Set<string>): LensStageResult {
   const out = emptyResult();
   const byId = new Map(batch.rules.map((r) => [r.id, r]));
@@ -74,7 +79,7 @@ function acceptSweep(output: SweepOutput, batch: SweepBatch, taken: Set<string>)
       continue;
     }
     kept++;
-    out.candidates.push({ ...candidate, severity: raised(candidate.severity, rule!.severityFloor) });
+    out.candidates.push({ ...candidate, severity: floored(candidate.severity, rule!.severityFloor) });
   }
   for (const q of output.questions) {
     if (q.trim() !== '') out.questions.push({ text: q.trim(), cohortId: batch.cohortId, source: { pack: batch.rules[0]!.packId, lens: null, ruleId: null } });

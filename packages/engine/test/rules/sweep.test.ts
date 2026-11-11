@@ -69,6 +69,24 @@ describe('runSweep', () => {
     expect(r.candidates[0]!.severity).toBe('block');
   });
 
+  it.each([
+    ['fix', 'block', 'block'], ['fix', 'fix', 'fix'], ['fix', 'ask', 'ask'], ['fix', 'note', 'fix'],
+    ['block', 'block', 'block'], ['block', 'fix', 'block'], ['block', 'ask', 'ask'], ['block', 'note', 'block'],
+  ] as const)('against a %s floor, a %s candidate becomes %s: a doubt stays a doubt', async (floor, given, expected) => {
+    const floored = [pack('core', [lens('boundary')], { rules: [rule('bill-1', ['src/billing/**'], { severityFloor: floor })] })];
+    const runner = createFakeRunner((req) => (req.role.endsWith('#1') ? { candidates: [sweepCandidate({ severity: given })], questions: [] } : { candidates: [], questions: [] }));
+    const r = await runSweep(runner, sweepCtx({ packs: floored }));
+    expect(r.candidates.map((c) => c.severity)).toEqual([expected]);
+  });
+
+  it('prints each rule\'s floor beside it', async () => {
+    const runner = createFakeRunner(() => ({ candidates: [], questions: [] }));
+    await runSweep(runner, sweepCtx());
+    expect(runner.calls[0]!.instructions).toContain('### bill-1: Rule bill-1\n\nCharges must be idempotent.');
+    expect(runner.calls[0]!.instructions).toContain('Applies to: src/billing/**\nFloor: fix');
+    expect(runner.calls[1]!.instructions).toContain('Floor: note');
+  });
+
   it('drops a candidate that names a rule that was not given', async () => {
     const runner = createFakeRunner((req) => (req.role.endsWith('#1')
       ? { candidates: [sweepCandidate({ ruleId: 'mem-1' }), sweepCandidate()], questions: [] } : { candidates: [], questions: [] }));

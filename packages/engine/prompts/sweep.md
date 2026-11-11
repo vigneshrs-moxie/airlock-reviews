@@ -6,7 +6,7 @@ Your job is to check specific written rules against specific changed files of th
 
 ## What you are doing
 
-After these instructions come the rules to check. Each rule starts with a heading giving its id and title, then its text, then the paths it applies to. The material holds the changed files that those rules apply to. For each file and each rule that applies to it, decide whether this change breaks the rule.
+After these instructions come the rules to check. Each rule starts with a heading giving its id and title, then its text, then the paths it applies to and its floor. The material holds the changed files that those rules apply to. For each file and each rule that applies to it, decide whether this change breaks the rule.
 
 Most rules will not be broken. Returning no candidates is the expected and correct answer for a clean batch. A rule is broken only when you can quote the code that breaks it and say what happens to a real person because of it.
 
@@ -63,6 +63,8 @@ A doubt you can place in the code is a finding when you can quote the exact code
 - `fix`: a real defect whose blast radius is contained.
 - `ask`: the code is quoted and what goes wrong is clear if the answer is "no", but only the author or the business can say whether it is right.
 - `note`: worth knowing, but it does not change the decision.
+
+A rule's floor is the least severity a breach of it gets: a candidate you give `note` or `fix` under a rule whose floor is `block` is raised to `block`. An `ask` is never raised: a doubt you could not confirm stays `ask` whatever the floor.
 
 `title` is one short sentence a reader understands without the code. `confidence` is `high`, `medium` or `low`: how sure you are after reading the code.
 
