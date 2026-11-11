@@ -1,20 +1,24 @@
 import type {
-  Candidate, Depth, Dropped, Finding, Place, PrInfo, Question, StageError, Verdict, VerdictLabel,
+  Depth, Dropped, Finding, PrInfo, Question, StageError, Verdict, VerdictLabel,
 } from '@airlock/shared';
 import { z } from 'zod';
 import { asMaterial, fill, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner, AgentUsage } from '../agent/runner.js';
 import { fingerprint } from '../anchor/fingerprint.js';
 import type { KeptCandidate } from '../challenge/challenge.js';
-import { briefBlock, instructionsFor, mapBlock, prBlock, readerOf, sendRequest } from '../lenses/context.js';
+import { briefBlock, instructionsFor, mapBlock, mapCutSentence, orNone, prBlock, readerOf, sendRequest } from '../lenses/context.js';
 import type { LensContext } from '../lenses/context.js';
+import { absorb, nearInFile, plainCandidate } from '../merge/merge.js';
 import { SEVERITY_RANK } from '../rules/sweep.js';
 
 /** The top list holds at most this many findings. */
 export const MAX_TOP = 5;
 /** `whoseCall` and `checksAfterMerge` keep at most this many lines each. */
 const MAX_LINES = 5;
-/** An agent group listing more ids than this is ignored: that large a group is more likely careless than a real duplicate. */
+/**
+ * An agent group listing more findings than this is ignored unless they all sit near each other in one file: across files
+ * that large a group is more likely careless than a real duplicate.
+ */
 const MAX_GROUP = 4;
 /** The longest title quoted in the verdict sentence, the closing `…` of a cut title included. */
 const MAX_TITLE = 120;
@@ -40,12 +44,15 @@ export interface SelectResult {
   whoseCall: string[];
   checksAfterMerge: string[];
   selfReviewText: string;
+  /** Groups the model named that were not merged, and the questions that were merged, in words for the document. */
+  notes: string[];
+  /** Plain sentences saying what the request was not shown because of a size limit. */
+  limits: string[];
   errors: StageError[];
   usage: AgentUsage[];
 }
 
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
-const squash = (text: string): string => text.replace(/\s+/g, '');
 /** The positions `at` in `items`, higher severity first, then by position. */
 const bySeverity = (items: KeptCandidate[], at: number[]): number[] =>
   [...at].sort((a, b) => SEVERITY_RANK[items[b]!.severity] - SEVERITY_RANK[items[a]!.severity] || a - b);
@@ -56,33 +63,39 @@ const bySeverity = (items: KeptCandidate[], at: number[]): number[] =>
 const shareFile = (a: KeptCandidate, b: KeptCandidate): boolean =>
   a.path === b.path || a.connected.some((p) => p.path === b.path) || b.connected.some((p) => p.path === a.path);
 
-/** Every place once, by path and quote without whitespace, in the order given. */
-function uniquePlaces(places: Place[]): Place[] {
-  const seen = new Set<string>();
-  return places.filter((p) => {
-    const key = `${p.path}\0${squash(p.quote)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+/** True when the items are all in one file and their anchored lines join up, each near another (see nearInFile). */
+function nearInOneFile(items: KeptCandidate[]): boolean {
+  if (items.length === 0 || items.some((i) => i.path !== items[0]!.path || i.anchor.startLine === null)) return false;
+  const reached = new Set([0]);
+  const todo = [0];
+  while (todo.length > 0) {
+    const i = todo.pop()!;
+    items.forEach((other, j) => {
+      if (!reached.has(j) && nearInFile(items[i]!, other)) { reached.add(j); todo.push(j); }
+    });
+  }
+  return reached.size === items.length;
 }
 
-function asCandidate(item: KeptCandidate): Candidate {
-  const { anchor: _anchor, checked: _checked, ...candidate } = item;
-  return candidate;
-}
+const titles = (items: KeptCandidate[]): string => items.map((i) => `"${oneLine(i.title)}"`).join(', ');
+const ignoredNote = (members: KeptCandidate[], because: string): string =>
+  `Selection named ${members.length} findings as one problem; they were not merged because ${because}: ${titles(members)}`;
+/** Why a group larger than MAX_GROUP was not merged. */
+const TOO_MANY = 'more than four are merged at once only when they all sit near each other in one file';
 
 /**
  * Merges items that are the same underlying problem: always those with the identical fingerprint, and the items of an
- * agent group of at most MAX_GROUP ids when every pair of items it would end up joining, including those of sets it
- * joins, shares a file (otherwise the group is ignored). Lines alone never merge two items.
- * Each merged set keeps its most serious item (the first on a tie) with the connected places of all of them, and
- * records the others as dropped at stage `select`. Survivors and dropped items keep the input order. Inputs are not changed.
+ * agent group when every pair of items it would end up joining, including those of sets it joins, shares a file, and the
+ * group holds at most MAX_GROUP items or all of them sit near each other in one file. Otherwise the group is ignored and
+ * a note says why. Lines alone never merge two items.
+ * Each merged set keeps its most serious item (the first on a tie) with the connected places, sources and fingerprints
+ * of all of them, and records the others as dropped at stage `select` with `mergedInto` naming the kept item. Survivors
+ * and dropped items keep the input order. Inputs are not changed.
  */
 export function mergeDuplicates(
   items: readonly KeptCandidate[],
   groups: readonly (readonly string[])[] = [],
-): { merged: KeptCandidate[]; dropped: Dropped[] } {
+): { merged: KeptCandidate[]; dropped: Dropped[]; notes: string[] } {
   const parent = items.map((_, i) => i);
   const root = (i: number): number => {
     while (parent[i] !== i) i = parent[i]!;
@@ -107,13 +120,21 @@ export function mergeDuplicates(
   });
   const allShare = (set: number[]): boolean =>
     set.every((a, k) => set.slice(k + 1).every((b) => shareFile(items[a]!, items[b]!)));
+  const notes: string[] = [];
   for (const group of groups) {
-    if (new Set(group).size > MAX_GROUP) continue;
     const members = [...new Set(group.flatMap((id) => indexOf.get(id) ?? []))];
     if (members.length < 2) continue;
+    const named = members.map((m) => items[m]!);
+    if (members.length > MAX_GROUP && !nearInOneFile(named)) {
+      notes.push(ignoredNote(named, TOO_MANY));
+      continue;
+    }
     // The test covers everything the group would end up with, so two groups cannot chain unrelated files together.
     const roots = new Set(members.map(root));
-    if (!allShare(items.flatMap((_, i) => (roots.has(root(i)) ? [i] : [])))) continue;
+    if (!allShare(items.flatMap((_, i) => (roots.has(root(i)) ? [i] : [])))) {
+      notes.push(ignoredNote(named, 'they do not all share a file'));
+      continue;
+    }
     for (const m of members.slice(1)) join(members[0]!, m);
   }
 
@@ -135,14 +156,14 @@ export function mergeDuplicates(
     const r = root(i);
     const keeper = keeperOf.get(r)!;
     if (keeper !== i) {
-      dropped.push({ candidate: asCandidate(item), stage: 'select', reason: `same problem as ${items[keeper]!.id}`, refutation: null });
+      const into = items[keeper]!.id;
+      dropped.push({ candidate: plainCandidate(item), stage: 'select', reason: `same problem as ${into}`, refutation: null, mergedInto: into });
       return;
     }
     const others = sets.get(r)!.filter((m) => m !== i).map((m) => items[m]!);
-    merged.push(others.length === 0 ? { ...item }
-      : { ...item, connected: uniquePlaces([...item.connected, ...others.flatMap((o) => o.connected)]) });
+    merged.push(others.length === 0 ? { ...item } : absorb(item, others));
   });
-  return { merged, dropped };
+  return { merged, dropped, notes };
 }
 
 // ---- The request ----
@@ -154,18 +175,25 @@ function findingLine(c: KeptCandidate): string {
   const origin = c.source.ruleId ?? c.source.lens ?? '-';
   return [
     c.id, c.severity, `${field(c.source.pack)}/${field(origin)}`, `${field(c.path)}:${c.anchor.startLine ?? '-'}`,
-    field(c.title), `happens: ${field(c.happens)}`,
+    field(c.title), `happens: ${field(c.happens)}`, `why: ${field(c.why)}`,
   ].join(' | ');
+}
+
+/** The items by file, then line (an item with no line last in its file), then the order given. */
+function byPlace(items: KeptCandidate[]): KeptCandidate[] {
+  const line = (c: KeptCandidate): number => c.anchor.startLine ?? Number.POSITIVE_INFINITY;
+  return items.map((c, i) => ({ c, i }))
+    .sort((a, b) => (a.c.path < b.c.path ? -1 : a.c.path > b.c.path ? 1 : 0) || line(a.c) - line(b.c) || a.i - b.i)
+    .map(({ c }) => c);
 }
 
 /** The questions are numbered `q1`, `q2`, … so the model can name them in `questionSameAs`. */
 function selectMaterial(ctx: LensContext, items: KeptCandidate[], questions: Question[]): string {
-  const orNone = (lines: string[]): string => (lines.length === 0 ? '(none)' : lines.join('\n'));
   return [
     prBlock(ctx.pr),
     briefBlock(ctx.brief),
     mapBlock(ctx.map),
-    asMaterial('findings', orNone(items.map(findingLine))),
+    asMaterial('findings', orNone(byPlace(items).map(findingLine))),
     asMaterial('questions', orNone(questions.map((q, i) => `q${i + 1} | ${field(q.text)}`))),
   ].join('\n\n');
 }
@@ -186,21 +214,26 @@ export function sameTextOnce(questions: readonly Question[]): Question[] {
 /** `q<m>` names the question at position m of the list the model was given. */
 const QUESTION_REF = /^q([1-9]\d*)$/;
 
+/** What a merged question went into: another question that stays, or a finding shown to the model. */
+export type QuestionTarget = { question: Question } | { findingId: string };
+
 /**
- * The questions left once the model's `questionSameAs` entries are applied, in the order given. An entry counts only when
- * its `question` is a position in the list and its `sameAs` is another question of the list (`q<m>`) or the id of a finding
- * shown to the model; anything else is ignored and the question stays. Every finding shown survives selection, in the
- * result or as the survivor of a merge, so an entry that names one always applies. Chains are followed: a question goes
- * when what it names goes on to a finding or to a question that stays. In a cycle the lowest position stays.
+ * The questions left once the model's `questionSameAs` entries are applied, in the order given, and each question that
+ * went with what it went into. An entry counts only when its `question` is a position in the list and its `sameAs` is
+ * another question of the list (`q<m>`) or the id of a finding shown to the model; anything else is ignored and the
+ * question stays. Every finding shown survives selection, in the result or as the survivor of a merge, so an entry that
+ * names one always applies. Chains are followed: a question goes when what it names goes on to a finding or to a
+ * question that stays, and it is merged into that finding (the first a question of the chain names) or else that
+ * question (the lowest that stays). In a cycle the lowest position stays.
  */
 function mergeQuestions(
   questions: readonly Question[],
   entries: readonly { question: number; sameAs: string }[],
   findingIds: ReadonlySet<string>,
-): Question[] {
+): { kept: Question[]; merged: { question: Question; into: QuestionTarget }[] } {
   const n = questions.length;
   const next: number[][] = questions.map(() => []);
-  const namesFinding = questions.map(() => false);
+  const namesFinding: (string | null)[] = questions.map(() => null);
   for (const { question, sameAs } of entries) {
     if (!Number.isInteger(question) || question < 1 || question > n) continue;
     const from = question - 1;
@@ -209,7 +242,7 @@ function mergeQuestions(
       const to = Number(ref[1]) - 1;
       if (to < n && to !== from) next[from]!.push(to);
     } else if (findingIds.has(sameAs)) {
-      namesFinding[from] = true;
+      namesFinding[from] ??= sameAs;
     }
   }
   // Every question reachable from each one through one entry or more.
@@ -225,8 +258,18 @@ function mergeQuestions(
     return seen;
   });
   // A question stays when it leads to no finding, everything it leads to leads back to it, and it is the lowest of those.
-  return questions.filter((_, i) => !namesFinding[i]
-    && [...reach[i]!].every((j) => j >= i && !namesFinding[j] && reach[j]!.has(i)));
+  const stays = questions.map((_, i) => namesFinding[i] === null
+    && [...reach[i]!].every((j) => j >= i && namesFinding[j] === null && reach[j]!.has(i)));
+  const merged: { question: Question; into: QuestionTarget }[] = [];
+  questions.forEach((q, i) => {
+    if (stays[i]) return;
+    const chain = [i, ...[...reach[i]!].sort((a, b) => a - b)];
+    const finding = chain.map((j) => namesFinding[j]).find((id) => id !== null);
+    const kept = chain.find((j) => j !== i && stays[j]);
+    if (finding !== undefined && finding !== null) merged.push({ question: q, into: { findingId: finding } });
+    else if (kept !== undefined) merged.push({ question: q, into: { question: questions[kept]! } });
+  });
+  return { kept: questions.filter((_, i) => stays[i]), merged };
 }
 
 // ---- Ranking ----
@@ -379,7 +422,7 @@ export function selfReviewText(pr: PrInfo, depth: Depth, packTitles: string[], v
   const { counts } = verdict;
   const total = counts.block + counts.fix + counts.ask + counts.note;
   const words: [number, string, string][] = [
-    [counts.block, 'block', 'blocks'], [counts.fix, 'fix', 'fixes'], [counts.ask, 'question', 'questions'], [counts.note, 'note', 'notes'],
+    [counts.block, 'block', 'blocks'], [counts.fix, 'fix', 'fixes'], [counts.ask, 'ask', 'asks'], [counts.note, 'note', 'notes'],
   ];
   const tally = words.filter(([n]) => n > 0).map(([n, one, many]) => plural(n, one, many)).join(', ');
   const incomplete = verdict.label === 'incomplete';
@@ -419,12 +462,13 @@ export async function select(
   const distinct = mergeDuplicates(kept);
   const shown = sameTextOnce(questions);
   let answer: SelectOutput | null = null;
+  const limits: string[] = [];
 
   if (!(skipModel && distinct.merged.length === 0 && shown.length === 0)) {
     const template = await loadTemplate('select');
     const result = await sendRequest<SelectOutput>(runner, ctx, {
       role: 'select',
-      instructions: instructionsFor(fill(template, { reader: readerOf(ctx.pr) }), ctx.packs, null),
+      instructions: instructionsFor(fill(template, { reader: readerOf(ctx.pr) }), ctx.packs, ctx.missingHelpers),
       material: selectMaterial(ctx, distinct.merged, shown),
       schema: SelectOutputSchema,
       cwd: ctx.headDir,
@@ -433,14 +477,22 @@ export async function select(
       effort: ctx.models.effort,
     });
     usage.push(result.usage);
+    const cut = mapCutSentence('select', ctx.map);
+    if (cut !== null) limits.push(cut);
     if (result.ok) answer = result.output;
     else errors.push({ stage: 'select', cohortId: null, message: result.error, kind: result.kind });
   }
 
-  const { merged, dropped } = answer ? mergeDuplicates(kept, answer.sameAs) : distinct;
+  const { merged, dropped, notes } = answer ? mergeDuplicates(kept, answer.sameAs) : distinct;
   const { top, also } = rank(merged, answer);
   const findings = [...top.map((item, i) => toFinding(item, 'top', i + 1)), ...also.map((item) => toFinding(item, 'also', null))];
-  const survivors = answer ? mergeQuestions(shown, answer.questionSameAs, new Set(distinct.merged.map((k) => k.id))) : shown;
+  const titleOf = new Map(distinct.merged.map((k) => [k.id, k.title]));
+  const asked = answer ? mergeQuestions(shown, answer.questionSameAs, new Set(titleOf.keys())) : { kept: shown, merged: [] };
+  const survivors = asked.kept;
+  for (const { question, into } of asked.merged) {
+    const target = 'findingId' in into ? `the finding "${oneLine(titleOf.get(into.findingId)!)}"` : `the question "${oneLine(into.question.text)}"`;
+    notes.push(`A question was merged into ${target}: "${oneLine(question.text)}"`);
+  }
   const verdict = decideVerdict(ctx.pr, findings, [...stageErrors, ...errors], answer?.splitSuggested ?? false, survivors.length);
   return {
     findings,
@@ -450,6 +502,8 @@ export async function select(
     whoseCall: cleanLines(answer?.whoseCall ?? []),
     checksAfterMerge: cleanLines(answer?.checksAfterMerge ?? []),
     selfReviewText: selfReviewText(ctx.pr, depth, ctx.packs.map((p) => p.title), verdict),
+    notes,
+    limits,
     errors,
     usage,
   };

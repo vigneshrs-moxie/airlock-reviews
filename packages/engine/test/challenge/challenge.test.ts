@@ -1,5 +1,6 @@
 import type { Anchor, Candidate, Severity } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
+import { splitInstructions } from '../../src/agent/prompt.js';
 import type { AgentRequest } from '../../src/agent/runner.js';
 import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import { challenge } from '../../src/challenge/challenge.js';
@@ -286,7 +287,7 @@ describe('challenge', () => {
       connected: [{ path: 'src/charge.ts', line: 4, role: 'the nightly charge runs here', quote: 'charge(p);' }],
     })], read);
     const req = runner.calls[0]!;
-    expect(req.instructions).toMatch(/^Your job is to try to refute one finding about a pull request/);
+    expect(splitInstructions(req.instructions).stage).toMatch(/^Your job is to try to refute one finding about a pull request/);
     expect(req.instructions).toContain('Doubt, unfamiliarity or a sense that it is probably fine are not reasons to remove a finding.');
     expect(req.instructions).toContain('STANDARD_MARKER');
     expect(req.instructions).toContain('LEARNED_MARKER');

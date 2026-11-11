@@ -237,18 +237,28 @@ describe('summarise', () => {
     const cases = [replayCase({ id: 'a' }), replayCase({ id: 'b', kind: 'negative' }), replayCase({ id: 'c', kind: 'negative' })];
     const s = summarise('r', 'm', 'standard', scores, cases);
     expect(s.incompleteCases).toEqual(['a', 'c']);
-    // With no wall clock for the run, the total time is the sum of cases, and says so.
+    // With no spans recorded for the run, the total time is the sum of cases, and says so.
     expect(s.totals).toEqual({ ms: 150, msSummed: true, inputTokens: 15, outputTokens: 3, agentRuns: 3 });
-    expect(s.wallClock).toBeNull();
+    expect(s.spans).toEqual([]);
   });
 
-  it('the total time is the run\'s wall clock from its first case start to its last case end', () => {
+  it('the total time is the time the replay was running: one call gives its own duration', () => {
     const scores = [score({ caseId: 'a', ms: 600_000 }), score({ caseId: 'b', ms: 600_000 })];
     const cases = [replayCase({ id: 'a' }), replayCase({ id: 'b' })];
-    const wallClock = { startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:15:00.000Z' };
-    const s = summarise('r', 'm', 'standard', scores, cases, cases, wallClock);
+    const spans = [{ startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:15:00.000Z' }];
+    const s = summarise('r', 'm', 'standard', scores, cases, cases, { spans });
     expect(s.totals).toMatchObject({ ms: 900_000, msSummed: false });
-    expect(s.wallClock).toEqual(wallClock);
+    expect(s.spans).toEqual(spans);
+  });
+
+  it('two calls an hour apart give the sum of their own durations, not the wait between them', () => {
+    const scores = [score({ caseId: 'a', ms: 600_000 }), score({ caseId: 'b', ms: 600_000 })];
+    const cases = [replayCase({ id: 'a' }), replayCase({ id: 'b' })];
+    const spans = [
+      { startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:15:00.000Z' },
+      { startedAt: '2026-11-10T10:15:00.000Z', finishedAt: '2026-11-10T10:20:00.000Z' },
+    ];
+    expect(summarise('r', 'm', 'standard', scores, cases, cases, { spans }).totals).toMatchObject({ ms: 1_200_000, msSummed: false });
   });
 
   describe('how much of the dataset the run covers', () => {

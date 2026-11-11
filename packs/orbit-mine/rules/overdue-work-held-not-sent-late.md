@@ -1,7 +1,7 @@
 ---
 id: overdue-work-held-not-sent-late
 title: Scheduled work that is long overdue is held, not sent late
-paths: ["app/src/lib/**/*.ts", "app/src/app/api/**/route.ts"]
+paths: ["app/src/lib/**/*.ts", "app/src/app/api/{**/cron,cron/**,*/{warm,sync,process,distribute},*/{sync,process}-*,*/*-{sweep,reminders}}/route.ts"]
 severityFloor: fix
 sourcePrs: [99, 100, 174]
 origin: "past_review_comment_mining.md section 5 rule 9 (C6)"

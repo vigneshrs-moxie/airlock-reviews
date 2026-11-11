@@ -5,11 +5,14 @@ import { airlockHome } from '../util/paths.js';
 import type { Pack } from './types.js';
 
 export const KIT_REPO = 'Moxie-Pest-Control-Phoenix/moxie-review-kit';
+/**
+ * The kit files Airlock reads: the three standards attachKit attaches. The kit's SKILL.md is not fetched; the lens briefs
+ * in packs/raj-standard/lenses are Airlock's own.
+ */
 export const KIT_FILES = [
   'skills/moxie-review/profile.md',
   'skills/moxie-review/orbit.md',
   'skills/moxie-review/calibration.md',
-  'skills/moxie-review/SKILL.md',
 ];
 const BASE_NAMES = KIT_FILES.map((p) => basename(p));
 

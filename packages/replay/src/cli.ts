@@ -7,8 +7,9 @@ import { abortOnExitSignals, cleanForTerminal, createSdkRunner, realExec, syncKi
 import { DepthSchema } from '@airlock/shared';
 import { loadCases, pickCases } from './dataset.js';
 import type { ReplayCase } from './dataset.js';
+import type { RunSummary } from './score.js';
 import { coverage, halfInTopWord } from './report.js';
-import { checkRunId, HOME_FOLDER, loadRun, runReplay, saveRunReport } from './run.js';
+import { checkRunId, EarlierRunFolderError, HOME_FOLDER, loadRun, REPLAY_COMBINE, REPLAY_EFFORTS, runReplay, saveRunReport } from './run.js';
 import type { CaseEvent, ReplayDeps } from './run.js';
 
 export interface ReplayCliOverrides { deps?: ReplayDeps; packsDir?: string; kit?: { dir: string; sha: string }; cases?: ReplayCase[] }
@@ -16,6 +17,8 @@ export interface ReplayCliOverrides { deps?: ReplayDeps; packsDir?: string; kit?
 type Io = { out: (t: string) => void; err: (t: string) => void };
 
 const DEFAULT_MODEL = 'claude-opus-5-5';
+/** The exit code of a run stopped by Ctrl-C, as a shell gives a command ended by SIGINT. */
+const EXIT_STOPPED = 130;
 const DEFAULT_OUT = fileURLToPath(new URL('../../../replay-work', import.meta.url));
 const DEFAULT_PACKS = fileURLToPath(new URL('../../../packs', import.meta.url));
 
@@ -23,7 +26,8 @@ export function usage(): string {
   return [
     'Usage:',
     '  airlock-replay run --cases <selection> [--model <id>] [--depth quick|standard|deep] [--out <dir>] [--run <id>]',
-    '                     [--judge-model <id>] [--parallel <n>]',
+    '                     [--judge-model <id>] [--parallel <n>] [--effort low|medium|high] [--sweep-model <id>]',
+    '                     [--combine never|no-read-tier]',
     '  airlock-replay report <runDir>',
     '  airlock-replay help',
     '',
@@ -35,6 +39,10 @@ export function usage(): string {
     '  --run <id>                   the run folder name; give an earlier run\'s id to resume it',
     `  --judge-model <id>           model that judges each review (default ${DEFAULT_MODEL})`,
     '  --parallel <n>               pull requests reviewed at once, 1 to 3 (default 1)',
+    '  --effort low|medium|high     how hard every model of every review works (default high)',
+    '  --sweep-model <id>           model for the rule sweep, in place of --model',
+    '  --combine never|no-read-tier one combined lens request for a group with no read-tier file (default never)',
+    'A run folder is only resumed with the same model, depth, judge model, kit, effort, sweep model and combine setting.',
     '',
     'report rewrites summary.json and report.md from a run folder without any model call.',
   ].join('\n');
@@ -62,6 +70,7 @@ function parseRun(args: string[]) {
       options: {
         cases: { type: 'string' }, model: { type: 'string' }, depth: { type: 'string' }, out: { type: 'string' },
         run: { type: 'string' }, 'judge-model': { type: 'string' }, parallel: { type: 'string' },
+        effort: { type: 'string' }, 'sweep-model': { type: 'string' }, combine: { type: 'string' },
       },
       strict: true,
       allowPositionals: false,
@@ -76,7 +85,11 @@ function parseRun(args: string[]) {
   if (!depth.success) throw new UsageError(`--depth must be quick, standard or deep, got "${values.depth}".`);
   const parallel = values.parallel ?? '1';
   if (!/^[1-3]$/.test(parallel)) throw new UsageError(`--parallel must be 1, 2 or 3, got "${parallel}".`);
-  for (const flag of ['model', 'judge-model'] as const) {
+  const effort = values.effort ?? 'high';
+  if (!(REPLAY_EFFORTS as readonly string[]).includes(effort)) throw new UsageError(`--effort must be low, medium or high, got "${values.effort}".`);
+  const combine = values.combine ?? 'never';
+  if (!(REPLAY_COMBINE as readonly string[]).includes(combine)) throw new UsageError(`--combine must be never or no-read-tier, got "${values.combine}".`);
+  for (const flag of ['model', 'judge-model', 'sweep-model'] as const) {
     if (values[flag] !== undefined && values[flag].trim() === '') throw new UsageError(`--${flag} needs a model id.`);
   }
   if (values.run !== undefined) {
@@ -85,7 +98,18 @@ function parseRun(args: string[]) {
   return {
     selection: values.cases, model: values.model ?? DEFAULT_MODEL, depth: depth.data, out: resolve(values.out ?? DEFAULT_OUT),
     runId: values.run, judgeModel: values['judge-model'] ?? DEFAULT_MODEL, parallel: Number(parallel),
+    effort: effort as (typeof REPLAY_EFFORTS)[number], combine: combine as (typeof REPLAY_COMBINE)[number],
+    sweepModel: values['sweep-model'],
   };
+}
+
+/** The two answers, for the last lines a command prints. */
+function closingLines(summary: RunSummary, all: ReplayCase[]): string[] {
+  const covered = coverage(summary, all);
+  return [
+    `Half of the known problems in the top list: ${halfInTopWord(summary.meets.halfInTop).toLowerCase()}${covered === null ? '' : `: ${clean(covered)}.`}`,
+    `Clean pull requests stay clean: ${word(summary.meets.cleanControls)}`,
+  ];
 }
 
 function progress(io: Io): (e: CaseEvent) => void {
@@ -140,11 +164,12 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
     summary = await runReplay({
       cases, dataset: all, model: opts.model, depth: opts.depth, outDir: opts.out, packsDir: overrides.packsDir ?? process.env.AIRLOCK_PACKS_DIR ?? DEFAULT_PACKS,
       kitDir: kit.dir, kitSha: kit.sha, judgeModel: opts.judgeModel, parallelCases: opts.parallel,
+      effort: opts.effort, combine: opts.combine, ...(opts.sweepModel === undefined ? {} : { sweepModel: opts.sweepModel }),
       ...(opts.runId === undefined ? {} : { runId: opts.runId }),
     }, deps, progress(io));
   } catch (err) {
     io.err(clean(messageOf(err)));
-    return 1;
+    return err instanceof EarlierRunFolderError ? 2 : 1;
   }
 
   const unfinished = summary.incompleteCases;
@@ -152,18 +177,21 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
     const n = unfinished.length;
     io.err(`${n} ${n === 1 ? 'case' : 'cases'} did not finish: ${clean(unfinished.join(', '))}. The report lists ${n === 1 ? 'it' : 'them'}.`);
   }
-  if (summary.stopped) {
+  if (summary.stopped?.reason === 'usage-limit') {
     const n = summary.stopped.notStarted.length;
     io.err(
       `Claude's usage limit was reached during ${clean(summary.stopped.caseId)}. ` +
         `The run stopped there; ${n} ${n === 1 ? 'case was' : 'cases were'} not started. Run the same command again later to continue.`,
     );
   }
+  const stopped = summary.stopped?.reason === 'exit-signal';
+  if (stopped) {
+    const n = unfinished.length;
+    io.err(`Stopped. ${n} ${n === 1 ? 'case was' : 'cases were'} not finished. Run the same command again to continue.`);
+  }
   io.out(clean(join(opts.out, summary.runId, 'report.md')));
-  const covered = coverage(summary, all);
-  io.out(`Half of the known problems in the top list: ${halfInTopWord(summary.meets.halfInTop).toLowerCase()}${covered === null ? '' : `: ${clean(covered)}.`}`);
-  io.out(`Clean pull requests stay clean: ${word(summary.meets.cleanControls)}`);
-  return 0;
+  for (const line of closingLines(summary, all)) io.out(line);
+  return stopped ? EXIT_STOPPED : 0;
 }
 
 async function reportCommand(args: string[], io: Io, overrides: ReplayCliOverrides): Promise<number> {
@@ -179,6 +207,7 @@ async function reportCommand(args: string[], io: Io, overrides: ReplayCliOverrid
     const cases = overrides.cases ?? await loadCases();
     const { summary, details } = await loadRun(runDir, cases);
     io.out(clean(await saveRunReport(runDir, summary, cases, details)));
+    for (const line of closingLines(summary, cases)) io.out(line);
     return 0;
   } catch (err) {
     io.err(clean(messageOf(err)));
@@ -186,7 +215,10 @@ async function reportCommand(args: string[], io: Io, overrides: ReplayCliOverrid
   }
 }
 
-/** The airlock-replay command. Returns the exit code: 0 when the run finished, 2 for a usage error, 1 otherwise. */
+/**
+ * The airlock-replay command. Returns the exit code: 0 when the run finished, 130 when Ctrl-C stopped it, 2 for a
+ * usage error or a run folder made by an earlier version, 1 otherwise.
+ */
 export async function main(argv: string[], io: Io, overrides: ReplayCliOverrides = {}): Promise<number> {
   const [command, ...rest] = argv;
   try {

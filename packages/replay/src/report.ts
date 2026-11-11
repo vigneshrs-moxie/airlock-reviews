@@ -45,10 +45,13 @@ function table(header: string[], rows: string[][]): string[] {
   return [line(header), line(header.map(() => '---')), ...rows.map(line)];
 }
 
-/** A stage's name for a reader: `merge` in words, the others as they are. */
+/** A stage named as one that failed or did not finish: `merge` in words, the others as they are. */
 export function stageWords(stage: string): string {
-  return stage === 'merge' ? 'merged into another finding' : stage;
+  return stage === 'merge' ? 'merging duplicates' : stage;
 }
+
+/** What the merge stage did to a finding it dropped. */
+const MERGED = 'merged into another finding';
 
 /** Plain words for what a stage did to an item it dropped. */
 function droppedWords(stage: string | undefined): string {
@@ -62,7 +65,7 @@ function droppedWords(stage: string | undefined): string {
     case 'select':
       return 'left out of the top five and not shown';
     case 'merge':
-      return stageWords('merge');
+      return MERGED;
     default:
       return 'dropped';
   }
@@ -111,7 +114,7 @@ function whereLost(m: Match | undefined, doc: ReviewDocument): string {
         case 'challenge':
           return `It was found, then dropped by the challenge.${reason}`;
         case 'merge':
-          return `It was found, then ${stageWords('merge')}.${reason}`;
+          return `It was found, then ${MERGED}.${reason}`;
         case 'anchor':
           return 'It was found, then dropped because the quoted code was not in the file.';
         case 'schema':
@@ -167,29 +170,42 @@ const NOT_JUDGED = 'Not judged: this review did not finish; see Incomplete revie
 const notJudged = (s: CaseScore): boolean =>
   s.verdict === 'incomplete' && s.raised + Object.values(s.lostAt).reduce((n, x) => n + x, 0) < s.known;
 
-/** The answer to the first test as a word: Yes, No, Yes so far, No so far or Not tested. */
+/** The answer to the first test as a word: Yes, No, Yes so far, No so far, Not tested or Not comparable. */
 export function halfInTopWord(half: RunSummary['meets']['halfInTop']): string {
-  if (half === true) return 'Yes';
-  if (half === false) return 'No';
-  return half === 'not tested' ? 'Not tested' : half === 'yes so far' ? 'Yes so far' : 'No so far';
+  switch (half) {
+    case true: return 'Yes';
+    case false: return 'No';
+    case 'yes so far': return 'Yes so far';
+    case 'no so far': return 'No so far';
+    case 'not tested': return 'Not tested';
+    case 'not comparable': return 'Not comparable';
+  }
 }
 
 /**
- * For an answer that holds only so far: how much of the dataset the run covers and which positive pull requests it did
- * not run, e.g. "this run covers 10 of the dataset's 26 known problems; 3 pull requests were not run (#100, #126, #171)".
- * Null when the answer is final or the test was not run. `cases` are looked up for pull request numbers.
+ * For an answer that holds only so far: how much of the dataset the run covers, which positive pull requests it did
+ * not run and which in the run did not finish, e.g. "this run covers 10 of the dataset's 26 known problems; 3 pull
+ * requests were not run (#100, #126, #171); 1 did not finish (#146)". Null when the answer is final or the test was not
+ * run. `cases` are looked up for pull request numbers and kinds.
  */
 export function coverage(summary: RunSummary, cases: ReplayCase[]): string | null {
   const half = summary.meets.halfInTop;
   if (half !== 'yes so far' && half !== 'no so far') return null;
+  const caseById = new Map(cases.map((c) => [c.id, c]));
+  /** "#100, #126" in pull request order, or the case ids when a number is not known. */
+  const numbered = (ids: string[]): string => {
+    const numbers = ids.map((id) => caseById.get(id)?.pr ?? null);
+    return (numbers.every((n) => n !== null) ? [...numbers].sort((a, b) => a - b).map((n) => `#${n}`) : ids).join(', ');
+  };
   let text = `this run covers ${summary.knownTotal} of the dataset's ${summary.datasetKnownTotal} known problems`;
   const notRun = summary.positivesNotRun;
   if (notRun.length > 0) {
-    const caseById = new Map(cases.map((c) => [c.id, c]));
-    const numbers = notRun.map((id) => caseById.get(id)?.pr ?? null);
-    const names = numbers.every((n) => n !== null) ? [...numbers].sort((a, b) => a - b).map((n) => `#${n}`) : notRun;
-    text += `; ${notRun.length} ${plural(notRun.length, 'pull request was', 'pull requests were')} not run (${names.join(', ')})`;
+    text += `; ${notRun.length} ${plural(notRun.length, 'pull request was', 'pull requests were')} not run (${numbered(notRun)})`;
   }
+  const unfinished = summary.cases
+    .filter((s) => (caseById.get(s.caseId)?.kind ?? s.kind) === 'positive' && s.verdict === 'incomplete')
+    .map((s) => s.caseId);
+  if (unfinished.length > 0) text += `; ${unfinished.length} did not finish (${numbered(unfinished)})`;
   return text;
 }
 
@@ -228,7 +244,7 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
   if (half === 'not tested') {
     first += 'Not tested in this run: there were no pull requests with known problems.';
   } else {
-    const covered = coverage(summary, cases);
+    const covered = half === 'not comparable' ? 'see How to read this' : coverage(summary, cases);
     first += `${summary.inTopTotal} of ${summary.knownTotal} were (${percent(summary.recallTop)}). ${halfInTopWord(half)}${covered === null ? '' : `: ${md(covered)}`}.`;
     const failed = unfinished(positives);
     if (failed.length > 0) {
@@ -364,7 +380,11 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
     ],
   ), '');
   const timeNotes: string[] = [];
-  if (summary.wallClock !== null) timeNotes.push("The total is the time from the first case's start to the last case's end, not the sum of the cases.");
+  if (!summary.totals.msSummed) {
+    timeNotes.push(summary.spans.length > 1
+      ? `Total time is the time the replay was running, over ${summary.spans.length} runs of the command.`
+      : "The total is the time from the first case's start to the last case's end, not the sum of the cases.");
+  }
   if (summary.totals.msSummed || summary.cases.some((s) => s.msSummed)) {
     timeNotes.push('A time marked about adds up steps that can run side by side, so it can be more than the time that passed.');
   }
@@ -372,8 +392,14 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
 
   out.push('## How to read this', '');
   out.push(
-    'When a pull request was replayed, the rules written from that pull request were withheld, so the review could not simply remember the answer. ' +
-      'Each pull request was reviewed with its title and description as they stood when the senior reviewer reviewed it, not as they read today. ' +
+    (summary.madeByEarlierVersion
+      ? `The run folder ${md(summary.runId)} was made by an earlier version of the replay: its reviews read today's descriptions ` +
+        'and its judge saw where each finding was placed, so these numbers cannot be compared with a run made today. '
+      : '') +
+      'When a pull request was replayed, the rules written from that pull request were withheld, so the review could not simply remember the answer. ' +
+      (summary.madeByEarlierVersion
+        ? ''
+        : 'Each pull request was reviewed with its title and description as they stood when the senior reviewer reviewed it, not as they read today. ') +
       "The team's rule sheet was written after these reviews and could not be withheld, so these numbers may be better than real use. " +
       'The true test is the next pull requests the senior reviewer comments on.',
   );

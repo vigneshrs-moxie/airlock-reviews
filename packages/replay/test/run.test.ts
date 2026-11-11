@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFakeRunner, withRetry } from '@airlock/engine';
-import type { AgentRequest, ReviewRequest } from '@airlock/engine';
+import type { AgentRequest, EngineDeps, ReviewRequest } from '@airlock/engine';
 import { ReviewDocumentSchema } from '@airlock/shared';
 import type { ReviewDocument } from '@airlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -49,11 +49,11 @@ function reviewFor(req: ReviewRequest): ReviewDocument {
 
 type FakeReview = NonNullable<ReplayDeps['review']> & { requests: ReviewRequest[] };
 
-function fakeReview(behaviour: (req: ReviewRequest) => Promise<ReviewDocument> | ReviewDocument = reviewFor): FakeReview {
+function fakeReview(behaviour: (req: ReviewRequest, engine: EngineDeps) => Promise<ReviewDocument> | ReviewDocument = reviewFor): FakeReview {
   const requests: ReviewRequest[] = [];
-  const review = async (req: ReviewRequest): Promise<ReviewDocument> => {
+  const review = async (req: ReviewRequest, engine: EngineDeps): Promise<ReviewDocument> => {
     requests.push(req);
-    return behaviour(req);
+    return behaviour(req, engine);
   };
   return Object.assign(review, { requests });
 }
@@ -88,6 +88,16 @@ const caseDir = (caseId: string, runId = 'run-a'): string => join(outDir, runId,
 const readJson = async (path: string): Promise<unknown> => JSON.parse(await readFile(path, 'utf8'));
 const exists = async (path: string): Promise<boolean> => readFile(path).then(() => true, () => false);
 
+/** Every file under `dir` with its bytes, and every folder, by path relative to `dir`. */
+async function snapshot(dir: string): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const path of (await readdir(dir, { recursive: true })).sort()) {
+    const full = join(dir, path);
+    out[path] = (await stat(full)).isDirectory() ? '(folder)' : (await readFile(full)).toString('base64');
+  }
+  return out;
+}
+
 function recorder(): { events: CaseEvent[]; onCase: (e: CaseEvent) => void } {
   const events: CaseEvent[] = [];
   return { events, onCase: (e) => events.push(e) };
@@ -101,14 +111,79 @@ describe('runReplay', () => {
     cases().forEach((c, i) => {
       const req = review.requests[i]!;
       expect(req).toStrictEqual({
-        repo: c.repo, number: c.pr, depth: 'deep',
-        models: { main: 'claude-fable-5-2', challenger: 'claude-fable-5-2', sweep: 'claude-fable-5-2' },
+        repo: c.repo, number: c.pr, depth: 'deep', combine: 'never',
+        models: { main: 'claude-fable-5-2', challenger: 'claude-fable-5-2', sweep: 'claude-fable-5-2', effort: 'high' },
         explicit: { baseSha: c.baseSha, headSha: c.headSha },
         prText: { title: c.titleAtReview, body: c.bodyAtReview },
         holdout: { pr: c.pr, reviewedAt: c.reviewedAt },
         packsDir: '/packs/here', kitDir: '/kit/here', kitSha: KIT_SHA,
       });
       expect('packIds' in req).toBe(false);
+    });
+  });
+
+  it('passes the effort, the sweep model and the combine setting to every review and records them in run.json', async () => {
+    const review = fakeReview();
+    await runReplay(options({ effort: 'medium', sweepModel: 'claude-sonnet-5-5', combine: 'no-read-tier' }), deps(review));
+    for (const req of review.requests) {
+      expect(req.models).toEqual({ main: MODEL, challenger: MODEL, sweep: 'claude-sonnet-5-5', effort: 'medium' });
+      expect(req.combine).toBe('no-read-tier');
+    }
+    expect(JSON.parse(await readFile(join(outDir, 'run-a', 'run.json'), 'utf8'))).toMatchObject({
+      model: MODEL, effort: 'medium', sweepModel: 'claude-sonnet-5-5', combine: 'no-read-tier',
+    });
+  });
+
+  describe('a run folder made by an earlier version of the replay', () => {
+    const REFUSED = 'The run folder run-a was made by an earlier version of the replay: its reviews read today\'s descriptions ' +
+      'and its judge saw where each finding was placed. Start a new run with another --run id.';
+
+    /** A run folder as an earlier version left it: run.json without `format` (or with `format`), effort, sweep model or combine. */
+    async function earlierFolder(format?: number): Promise<void> {
+      await runReplay(options(), deps(fakeReview()));
+      const path = join(outDir, 'run-a', 'run.json');
+      const { format: _f, effort: _e, sweepModel: _s, combine: _c, ...older } = await readJson(path) as Record<string, unknown>;
+      await writeFile(path, JSON.stringify(format === undefined ? older : { ...older, format }));
+      // A case with work left to do, so a resume would have touched it.
+      await rm(join(caseDir('pr2'), 'matches.json'));
+    }
+
+    it('a new run writes format 2 in run.json and is resumed', async () => {
+      await runReplay(options(), deps(fakeReview()));
+      expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ format: 2 });
+      await rm(join(caseDir('pr2'), 'matches.json'));
+      const runner = createFakeRunner(judgeAnswer);
+      const resumed = await runReplay(options(), deps(fakeReview(), runner));
+      expect(runner.calls).toHaveLength(1);
+      expect(resumed.incompleteCases).toEqual([]);
+      expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ format: 2 });
+    });
+
+    for (const format of [undefined, 1]) {
+      it(`is refused for a run when run.json has ${format === undefined ? 'no format' : `format ${format}`}, and nothing in it changes`, async () => {
+        await earlierFolder(format);
+        const before = await snapshot(join(outDir, 'run-a'));
+        const review = fakeReview();
+        const runner = createFakeRunner(judgeAnswer);
+        const { events, onCase } = recorder();
+        await expect(runReplay(options(), deps(review, runner), onCase)).rejects.toThrow(REFUSED);
+        expect(review.requests).toHaveLength(0);
+        expect(runner.calls).toHaveLength(0);
+        expect(events).toEqual([]);
+        expect(await snapshot(join(outDir, 'run-a'))).toEqual(before);
+      });
+    }
+
+    it('is read by loadRun with the old defaults, and its report says it is not comparable', async () => {
+      await earlierFolder();
+      const { summary, details } = await loadRun(join(outDir, 'run-a'), cases());
+      expect(summary.madeByEarlierVersion).toBe(true);
+      expect(summary.meets.halfInTop).toBe('not comparable');
+      expect(details.pr1!.doc.verdict.label).toBe('approve');
+      const report = renderReport(summary, cases(), details);
+      const first = report.split('\n').find((l) => l.startsWith('1. '))!;
+      expect(first).toContain(' were (33%). Not comparable: see How to read this. ');
+      expect(report).toContain('The run folder run-a was made by an earlier version of the replay');
     });
   });
 
@@ -152,9 +227,10 @@ describe('runReplay', () => {
       c.id, { doc: ReviewDocumentSchema.parse(await readJson(join(runDir, c.id, 'review.json'))), matches: await readJson(join(runDir, c.id, 'matches.json')) },
     ])))));
     expect(await readJson(join(runDir, 'run.json'))).toEqual({
-      runId, model: MODEL, depth: 'standard', judgeModel: 'claude-opus-5-5', kitSha: KIT_SHA,
+      format: 2, runId, model: MODEL, depth: 'standard', judgeModel: 'claude-opus-5-5', kitSha: KIT_SHA,
+      effort: 'high', sweepModel: MODEL, combine: 'never',
       caseIds: ['pr1', 'pr2', 'pr3'], startedAt: NOW.toISOString(),
-      casesStartedAt: NOW.toISOString(), casesFinishedAt: NOW.toISOString(),
+      spans: [{ startedAt: NOW.toISOString(), finishedAt: NOW.toISOString() }],
     });
   });
 
@@ -254,6 +330,9 @@ describe('runReplay', () => {
     await expect(runReplay(options({ depth: 'quick' }), deps(review))).rejects.toThrow(/depth/);
     await expect(runReplay(options({ kitSha: 'd'.repeat(40) }), deps(review))).rejects.toThrow(/kit/);
     await expect(runReplay(options({ judgeModel: 'claude-fable-5-2' }), deps(review))).rejects.toThrow(/judge model/);
+    await expect(runReplay(options({ effort: 'medium' }), deps(review))).rejects.toThrow(/effort high, not medium/);
+    await expect(runReplay(options({ sweepModel: 'claude-sonnet-5-5' }), deps(review))).rejects.toThrow(/sweep model/);
+    await expect(runReplay(options({ combine: 'no-read-tier' }), deps(review))).rejects.toThrow(/combine never, not no-read-tier/);
     expect(review.requests).toHaveLength(0);
 
     // A folder with case folders but no run.json is refused too.
@@ -360,12 +439,14 @@ describe('runReplay', () => {
     expect(review.requests).toHaveLength(0);
     expect(runner.calls).toHaveLength(1); // pr2 is judged again, and only that
     expect(new Set(events.map((e) => e.caseId))).toEqual(new Set(['pr2']));
-    expect(second).toEqual(first);
-    expect(await readJson(join(outDir, 'run-a', 'summary.json'))).toEqual(first);
+    // The same summary, apart from the second call's own span.
+    expect(second.spans).toHaveLength(2);
+    expect({ ...second, spans: first.spans }).toEqual(first);
+    expect(await readJson(join(outDir, 'run-a', 'summary.json'))).toEqual(second);
     expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ caseIds: ['pr1', 'pr2', 'pr3'] });
     const loaded = await loadRun(join(outDir, 'run-a'), cases());
     expect(await readFile(join(outDir, 'run-a', 'report.md'), 'utf8')).toBe(renderReport(loaded.summary, cases(), loaded.details));
-    expect(loaded.summary).toEqual(first);
+    expect(loaded.summary).toEqual(second);
   });
 
   it('a resume that adds a case runs it and keeps the earlier ones, in dataset order', async () => {
@@ -674,6 +755,96 @@ describe('runReplay', () => {
     });
   });
 
+  describe('an exit signal stops the run', () => {
+    const four = [1, 2, 3, 4].map((n) => replayCase({
+      id: `pr${n}`, pr: n, baseSha: String(n).repeat(40), headSha: 'e'.repeat(40), known: [problem({ id: `K${n}` })],
+    }));
+    const answerAll = (req: AgentRequest<unknown>) => ({
+      matches: four.map((c) => c.known[0]!.id).filter((id) => isFor(req, id)).map((knownId) => ({ knownId, items: [{ itemId: 'f1', partial: false, reason: 'Same.' }], reason: 'Same.' })),
+    });
+    /** Waits for the review's signal, then rejects as the engine does when it is stopped. */
+    const untilStopped = (engine: EngineDeps): Promise<never> => new Promise((_, reject) => {
+      engine.signal!.addEventListener('abort', () => reject(new Error('The review was stopped.')), { once: true });
+    });
+    /** A review of pr2 that stops the run while it is in flight; the other cases review as usual. */
+    const stoppingAtPr2 = (controller: AbortController): FakeReview => fakeReview((req, engine) => {
+      if (req.number !== 2) return reviewFor(req);
+      setTimeout(() => controller.abort(), 5);
+      return untilStopped(engine);
+    });
+
+    it('an abort during the second of four cases starts no other case, judges nothing after it, and a second run picks up exactly the unfinished cases', async () => {
+      const controller = new AbortController();
+      const review = stoppingAtPr2(controller);
+      const runner = createFakeRunner(answerAll);
+      const { events, onCase } = recorder();
+      const summary = await runReplay(options({ cases: four, parallelCases: 1 }), { ...deps(review, runner), signal: controller.signal }, onCase);
+
+      expect(review.requests.map((r) => r.number)).toEqual([1, 2]);
+      expect(runner.calls).toHaveLength(1);
+      expect(runner.calls.filter((r) => isFor(r, 'K2'))).toHaveLength(0);
+      // pr2 had no folder before this call, and has none after it: no error.txt, nothing else.
+      for (const id of ['pr2', 'pr3', 'pr4']) await expect(stat(caseDir(id))).rejects.toThrow(/ENOENT/);
+      expect(events.filter((e) => e.caseId === 'pr2').map((e) => e.status)).toEqual(['start', 'stopped']);
+      expect(events.some((e) => e.caseId === 'pr3' || e.caseId === 'pr4')).toBe(false);
+      expect(summary.incompleteCases).toEqual(['pr2', 'pr3', 'pr4']);
+      expect(summary.stopped).toEqual({ reason: 'exit-signal' });
+      expect(await readJson(join(outDir, 'run-a', 'summary.json'))).toEqual(summary);
+      expect(await exists(join(outDir, 'run-a', 'report.md'))).toBe(true);
+
+      const healthy = fakeReview();
+      const again = createFakeRunner(answerAll);
+      const second = await runReplay(options({ cases: four, parallelCases: 1 }), deps(healthy, again));
+      expect(healthy.requests.map((r) => r.number)).toEqual([2, 3, 4]);
+      expect(again.calls).toHaveLength(3);
+      expect(second.incompleteCases).toEqual([]);
+      expect(second.stopped).toBeUndefined();
+    });
+
+    it('a stopped case\'s folder is left as it was before the call', async () => {
+      await runReplay(options({ cases: four, parallelCases: 1 }), deps(fakeReview((req) => {
+        if (req.number === 2) throw new Error('clone failed');
+        return reviewFor(req);
+      }), createFakeRunner(answerAll)));
+      const before = await snapshot(caseDir('pr2'));
+      expect(Object.keys(before)).toEqual(['error.txt']);
+
+      const controller = new AbortController();
+      await runReplay(options({ cases: four, parallelCases: 1 }), { ...deps(stoppingAtPr2(controller), createFakeRunner(answerAll)), signal: controller.signal });
+      expect(await snapshot(caseDir('pr2'))).toEqual(before);
+    });
+
+    it('a review that finishes after the stop is saved but not judged, and no error.txt is written', async () => {
+      const controller = new AbortController();
+      const review = fakeReview((req) => {
+        if (req.number === 1) controller.abort();
+        return reviewFor(req);
+      });
+      const runner = createFakeRunner(answerAll);
+      const summary = await runReplay(options({ cases: four, parallelCases: 1 }), { ...deps(review, runner), signal: controller.signal });
+      expect(review.requests.map((r) => r.number)).toEqual([1]);
+      expect(runner.calls).toHaveLength(0);
+      expect((await readdir(caseDir('pr1'))).sort()).toEqual(['review.json']);
+      expect(summary.incompleteCases).toEqual(['pr1', 'pr2', 'pr3', 'pr4']);
+      expect(summary.stopped).toEqual({ reason: 'exit-signal' });
+
+      const again = createFakeRunner(answerAll);
+      const resumed = fakeReview();
+      await runReplay(options({ cases: four, parallelCases: 1 }), deps(resumed, again));
+      expect(resumed.requests.map((r) => r.number)).toEqual([2, 3, 4]);
+      expect(again.calls).toHaveLength(4);
+    });
+
+    it('every judge request carries the run\'s stop signal', async () => {
+      const controller = new AbortController();
+      const runner = createFakeRunner(answerAll);
+      const summary = await runReplay(options({ cases: four }), { ...deps(fakeReview(), runner), signal: controller.signal });
+      expect(runner.calls).toHaveLength(4);
+      expect(runner.calls.every((r) => r.signal === controller.signal)).toBe(true);
+      expect(summary.stopped).toBeUndefined();
+    });
+  });
+
   it('the other items the judge named are saved with the matches and read back by loadRun', async () => {
     const runner = createFakeRunner(() => ({
       matches: [{ knownId: 'K1', items: [{ itemId: 'q1', partial: false, reason: 'Asks it.' }, { itemId: 'f1', partial: true, reason: 'Half.' }], reason: 'Both.' }],
@@ -699,30 +870,46 @@ describe('runReplay', () => {
     }));
     const { events, onCase } = recorder();
     await runReplay(options({ cases: [cases()[0]!] }), deps(review), onCase);
-    expect(events.at(-1)!.message).toBe('The review did not finish (merged into another finding).');
+    expect(events.at(-1)!.message).toBe('The review did not finish (merging duplicates).');
   });
 
-  it('the run\'s total time is its wall clock from the first case start to the last case end, kept across a resume', async () => {
+  it('the run\'s total time is the time each call was working on cases, added up across resumes', async () => {
     let t = Date.parse('2026-11-10T09:00:00.000Z');
     const clock = (): Date => new Date(t);
     const review = fakeReview(async (req) => { t += 60_000; return reviewFor(req); });
     const first = await runReplay(options({ parallelCases: 3 }), { ...deps(review), now: clock });
-    // The clock moves a minute in each review: the total is the clock from the first case start to the last case end.
-    expect(first.wallClock).toEqual({ startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:03:00.000Z' });
+    // The clock moves a minute in each review: one call gives its own duration, from its first case start to its last case end.
+    const span1 = { startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:03:00.000Z' };
+    expect(first.spans).toEqual([span1]);
     expect(first.totals).toMatchObject({ ms: 180_000, msSummed: false });
-    expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({
-      casesStartedAt: '2026-11-10T09:00:00.000Z', casesFinishedAt: '2026-11-10T09:03:00.000Z',
-    });
+    expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ spans: [span1] });
 
-    // A resume that works on one case later moves the end, not the start; a call that only skips cases moves neither.
+    // A resume an hour later that reviews one case adds its own span: the hour between is not counted.
     await rm(join(caseDir('pr2'), 'matches.json'));
-    t = Date.parse('2026-11-10T10:00:00.000Z');
-    const second = await runReplay(options(), { ...deps(fakeReview()), now: clock });
-    expect(second.wallClock).toEqual({ startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T10:00:00.000Z' });
+    await rm(join(caseDir('pr2'), 'review.json'));
+    t = Date.parse('2026-11-10T10:03:00.000Z');
+    const second = await runReplay(options(), { ...deps(fakeReview(async (req) => { t += 60_000; return reviewFor(req); })), now: clock });
+    const span2 = { startedAt: '2026-11-10T10:03:00.000Z', finishedAt: '2026-11-10T10:04:00.000Z' };
+    expect(second.spans).toEqual([span1, span2]);
+    expect(second.totals).toMatchObject({ ms: 240_000, msSummed: false });
+    expect(await readFile(join(outDir, 'run-a', 'report.md'), 'utf8')).toContain('Total time is the time the replay was running, over 2 runs of the command.');
+
+    // A call that only skips cases adds nothing.
     t = Date.parse('2026-11-11T10:00:00.000Z');
     const third = await runReplay(options(), { ...deps(fakeReview()), now: clock });
-    expect(third.wallClock).toEqual(second.wallClock);
+    expect(third.spans).toEqual(second.spans);
     expect((await loadRun(join(outDir, 'run-a'), cases())).summary).toEqual(third);
+  });
+
+  it('a run folder without spans gives the summed case times, marked about', async () => {
+    await runReplay(options(), deps(fakeReview()));
+    const path = join(outDir, 'run-a', 'run.json');
+    const { spans: _s, ...without } = await readJson(path) as Record<string, unknown>;
+    await writeFile(path, JSON.stringify({ ...without, casesStartedAt: '2026-11-10T09:00:00.000Z', casesFinishedAt: '2026-11-11T09:00:00.000Z' }));
+    const { summary, details } = await loadRun(join(outDir, 'run-a'), cases());
+    expect(summary.spans).toEqual([]);
+    expect(summary.totals).toMatchObject({ ms: 3_000, msSummed: true });
+    expect(renderReport(summary, cases(), details)).toMatch(/\| Total \| about 3 s \|/);
   });
 
   it('the judge runs in a fresh, empty folder made for the run and removed at the end', async () => {

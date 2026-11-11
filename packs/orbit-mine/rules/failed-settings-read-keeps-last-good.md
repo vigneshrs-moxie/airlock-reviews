@@ -1,7 +1,7 @@
 ---
 id: failed-settings-read-keeps-last-good
 title: A failed settings read keeps the last good value
-paths: ["app/src/lib/**/*.ts", "app/src/app/api/**/route.ts"]
+paths: ["app/src/lib/**/*.ts", "app/src/app/api/{**/cron,cron/**,*/{warm,sync,process,distribute},*/{sync,process}-*,*/*-{sweep,reminders}}/route.ts"]
 severityFloor: fix
 sourcePrs: [193, 194]
 origin: "past_review_comment_mining.md section 5 rule 35 (secondary evidence, PR #194 review fixes)"

@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join, relative } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { loadTemplate } from '../../src/agent/prompt.js';
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '@anthropic-ai/claude-agent-sdk';
+import { loadTemplate, PROMPT_BOUNDARY } from '../../src/agent/prompt.js';
 import type { AgentRequest } from '../../src/agent/runner.js';
 import { createSdkRunner, findClaude, roleLimits } from '../../src/agent/sdk-runner.js';
 import type { SdkRunnerDeps } from '../../src/agent/sdk-runner.js';
@@ -82,12 +83,22 @@ describe('createSdkRunner options', () => {
     expect('additionalDirectories' in (await optionsFor(req({ extraDirs: [] }))).options).toBe(false);
   });
 
-  it('puts the shared instructions before the request instructions and sends the material as the prompt', async () => {
+  it('puts the shared instructions first, then the cache boundary, then the request instructions, and sends the material as the prompt', async () => {
     const shared = await loadTemplate('_shared');
     const call = await optionsFor();
-    expect(call.options.systemPrompt).toBe(`${shared}\n\nList the files.`);
+    expect(call.options.systemPrompt).toEqual([shared.trimEnd(), SYSTEM_PROMPT_DYNAMIC_BOUNDARY, 'List the files.']);
     expect(call.prompt).toBe('<material label="x">\nstuff\n</material>');
     expect((await optionsFor(req({ material: '' }))).prompt).toBe('Begin.');
+  });
+
+  it('puts the unchanging part of the request instructions with the shared ones, before the boundary, and the stage\'s own after it', async () => {
+    const shared = await loadTemplate('_shared');
+    const { options } = await optionsFor(req({ instructions: `# Standards\n\nUse cents.\n\n${PROMPT_BOUNDARY}\n\nList the files.` }));
+    expect(options.systemPrompt).toEqual([`${shared.trimEnd()}\n\n# Standards\n\nUse cents.`, SYSTEM_PROMPT_DYNAMIC_BOUNDARY, 'List the files.']);
+  });
+
+  it('uses the boundary constant of the installed SDK', () => {
+    expect(PROMPT_BOUNDARY).toBe(SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
   });
 
   it('sends the schema as a JSON schema output format', async () => {
@@ -99,7 +110,7 @@ describe('createSdkRunner options', () => {
     const custom = z.custom<{ files: string[] }>(() => true);
     const { options } = await optionsFor(req({ schema: custom }));
     expect('outputFormat' in options).toBe(false);
-    expect(options.systemPrompt).toMatch(/List the files\.\n\nReply with one JSON object and nothing else\.$/);
+    expect((options.systemPrompt as string[]).at(-1)).toBe('List the files.\n\nReply with one JSON object and nothing else.');
   });
 
   it('sends the model, effort and turn limit', async () => {

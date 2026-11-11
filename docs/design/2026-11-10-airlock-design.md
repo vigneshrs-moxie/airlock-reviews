@@ -120,7 +120,7 @@ A pack is a folder: a short manifest, standard files in Markdown, rule files, co
 
 ### 6.1 The three packs
 
-- **Raj's standard.** Read from `Moxie-Pest-Control-Phoenix/moxie-review-kit` through `gh` at the start of each review and cached by commit. Files used: `profile.md`, `orbit.md`, `calibration.md`, and the four lens descriptions in `SKILL.md`. Never edited by Airlock. At sync, the engine checks that each helper `orbit.md` names still exists in `moxie/main`, as that file asks, and tells the lenses which ones are gone.
+- **Raj's standard.** Read from `Moxie-Pest-Control-Phoenix/moxie-review-kit` through `gh` at the start of each review and cached by commit. Files used: `profile.md`, `orbit.md` and `calibration.md`. The four lens briefs in `packs/raj-standard/lenses/` are Airlock's own, written for these lenses; the kit's `SKILL.md` is not fetched. Never edited by Airlock. At sync, the engine checks that each helper `orbit.md` names still exists in `moxie/main`, as that file asks, and tells the lenses which ones are gone.
 - **Vignesh's pack.** Lives in this repository under `packs/orbit-mine/`. It starts with the sibling check, the rules mined from Raj's past comments, and the rules from the Orbit inventory that are not already in Raj's kit. Each rule has an id, the paths it applies to, a severity floor, the rule in one or two sentences, and where it came from.
 - **Generic.** Built in. Lenses for correctness, security and permissions, and data and error handling. It reads the repository's own `CLAUDE.md`, `AGENTS.md` and similar files and treats them as rules to check against.
 

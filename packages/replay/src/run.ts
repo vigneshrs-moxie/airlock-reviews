@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { limiter, runReview } from '@airlock/engine';
@@ -37,7 +37,18 @@ export interface ReplayOptions {
   judgeModel?: string;
   /** Default 1. */
   parallelCases?: number;
+  /** How hard every model of every review works. Default 'high'. */
+  effort?: ReplayEffort;
+  /** The rule sweep's model. Default: `model`. */
+  sweepModel?: string;
+  /** Whether a group's lenses may share one request (see ReviewRequest.combine). Default 'never'. */
+  combine?: ReplayCombine;
 }
+
+export const REPLAY_EFFORTS = ['low', 'medium', 'high'] as const;
+export type ReplayEffort = (typeof REPLAY_EFFORTS)[number];
+export const REPLAY_COMBINE = ['never', 'no-read-tier'] as const;
+export type ReplayCombine = (typeof REPLAY_COMBINE)[number];
 
 /**
  * The engine's dependencies; tests pass a fake `review`. `runner` must already retry a failed request (as
@@ -45,10 +56,10 @@ export interface ReplayOptions {
  */
 export interface ReplayDeps extends EngineDeps { review?: typeof runReview }
 
-/** One step of one case. The case's last event (`skipped`, `judged` or `failed`) carries its score. */
+/** One step of one case. The case's last event (`skipped`, `judged`, `failed` or `stopped`) carries its score. */
 export type CaseEvent = {
   caseId: string;
-  status: 'start' | 'skipped' | 'reviewed' | 'judged' | 'failed';
+  status: 'start' | 'skipped' | 'reviewed' | 'judged' | 'failed' | 'stopped';
   message?: string;
   score?: CaseScore;
 };
@@ -91,17 +102,34 @@ const MatchesSchema = z.array(z.object({
   })).optional(),
 }));
 
+/**
+ * The version of the run folder's rules. 2: each review reads the description as it stood at review time, and the judge
+ * does not see where an item ended up. A folder of an earlier version is never continued, only reported.
+ */
+const RUN_FORMAT = 2;
+
+/** A run folder made by an earlier version of the replay was given to `run`: it can be reported, never continued. */
+export class EarlierRunFolderError extends Error {}
+
 const RunFileSchema = z.object({
+  /** Absent in a run.json written before format 2. */
+  format: z.number().int().optional(),
   runId: z.string(),
   model: z.string(),
   depth: DepthSchema,
   judgeModel: z.string(),
   kitSha: z.string(),
+  /**
+   * Absent in a run.json written before they were recorded, which is always before format 2: `report` then reads the
+   * effort as `high` and the sweep model as the main model, as those runs used.
+   */
+  effort: z.enum(REPLAY_EFFORTS).optional(),
+  sweepModel: z.string().optional(),
+  combine: z.enum(REPLAY_COMBINE).optional(),
   caseIds: z.array(z.string()),
   startedAt: z.string(),
-  /** When the first case the run worked on started, and when the last one ended, over every call. */
-  casesStartedAt: z.string().optional(),
-  casesFinishedAt: z.string().optional(),
+  /** One per call that started at least one case, from its first case start to its last case end. */
+  spans: z.array(z.object({ startedAt: z.string(), finishedAt: z.string() })).optional(),
 });
 type RunFile = z.infer<typeof RunFileSchema>;
 
@@ -212,7 +240,7 @@ async function readOutcome(dir: string, c: ReplayCase): Promise<Outcome> {
  * A valid document for a case whose review did not finish: verdict `incomplete`, no findings and one intake stage error.
  * Never saved; the run and `loadRun` both build it from the case and error.txt.
  */
-function notFinishedDocument(c: ReplayCase, run: { model: string; depth: Depth; createdAt: string }, message: string): ReviewDocument {
+function notFinishedDocument(c: ReplayCase, run: RunInfo, message: string): ReviewDocument {
   return {
     schemaVersion: 1,
     id: `not-finished-${c.id}`,
@@ -225,7 +253,7 @@ function notFinishedDocument(c: ReplayCase, run: { model: string; depth: Depth; 
     range: { baseSha: c.baseSha, headSha: c.headSha, kind: 'explicit' },
     depth: run.depth,
     packs: [],
-    models: { main: run.model, challenger: run.model, sweep: run.model, effort: 'high' },
+    models: { main: run.model, challenger: run.model, sweep: run.sweepModel, effort: run.effort },
     files: [],
     facts: [],
     map: { cohorts: [], standalone: [], links: [] },
@@ -250,7 +278,11 @@ const notJudged = (c: ReplayCase, reason: string): Match[] =>
 const NOT_LOST: CaseScore['lostAt'] = { lenses: 0, schema: 0, anchor: 0, merge: 0, challenge: 0, select: 0 };
 
 type Scored = { score: CaseScore; detail: { doc: ReviewDocument; matches: Match[] } };
-type RunInfo = { model: string; depth: Depth; createdAt: string };
+type RunInfo = { model: string; sweepModel: string; effort: ReplayEffort; depth: Depth; createdAt: string };
+
+/** How a run's cases are scored; a run.json written before effort and sweep model were recorded reads as `high` and the main model (`report` only). */
+const runInfo = (run: RunFile): RunInfo =>
+  ({ model: run.model, sweepModel: run.sweepModel ?? run.model, effort: run.effort ?? 'high', depth: run.depth, createdAt: run.startedAt });
 
 /**
  * The score and report details of one case. A case that is not done is scored `incomplete` with every known problem
@@ -288,7 +320,12 @@ function defaultRunId(now: Date, model: string, depth: Depth): string {
   return `${stamp}-${model}-${depth}`.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100);
 }
 
-const COMPARED = [['model', 'model'], ['depth', 'depth'], ['judgeModel', 'judge model'], ['kitSha', 'kit version']] as const;
+const COMPARED = [
+  ['model', 'model'], ['depth', 'depth'], ['judgeModel', 'judge model'], ['kitSha', 'kit version'],
+  ['effort', 'effort'], ['sweepModel', 'sweep model'], ['combine', 'combine'],
+] as const;
+
+const madeByEarlierVersion = (run: RunFile): boolean => (run.format ?? 1) < RUN_FORMAT;
 
 /** The dataset's cases with these ids, in dataset order; throws for an id the dataset does not have. */
 function inDatasetOrder(ids: Iterable<string>, dataset: ReplayCase[], runDir: string): ReplayCase[] {
@@ -299,8 +336,9 @@ function inDatasetOrder(ids: Iterable<string>, dataset: ReplayCase[], runDir: st
 }
 
 /**
- * Creates the run folder and writes run.json, or checks an existing run.json against this run. Refuses a folder made
- * with another model, depth, judge model or kit version, and a folder with case folders but no run.json. A resumed run
+ * Creates the run folder and writes run.json, or checks an existing run.json against this run. Refuses, before writing
+ * anything, a folder made by an earlier version of the replay, a folder made with another model, depth, judge model,
+ * kit version, effort, sweep model or combine setting, and a folder with case folders but no run.json. A resumed run
  * keeps its start time and its cases: run.json lists the earlier cases and this call's, in dataset order. Without a
  * `dataset`, earlier cases that are not among this call's cannot be scored: they stay in run.json, after the others,
  * and are left out of the cases returned.
@@ -321,6 +359,12 @@ async function openRunFolder(runDir: string, run: RunFile, dataset: ReplayCase[]
     } catch {
       throw new Error(`The run folder ${runDir} has a run.json that cannot be read. Use another run id.`);
     }
+    if (madeByEarlierVersion(previous)) {
+      throw new EarlierRunFolderError(
+        `The run folder ${run.runId} was made by an earlier version of the replay: its reviews read today's descriptions ` +
+          'and its judge saw where each finding was placed. Start a new run with another --run id.',
+      );
+    }
     const prev = previous;
     const differences = COMPARED.filter(([key]) => prev[key] !== run[key]).map(([key, words]) => `${words} ${prev[key]}, not ${run[key]}`);
     if (differences.length > 0) {
@@ -336,16 +380,11 @@ async function openRunFolder(runDir: string, run: RunFile, dataset: ReplayCase[]
   checkCases(cases);
   const merged: RunFile = {
     ...run, caseIds: [...cases.map((c) => c.id), ...unknown], startedAt: previous?.startedAt ?? run.startedAt,
-    ...(previous?.casesStartedAt === undefined ? {} : { casesStartedAt: previous.casesStartedAt }),
-    ...(previous?.casesFinishedAt === undefined ? {} : { casesFinishedAt: previous.casesFinishedAt }),
+    ...(previous?.spans === undefined ? {} : { spans: previous.spans }),
   };
   await writeAtomic(path, json(merged));
   return { run: merged, cases };
 }
-
-/** The run's wall clock from run.json, when it has both ends. */
-const wallClockOf = (run: RunFile): RunSummary['wallClock'] =>
-  run.casesStartedAt !== undefined && run.casesFinishedAt !== undefined ? { startedAt: run.casesStartedAt, finishedAt: run.casesFinishedAt } : null;
 
 /** The earlier or later of two ISO times, either of which may be missing. */
 function earlier(a: string | undefined, b: string | undefined): string | undefined {
@@ -383,7 +422,8 @@ function reviewRequest(c: ReplayCase, opts: ReplayOptions): ReviewRequest {
     repo: c.repo,
     number: c.pr,
     depth: opts.depth,
-    models: { main: opts.model, challenger: opts.model, sweep: opts.model },
+    combine: opts.combine ?? 'never',
+    models: { main: opts.model, challenger: opts.model, sweep: opts.sweepModel ?? opts.model, effort: opts.effort ?? 'high' },
     explicit: { baseSha: c.baseSha, headSha: c.headSha },
     prText: { title: c.titleAtReview, body: c.bodyAtReview },
     holdout: { pr: c.pr, reviewedAt: c.reviewedAt },
@@ -409,11 +449,12 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   const judgeModel = opts.judgeModel ?? DEFAULT_JUDGE_MODEL;
   const runDir = join(opts.outDir, runId);
   const opened = await openRunFolder(runDir, {
-    runId, model: opts.model, depth: opts.depth, judgeModel, kitSha: opts.kitSha,
+    format: RUN_FORMAT, runId, model: opts.model, depth: opts.depth, judgeModel, kitSha: opts.kitSha,
+    effort: opts.effort ?? 'high', sweepModel: opts.sweepModel ?? opts.model, combine: opts.combine ?? 'never',
     caseIds: opts.cases.map((c) => c.id), startedAt: now.toISOString(),
   }, opts.dataset, opts.cases);
   let { run } = opened;
-  const scoring: RunInfo = { model: run.model, depth: run.depth, createdAt: run.startedAt };
+  const scoring = runInfo(run);
 
   const review = deps.review ?? runReview;
   const engineDeps: EngineDeps = { exec: deps.exec, runner: deps.runner, now: deps.now, ...(deps.signal ? { signal: deps.signal } : {}) };
@@ -432,35 +473,45 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   // Set when a review or the judge reaches Claude's usage limit: no case starts after that, so none is spoiled.
   let limitReachedIn: string | null = null;
   const notStarted = new Set<string>();
+  // An exit signal does the same and more: the reviews in flight are stopped through it, and no judge request follows.
+  const exitSignal = (): boolean => deps.signal?.aborted === true;
+  let stoppedBySignal = false;
 
-  // The run's own wall clock: from the first case this call works on to the last one's end.
+  // This call's span: from the first case it works on to the last one's end.
   let firstStart: string | undefined;
   let lastEnd: string | undefined;
   const stamp = (): string => deps.now().toISOString();
 
   /**
    * Works on one case until it is done: reviews it unless a finished review of it is saved, then judges it. A review
-   * that comes back incomplete is saved, in place of the old one, and not judged. Never throws.
+   * that comes back incomplete is saved, in place of the old one, and not judged. A case stopped by an exit signal
+   * keeps its folder as it was before this call, apart from a review that finished. Never throws.
    */
   const processCase = async (c: ReplayCase): Promise<Scored> => {
     const dir = join(runDir, c.id);
     let kept: ReviewDocument | null = null;
     let lead = 'The case folder could not be prepared';
     let started = false;
+    let made = false;
+    /** Leaves the folder as it was (a folder this call made is removed while it is empty) and scores what is there. */
+    const stop = async (): Promise<Scored> => {
+      stoppedBySignal = true;
+      if (made) await rmdir(dir).catch(() => undefined);
+      return finish(c, await readOutcome(dir, c), 'stopped');
+    };
     try {
       const saved = await readOutcome(dir, c);
       if (saved.kind === 'done') return finish(c, saved, 'skipped');
-      if (limitReachedIn !== null) {
+      if (limitReachedIn !== null || exitSignal()) {
         notStarted.add(c.id);
+        if (exitSignal()) stoppedBySignal = true;
         return scoreOutcome(c, saved, scoring);
       }
 
       firstStart = earlier(firstStart, stamp());
       started = true;
       emit({ caseId: c.id, status: 'start', ...(saved.kind === 'not-judged' ? { message: 'judging the saved review again' } : {}) });
-      await mkdir(dir, { recursive: true });
-      await rm(join(dir, 'error.txt'), { recursive: true, force: true });
-      await rm(join(dir, 'matches.json'), { force: true });
+      made = (await mkdir(dir, { recursive: true })) !== undefined;
 
       if (saved.kind === 'not-judged') {
         kept = saved.doc;
@@ -468,6 +519,9 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
         lead = 'The review failed';
         const doc = ReviewDocumentSchema.parse(await review(reviewRequest(c, opts), engineDeps));
         lead = 'Saving the review failed';
+        // What the folder says about an earlier review goes before the new review is saved, so it is never read with it.
+        await rm(join(dir, 'matches.json'), { force: true });
+        await rm(join(dir, 'error.txt'), { recursive: true, force: true });
         await writeAtomic(join(dir, 'review.json'), json(doc));
         emit({ caseId: c.id, status: 'reviewed' });
         if (hitUsageLimit(doc)) limitReachedIn ??= c.id;
@@ -478,12 +532,15 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
         kept = doc;
       }
 
+      if (exitSignal()) return await stop();
       lead = 'The judge failed';
-      const matches = await judgeCase(deps.runner, c, kept, judgeModel, judgeDir);
+      const matches = await judgeCase(deps.runner, c, kept, judgeModel, judgeDir, deps.signal);
       lead = 'Saving the matches failed';
       await writeAtomic(join(dir, 'matches.json'), json(matches));
+      await rm(join(dir, 'error.txt'), { recursive: true, force: true });
       return finish(c, { kind: 'done', doc: kept, matches }, 'judged');
     } catch (err) {
+      if (exitSignal()) return await stop();
       if (err instanceof UsageLimitError) limitReachedIn ??= c.id;
       const error = failureText(lead, err);
       await writeAtomic(join(dir, 'error.txt'), `${error}\n`).catch(() => undefined);
@@ -509,19 +566,13 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
     const c = opened.cases[i]!;
     return scoreOutcome(c, { kind: 'not-done', doc: null, reason: failureText('The case failed', r.reason) }, scoring);
   });
-  const casesStartedAt = earlier(run.casesStartedAt, firstStart);
-  const casesFinishedAt = later(run.casesFinishedAt, lastEnd);
-  if (casesStartedAt !== run.casesStartedAt || casesFinishedAt !== run.casesFinishedAt) {
-    run = {
-      ...run,
-      ...(casesStartedAt === undefined ? {} : { casesStartedAt }),
-      ...(casesFinishedAt === undefined ? {} : { casesFinishedAt }),
-    };
+  if (firstStart !== undefined) {
+    run = { ...run, spans: [...(run.spans ?? []), { startedAt: firstStart, finishedAt: lastEnd ?? firstStart }] };
     await writeAtomic(join(runDir, 'run.json'), json(run));
   }
   const summary: RunSummary = {
-    ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases, opts.dataset ?? opts.cases, wallClockOf(run)),
-    ...(limitReachedIn === null ? {} : {
+    ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases, opts.dataset ?? opts.cases, { spans: run.spans ?? [] }),
+    ...(stoppedBySignal ? { stopped: { reason: 'exit-signal' } } : limitReachedIn === null ? {} : {
       stopped: { reason: 'usage-limit', caseId: limitReachedIn, notStarted: opened.cases.filter((c) => notStarted.has(c.id)).map((c) => c.id) },
     }),
   };
@@ -530,7 +581,10 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   return summary;
 }
 
-/** Rebuilds the summary and the report details of a finished or part-finished run from its folder. */
+/**
+ * Rebuilds the summary and the report details of a finished or part-finished run from its folder, including one made
+ * by an earlier version of the replay, whose first test then reads `not comparable`.
+ */
 export async function loadRun(runDir: string, cases: ReplayCase[]): Promise<{ summary: RunSummary; details: RunDetails }> {
   const text = await readText(join(runDir, 'run.json'));
   if (text === null) throw new Error(`${runDir} is not a replay run folder: it has no run.json.`);
@@ -542,9 +596,11 @@ export async function loadRun(runDir: string, cases: ReplayCase[]): Promise<{ su
   }
   const selected = inDatasetOrder(run.caseIds, cases, runDir);
   checkCases(selected);
-  const scoring: RunInfo = { model: run.model, depth: run.depth, createdAt: run.startedAt };
+  const scoring = runInfo(run);
   const results = await Promise.all(selected.map(async (c) => scoreOutcome(c, await readOutcome(join(runDir, c.id), c), scoring)));
-  const summary = summarise(run.runId, run.model, run.depth, results.map((r) => r.score), selected, cases, wallClockOf(run));
+  const summary = summarise(run.runId, run.model, run.depth, results.map((r) => r.score), selected, cases, {
+    spans: run.spans ?? [], madeByEarlierVersion: madeByEarlierVersion(run),
+  });
   const details: RunDetails = Object.fromEntries(selected.map((c, i) => [c.id, results[i]!.detail]));
   return { summary, details };
 }

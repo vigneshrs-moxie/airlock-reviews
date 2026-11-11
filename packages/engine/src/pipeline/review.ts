@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { ReviewDocumentSchema } from '@airlock/shared';
 import type {
-  Anchor, Brief, Candidate, ChangeMap, Depth, Dropped, Fact, FileDiff, FileFact, Finding, Link, ModelConfig, Neighbour, PrInfo,
+  Brief, Candidate, ChangeMap, Depth, Dropped, Fact, FileDiff, FileFact, Finding, Link, ModelConfig, Neighbour, PrInfo,
   Question, ReviewDocument, ReviewEvent, ReviewRange, StageError,
 } from '@airlock/shared';
 import { UNKNOWN_USAGE } from '../agent/runner.js';
@@ -17,7 +17,7 @@ import { runChecks } from '../facts/checks.js';
 import { classifyFiles } from '../facts/classify.js';
 import { fetchPr } from '../intake/pr.js';
 import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
-import { runCohortLenses, runnableLenses } from '../lenses/cohort-lens.js';
+import { runCohortLenses } from '../lenses/cohort-lens.js';
 import {
   descriptionCutSentence, emptyResult, MAX_DESCRIPTION_CHARS, type LensContext, type LensStageResult,
 } from '../lenses/context.js';
@@ -26,6 +26,7 @@ import { placeablePaths } from '../map/check.js';
 import { findLinks } from '../map/links.js';
 import { fallbackMap, buildChangeMap } from '../map/mapper.js';
 import { findNeighbours } from '../map/neighbours.js';
+import { mergeSameProblems, withMergedCount, type AnchoredCandidate } from '../merge/merge.js';
 import type { Holdout, Pack } from '../packs/types.js';
 import { runSweep } from '../rules/sweep.js';
 import { decideVerdict, sameTextOnce, select, selfReviewText, type SelectResult } from '../select/select.js';
@@ -48,6 +49,11 @@ export interface ReviewRequest {
   /** The pull request's title and description as they were when it was reviewed, in place of today's (the replay). */
   prText?: { title: string; body: string };
   holdout?: Holdout;
+  /**
+   * At standard and deep depth, whether a group's lenses may share one combined request: `no-read-tier` combines them for
+   * a group with no file in the read tier and for the standalone group. Default `never`. Quick depth always combines.
+   */
+  combine?: 'never' | 'no-read-tier';
   packsDir: string;
   remoteUrl?: string;
   parallel?: number;
@@ -134,21 +140,14 @@ export function withUniqueIds(candidates: Candidate[], used: Set<string>): Candi
   });
 }
 
-/** Only the first lens that can run of each pack. */
-function firstLensOnly(packs: Pack[]): Pack[] {
-  const runnable = runnableLenses(packs);
-  return packs.map((pack) => {
-    const first = runnable.find((r) => r.pack === pack);
-    return { ...pack, lenses: first ? [first.lens] : [] };
-  });
-}
-
 /** Prepares the workspace; a clone or fetch refused for lack of credentials says how to fix it. */
 async function openWorkspace(exec: Exec, req: ReviewRequest, pr: PrInfo, reviewId: string): Promise<Workspace> {
   try {
     return await prepareWorkspace(exec, {
       repo: req.repo, remoteUrl: req.remoteUrl ?? `https://github.com/${req.repo}.git`, reviewId,
-      ...(req.explicit ? { explicit: req.explicit } : { pr: { number: req.number, baseRef: pr.baseRef, headSha: pr.headSha } }),
+      ...(req.explicit ? { explicit: req.explicit } : {
+        pr: { number: req.number, baseRef: pr.baseRef, headSha: pr.headSha, baseSha: pr.baseSha, ...(pr.merged === undefined ? {} : { merged: pr.merged }) },
+      }),
     });
   } catch (err) {
     if (!CREDENTIAL_TROUBLE.test(messageOf(err))) throw err;
@@ -178,13 +177,23 @@ function fallbackSelection(
   const verdict = decideVerdict(pr, findings, log.errors, false, left.length);
   return {
     findings, dropped: [], questions: left, verdict, whoseCall: [], checksAfterMerge: [],
-    selfReviewText: selfReviewText(pr, depth, packs.map((p) => p.title), verdict), errors: [], usage: [],
+    selfReviewText: selfReviewText(pr, depth, packs.map((p) => p.title), verdict), notes: [], limits: [], errors: [], usage: [],
   };
 }
 
 /** The stage error that keeps a sync merge from being reported as reviewed. */
 const unreviewedMerge = (changed: number): string =>
   `This pull request only merges another branch in. Airlock did not review it: ${changed === 1 ? '1 changed file was' : `${changed} changed files were`} not looked at.`;
+
+/**
+ * For a live pull request (no explicit range): when the diff has no files but GitHub lists changed files, the sentence for
+ * a stage error, since nothing was reviewed; otherwise null.
+ */
+function emptyDiff(files: FileDiff[], pr: PrInfo, explicit: boolean): string | null {
+  if (explicit || files.length > 0 || pr.changedFiles <= 0) return null;
+  const listed = pr.changedFiles === 1 ? '1 changed file' : `${pr.changedFiles} changed files`;
+  return `GitHub lists ${listed} for this pull request, but the diff Airlock computed is empty. Nothing was reviewed.`;
+}
 
 /** Most paths named in the stage error for a pull request none of whose changed files could be reviewed. */
 const MAX_UNREVIEWED_NAMED = 5;
@@ -200,11 +209,11 @@ function notReviewed(files: FileDiff[], tiers: FileFact[]): string | null {
   return `${files.length === 1 ? '1 changed file was' : `${files.length} changed files were`} not reviewed: ${named}${more}`;
 }
 
-interface Settings { depth: Depth; models: ModelConfig; parallel: number }
+interface Settings { depth: Depth; models: ModelConfig; parallel: number; combine: 'never' | 'no-read-tier' }
 
 interface Reviewed {
   range: ReviewRange; packs: Pack[]; tiers: FileFact[]; facts: Fact[]; map: ChangeMap; brief: Brief; questions: Question[];
-  candidates: Candidate[]; dropped: Dropped[]; selection: SelectResult; limits: string[];
+  candidates: Candidate[]; dropped: Dropped[]; selection: SelectResult; limits: string[]; notes: string[];
 }
 
 /** Every stage from packs to select, inside the workspace. */
@@ -253,7 +262,7 @@ async function reviewInWorkspace(
 
   const gathered = (await log.run('facts', async (rec) => {
     const tiers = await rec.attempt(() => classifyFiles(files, packs), [] as FileFact[]);
-    const unreviewed = notReviewed(files, tiers);
+    const unreviewed = notReviewed(files, tiers) ?? emptyDiff(files, pr, req.explicit !== undefined);
     if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
     const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead), [] as Fact[])];
     const found = await rec.attempt(
@@ -275,7 +284,9 @@ async function reviewInWorkspace(
     log.skip('map', skipWhy);
     log.emit({ type: 'map', map }); // empty, so a listener waiting for the map is not left hanging
     log.skip('brief', skipWhy);
-    brief = files.length === 0 ? EMPTY_SYNC_MERGE_BRIEF : SYNC_MERGE_BRIEF;
+    // A merge with no files is one that changes nothing only when GitHub agrees (or the range was given explicitly).
+    const nothingChanged = files.length === 0 && emptyDiff(files, pr, req.explicit !== undefined) === null;
+    brief = nothingChanged ? EMPTY_SYNC_MERGE_BRIEF : files.length === 0 ? EMPTY_BRIEF : SYNC_MERGE_BRIEF;
   } else {
     map = ((await limitedOut('map')) ? undefined : await log.run('map', async (rec) => {
       const r = await buildChangeMap(capped, {
@@ -303,6 +314,9 @@ async function reviewInWorkspace(
     headDir: ws.headDir, baseDir: ws.baseDir, models, run,
   };
   const quick = depth === 'quick';
+  // Quick depth is one combined lens request per group; the other depths combine only when the request says so.
+  const lensCombine: Pick<LensContext, 'combine'> = quick ? { combine: 'all' }
+    : settings.combine === 'no-read-tier' ? { combine: 'no-read-tier' } : {};
   let lensR = emptyResult();
   let sweepR = emptyResult();
   let seamsR = emptyResult();
@@ -313,7 +327,7 @@ async function reviewInWorkspace(
     // Checked without waiting, so the two stages start in the same order as always.
     const limited = (): boolean => deps.gate.stoppedBy() !== null;
     const lenses = (): Promise<LensStageResult> => (limited() ? limitedOut('lenses').then(emptyResult)
-      : lensStage(log, 'lenses', () => runCohortLenses(runner, quick ? { ...ctx, packs: firstLensOnly(packs) } : ctx)));
+      : lensStage(log, 'lenses', () => runCohortLenses(runner, { ...ctx, ...lensCombine })));
     const sweep = (): Promise<LensStageResult> => (limited() ? limitedOut('sweep').then(emptyResult)
       : lensStage(log, 'sweep', () => runSweep(runner, ctx)));
     [lensR, sweepR] = await Promise.all([lenses(), quick ? (log.skip('sweep', skipWhy), emptyResult()) : sweep()]);
@@ -331,13 +345,32 @@ async function reviewInWorkspace(
   const candidates = withUniqueIds([...lensR.candidates, ...sweepR.candidates, ...seamsR.candidates], usedIds);
   const schemaDropped = [...lensR.dropped, ...sweepR.dropped, ...seamsR.dropped];
 
-  let anchored: (Candidate & { anchor: Anchor })[] = [];
+  let anchored: AnchoredCandidate[] = [];
   const anchorDropped: Dropped[] = [];
   if (sync) log.skip('anchor', skipWhy);
   else {
     const r = await log.run('anchor', () => anchorCandidates(candidates, files, readHead));
     anchored = r?.anchored ?? [];
     anchorDropped.push(...(r?.dropped ?? []));
+  }
+
+  // Code proposes clusters at the same place and the model says which are the same problem; only then are they merged,
+  // before the challenge, so each problem is challenged once.
+  const mergeDropped: Dropped[] = [];
+  const mergeNotes: string[] = [];
+  if (sync || quick) log.skip('merge', skipWhy);
+  else if (!(await limitedOut('merge'))) {
+    const r = await log.run('merge', async (rec) => {
+      const out = await mergeSameProblems(runner, ctx, anchored);
+      rec.usage(out.usage);
+      rec.error(...out.errors);
+      return out;
+    });
+    if (r !== undefined) {
+      anchored = r.items;
+      mergeDropped.push(...r.dropped);
+      mergeNotes.push(...r.notes);
+    }
   }
 
   let kept: KeptCandidate[];
@@ -356,11 +389,11 @@ async function reviewInWorkspace(
       return out;
     });
     kept = r?.kept ?? anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED }));
-    challengeDropped.push(...(r?.dropped ?? []));
+    challengeDropped.push(...withMergedCount(r?.dropped ?? [], mergeDropped));
   }
 
   if (depth === 'deep' && !sync && !(await limitedOut('lenses-deep'))) {
-    const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...challengeDropped].map((d) => d.candidate)];
+    const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped].map((d) => d.candidate)];
     await log.run('lenses-deep', (rec) => deepPass(rec, {
       runner, ctx, seen: new Set(known.map(fingerprint)), uniqueIds: (c) => withUniqueIds(c, usedIds), readHead, readBoth,
     }, { candidates, questions, schemaDropped, anchorDropped, challengeDropped, kept, limits }));
@@ -375,9 +408,11 @@ async function reviewInWorkspace(
     return r;
   })) ?? fallbackSelection(pr, depth, packs, kept, questions, log);
 
+  limits.push(...selection.limits);
   return {
     range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
-    dropped: [...schemaDropped, ...anchorDropped, ...challengeDropped, ...selection.dropped], limits,
+    dropped: [...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
+    notes: [...mergeNotes, ...selection.notes],
   };
 }
 
@@ -402,7 +437,9 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
   const parallel = req.parallel ?? DEFAULT_PARALLEL;
   if (!Number.isInteger(parallel) || parallel < 1) throw new RangeError(`parallel must be a whole number of at least 1, got ${parallel}`);
   const models = Object.fromEntries(Object.entries(req.models ?? {}).filter(([, v]) => v !== undefined)) as Partial<ModelConfig>;
-  const settings: Settings = { depth: req.depth ?? 'standard', models: { ...DEFAULT_MODELS, ...models }, parallel };
+  const settings: Settings = {
+    depth: req.depth ?? 'standard', models: { ...DEFAULT_MODELS, ...models }, parallel, combine: req.combine ?? 'never',
+  };
   const id = hexId('r_', 5);
   const startedAt = given.now().toISOString();
   const { signal } = given;
@@ -450,7 +487,7 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
     files: reviewed.tiers, facts: reviewed.facts, map: reviewed.map, brief: reviewed.brief, verdict: selection.verdict,
     findings: selection.findings, questions: reviewed.questions, dropped: reviewed.dropped, candidates: reviewed.candidates,
     whoseCall: selection.whoseCall, checksAfterMerge: selection.checksAfterMerge, selfReviewText: selection.selfReviewText,
-    stageErrors: [...log.errors], timings: log.timings(), limits: reviewed.limits,
+    stageErrors: [...log.errors], timings: log.timings(), limits: reviewed.limits, notes: reviewed.notes,
   });
   // A draft that fails the schema is the engine's own fault, so it rejects rather than becoming a stage error.
   const engineFault: { error: Error | null } = { error: null };

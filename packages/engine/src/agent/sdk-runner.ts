@@ -4,7 +4,7 @@ import { delimiter, isAbsolute, join } from 'node:path';
 import type { StageErrorKind } from '@airlock/shared';
 import type { ModelUsage, Options, SDKRateLimitInfo, SDKResultMessage, query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { loadTemplate } from './prompt.js';
+import { loadTemplate, PROMPT_BOUNDARY, splitInstructions } from './prompt.js';
 import type { AgentRequest, AgentResult, AgentRunner, AgentUsage } from './runner.js';
 
 /** Both are for tests. Defaults: the SDK's own query, and the `claude` that findClaude finds. */
@@ -28,6 +28,7 @@ const ROLE_LIMITS: Record<string, { timeoutMs: number; maxTurns: number }> = {
   seams: { timeoutMs: 15 * MINUTE, maxTurns: 40 },
   brief: { timeoutMs: 5 * MINUTE, maxTurns: 25 },
   select: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
+  merge: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
   judge: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
 };
 const OTHER_LIMITS = { timeoutMs: 10 * MINUTE, maxTurns: 40 };
@@ -47,8 +48,10 @@ const PLAIN_JSON = 'Reply with one JSON object and nothing else.';
 const MAX_ERROR_DETAIL = 300;
 
 /**
- * The SDK options for one read-only review run. `systemPrompt` is the shared template; the request's
- * instructions follow it after a blank line. With no `jsonSchema` the prompt asks for plain JSON instead.
+ * The SDK options for one read-only review run. The system prompt is three blocks: the shared template with the part of
+ * the request's instructions that comes before their boundary line (the standards, the same for every request of a
+ * review), the SDK's boundary marker, and the rest of the instructions. Everything before the marker can be cached
+ * across requests. With no `jsonSchema` the last block also asks for plain JSON.
  * Never add `allowedTools`: it pre-approves reads anywhere on the disk.
  */
 export function buildOptions(
@@ -67,7 +70,10 @@ function reviewOptions(
   claudePath: string | null,
   jsonSchema: object | null,
 ): Options {
-  const prompt = [systemPrompt, req.instructions, ...(jsonSchema === null ? [PLAIN_JSON] : [])].join('\n\n');
+  const { standing, stage } = splitInstructions(req.instructions);
+  const first = [systemPrompt.trimEnd(), standing].filter((s) => s !== '').join('\n\n');
+  const last = [stage, ...(jsonSchema === null ? [PLAIN_JSON] : [])].join('\n\n');
+  const prompt = [first, PROMPT_BOUNDARY, last];
   const options: Options = {
     cwd: req.cwd,
     model: req.model,

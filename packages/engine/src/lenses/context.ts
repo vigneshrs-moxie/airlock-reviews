@@ -2,12 +2,12 @@ import type {
   Brief, Candidate, ChangeMap, Cohort, Dropped, Fact, FileDiff, FileFact, ModelConfig, PrInfo, Question, Source,
   StageError, Tier,
 } from '@airlock/shared';
-import { asMaterial } from '../agent/prompt.js';
+import { asMaterial, PROMPT_BOUNDARY } from '../agent/prompt.js';
 import { UNKNOWN_USAGE } from '../agent/runner.js';
 import type { AgentRequest, AgentResult, AgentRunner, AgentUsage } from '../agent/runner.js';
 import type { Pack } from '../packs/types.js';
-import { LensOutputSchema, acceptCandidates } from './candidate.js';
-import type { LensOutput } from './candidate.js';
+import { CombinedOutputSchema, LensOutputSchema, acceptCandidates, acceptCombined } from './candidate.js';
+import type { Accepted, CombinedOutput, LensOutput } from './candidate.js';
 
 /** What the lens stages need. `tiers` holds the read, skim, trust or ignored tier of each changed file. */
 export interface LensContext {
@@ -26,6 +26,11 @@ export interface LensContext {
   run: <T>(fn: () => Promise<T>) => Promise<T>;
   /** One more sentence for every cohort lens request, added after the lens's own instructions (the deep pass uses it). */
   extraInstructions?: string;
+  /**
+   * When the lenses of a group go in one combined request: `all` for every group (quick depth), `no-read-tier` for a group
+   * with no file in the read tier and for the standalone group; otherwise each lens has its own request.
+   */
+  combine?: 'all' | 'no-read-tier';
 }
 
 export interface LensStageResult {
@@ -59,7 +64,8 @@ export const diffCutSentence = (stage: string, title: string, cut: DiffCut): str
 export const descriptionCutSentence = (who: string, body: string, max: number): string | null =>
   (body.length > max ? `${who}: the description was cut at ${count(max)} of ${count(body.length)} characters` : null);
 
-const orNone = (lines: string[]): string => (lines.length === 0 ? '(none)' : lines.join('\n'));
+/** The lines joined, or `(none)` for a block with nothing in it. */
+export const orNone = (lines: string[]): string => (lines.length === 0 ? '(none)' : lines.join('\n'));
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
 /** A file with no recorded tier is read, so nothing is skipped by accident. */
@@ -142,13 +148,18 @@ function helpersText(missing: string[]): string {
   ].join('\n');
 }
 
-/** The template, then the standards, the learned entries and (when given) the missing helpers. */
-export function instructionsFor(template: string, packs: Pack[], missingHelpers: string[] | null): string {
+/**
+ * The standards, the learned entries and the missing helpers first, then the boundary line, then the stage's template.
+ * Everything before the boundary is the same for every stage of a review that is given the same packs and helpers, so it
+ * is cached across its requests; nothing from the pull request may go there.
+ */
+export function instructionsFor(template: string, packs: Pack[], missingHelpers: string[]): string {
   return [
-    template.trimEnd(),
     section("The team's standards", standardDocuments(packs)),
     section('Learned from earlier reviews', learnedDocuments(packs)),
-    missingHelpers ? helpersText(missingHelpers) : '',
+    helpersText(missingHelpers),
+    PROMPT_BOUNDARY,
+    template.trim(),
   ]
     .filter((s) => s !== '')
     .join('\n\n');
@@ -185,11 +196,35 @@ export function cohortOutline(cohort: Cohort, tier?: (path: string) => Tier): st
   return lines;
 }
 
-/** Every cohort of the map with its layers and files, then the standalone files. */
+/** The change map block lists at most this many files; the rest are counted on its last line. */
+export const MAX_MAP_FILES = 200;
+
+const mapFileCount = (map: ChangeMap): number =>
+  map.cohorts.reduce((n, c) => n + c.layers.reduce((m, l) => m + l.files.length, 0), 0) + map.standalone.length;
+
+/**
+ * Every cohort of the map with its layers and files, then the standalone files. After MAX_MAP_FILES files the rest are
+ * left out (the cohort and layer lines stay) and the last line says `… and <n> more`.
+ */
 export function mapBlock(map: ChangeMap): string {
-  const lines = map.cohorts.flatMap((c) => cohortOutline(c));
-  if (map.standalone.length > 0) lines.push('Standalone files:', ...map.standalone.map((f) => `  ${f}`));
+  let room = MAX_MAP_FILES;
+  const files = (paths: string[]): string[] => {
+    const shown = paths.slice(0, Math.max(0, room));
+    room -= shown.length;
+    return shown;
+  };
+  const lines = map.cohorts.flatMap((c) => cohortOutline({ ...c, layers: c.layers.map((l) => ({ ...l, files: files(l.files) })) }));
+  const standalone = files(map.standalone);
+  if (map.standalone.length > 0) lines.push('Standalone files:', ...standalone.map((f) => `  ${f}`));
+  const left = mapFileCount(map) - MAX_MAP_FILES;
+  if (left > 0) lines.push(`… and ${left} more`);
   return asMaterial('change map', orNone(lines));
+}
+
+/** `<stage>: the change map listed <max> of <n> files`, or null when mapBlock listed every file. */
+export function mapCutSentence(stage: string, map: ChangeMap): string | null {
+  const total = mapFileCount(map);
+  return total > MAX_MAP_FILES ? `${stage}: the change map listed ${count(MAX_MAP_FILES)} of ${count(total)} files` : null;
 }
 
 /** One line per fact: `path:line check: message`, or `path check: message` when there is no line. */
@@ -214,6 +249,8 @@ export interface LensCall {
   cohortId: string | null;
   instructions: string;
   material: string;
+  /** For a combined request: each lens it carries, by the id candidates name it with (`<pack>/<lens>`). */
+  lenses?: ReadonlyMap<string, Source>;
 }
 
 /** Sends one request through the parallel cap. A runner that throws becomes a failed result, so one request never stops the others. */
@@ -227,11 +264,11 @@ export async function sendRequest<T>(runner: AgentRunner, ctx: LensContext, req:
 
 /** Sends one request through the parallel cap and turns its answer into candidates, questions and dropped extras. */
 export async function runLensCall(runner: AgentRunner, ctx: LensContext, call: LensCall, taken: Set<string>): Promise<LensStageResult> {
-  const result = await sendRequest<LensOutput>(runner, ctx, {
+  const result = await sendRequest<LensOutput | CombinedOutput>(runner, ctx, {
     role: call.role,
     instructions: call.instructions,
     material: call.material,
-    schema: LensOutputSchema,
+    schema: call.lenses === undefined ? LensOutputSchema : CombinedOutputSchema,
     cwd: ctx.headDir,
     extraDirs: [ctx.baseDir],
     model: ctx.models.main,
@@ -243,7 +280,9 @@ export async function runLensCall(runner: AgentRunner, ctx: LensContext, call: L
     out.errors.push({ stage: call.stage, cohortId: call.cohortId, message: `${call.name}: ${result.error}`, kind: result.kind });
     return out;
   }
-  const accepted = acceptCandidates(result.output.candidates, call.source, call.cohortId, taken);
+  const accepted: Accepted = call.lenses === undefined
+    ? acceptCandidates(result.output.candidates, call.source, call.cohortId, taken)
+    : acceptCombined(result.output.candidates, call.lenses, call.cohortId, taken);
   out.candidates.push(...accepted.candidates);
   out.dropped.push(...accepted.dropped);
   for (const q of result.output.questions) {

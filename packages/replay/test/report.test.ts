@@ -224,10 +224,13 @@ describe('renderReport', () => {
     const dataset = [positive(100, 5), positive(171, 9), positive(126, 2), positive(129, 3), positive(143, 4), positive(146, 3)];
     const secondary = replayCase({ id: 'pr220', pr: 220, title: 'Fixes described in the body', kind: 'secondary', known: [problem({ id: 'S1', summary: 'The secondary problem.' })] });
 
-    function render(run: ReplayCase[], inTop: Record<string, number>, all: ReplayCase[] = dataset) {
+    function render(run: ReplayCase[], inTop: Record<string, number>, all: ReplayCase[] = dataset, unfinished: string[] = []) {
       const details: Record<string, { doc: ReviewDocument; matches: Match[] }> = {};
       for (const c of run) {
-        const d = doc({ findings: [finding('f1', 'top')] });
+        const d = doc({
+          findings: [finding('f1', 'top')],
+          ...(unfinished.includes(c.id) ? { verdict: { label: 'incomplete', sentence: 's', counts: { block: 0, fix: 0, ask: 0, note: 0 } } } : {}),
+        });
         details[c.id] = { doc: d, matches: c.known.map((k, i) => (i < (inTop[c.id] ?? 0) ? match(k.id, 'top', 'f1') : match(k.id, 'none', null))) };
       }
       const scores = run.map((c) => scoreCase(c, details[c.id]!.doc, details[c.id]!.matches));
@@ -241,6 +244,19 @@ describe('renderReport', () => {
       const first = section(text, 'The two tests').split('\n').find((l) => l.startsWith('1. '))!;
       expect(first).toBe('1. At least half of the known problems should be in the top five. 7 of 10 were (70%). ' +
         "Yes so far: this run covers 10 of the dataset's 26 known problems; 3 pull requests were not run (#100, #126, #171).");
+    });
+
+    it('so far also says which positive pull requests in the run did not finish', () => {
+      const every = render(dataset, { pr100: 5, pr171: 9 }, dataset, ['pr143', 'pr129']);
+      const first = section(every.text, 'The two tests').split('\n').find((l) => l.startsWith('1. '))!;
+      expect(first).toBe('1. At least half of the known problems should be in the top five. 14 of 26 were (54%). ' +
+        "Yes so far: this run covers 26 of the dataset's 26 known problems; 2 did not finish (#129, #143). " +
+        'The reviews of 2 of these pull requests did not finish (#129 Case 129, #143 Case 143); their known problems are counted as missed.');
+
+      const partial = render(dataset.filter((c) => [129, 143, 146].includes(c.pr)), { pr129: 3, pr143: 3, pr146: 1 }, dataset, ['pr146']);
+      expect(section(partial.text, 'The two tests')).toContain(
+        "Yes so far: this run covers 10 of the dataset's 26 known problems; 3 pull requests were not run (#100, #126, #171); 1 did not finish (#146).",
+      );
     });
 
     it('a run with every positive case answers Yes or No', () => {
@@ -294,11 +310,16 @@ describe('renderReport', () => {
       expect(shared).toContain('  - For A3 the judge also named: d1, dropped by the challenge.');
     });
 
-    it('says merge in words wherever a stage is named', () => {
+    it('says merge in words: a stage that failed is merging duplicates, and a finding\'s fate is merged into another finding', () => {
       const report = text();
       expect(section(report, 'What was missed')).toContain('It was found, then merged into another finding. Its reason: Merged with a finding that is gone.');
-      expect(section(report, 'Incomplete reviews')).toContain('  - merged into another finding: The merge request failed.');
+      expect(section(report, 'Incomplete reviews')).toContain('  - merging duplicates: The merge request failed.');
+      expect(section(report, 'Incomplete reviews')).not.toContain('merged into another finding');
       expect(report).not.toMatch(/\bmerge:/);
+      // Another item the judge named that was merged away is described by its fate too.
+      const others: Match[] = [{ ...match('A1', 'also', 'f2'), others: [{ itemId: 'm1', where: 'dropped', partial: false }] }, match('A2', 'none', null), match('A3', 'none', null)];
+      const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, others)], [c]);
+      expect(section(renderReport(summary, [c], { a: { doc: d, matches: others } }), 'What was missed')).toContain('The judge also named: m1, merged into another finding.');
     });
 
     it('a match saved without others reads as having none', () => {
@@ -437,15 +458,30 @@ describe('renderReport', () => {
     expect(time).toMatch(/\| Total \| about 3 min 6 s \| 170,100 \| 10,010 \| 15 \|/);
   });
 
-  it('gives elapsed time for a review that records its start, and the run\'s wall clock as the total', () => {
+  it('gives elapsed time for a review that records its start, and the time the run took as the total', () => {
     const c = replayCase({ id: 'a', pr: 10, title: 'Timed', known: [] , kind: 'negative' });
     const d = doc({ startedAt: '2026-11-10T09:00:00.000Z', createdAt: '2026-11-10T09:07:10.000Z', timings: [timing(900_000, 1, 1, 1)] });
-    const wallClock = { startedAt: '2026-11-10T08:59:58.000Z', finishedAt: '2026-11-10T09:08:00.000Z' };
-    const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, [])], [c], [c], wallClock);
+    const spans = [{ startedAt: '2026-11-10T08:59:58.000Z', finishedAt: '2026-11-10T09:08:00.000Z' }];
+    const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, [])], [c], [c], { spans });
     const time = section(renderReport(summary, [c], { a: { doc: d, matches: [] } }), 'Time and tokens');
     expect(time).toMatch(/\| #10 Timed \| 7 min 10 s \|/);
     expect(time).toMatch(/\| Total \| 8 min 2 s \|/);
     expect(time).toContain('The total is the time from the first case\'s start to the last case\'s end');
+    expect(time).not.toContain('runs of the command');
+  });
+
+  it('over several calls, the total is the time the replay was running and the note says over how many', () => {
+    const c = replayCase({ id: 'a', pr: 10, title: 'Timed', known: [] , kind: 'negative' });
+    const d = doc({ startedAt: '2026-11-10T09:00:00.000Z', createdAt: '2026-11-10T09:07:10.000Z', timings: [timing(900_000, 1, 1, 1)] });
+    const spans = [
+      { startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:08:00.000Z' },
+      { startedAt: '2026-11-10T11:00:00.000Z', finishedAt: '2026-11-10T11:02:00.000Z' },
+    ];
+    const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, [])], [c], [c], { spans });
+    const time = section(renderReport(summary, [c], { a: { doc: d, matches: [] } }), 'Time and tokens');
+    expect(time).toMatch(/\| Total \| 10 min 0 s \|/);
+    expect(time).toContain('Total time is the time the replay was running, over 2 runs of the command.');
+    expect(time).not.toContain('first case\'s start');
   });
 
   it('closes with how to read the numbers', () => {
@@ -455,5 +491,25 @@ describe('renderReport', () => {
     expect(how).toContain('rule sheet');
     expect(how).toContain('next pull requests');
     expect(how).toContain('title and description as they stood when the senior reviewer reviewed it');
+    expect(how).not.toContain('earlier version');
+  });
+
+  it('a run folder made by an earlier version says so first under how to read this, and its first test is not comparable', () => {
+    const { cases, details } = scenario();
+    const scores = cases.map((c) => scoreCase(c, details[c.id]!.doc, details[c.id]!.matches));
+    const summary = summarise('old-run', 'claude-opus-5-5', 'standard', scores, cases, cases, { madeByEarlierVersion: true });
+    expect(summary.meets.halfInTop).toBe('not comparable');
+    const text = renderReport(summary, cases, details);
+    const how = section(text, 'How to read this').split('\n').filter((l) => l !== '');
+    expect(how[1]).toBe(
+      'The run folder old-run was made by an earlier version of the replay: its reviews read today\'s descriptions and its judge ' +
+        'saw where each finding was placed, so these numbers cannot be compared with a run made today. ' +
+        'When a pull request was replayed, the rules written from that pull request were withheld, so the review could not simply remember the answer. ' +
+        "The team's rule sheet was written after these reviews and could not be withheld, so these numbers may be better than real use. " +
+        'The true test is the next pull requests the senior reviewer comments on.',
+    );
+    expect(how.join('\n')).not.toContain('as they stood when the senior reviewer reviewed it');
+    const first = section(text, 'The two tests').split('\n').find((l) => l.startsWith('1. '))!;
+    expect(first).toBe('1. At least half of the known problems should be in the top five. 1 of 8 were (13%). Not comparable: see How to read this.');
   });
 });

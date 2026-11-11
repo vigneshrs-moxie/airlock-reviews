@@ -22,7 +22,7 @@
 - Severity words are exactly `block`, `fix`, `ask`, `note` in data and `Block`, `Fix`, `Ask`, `Note` on screen.
 - A lens may return at most 6 candidates. The top list holds at most 5 findings.
 - A review whose stage failed is never reported as clean: its verdict label is `incomplete`.
-- Model ids: `claude-opus-5-5` (default main and challenger), `claude-fable-5-2` (comparison), `claude-haiku-5-5` (rule sweep on Quick depth only). Effort is set explicitly, default `high`.
+- Model ids: `claude-opus-5-5` for every stage by default (main, challenger and rule sweep); `--sweep-model` names a cheaper one for the sweep. Effort is set explicitly, default `high`. (As built: Quick depth runs no rule sweep, so the Haiku line this plan first carried never applied; the Fable 5.2 comparison was dropped by decision on 2026-11-11.)
 - Every task ends with `npm run check` (type-check and tests for the whole workspace) passing, then one commit whose message ends with `Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>`.
 
 ## Review Focus

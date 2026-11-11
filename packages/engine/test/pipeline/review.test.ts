@@ -2,6 +2,7 @@ import { copyFile, mkdir, readdir, stat, utimes, writeFile } from 'node:fs/promi
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { candidate, ReviewDocumentSchema, type Candidate, type ReviewEvent } from '@airlock/shared';
+import { PROMPT_BOUNDARY, splitInstructions } from '../../src/agent/prompt.js';
 import { type AgentRequest, withRetry } from '../../src/agent/runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
 import { withUniqueIds } from '../../src/pipeline/review.js';
@@ -132,15 +133,42 @@ describe('runReview', () => {
     expect(brief).toEqual({ type: 'brief', brief: { whatItDoes: ['Adds refunds and a pause job.'], claims: [] } });
   }, SLOW);
 
-  it('quick depth makes requests only for the mapper, the brief, the first lens of each pack and select', async () => {
-    const { doc, calls, events } = await review({ req: { depth: 'quick' } });
-    expect(new Set(roles(calls))).toEqual(new Set(['mapper', 'brief', 'lens:core/correctness', 'lens:raj-standard/boundary', 'select']));
-    expect(roles(calls).filter((r) => r.startsWith('lens:'))).toHaveLength(6); // three cohorts, two lenses
+  it('quick depth makes requests only for the mapper, the brief, one combined lens request per group and select', async () => {
+    const combined = (req: AgentRequest<unknown>) => (block(req.material, 'cohort')!.startsWith('Cohort: Money\n')
+      ? { candidates: [{ ...GOOD, lens: 'core/correctness' }], questions: [] } : { candidates: [], questions: [] });
+    const { doc, calls, events } = await review({ req: { depth: 'quick' }, script: scenarioScript({ 'lens:combined': combined }) });
+    expect(new Set(roles(calls))).toEqual(new Set(['mapper', 'brief', 'lens:combined', 'select']));
+    expect(roles(calls).filter((r) => r.startsWith('lens:'))).toHaveLength(3); // three groups, one request each
+    for (const id of ['core/correctness', 'core/naming', 'raj-standard/boundary']) {
+      expect(calls.find((c) => c.role === 'lens:combined')!.instructions).toContain(`### ${id}:`);
+    }
+    expect(doc.findings.map((f) => f.source)).toEqual([{ pack: 'core', lens: 'correctness', ruleId: null }]);
     expect(doc.findings.map((f) => f.checked)).toEqual(['not challenged (quick review)']);
     expect(doc.depth).toBe('quick');
     expect(starts(events)).toEqual(STANDARD_STAGES);
     const skipped = events.flatMap((e) => (e.type === 'stage' && e.status === 'done' && e.detail.startsWith('skipped') ? [e.stage] : []));
-    expect(skipped).toEqual(['sweep', 'seams', 'challenge']);
+    expect(skipped).toEqual(['sweep', 'seams', 'merge', 'challenge']);
+  }, SLOW);
+
+  it('standard depth with combine no-read-tier sends one combined request for each group with no read-tier file', async () => {
+    // The fixture packs name no read-tier files, so every group here is one the setting combines.
+    const { calls } = await review({ req: { combine: 'no-read-tier' } });
+    const groupOf = (c: AgentRequest<unknown>): string => block(c.material, 'cohort')!.split('\n')[0]!;
+    const lensCalls = calls.filter((c) => c.role.startsWith('lens:'));
+    expect(lensCalls.map((c) => [c.role, groupOf(c)])).toEqual([
+      ['lens:combined', 'Cohort: Money'], ['lens:combined', 'Cohort: Jobs'], ['lens:combined', 'Cohort: Standalone changes'],
+    ]);
+  }, SLOW);
+
+  it('every request that carries the standards starts its instructions with the same first part, once per request', async () => {
+    const { calls } = await review();
+    const withStandards = calls.filter((c) => !['mapper', 'brief'].includes(c.role) && !c.role.startsWith('sweep:'));
+    expect(new Set(withStandards.map((c) => c.role.split(':')[0]))).toEqual(new Set(['lens', 'seams', 'challenge', 'select']));
+    const firsts = new Set(withStandards.map((c) => splitInstructions(c.instructions).standing));
+    expect(firsts.size).toBe(1);
+    expect([...firsts][0]).toContain('# The team\'s standards');
+    for (const c of calls) expect(c.instructions.split(PROMPT_BOUNDARY).length).toBeLessThanOrEqual(2);
+    for (const marker of ['Add refunds', 'Refunds reuse formatMoney', 'src/money.ts']) expect([...firsts][0]).not.toContain(marker);
   }, SLOW);
 
   it('never runs more than the parallel limit at once', async () => {
@@ -257,7 +285,7 @@ describe('runReview', () => {
     expect(events).toContainEqual({ type: 'brief', brief: doc.brief });
     expect(events.findIndex((e) => e.type === 'map')).toBeLessThan(events.findIndex((e) => e.type === 'brief'));
     const skipped = events.flatMap((e) => (e.type === 'stage' && e.status === 'done' && e.detail.startsWith('skipped') ? [e.stage] : []));
-    expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'challenge']);
+    expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge']);
   }, SLOW);
 
   it('a sync merge that changes no files has no stage error and its brief says it changes no files', async () => {
@@ -268,7 +296,8 @@ describe('runReview', () => {
     await s.remote.git('checkout', 'feature');
     await s.remote.git('merge', '--no-ff', '-m', 'Merge main into feature', 'main');
     const head = await s.remote.git('rev-parse', 'HEAD');
-    const { doc, calls } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: head }) });
+    // GitHub agrees: a merge that brings in nothing new lists no changed files.
+    const { doc, calls } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: head, changedFiles: 0 }) });
     expect(doc.range.kind).toBe('sync-merge');
     expect(calls).toEqual([]);
     expect(doc.stageErrors).toEqual([]);
@@ -340,12 +369,12 @@ describe('runReview', () => {
     expect(added.cohortId).toBe('k1');
     expect(doc.findings.map((f) => f.title)).toContain(DEEP_NEW.title);
     expect(roles(calls)).toContain(`challenge:${added.id}`);
-    expect(starts(events)).toEqual([...STANDARD_STAGES.slice(0, 11), 'lenses-deep', 'select', 'store']);
+    expect(starts(events)).toEqual([...STANDARD_STAGES.slice(0, 12), 'lenses-deep', 'select', 'store']);
   }, SLOW);
 
   it('timings add up: one entry per stage, agent runs equal to the requests of that stage', async () => {
     const { doc, calls } = await review({ req: { depth: 'deep' } });
-    expect(doc.timings.map((t) => t.stage)).toEqual([...STANDARD_STAGES.slice(0, 11), 'lenses-deep', 'select', 'store']);
+    expect(doc.timings.map((t) => t.stage)).toEqual([...STANDARD_STAGES.slice(0, 12), 'lenses-deep', 'select', 'store']);
     const isDeep = (c: AgentRequest<unknown>): boolean => c.instructions.includes(DEEP_SENTENCE);
     const deepIds = new Set(doc.candidates.filter((c) => c.title === DEEP_NEW.title).map((c) => c.id));
     const isDeepChallenge = (c: AgentRequest<unknown>): boolean => deepIds.has(c.role.replace('challenge:', ''));
@@ -357,6 +386,7 @@ describe('runReview', () => {
       lenses: count((c) => c.role.startsWith('lens:') && !isDeep(c)),
       sweep: count((c) => c.role.startsWith('sweep:')),
       seams: count((c) => c.role === 'seams'),
+      merge: count((c) => c.role === 'merge'),
       challenge: count((c) => c.role.startsWith('challenge:') && !isDeepChallenge(c)),
       'lenses-deep': count((c) => isDeep(c) || (c.role.startsWith('challenge:') && isDeepChallenge(c))),
       select: count((c) => c.role === 'select'),
@@ -418,6 +448,17 @@ describe('runReview when a stage throws', () => {
     expect(doc.findings.every((f) => f.bucket === 'also')).toBe(true);
     expect(doc.selfReviewText).toBe(selfReviewText(doc.pr, doc.depth, ['Core', 'Team standard'], doc.verdict));
     expect(doc.selfReviewText).toMatch(/^Reviewed with Airlock at .* The review did not finish\.$/);
+  }, SLOW);
+
+  it('when select throws, the fallback keeps one of each repeated question and counts them in the verdict', async () => {
+    hooks.select = fail('select exploded');
+    const { doc } = await review({
+      script: scenarioScript({ seams: () => ({ candidates: [], questions: ['  is ROUNDING half up\nintended? ', 'Does a refund need a ledger entry?'] }) }),
+    });
+    const texts = doc.questions.map((q) => q.text);
+    expect(texts.filter((t) => /rounding half up/i.test(t))).toEqual(['Is rounding half up intended?']);
+    expect(texts.filter((t) => t === 'Does a refund need a ledger entry?')).toHaveLength(1);
+    expect(doc.verdict.label).toBe('incomplete');
   }, SLOW);
 
   it('rejects with a message of its own when it builds a document that does not match the schema', async () => {

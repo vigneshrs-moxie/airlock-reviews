@@ -222,6 +222,26 @@ describe('renderReview', () => {
     expect(renderReview(minimalDocument())).not.toContain('Not reviewed');
   });
 
+  it('shows who else raised a finding under it, in the top list and under also found', () => {
+    const doc = fullDocument();
+    doc.findings[0]!.alsoRaisedBy = [{ pack: 'raj-standard', lens: 'numbers-data', ruleId: null }, { pack: 'orbit-mine', lens: null, ruleId: 'money-rounding' }];
+    doc.findings[1]!.alsoRaisedBy = [{ pack: 'core', lens: 'scale', ruleId: null }];
+    const out = renderReview(doc);
+    expect(out).toContain('   From: core · correctness\n   Also raised by: raj-standard · numbers-data, orbit-mine · money-rounding\n');
+    expect(out).toContain('- [Fix] Missing test  (src/total.ts:3)\n  Also raised by: core · scale\n');
+    expect(renderReview(fullDocument())).not.toContain('Also raised by');
+  });
+
+  it('prints the notes under Notes, after Not shown to the reviewer', () => {
+    const doc = fullDocument();
+    doc.limits = ['lenses: Totals: 1,500 of 4,556 changed lines were shown (2 files cut)'];
+    doc.notes = ['A question was merged into the finding "Total is not rounded": "Is the total rounded?"'];
+    const out = renderReview(doc);
+    expect(out).toContain('\nNotes\n\n- A question was merged into the finding "Total is not rounded": "Is the total rounded?"\n');
+    expect(out.indexOf('\nNot shown to the reviewer\n')).toBeLessThan(out.indexOf('\nNotes\n'));
+    expect(renderReview(minimalDocument())).not.toContain('\nNotes\n');
+  });
+
   it('prints the limits under Not shown to the reviewer, after Not reviewed', () => {
     const doc = fullDocument();
     doc.files.push({ path: 'yarn.lock', tier: 'ignored', reason: 'lock file (built-in: **/yarn.lock)' });

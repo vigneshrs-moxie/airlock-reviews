@@ -43,6 +43,13 @@ describe('fetchPr', () => {
     expect(calls).toContainEqual(['gh', 'api', 'repos/acme/app/pulls/12']);
     expect(calls).toContainEqual(['gh', 'api', 'user', '--jq', '.login']);
   });
+  it('passes on whether GitHub says the pull request is open or closed, and merged', async () => {
+    const exec: Exec = async (_c, a) => ({ stdout: a[1] === 'user' ? 'v' : JSON.stringify({ ...pull, state: 'closed', merged: true }), stderr: '', code: 0 });
+    expect(await fetchPr(exec, 'acme/app', 12, [])).toMatchObject({ state: 'closed', merged: true });
+    const older: Exec = async (_c, a) => ({ stdout: a[1] === 'user' ? 'v' : JSON.stringify(pull), stderr: '', code: 0 });
+    const pr = await fetchPr(older, 'acme/app', 12, []);
+    expect('state' in pr || 'merged' in pr).toBe(false);
+  });
   it('is not a fork when head and base repos match, and throws when gh fails', async () => {
     const same = { ...pull, head: { ...pull.head, repo: { full_name: 'acme/app' } } };
     const ok: Exec = async (_c, a) => ({ stdout: a[1] === 'user' ? 'v' : JSON.stringify(same), stderr: '', code: 0 });

@@ -35,24 +35,26 @@ function fakeGh(opts: { sha?: string; resolveFails?: boolean; failPath?: string 
 }
 
 describe('syncKit', () => {
-  it('fetches four files once and serves the second call from the cache', async () => {
+  it('fetches the three standards once, never SKILL.md, and serves the second call from the cache', async () => {
     const gh = fakeGh();
     const first = await syncKit(gh.exec);
     expect(first).toEqual({ sha: SHA, dir: join(home, 'kit', SHA), stale: false });
     expect(gh.calls[0]).toEqual({ cmd: 'gh', args: ['api', `repos/${KIT_REPO}/commits/main`, '--jq', '.sha'] });
-    expect(gh.calls).toHaveLength(5);
+    expect(gh.calls).toHaveLength(4);
+    expect(KIT_FILES.map((p) => p.split('/').at(-1))).toEqual(['profile.md', 'orbit.md', 'calibration.md']);
+    expect(gh.calls.some((c) => c.args.some((a) => a.includes('SKILL.md')))).toBe(false);
     for (const path of KIT_FILES) {
       expect(gh.calls).toContainEqual({
         cmd: 'gh',
         args: ['api', '-H', 'Accept: application/vnd.github.raw', `repos/${KIT_REPO}/contents/${path}?ref=${SHA}`],
       });
     }
-    expect((await readdir(first.dir)).sort()).toEqual(['SKILL.md', 'calibration.md', 'orbit.md', 'profile.md']);
+    expect((await readdir(first.dir)).sort()).toEqual(['calibration.md', 'orbit.md', 'profile.md']);
     expect(await readFile(join(first.dir, 'orbit.md'), 'utf8')).toContain('skills/moxie-review/orbit.md');
 
     const second = await syncKit(gh.exec);
     expect(second).toEqual({ sha: SHA, dir: first.dir, stale: false });
-    expect(gh.calls).toHaveLength(6); // only the commit lookup was repeated
+    expect(gh.calls).toHaveLength(5); // only the commit lookup was repeated
   });
 
   it('resolves the given ref', async () => {
@@ -65,7 +67,7 @@ describe('syncKit', () => {
     const mk = async (sha: string, complete: boolean, time: number) => {
       const dir = join(home, 'kit', sha);
       await mkdir(dir, { recursive: true });
-      for (const f of complete ? ['profile.md', 'orbit.md', 'calibration.md', 'SKILL.md'] : ['profile.md']) {
+      for (const f of complete ? ['profile.md', 'orbit.md', 'calibration.md'] : ['profile.md']) {
         await writeFile(join(dir, f), f);
       }
       await utimes(dir, time, time);
@@ -97,7 +99,7 @@ describe('syncKit', () => {
     expect(a).toEqual({ sha: SHA, dir: join(home, 'kit', SHA), stale: false });
     expect(b).toEqual(a);
     expect((await readdir(join(home, 'kit'))).sort()).toEqual([SHA]);
-    expect((await readdir(a.dir)).sort()).toEqual(['SKILL.md', 'calibration.md', 'orbit.md', 'profile.md']);
+    expect((await readdir(a.dir)).sort()).toEqual(['calibration.md', 'orbit.md', 'profile.md']);
   });
 
   it('does not treat a half-finished download as cached', async () => {
@@ -105,14 +107,14 @@ describe('syncKit', () => {
     await expect(syncKit(failing.exec)).rejects.toThrow(/boom/);
     const kitDir = join(home, 'kit');
     expect((await readdir(kitDir)).filter((n) => n === SHA)).toEqual([]);
-    // a leftover folder with fewer than four files is not a cache either
+    // a leftover folder with fewer than the three files is not a cache either
     await mkdir(join(kitDir, SHA), { recursive: true });
     await writeFile(join(kitDir, SHA, 'profile.md'), 'x');
     const ok = fakeGh();
     const result = await syncKit(ok.exec);
     expect(result.stale).toBe(false);
-    expect(ok.calls).toHaveLength(5);
-    expect((await readdir(result.dir)).sort()).toEqual(['SKILL.md', 'calibration.md', 'orbit.md', 'profile.md']);
+    expect(ok.calls).toHaveLength(4);
+    expect((await readdir(result.dir)).sort()).toEqual(['calibration.md', 'orbit.md', 'profile.md']);
     expect((await readdir(kitDir)).sort()).toEqual([SHA]);
   });
 });

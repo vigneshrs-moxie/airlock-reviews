@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AgentRequest } from '../../src/agent/runner.js';
 import { CHALLENGE_DIFF_LINE_BUDGET } from '../../src/challenge/challenge.js';
 import { DIFF_LINE_BUDGET } from '../../src/lenses/cohort-lens.js';
+import { MAX_MAP_FILES } from '../../src/lenses/context.js';
 import { MAX_BATCH_FILES } from '../../src/rules/match.js';
 import { SWEEP_DIFF_LINE_BUDGET } from '../../src/rules/sweep.js';
 import { block, rawCandidate } from '../helpers/lens-context.js';
@@ -67,6 +68,16 @@ describe('runReview on a large pull request', () => {
       expect(diff.match(/^## File: /gm)!.length).toBeLessThanOrEqual(MAX_BATCH_FILES);
     }
     for (const c of challenges) expect(lines(block(c.material, 'diff'))).toBeLessThanOrEqual(CHALLENGE_DIFF_LINE_BUDGET);
+    // The change map given to the selection and seams requests lists at most 200 files, says how many more, and the
+    // document says what was not shown.
+    for (const c of calls.filter((x) => x.role === 'select' || x.role === 'seams')) {
+      const map = block(c.material, 'change map')!.split('\n');
+      expect(map.filter((l) => /^\s+bulk\//.test(l))).toHaveLength(MAX_MAP_FILES);
+      expect(map.at(-1)).toBe('… and 100 more');
+    }
+    expect(calls.filter((x) => x.role === 'select' || x.role === 'seams').map((x) => x.role).sort()).toEqual(['seams', 'select']);
+    expect(doc.limits).toContain('seams: the change map listed 200 of 300 files');
+    expect(doc.limits).toContain('select: the change map listed 200 of 300 files');
   }, 90_000); // about 10 s alone and 15 s in the full suite on a quiet machine; the limit is generous because this Mac often runs other work
 
 });

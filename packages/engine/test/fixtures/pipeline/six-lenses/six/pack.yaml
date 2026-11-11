@@ -1,0 +1,13 @@
+id: six
+title: Six lenses
+version: 1
+repos: [acme/app]
+stageRules:
+  - { default: true, stage: pr1 }
+lenses:
+  - { id: boundary, title: Boundary, file: lenses/look.md }
+  - { id: numbers, title: Numbers, file: lenses/look.md }
+  - { id: scale, title: Scale, file: lenses/look.md }
+  - { id: release, title: Release, file: lenses/look.md }
+  - { id: sibling, title: Sibling, file: lenses/look.md }
+  - { id: correctness, title: Correctness, file: lenses/look.md }

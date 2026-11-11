@@ -75,6 +75,24 @@ describe('main', () => {
     expect(h.requests[0]).not.toHaveProperty('models');
   });
 
+  it('passes --combine to the review, and leaves it out when not given', async () => {
+    const h = harness();
+    await main(['review', 'acme/widgets#42', '--combine', 'no-read-tier'], h.io, h.overrides);
+    await main(['review', 'acme/widgets#42'], h.io, h.overrides);
+    expect(h.requests[0]!.combine).toBe('no-read-tier');
+    expect(h.requests[1]).not.toHaveProperty('combine');
+  });
+
+  it('sets the sweep model from --sweep-model over --model, and the effort from --effort', async () => {
+    const h = harness();
+    await main(['review', 'acme/widgets#42', '--model', 'claude-x', '--sweep-model', 'claude-s', '--effort', 'low'], h.io, h.overrides);
+    await main(['review', 'acme/widgets#42', '--sweep-model', 'claude-s'], h.io, h.overrides);
+    await main(['review', 'acme/widgets#42', '--effort', 'medium'], h.io, h.overrides);
+    expect(h.requests.map((r) => r.models)).toEqual([
+      { main: 'claude-x', challenger: 'claude-x', sweep: 'claude-s', effort: 'low' }, { sweep: 'claude-s' }, { effort: 'medium' },
+    ]);
+  });
+
   it('sets main, challenger and sweep from --model', async () => {
     const h = harness();
     await main(['review', 'acme/widgets#42', '--model', 'claude-x'], h.io, h.overrides);

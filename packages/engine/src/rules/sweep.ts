@@ -10,7 +10,7 @@ import {
 } from '../lenses/context.js';
 import type { DiffCut, LensContext, LensStageResult } from '../lenses/context.js';
 import type { Rule } from '../packs/types.js';
-import { planSweep } from './match.js';
+import { planSweep, ruleApplies } from './match.js';
 import type { SweepBatch } from './match.js';
 
 /** The sweep's diff budget, in lines of formatForPrompt output. */
@@ -24,10 +24,15 @@ type SweepOutput = z.infer<typeof SweepOutputSchema>;
 
 /** Higher is more serious: block > fix > ask > note. */
 export const SEVERITY_RANK: Record<Severity, number> = { note: 0, ask: 1, fix: 2, block: 3 };
-const raised = (severity: Severity, floor: Severity): Severity => (SEVERITY_RANK[severity] < SEVERITY_RANK[floor] ? floor : severity);
+/**
+ * A definite breach (`note`, `fix` or `block`) is at least the rule's floor; a doubt (`ask`) stays a doubt whatever the
+ * floor, since the model could not confirm the breach.
+ */
+const floored = (severity: Severity, floor: Severity): Severity =>
+  (severity === 'ask' || SEVERITY_RANK[severity] >= SEVERITY_RANK[floor] ? severity : floor);
 
 function rulesText(rules: Rule[]): string {
-  const parts = rules.map((r) => `### ${r.id}: ${r.title}\n\n${r.body.trim()}\n\nApplies to: ${r.paths.join(', ')}`);
+  const parts = rules.map((r) => `### ${r.id}: ${r.title}\n\n${r.body.trim()}\n\nApplies to: ${r.paths.join(', ')}\nFloor: ${r.severityFloor}`);
   return `# The rules to check\n\n${parts.join('\n\n')}`;
 }
 
@@ -39,9 +44,11 @@ function batchMaterial(ctx: LensContext, batch: SweepBatch): { material: string;
   const diffs = batch.files.flatMap((p) => byPath.get(p) ?? []);
   const neighbours = cohort.neighbours.map((n) => `${n.path} [${n.role}] for: ${n.forFiles.join(', ')} — ${n.why.replace(/\s+/g, ' ').trim()}`);
   const diff = budgetedDiff(diffs, SWEEP_DIFF_LINE_BUDGET);
+  const rulesOf = batch.files.map((p) => `${p}: ${batch.rulesOf[p]!.join(', ')}`);
   const material = [
     prBlock(ctx.pr),
     asMaterial('cohort', cohortOutline(cohort, tier).join('\n')),
+    asMaterial('files and their rules', rulesOf.join('\n')),
     asMaterial('diff', diff.text),
     factsBlock(ctx.facts.filter((f) => inBatch.has(f.path))),
     asMaterial('neighbours', neighbours.length === 0 ? '(none)' : neighbours.join('\n')),
@@ -49,7 +56,10 @@ function batchMaterial(ctx: LensContext, batch: SweepBatch): { material: string;
   return { material, cut: diff.cut, title: cohort.title };
 }
 
-/** Checks one batch's raw candidates against its rules: unknown rule ids are dropped, severity is raised to the rule's floor. */
+/**
+ * Checks one batch's raw candidates against its rules: a candidate naming a rule that was not given, or a rule that does
+ * not match the candidate's file, is dropped; a definite breach is raised to the rule's floor.
+ */
 function acceptSweep(output: SweepOutput, batch: SweepBatch, taken: Set<string>): LensStageResult {
   const out = emptyResult();
   const byId = new Map(batch.rules.map((r) => [r.id, r]));
@@ -67,14 +77,15 @@ function acceptSweep(output: SweepOutput, batch: SweepBatch, taken: Set<string>)
   let kept = 0;
   for (const { candidate, rule, named } of valid) {
     const reason = rule === null ? `names a rule that was not given: ${named}`
-      : kept >= MAX_CANDIDATES_PER_LENS ? `more than ${MAX_CANDIDATES_PER_LENS} candidates from one lens` : null;
+      : !ruleApplies(rule, candidate.path) ? `the rule ${rule.id} does not apply to ${candidate.path}`
+        : kept >= MAX_CANDIDATES_PER_LENS ? `more than ${MAX_CANDIDATES_PER_LENS} candidates from one lens` : null;
     if (reason !== null) {
       const dropped: Dropped = { candidate, stage: 'schema', reason, refutation: null };
       out.dropped.push(dropped);
       continue;
     }
     kept++;
-    out.candidates.push({ ...candidate, severity: raised(candidate.severity, rule!.severityFloor) });
+    out.candidates.push({ ...candidate, severity: floored(candidate.severity, rule!.severityFloor) });
   }
   for (const q of output.questions) {
     if (q.trim() !== '') out.questions.push({ text: q.trim(), cohortId: batch.cohortId, source: { pack: batch.rules[0]!.packId, lens: null, ruleId: null } });
@@ -83,8 +94,9 @@ function acceptSweep(output: SweepOutput, batch: SweepBatch, taken: Set<string>)
 }
 
 /**
- * The rule sweep: one request per batch of changed files, carrying only the rules that match them. A failed request
- * becomes a stage error naming the batch and the others carry on. With no batches nothing is sent.
+ * The rule sweep: one request per batch of a group's changed files (see planSweep), carrying the rules that match them,
+ * with each file listed beside the ids of its own rules. A failed request becomes a stage error naming the batch and the
+ * others carry on. With no batches nothing is sent.
  */
 export async function runSweep(runner: AgentRunner, ctx: LensContext): Promise<LensStageResult> {
   const batches = planSweep(ctx.map, ctx.tiers, ctx.files, ctx.packs);
@@ -106,7 +118,7 @@ export async function runSweep(runner: AgentRunner, ctx: LensContext): Promise<L
     const limits = cut === null ? [] : [diffCutSentence('sweep', `${title}, batch ${n}`, cut)];
     const result = await sendRequest<SweepOutput>(runner, ctx, {
       role: `sweep:${batch.cohortId}#${n}`,
-      instructions: instructionsFor(`${template.trimEnd()}\n\n${rulesText(batch.rules)}`, withoutStandards, null),
+      instructions: instructionsFor(`${template.trimEnd()}\n\n${rulesText(batch.rules)}`, withoutStandards, ctx.missingHelpers),
       material,
       schema: SweepOutputSchema,
       cwd: ctx.headDir,

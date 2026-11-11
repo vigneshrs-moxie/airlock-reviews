@@ -2,7 +2,8 @@ import type { Candidate } from '@airlock/shared';
 import { asMaterial, fill, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner } from '../agent/runner.js';
 import {
-  briefBlock, candidateLines, emptyResult, factsBlock, hasFilesToRead, instructionsFor, mapBlock, prBlock, readerOf,
+  briefBlock, candidateLines, emptyResult, factsBlock, hasFilesToRead, instructionsFor, mapBlock, mapCutSentence, prBlock,
+  readerOf,
   runLensCall, standaloneCohort, tierOf,
 } from './context.js';
 import type { LensContext, LensStageResult } from './context.js';
@@ -24,9 +25,12 @@ export async function runSeams(runner: AgentRunner, ctx: LensContext, soFar: Can
     asMaterial('candidates so far', lines.length === 0 ? '(none)' : lines.join('\n')),
   ].join('\n\n');
 
-  return runLensCall(runner, ctx, {
+  const result = await runLensCall(runner, ctx, {
     role: 'seams', name: 'airlock/seams', stage: 'seams', source: { pack: 'airlock', lens: 'seams', ruleId: null },
     cohortId: null, material,
-    instructions: instructionsFor(fill(await loadTemplate('seams'), { reader: readerOf(ctx.pr) }), ctx.packs, null),
+    instructions: instructionsFor(fill(await loadTemplate('seams'), { reader: readerOf(ctx.pr) }), ctx.packs, ctx.missingHelpers),
   }, new Set(soFar.map((c) => c.id)));
+  const cut = mapCutSentence('seams', ctx.map);
+  if (cut !== null) result.limits.push(cut);
+  return result;
 }

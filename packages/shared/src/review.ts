@@ -16,6 +16,8 @@ export const PrInfoSchema = z.object({
   viewer: z.string(), baseRef: z.string(), headRef: z.string(), baseSha: z.string(), headSha: z.string(),
   isFork: z.boolean(), additions: z.number().int(), deletions: z.number().int(),
   changedFiles: z.number().int(), url: z.string(), stage: StageSchema,
+  /** GitHub's `state` (`open` or `closed`) and whether the pull request was merged, when fetched from GitHub. */
+  state: z.string().optional(), merged: z.boolean().optional(),
 });
 export type PrInfo = z.infer<typeof PrInfoSchema>;
 
@@ -192,6 +194,8 @@ export const ReviewDocumentSchema = z.object({
   timings: z.array(StageTimingSchema),
   /** Plain sentences saying what a model was not shown because of a size limit (a diff cut short, rule files left out). */
   limits: z.array(z.string()).optional(),
+  /** Plain sentences about what the engine did that a reader may want to know (a group it did not merge, a merged question). */
+  notes: z.array(z.string()).optional(),
   /** When the review started (ISO time). `createdAt` is when the document was assembled, at the end of the review. */
   startedAt: z.string().optional(),
 });

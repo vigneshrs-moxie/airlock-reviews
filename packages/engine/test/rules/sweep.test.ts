@@ -23,28 +23,32 @@ const sweepCandidate = (over: Record<string, unknown> = {}) =>
   rawCandidate({ path: 'src/billing/a.ts', ruleId: 'bill-1', severity: 'note', ...over });
 
 describe('runSweep', () => {
-  it('sends one request per batch with its role, model and directories', async () => {
+  it('sends one request per group of changes with its role, model and directories', async () => {
     const runner = createFakeRunner(() => ({ candidates: [], questions: [] }));
     const r = await runSweep(runner, sweepCtx());
-    expect(runner.calls.map((c) => c.role)).toEqual(['sweep:k1#1', 'sweep:k1#2']);
+    expect(runner.calls.map((c) => c.role)).toEqual(['sweep:k1#1']);
     expect(runner.calls[0]).toMatchObject({ cwd: '/tmp/head', extraDirs: ['/tmp/base'], model: 'claude-haiku-5-5', effort: 'high' });
-    expect(r.usage).toHaveLength(2);
+    expect(r.usage).toHaveLength(1);
   });
 
-  it('a request carries only the rules that matched its files, and the description in material', async () => {
+  it('a request carries the rules that matched its files, lists each file with its own rule ids, and the description in material', async () => {
+    const unmatched = [pack('core', [lens('boundary')], { rules: [...packs[0]!.rules, rule('docs-1', ['docs/**'])] })];
     const runner = createFakeRunner(() => ({ candidates: [], questions: [] }));
-    await runSweep(runner, sweepCtx());
-    const [first, second] = runner.calls;
+    await runSweep(runner, sweepCtx({ packs: unmatched }));
+    const [first] = runner.calls;
     expect(first!.instructions).toContain('### bill-1: Rule bill-1');
     expect(first!.instructions).toContain('Charges must be idempotent.');
     expect(first!.instructions).toContain('Applies to: src/billing/**');
-    expect(first!.instructions).not.toContain('mem-1');
-    expect(second!.instructions).toContain('### mem-1: Rule mem-1');
-    expect(second!.instructions).not.toContain('bill-1');
+    expect(first!.instructions).toContain('### mem-1: Rule mem-1');
+    expect(first!.instructions).not.toContain('docs-1');
+    expect(block(first!.material, 'files and their rules')!.split('\n')).toEqual([
+      'src/billing/a.ts: bill-1', 'src/billing/b.ts: bill-1', 'src/members/m.ts: mem-1',
+    ]);
+    expect(first!.instructions).not.toContain('src/billing/a.ts');
     expect(first!.material).toContain('PR_BODY_MARKER');
     expect(first!.instructions).not.toContain('PR_BODY_MARKER');
     expect(block(first!.material, 'diff')).toContain('src/billing/a.ts');
-    expect(block(first!.material, 'diff')).not.toContain('src/members/m.ts');
+    expect(block(first!.material, 'diff')).toContain('src/members/m.ts');
   });
 
   it('puts no pack standards in a sweep request', async () => {
@@ -69,13 +73,40 @@ describe('runSweep', () => {
     expect(r.candidates[0]!.severity).toBe('block');
   });
 
+  it.each([
+    ['fix', 'block', 'block'], ['fix', 'fix', 'fix'], ['fix', 'ask', 'ask'], ['fix', 'note', 'fix'],
+    ['block', 'block', 'block'], ['block', 'fix', 'block'], ['block', 'ask', 'ask'], ['block', 'note', 'block'],
+  ] as const)('against a %s floor, a %s candidate becomes %s: a doubt stays a doubt', async (floor, given, expected) => {
+    const floored = [pack('core', [lens('boundary')], { rules: [rule('bill-1', ['src/billing/**'], { severityFloor: floor })] })];
+    const runner = createFakeRunner((req) => (req.role.endsWith('#1') ? { candidates: [sweepCandidate({ severity: given })], questions: [] } : { candidates: [], questions: [] }));
+    const r = await runSweep(runner, sweepCtx({ packs: floored }));
+    expect(r.candidates.map((c) => c.severity)).toEqual([expected]);
+  });
+
+  it('prints each rule\'s floor beside it', async () => {
+    const runner = createFakeRunner(() => ({ candidates: [], questions: [] }));
+    await runSweep(runner, sweepCtx());
+    expect(runner.calls[0]!.instructions).toContain('### bill-1: Rule bill-1\n\nCharges must be idempotent.');
+    expect(runner.calls[0]!.instructions).toContain('Applies to: src/billing/**\nFloor: fix');
+    expect(runner.calls[0]!.instructions).toContain('Applies to: src/members/**\nFloor: note');
+  });
+
   it('drops a candidate that names a rule that was not given', async () => {
     const runner = createFakeRunner((req) => (req.role.endsWith('#1')
-      ? { candidates: [sweepCandidate({ ruleId: 'mem-1' }), sweepCandidate()], questions: [] } : { candidates: [], questions: [] }));
+      ? { candidates: [sweepCandidate({ ruleId: 'other-9' }), sweepCandidate()], questions: [] } : { candidates: [], questions: [] }));
     const r = await runSweep(runner, sweepCtx());
     expect(r.candidates).toHaveLength(1);
     expect(r.dropped).toHaveLength(1);
-    expect(r.dropped[0]).toMatchObject({ stage: 'schema', reason: 'names a rule that was not given: mem-1', refutation: null });
+    expect(r.dropped[0]).toMatchObject({ stage: 'schema', reason: 'names a rule that was not given: other-9', refutation: null });
+  });
+
+  it('drops a candidate that applies a rule to a file the rule does not match', async () => {
+    const runner = createFakeRunner(() => ({
+      candidates: [sweepCandidate({ ruleId: 'mem-1' }), sweepCandidate({ ruleId: 'mem-1', path: 'src/members/m.ts' })], questions: [],
+    }));
+    const r = await runSweep(runner, sweepCtx());
+    expect(r.candidates.map((c) => [c.source.ruleId, c.path])).toEqual([['mem-1', 'src/members/m.ts']]);
+    expect(r.dropped.map((d) => [d.stage, d.reason])).toEqual([['schema', 'the rule mem-1 does not apply to src/billing/a.ts']]);
   });
 
   it('turns an invalid candidate into a question, and keeps at most 6 candidates per batch', async () => {
@@ -99,16 +130,19 @@ describe('runSweep', () => {
   });
 
   it('a failed batch becomes a stage error naming the batch and the others carry on', async () => {
-    const runner = createFakeRunner((req) => (req.role.endsWith('#1') ? new Error('boom') : { candidates: [sweepCandidate({ ruleId: 'mem-1', path: 'src/members/m.ts' })], questions: [] }));
-    const r = await runSweep(runner, sweepCtx());
+    const m: ChangeMap = { ...map, standalone: ['src/members/s.ts'] };
+    const fs = [...files, 'src/members/s.ts'];
+    const runner = createFakeRunner((req) => (req.role === 'sweep:k1#1' ? new Error('boom') : { candidates: [sweepCandidate({ ruleId: 'mem-1', path: 'src/members/s.ts' })], questions: [] }));
+    const r = await runSweep(runner, sweepCtx({ map: m, files: fs.map((f) => diff(f)), tiers: fs.map((f) => tier(f)) }));
     expect(r.errors).toEqual([{ stage: 'sweep', cohortId: 'k1', message: 'batch 1: boom', kind: 'invalid-output' }]);
     expect(r.candidates).toHaveLength(1);
     expect(r.usage).toHaveLength(2);
   });
 
   it('numbers batches within each cohort, standalone included', async () => {
-    const m: ChangeMap = { ...map, standalone: ['src/billing/s.ts'] };
-    const fs = [...files, 'src/billing/s.ts'];
+    const more = Array.from({ length: 6 }, (_, i) => `src/billing/n${i}.ts`);
+    const m: ChangeMap = { cohorts: [cohort('k1', 'Billing', [layer('k1.l1', 'writes', [...files, ...more])])], standalone: ['src/billing/s.ts'], links: [] };
+    const fs = [...files, ...more, 'src/billing/s.ts'];
     const runner = createFakeRunner(() => ({ candidates: [], questions: [] }));
     await runSweep(runner, sweepCtx({ map: m, files: fs.map((f) => diff(f)), tiers: fs.map((f) => tier(f)) }));
     expect(runner.calls.map((c) => c.role)).toEqual(['sweep:k1#1', 'sweep:k1#2', 'sweep:standalone#1']);
