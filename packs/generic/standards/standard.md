@@ -2,30 +2,30 @@
 
 This standard applies to every review, in any repository. A team pack may add to it; where they differ, the team pack wins.
 
-## Selection, not detection
+## Write for a reader with ten minutes
 
-A review is judged by the few problems it chooses to raise, not by how many it could find. Choose at most five findings and rank them. The first ones are those that would hurt a person who uses the software or corrupt a figure that someone relies on. A long list of equal-weight remarks buries the one that matters, so leave the rest out.
+The person reading the review will act on the top of the list and probably stop there. Write for that reader. Return at most five findings, ordered so that the first is the one they would most regret skipping. Ordering is the work: a problem that leaves a customer's record wrong or shows one person another's data goes above a problem that only slows a page down. Anything that would not change what the reader does next stays out of the list, even when it is true.
 
-## Only what this pull request introduces
+## The scope is this change
 
-Raise a problem only when this change causes it, makes it reachable, or makes it worse. A fault that already exists on the base branch and is untouched here is not a finding. Code that the pull request deletes is in scope only for what its removal breaks.
+The reader is deciding about this pull request, not about the whole codebase. A problem belongs in the review when the change creates it, exposes it to new callers, or makes it worse. A weakness that was already on the base branch and that this change does not touch is out of scope. For deleted code, the only question is what stops working without it.
 
-## Consequence first
+## Open with the outcome
 
-Every finding opens with what happens to a real person or a real number, and only then names the code that causes it. "A support agent can read every customer's invoices by changing the id in the address" is a finding; "missing ownership check" is a label. If you cannot name a consequence, you have a question, not a finding.
+The first sentence of a finding tells the reader what someone will experience: a person, a team, a report, a bill. The code comes after, as the reason. "Two orders placed in the same second share an invoice number, so one customer is billed for the other's goods" gives the reader something to weigh; "race condition in invoice numbering" does not. When no outcome can be named, write it as a question for the author.
 
-## No style notes
+## Leave taste alone
 
-Naming, formatting, file layout, comment wording and test structure are never findings. When one of them hides a defect, raise the defect instead.
+Do not comment on names, formatting, folder layout, comment style or how tests are arranged. If one of these hides a bug, write about the bug.
 
-## Severities
+## Severity: what has to happen before this merges
 
-Give different findings different severities. A review in which everything carries the same severity has not ranked anything.
+Pick the severity by asking what the author must do next. Where findings differ in weight, let the levels show it, so the reader can see where to start.
 
-- **Block**: merging causes harm. People see or change data they should not, a number shown or stored is wrong without anyone noticing, data is lost, a secret is exposed, or a live outside system receives a write it should not.
-- **Fix**: a real defect whose damage is limited or can be undone. It should be fixed before merging, or before the change reaches more people.
-- **Ask**: only the author, or whoever owns the business rule, can answer it, and the answer decides whether there is a problem. State the question and what depends on the answer.
-- **Note**: worth knowing, but it does not change the decision to merge.
+- **Block**: the pull request must not merge as it is. Merging would destroy records, push an unintended write into a live outside system, leak a password or key, let someone open or edit records that belong to someone else, or put a wrong figure in front of people with nothing to flag it.
+- **Fix**: the author should change the code first, but the damage would be bounded or reversible if it slipped through, for example a bug on one screen or a retry that fails loudly.
+- **Ask**: the author or the owner of the business rule has to answer a question first; whether there is a problem depends on their answer. Put the question and say which way each answer goes.
+- **Note**: nothing has to happen before merging. Use it for context the author will want later.
 
 ## The repository's own rules
 

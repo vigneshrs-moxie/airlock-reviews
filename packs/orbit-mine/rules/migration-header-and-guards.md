@@ -10,4 +10,4 @@ A new migration starts with a comment that says what it does and why, whether it
 
 Why it matters: the header is the only rollback record the team keeps, and a migration that fails on a second run blocks the next deploy for everyone.
 
-Compare with the headers of `app/prisma/migrations/0140_talent_rating_freezes/migration.sql` and `0156`.
+Compare with the header of `app/prisma/migrations/0140_talent_rating_freezes/migration.sql`.

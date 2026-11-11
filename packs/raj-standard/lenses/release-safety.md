@@ -6,7 +6,7 @@ From the standard, this lens owns:
 - flags and feature seeding: the rows a new feature needs, and flags whose side effects reach real people;
 - deploy order: code that needs a migration, a setting or another pull request to land first;
 - environment variables: declared, documented, and set in every environment that runs the code;
-- recovery and retry paths: what happens when a run fails or never happens, and what the backup run or manual fallback is.
+- recovery: what happens when a run fails or is skipped, and how someone gets the data right again, whether by rerunning it or by hand.
 
 How to trace it: list everything the cohort needs to exist before it works: tables, columns, rows, environment variables, cron entries, flags. For each, find where it is created and when that happens relative to the code going live. Then, for each migration, backfill and background job, ask what happens if it fails halfway, runs twice or never runs, and who finds out. Compare a new job's failure handling with an existing job that does similar work.
 

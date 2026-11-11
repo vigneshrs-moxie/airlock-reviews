@@ -32,6 +32,12 @@ tiers:
     - "app/src/lib/email/client.ts"
     - "app/src/lib/migrations/**/!(*.test).ts"
     - "**/*.sql"
+    # The structural guard tests: an edit to one is a decision about what the guard
+    # allows, so they are read rather than trusted like other tests.
+    - "app/src/lib/{features-routes,no-hardcoded-offices,visible-ids-literal,team-side-consistency,people-models}.test.ts"
+    - "app/src/lib/{entities/operator-guards,announcements/release-guard,announcements/schema-sync,migrations/tracing,calls/dashboard-cache}.test.ts"
+    - "app/src/app/api/cron-methods.test.ts"
+    - "**/trufflehog-exclude.txt"
 
 # First match wins, so the most specific kind comes first. Orbit's crons are ordinary
 # route files with no shared folder; the cron glob matches the names in use on main
@@ -84,19 +90,14 @@ checks:
     paths: ["app/src/lib/feature-catalog.ts"]
     requires: [{ path: "app/prisma/migrations/*/migration.sql" }]
     message: "The feature catalogue changed and no migration in this pull request could seed entity_features for a new key."
-  - id: seed-all-entities
-    kind: added-line-matches
-    paths: ["app/prisma/migrations/**/*.sql"]
-    pattern: 'SELECT\s+\w+\.id\s*,\s*[^,]+,\s*(?:true|TRUE|True)\s*,'
-    message: "A seed switches a row on for every entity instead of for Arizona Operations only."
   - id: cron-missing-config
     kind: new-file-requires
     paths: ["app/src/app/api/{**/cron,cron/**,*/{warm,sync,process,distribute},*/{sync,process}-*,*/*-{sweep,reminders}}/route.ts"]
     requires:
       - { path: "{self}", pattern: 'maxDuration' }
-      - { path: "app/vercel.json", pattern: '"/api/(?:[^"/]+/)*{dir}"' }
-      - { path: "app/src/middleware.ts", pattern: '"/api/(?:[^"/]+/)*{dir}"' }
-    message: "A new route named like a cron job lacks maxDuration, a vercel.json schedule or a middleware allowlist entry"
+      - { path: "app/vercel.json", pattern: '/{parent}/{dir}"' }
+      - { path: "app/src/middleware.ts", pattern: '/{parent}/{dir}"' }
+    message: "A new route named like a cron job is missing maxDuration, its vercel.json schedule or its middleware allowlist entry."
   - id: raw-unsafe
     kind: added-line-matches
     paths: ["app/**/*.{ts,tsx}"]

@@ -2,7 +2,7 @@
 id: feature-route-prefixes-complete
 title: A gated feature maps every path it owns, and prefixes do not nest
 paths: ["app/src/lib/feature-catalog.ts", "app/src/app/(authenticated)/**/layout.tsx", "app/src/lib/features-routes.test.ts"]
-severityFloor: block
+severityFloor: fix
 sourcePrs: []
 origin: "orbit_repo_rules_inventory.md section 6 rule 18"
 ---

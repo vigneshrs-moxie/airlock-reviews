@@ -2,7 +2,7 @@
 id: scope-axis-fits-operation
 title: Each scope call uses the axis that fits the operation
 paths: ["app/src/**/*.{ts,tsx}"]
-severityFloor: block
+severityFloor: fix
 sourcePrs: []
 origin: "orbit_repo_rules_inventory.md section 6 rule 12"
 ---

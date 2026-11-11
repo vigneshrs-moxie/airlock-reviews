@@ -8,6 +8,6 @@ origin: "past_review_comment_mining.md section 5 rule 19 (C16)"
 ---
 When access is granted because a related row exists (a review request, a grant, a participant or watcher row), the check filters that row by its status or revocation so that superseded, declined or revoked rows grant nothing, and there is a way to remove the grant.
 
-Why it matters: someone picked by mistake, or replaced, would otherwise keep reading the ticket, its shared thread and its screenshots for good.
+Why it matters: a grant that cannot lapse leaves a person who no longer has any part in the ticket able to open it, with nobody able to take that away.
 
 Compare with `relationsFor` and `participantAccessWhere` in `app/src/lib/feedback/access.ts`, which count only open requests and requests the person decided.

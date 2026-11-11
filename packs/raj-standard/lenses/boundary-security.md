@@ -4,7 +4,7 @@ From the standard, this lens owns:
 
 - data that crosses an entity or role boundary, in either direction, including through a cache, a count or an export;
 - credentials and keys: where they are stored, where they travel, and who can read them;
-- the security posture the standard sets: refuse by default, gate the action and not only the button, and treat a new permission, a new place a key lives or a new outside service as a decision to raise;
+- the security posture the standard sets: anything not granted is refused, the gate sits on the action itself rather than on the button, and any change that widens who can do something, moves a secret somewhere new or brings in another vendor is raised for a decision;
 - the scope helpers `orbit.md` lists, used on the right axis and on the server-side write, not only on the picker.
 
 How to trace it: start from each way into the cohort (a page, a route, a server action, a cron, a webhook) and note who can call it. Follow each id the caller supplies down the layers to the query or the write that uses it, and check the scope applied there, not the one applied on the screen. Compare the read path with the write path for the same record: a scoped list whose save, export or badge count is unscoped is the break this lens exists to find. Check every cache key and every stored result for the entity it belongs to.

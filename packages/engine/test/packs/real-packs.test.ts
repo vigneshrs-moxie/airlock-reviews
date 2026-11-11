@@ -30,6 +30,14 @@ async function filesUnder(dir: string): Promise<string[]> {
 
 const kitPresent = existsSync(KIT_DIR);
 const normalise = (line: string): string => line.trim().replace(/\s+/g, ' ');
+const RUN_WORDS = 8;
+/** Every run of 8 consecutive words, lower-cased, apostrophes dropped and other punctuation read as a space. */
+function wordRuns(text: string): Set<string> {
+  const words = text.toLowerCase().replace(/['\u2019]/g, '').replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+  const runs = new Set<string>();
+  for (let i = 0; i + RUN_WORDS <= words.length; i++) runs.add(words.slice(i, i + RUN_WORDS).join(' '));
+  return runs;
+}
 const wordCount = (text: string): number => text.split(/\s+/).filter(Boolean).length;
 const orbit = (): Promise<Pack> => loadPack(join(packsDir, 'orbit-mine'));
 
@@ -94,25 +102,44 @@ describe('the packs in this repository', () => {
     }
   });
 
-  it('orbit-mine has the six code checks from the spec', async () => {
-    const kinds = new Map((await orbit()).checks.map((c) => [c.id, c.kind]));
-    for (const [id, kind] of SPEC_CHECKS) expect(kinds.get(id), id).toBe(kind);
+  it('orbit-mine has exactly the six code checks from the spec', async () => {
+    const checks = (await orbit()).checks.map((c) => [c.id, c.kind]);
+    expect(checks.sort()).toEqual([...SPEC_CHECKS].sort());
   });
 
-  it.skipIf(!kitPresent)('no pack file contains a line copied from the team kit', async () => {
+  it('orbit-mine reads the structural guard tests and trusts other tests', async () => {
+    const read = (await orbit()).tiers.read.map((g) => picomatch(g, { dot: true }));
+    const isRead = (path: string): boolean => read.some((m) => m(path));
+    expect(isRead('app/src/lib/no-hardcoded-offices.test.ts')).toBe(true);
+    expect(isRead('app/src/lib/announcements/release-guard.test.ts')).toBe(true);
+    expect(isRead('app/src/app/api/cron-methods.test.ts')).toBe(true);
+    expect(isRead('app/src/lib/scope.test.ts')).toBe(false);
+    expect(isRead('app/src/app/api/observations/route.test.ts')).toBe(false);
+    expect(isRead('app/src/app/api/observations/route.ts')).toBe(true);
+  });
+
+  it.skipIf(!kitPresent)('no pack file contains a line or an 8-word run copied from the team kit', async () => {
     const kitLines = new Set<string>();
+    const kitRuns = new Set<string>();
     for (const path of await filesUnder(KIT_DIR)) {
-      for (const line of (await readFile(path, 'utf8')).split('\n')) {
+      const text = await readFile(path, 'utf8');
+      for (const line of text.split('\n')) {
         const n = normalise(line);
         if (n.length >= 60) kitLines.add(n);
       }
+      for (const run of wordRuns(text)) kitRuns.add(run);
     }
     expect(kitLines.size).toBeGreaterThan(0);
+    expect(kitRuns.size).toBeGreaterThan(0);
     const copied: string[] = [];
     for (const path of await filesUnder(packsDir)) {
-      for (const line of (await readFile(path, 'utf8')).split('\n')) {
+      const text = await readFile(path, 'utf8');
+      for (const line of text.split('\n')) {
         const n = normalise(line);
-        if (n.length >= 60 && kitLines.has(n)) copied.push(`${relative(packsDir, path)}: ${n}`);
+        if (n.length >= 60 && kitLines.has(n)) copied.push(`${relative(packsDir, path)}: line: ${n}`);
+      }
+      for (const run of wordRuns(text)) {
+        if (kitRuns.has(run)) copied.push(`${relative(packsDir, path)}: words: ${run}`);
       }
     }
     expect(copied).toEqual([]);
@@ -139,21 +166,6 @@ describe('the orbit-mine code checks on sample changes', () => {
     ])).toEqual([
       'literal-all app/src/app/api/scorecards/generate/route.ts:1',
       'literal-all app/src/app/api/scorecards/generate/route.ts:3',
-    ]);
-  });
-
-  it('seed-all-entities flags a feature switched on for every entity, not the Arizona-only shape', async () => {
-    const out = await checkIds([
-      file('app/prisma/migrations/0160_swaps/migration.sql', 'added', [
-        "SELECT e.id, 'shift_swaps', true, 'all'::feature_audience",
-        "SELECT e.id, 'shift_swaps', e.name = 'Arizona Operations', 'all'::feature_audience",
-        "SELECT e.id, 'vsi', TRUE, 'all'::feature_audience",
-      ]),
-      file('app/prisma/schema.prisma'),
-    ]);
-    expect(out.filter((s) => s.startsWith('seed-all-entities'))).toEqual([
-      'seed-all-entities app/prisma/migrations/0160_swaps/migration.sql:1',
-      'seed-all-entities app/prisma/migrations/0160_swaps/migration.sql:3',
     ]);
   });
 
@@ -185,6 +197,20 @@ describe('the orbit-mine code checks on sample changes', () => {
     expect((await runChecks([file(route, 'added')], [await orbit()], read)).filter((f) => f.checkId === 'cron-missing-config'))
       .toEqual([]);
     expect(await checkIds([file('app/src/app/api/observations/route.ts', 'added')], read)).toEqual([]);
+  });
+
+  it('cron-missing-config is not satisfied by another route that ends in the same folder name', async () => {
+    const route = 'app/src/app/api/budget/warm/route.ts';
+    const heads: Record<string, string> = {
+      [route]: 'export const maxDuration = 120;',
+      'app/vercel.json': '{"crons":[{"path":"/api/calls/warm"},{"path":"/api/productivity/warm"},{"path":"/api/field-ops/warm"}]}',
+      'app/src/middleware.ts': 'pathname.startsWith("/api/calls/warm") ||\npathname.startsWith("/api/field-ops/warm") ||',
+    };
+    const facts = await runChecks([file(route, 'added')], [await orbit()], async (p) => heads[p] ?? null);
+    expect(facts.filter((f) => f.checkId === 'cron-missing-config').map((f) => f.message)).toEqual([
+      'A new route named like a cron job is missing maxDuration, its vercel.json schedule or its middleware allowlist entry. (missing in app/vercel.json)',
+      'A new route named like a cron job is missing maxDuration, its vercel.json schedule or its middleware allowlist entry. (missing in app/src/middleware.ts)',
+    ]);
   });
 
   it('guard-test-edited flags an edit to a structural guard test or the visibility baseline', async () => {

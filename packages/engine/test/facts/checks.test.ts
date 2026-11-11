@@ -106,6 +106,41 @@ describe('runChecks', () => {
       expect(await runChecks(files, [pack('p', [check])], async (p) => heads[p] ?? null)).toHaveLength(1);
     });
 
+    it('{parent} is the folder above the new file\'s folder, escaped in a pattern and plain in a path', async () => {
+      const nested: CheckDef = {
+        id: 'two', kind: 'new-file-requires', paths: ['app/api/**/route.ts'],
+        requires: [
+          { path: 'vercel.json', pattern: '"/api/{parent}/{dir}"' },
+          { path: 'docs/{parent}.md' },
+        ],
+        message: 'm',
+      };
+      const heads: Record<string, string> = {
+        'vercel.json': '{"path":"/api/calls/warm"}',
+        'docs/fleet.v2.md': 'x',
+      };
+      const read = async (p: string): Promise<string | null> => heads[p] ?? null;
+      const run = (path: string) => runChecks([file(path, { status: 'added' })], [pack('p', [nested])], read);
+      expect(await run('app/api/fleet.v2/warm/route.ts')).toEqual([
+        { checkId: 'two', path: 'app/api/fleet.v2/warm/route.ts', line: null, message: 'm (missing in vercel.json)' },
+      ]);
+      heads['vercel.json'] = '{"path":"/api/fleetXv2/warm"}';
+      expect(await run('app/api/fleet.v2/warm/route.ts')).toHaveLength(1);
+      heads['vercel.json'] = '{"path":"/api/fleet.v2/warm"}';
+      expect(await run('app/api/fleet.v2/warm/route.ts')).toEqual([]);
+    });
+
+    it('{parent} is empty when the new file\'s folder has no folder above it', async () => {
+      const top: CheckDef = {
+        id: 'top', kind: 'new-file-requires', paths: ['**/route.ts'],
+        requires: [{ path: 'index.txt', pattern: '^\\[{parent}\\]$' }], message: 'm',
+      };
+      const read = async (): Promise<string | null> => '[]';
+      expect(await runChecks([file('warm/route.ts', { status: 'added' })], [pack('p', [top])], read)).toEqual([]);
+      expect(await runChecks([file('route.ts', { status: 'added' })], [pack('p', [top])], read)).toEqual([]);
+      expect(await runChecks([file('a/warm/route.ts', { status: 'added' })], [pack('p', [top])], read)).toHaveLength(1);
+    });
+
     it('ignores modified files and reads each path at most once', async () => {
       const reads: string[] = [];
       const two = [
