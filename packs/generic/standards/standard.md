@@ -4,7 +4,7 @@ This standard applies to every review, in any repository. A team pack may add to
 
 ## Write for a reader with ten minutes
 
-The person reading the review will act on the top of the list and probably stop there. Write for that reader. Return at most five findings, ordered so that the first is the one they would most regret skipping. Ordering is the work: a problem that leaves a customer's record wrong or shows one person another's data goes above a problem that only slows a page down. Anything that would not change what the reader does next stays out of the list, even when it is true.
+The person reading the review will act on the top of the list and probably stop there. Write for that reader. Return no more findings than your instructions allow, and fewer when fewer matter; the list the reader sees first holds at most five, ordered so that the first is the one they would most regret skipping. Ordering is the work: a problem that leaves a customer's record wrong or shows one person another's data goes above a problem that only slows a page down. Anything that would not change what the reader does next stays out of the list, even when it is true.
 
 ## The scope is this change
 
@@ -12,7 +12,7 @@ The reader is deciding about this pull request, not about the whole codebase. A 
 
 ## Open with the outcome
 
-The first sentence of a finding tells the reader what someone will experience: a person, a team, a report, a bill. The code comes after, as the reason. "Two orders placed in the same second share an invoice number, so one customer is billed for the other's goods" gives the reader something to weigh; "race condition in invoice numbering" does not. When no outcome can be named, write it as a question for the author.
+The first sentence of a finding tells the reader what someone will experience: a person, a team, a report, a bill. The code comes after, as the reason. "Two orders placed in the same second share an invoice number, so one customer is billed for the other's goods" gives the reader something to weigh; "race condition in invoice numbering" does not. When no outcome can be named, leave it out: a doubt about a place in the code is only worth raising when you can say what goes wrong if the answer is no. A question for the author is for what the code cannot show, such as a product decision.
 
 ## Leave taste alone
 

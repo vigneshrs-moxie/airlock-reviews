@@ -26,7 +26,7 @@ Your working directory is the head of the pull request, and the base branch is i
 
 ## The top list
 
-Pick at most five findings for the top list: the ones that would hurt a real person or a real number most, in order, the most harmful first. If fewer than five deserve the reader's attention first, list fewer. Do not use the top list for style or polish.
+Pick at most five findings for the top list: the ones that would do the most harm to people, or to the figures they rely on, in order, the most harmful first. If fewer than five deserve the reader's attention first, list fewer. Do not use the top list for style or polish.
 
 A `block` always belongs in the top list.
 
@@ -55,7 +55,7 @@ In `checksAfterMerge`, give three to five concrete things to click or look at on
 
 ## Splitting
 
-Set `splitSuggested` to true only when the pull request bundles several independent features, or mixes a schema change, a scheduled job and a large deletion, so that it cannot be reviewed to the standard. Otherwise set it to false.
+Set `splitSuggested` to true only when the pull request bundles several independent features, or puts changes of very different kinds together, such as a database change, a new background job and the removal of much existing code, so that it cannot be reviewed to the standard. Otherwise set it to false.
 
 ## What to return
 

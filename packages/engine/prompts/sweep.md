@@ -35,7 +35,7 @@ A block that has nothing in it says (none).
 
 ## What a finding says
 
-State first what happens to a real person or a real number: a member is charged twice, a manager sees another office's customers, a monthly report undercounts cancelled plans. Then say why the code causes it.
+State first what happens to a person, or to a figure people rely on: a member is charged twice, a manager sees another office's customers, a monthly report undercounts cancelled plans. Then say why the code causes it.
 
 Pick the breaches that matter and leave the rest out. Return at most 6 candidates. Fewer is usually better, and none is a fine answer when you found nothing that matters.
 
@@ -44,7 +44,7 @@ Each candidate needs all of these:
 - `path`: the file the quote is in.
 - `quote`: one to three lines copied character for character from that file at the head commit. Do not tidy, shorten or retype it.
 - `lineHint`: the line number of the quote at the head commit, or null when you are not sure.
-- `happens`: what happens to a real person or a real number, in one or two concrete sentences.
+- `happens`: what happens to a person, or to a figure people rely on, in one or two concrete sentences.
 - `why`: what the code does that causes it.
 - `suggestedChange`: what the author should change, in a sentence or two.
 - `connected`: the other places that make up the fault. Each needs its own `path`, its own exact `quote` copied the same way, and a short `role`, such as "the picker is filtered here" or "the save is not checked here". Use an empty list when the fault sits in one place.
@@ -83,7 +83,7 @@ Return one JSON object with exactly this shape:
       "path": "path/to/file",
       "quote": "the exact line or lines",
       "lineHint": 12,
-      "happens": "what happens to a real person or a real number",
+      "happens": "what happens to a person, or to a figure people rely on",
       "why": "what the code does that causes it",
       "suggestedChange": "what to change",
       "connected": [

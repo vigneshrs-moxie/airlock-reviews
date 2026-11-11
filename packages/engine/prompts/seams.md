@@ -33,14 +33,14 @@ Do not review a cohort's insides again, and do not repeat a candidate already fo
 
 ## What a finding says
 
-State first what happens to a real person or a real number, then why the code causes it. Pick the few faults that matter and leave the rest out. Return at most 6 candidates; none is a fine answer when nothing crosses cohorts.
+State first what happens to a person, or to a figure people rely on, then why the code causes it. Pick the few faults that matter and leave the rest out. Return at most 6 candidates; none is a fine answer when nothing crosses cohorts.
 
 Each candidate needs all of these:
 
 - `path`: the file the quote is in.
 - `quote`: one to three lines copied character for character from that file at the head commit. Do not tidy, shorten or retype it.
 - `lineHint`: the line number of the quote at the head commit, or null when you are not sure.
-- `happens`: what happens to a real person or a real number, in one or two concrete sentences.
+- `happens`: what happens to a person, or to a figure people rely on, in one or two concrete sentences.
 - `why`: what the code does that causes it.
 - `suggestedChange`: what the author should change, in a sentence or two.
 - `connected`: the places in the other cohorts that make up the fault. Each needs its own `path`, its own exact `quote` and a short `role`.
@@ -75,7 +75,7 @@ Return one JSON object with exactly this shape:
       "path": "path/to/file",
       "quote": "the exact line or lines",
       "lineHint": 12,
-      "happens": "what happens to a real person or a real number",
+      "happens": "what happens to a person, or to a figure people rely on",
       "why": "what the code does that causes it",
       "suggestedChange": "what to change",
       "connected": [

@@ -31,13 +31,14 @@ async function filesUnder(dir: string): Promise<string[]> {
 const kitPresent = existsSync(KIT_DIR);
 const normalise = (line: string): string => line.trim().replace(/\s+/g, ' ');
 const RUN_WORDS = 8;
-/** Every run of 8 consecutive words, lower-cased, apostrophes dropped and other punctuation read as a space. */
-function wordRuns(text: string): Set<string> {
+/** Every run of `n` (default 8) consecutive words, lower-cased, apostrophes dropped and other punctuation read as a space. */
+function wordRuns(text: string, n = RUN_WORDS): Set<string> {
   const words = text.toLowerCase().replace(/['\u2019]/g, '').replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
   const runs = new Set<string>();
-  for (let i = 0; i + RUN_WORDS <= words.length; i++) runs.add(words.slice(i, i + RUN_WORDS).join(' '));
+  for (let i = 0; i + n <= words.length; i++) runs.add(words.slice(i, i + n).join(' '));
   return runs;
 }
+const promptsDir = fileURLToPath(new URL('../../prompts/', import.meta.url));
 const wordCount = (text: string): number => text.split(/\s+/).filter(Boolean).length;
 const orbit = (): Promise<Pack> => loadPack(join(packsDir, 'orbit-mine'));
 
@@ -143,6 +144,31 @@ describe('the packs in this repository', () => {
       }
     }
     expect(copied).toEqual([]);
+  });
+
+  it.skipIf(!kitPresent)('no engine prompt shares a run of 7 words with the team kit', async () => {
+    const kitRuns = new Set<string>();
+    for (const path of await filesUnder(KIT_DIR)) for (const run of wordRuns(await readFile(path, 'utf8'), 7)) kitRuns.add(run);
+    const shared: string[] = [];
+    for (const path of await filesUnder(promptsDir)) {
+      for (const run of wordRuns(await readFile(path, 'utf8'), 7)) if (kitRuns.has(run)) shared.push(`${basename(path)}: ${run}`);
+    }
+    expect(shared).toEqual([]);
+  });
+
+  it('the names rule and the sign-in rule are two general rules, each keeping its source pull requests', async () => {
+    const byId = new Map((await orbit()).rules.map((r) => [r.id, r]));
+    expect(byId.has('company-names-and-sign-in-flows')).toBe(false);
+    for (const id of ['company-names-spelled-as-stored', 'sign-in-changes-check-dependent-flows']) expect(byId.get(id)?.sourcePrs).toEqual([59, 62]);
+    expect(byId.get('company-names-spelled-as-stored')!.body).not.toMatch(/Joshua/);
+    expect(byId.get('sibling-pages-share-filter-pattern')!.body).not.toMatch(/\?team=/);
+  });
+
+  it('the generic standard agrees with the lens template on how many findings to return and on a doubt with no consequence', async () => {
+    const standard = await readFile(join(packsDir, 'generic/standards/standard.md'), 'utf8');
+    expect(standard).not.toMatch(/at most five findings/i);
+    expect(standard).not.toMatch(/no outcome can be named, write it as a question/i);
+    expect(standard).toMatch(/no outcome can be named, leave it out/i);
   });
 });
 
