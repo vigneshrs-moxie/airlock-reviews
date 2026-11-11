@@ -6,7 +6,7 @@ export { createSdkRunner, findClaude } from './agent/sdk-runner.js';
 export { choosePacks } from './pipeline/packs.js';
 export { runReview, type EngineDeps, type ReviewRequest } from './pipeline/review.js';
 export { latestReview, reviewById, saveReview } from './store/store.js';
-export { renderReview } from './render/terminal.js';
+export { cleanForTerminal, renderReview } from './render/terminal.js';
 export { parseArgs, usage } from './cli-args.js';
 export { fetchPr, parsePrRef } from './intake/pr.js';
 export { loadPack } from './packs/load.js';

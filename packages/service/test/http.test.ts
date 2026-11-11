@@ -400,7 +400,7 @@ describe('the service', () => {
     expect(again.json).toEqual({ paired: true, extension: 'same' });
     const second = await postPair(s, OTHER);
     expect(second.status).toBe(409);
-    expect(second.json).toEqual({ error: 'Airlock is already paired with another copy of the extension. Run "airlock-service unpair" and pair again.' });
+    expect(second.json).toEqual({ error: 'Airlock is already paired with another copy of the extension. In the airlock-reviews folder, run: npm run service -- unpair, then pair again.' });
   });
 
   it('refuses an Origin that is not a chrome-extension origin at pairing, and a missing one', async () => {

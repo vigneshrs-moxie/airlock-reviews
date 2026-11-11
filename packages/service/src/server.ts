@@ -43,7 +43,7 @@ export function defaultEngineDeps(): EngineDeps {
 
 export const LISTEN_HOST = '127.0.0.1';
 const PAIRED_ELSEWHERE =
-  'Airlock is already paired with another copy of the extension. Run "airlock-service unpair" and pair again.';
+  'Airlock is already paired with another copy of the extension. In the airlock-reviews folder, run: npm run service -- unpair, then pair again.';
 
 function frontRoutes(deps: ServiceDeps): Route[] {
   const { home, version } = deps.config;
