@@ -60,4 +60,20 @@ describe('tab watcher', () => {
     fake.update(-1, { url: 'https://github.com/acme/widgets/pull/1' });
     expect(seen).toEqual([]);
   });
+
+  it('reads the tab again after a failed read, so Retry can work', async () => {
+    const fake = fakeTabs([{ id: 7, url: 'https://github.com/acme/widgets/pull/1' }]);
+    let fail = true;
+    const query = fake.tabs.query;
+    fake.tabs.query = async (filter) => {
+      if (fail) {
+        fail = false;
+        throw new Error('No current window');
+      }
+      return query(filter);
+    };
+    const watcher = createTabWatcher(fake.tabs);
+    await expect(watcher.current()).rejects.toThrow('No current window');
+    expect(await watcher.current()).toEqual({ tabId: 7, url: 'https://github.com/acme/widgets/pull/1' });
+  });
 });

@@ -25,6 +25,21 @@ export function latestFor(pr: PrSummary, headSha = pr.headSha): LatestReply {
 
 export const prUrl = (repo: string, number: number, tail = ''): string => `https://github.com/${repo}/pull/${number}${tail}`;
 
+/** A reply that never comes, until the request is aborted. */
+export function never(req: { signal: AbortSignal | undefined }): Promise<Response> {
+  return new Promise<Response>((_, reject) => {
+    req.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  });
+}
+
+/** A reply held back until the test releases it. */
+export function held(): { reply: () => Promise<Response>; release: (res: Response) => void; asked: () => boolean } {
+  let release!: (res: Response) => void;
+  let asked = false;
+  const promise = new Promise<Response>((resolve) => { release = resolve; });
+  return { reply: () => { asked = true; return promise; }, release: (res) => release(res), asked: () => asked };
+}
+
 export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
@@ -55,7 +70,13 @@ export class FakeRun {
     }
   }
 
-  /** Every open stream breaks, as when the connection drops; the run itself goes on. */
+  /** Every open stream ends cleanly without a last event, as when the service drops its listeners. */
+  close(): void {
+    for (const l of this.listeners) l.controller.close();
+    this.listeners.clear();
+  }
+
+  /** Every open stream breaks at the network level, as when the service stops; the run itself goes on. */
   lose(): void {
     for (const l of this.listeners) l.controller.error(new TypeError('network error'));
     this.listeners.clear();

@@ -1,15 +1,25 @@
+/** An event whose data is not JSON. */
+export class EventDataError extends Error {
+  constructor() {
+    super('An event from the service is not JSON.');
+    this.name = 'EventDataError';
+  }
+}
+
 /**
  * Reads a `text/event-stream` body and hands each event's data, parsed as JSON, to `onEvent`.
  *
  * Lines end in LF or CRLF; a line starting with `:` is a comment (the service's keep-alive); the `data:` lines of
  * one event are joined with a newline; a blank line ends the event; other fields (`event:`, `id:`, `retry:`) are
- * ignored. A character or a line may be split across chunks. An event that never got its blank line is dropped,
- * as the format says. Rejects when an event's data is not JSON or when `onEvent` throws, cancelling the stream.
+ * ignored. A character or a line may be split across chunks; each chunk is scanned once, so a very long line costs
+ * no more than its length. An event that never got its blank line is dropped, as the format says. Rejects with
+ * `EventDataError` when an event's data is not JSON, or with whatever `onEvent` or the stream threw, cancelling the
+ * stream.
  */
 export async function readEventStream(body: ReadableStream<Uint8Array>, onEvent: (data: unknown) => void): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  let pending = '';
+  let partial: string[] = [];
   let data: string[] = [];
 
   const line = (text: string): void => {
@@ -17,7 +27,13 @@ export async function readEventStream(body: ReadableStream<Uint8Array>, onEvent:
       if (data.length > 0) {
         const joined = data.join('\n');
         data = [];
-        onEvent(JSON.parse(joined));
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(joined);
+        } catch {
+          throw new EventDataError();
+        }
+        onEvent(parsed);
       }
       return;
     }
@@ -30,14 +46,15 @@ export async function readEventStream(body: ReadableStream<Uint8Array>, onEvent:
   };
 
   const take = (text: string): void => {
-    pending += text;
     let start = 0;
-    for (let end = pending.indexOf('\n'); end !== -1; end = pending.indexOf('\n', start)) {
-      const raw = pending.slice(start, end);
+    for (let end = text.indexOf('\n'); end !== -1; end = text.indexOf('\n', start)) {
+      partial.push(text.slice(start, end));
+      const raw = partial.join('');
+      partial = [];
       line(raw.endsWith('\r') ? raw.slice(0, -1) : raw);
       start = end + 1;
     }
-    pending = pending.slice(start);
+    if (start < text.length) partial.push(text.slice(start));
   };
 
   try {

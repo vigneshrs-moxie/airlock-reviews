@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import type { ServiceEvent } from '@airlock/shared';
 import { NOT_UNDERSTOOD, ServiceClient, ServiceError } from '../../src/client/service';
-import { BASE, FakeService, OTHER_TOKEN, TOKEN, json, latestFor, prSummary } from '../helpers/fake-service';
+import { BASE, FakeService, OTHER_TOKEN, TOKEN, json, latestFor, never, prSummary } from '../helpers/fake-service';
+import { FakeTimers } from '../helpers/fake-timers';
 
 function setup(token: string | null = TOKEN) {
   const svc = new FakeService();
-  const client = new ServiceClient(BASE, async () => token, svc.fetch);
-  return { svc, client };
+  const timers = new FakeTimers();
+  const client = new ServiceClient(BASE, async () => token, svc.fetch, timers);
+  return { svc, client, timers };
 }
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
 
 async function failure(work: Promise<unknown>): Promise<ServiceError> {
   try {
@@ -121,6 +125,42 @@ describe('ServiceClient', () => {
     expect(svc.calls).toEqual(['POST /dismissals', 'POST /dismissals/restore']);
   });
 
+  it('gives up on hello after 5 seconds and on other calls after 60, through the given timers', async () => {
+    const { svc, client, timers } = setup();
+    svc.on('GET /hello', never);
+    svc.on('GET /pr', never);
+    const hello = client.hello();
+    const pr = client.pr('acme/widgets', 1);
+    await tick();
+    expect(timers.delays().sort()).toEqual([5_000, 60_000]);
+    timers.fire();
+    expect(await hello).toBe('offline');
+    expect(await failure(pr)).toMatchObject({ kind: 'offline' });
+  });
+
+  it('clears its timeout once a reply has been read', async () => {
+    const { client, timers } = setup();
+    await client.hello();
+    await client.pr('acme/widgets', 1);
+    expect(timers.delays()).toEqual([]);
+  });
+
+  it('aborts a call when the caller signal is aborted', async () => {
+    const { svc, client } = setup();
+    svc.on('GET /pr', never);
+    svc.on('GET /reviews/running', never);
+    svc.on('GET /reviews/latest', never);
+    const abort = new AbortController();
+    const calls = [
+      client.hello(abort.signal), client.pr('acme/widgets', 1, abort.signal),
+      client.running('acme/widgets', 1, abort.signal), client.latest('acme/widgets', 1, abort.signal),
+    ];
+    await tick();
+    abort.abort();
+    await Promise.allSettled(calls);
+    expect(svc.requests.map((r) => r.signal?.aborted)).toEqual([true, true, true, true]);
+  });
+
   describe('events', () => {
     it('delivers every event from the start and ends after done', async () => {
       const { svc, client } = setup();
@@ -149,16 +189,12 @@ describe('ServiceClient', () => {
       expect(seen).toEqual([{ type: 'failed', message: 'gh is not signed in.' }]);
     });
 
-    it('is lost when the stream breaks, closes early, or carries an event it does not understand', async () => {
+    it('is lost when the stream closes early or carries an event it does not understand', async () => {
       const { svc, client } = setup();
       const run = svc.startRun('acme/widgets', 1, 'run_00000000000a');
       run.emit(stage('intake', 'start'));
-      const seen: ServiceEvent[] = [];
-      const broken = client.events('run_00000000000a', (e) => {
-        seen.push(e);
-        queueMicrotask(() => run.lose());
-      }, new AbortController().signal);
-      expect(await broken).toBe('lost');
+      const closed = client.events('run_00000000000a', () => queueMicrotask(() => run.close()), new AbortController().signal);
+      expect(await closed).toBe('lost');
 
       svc.on('GET /reviews/:runId/events', () => new Response('data: {"type":"stage","stage":"intake","status":"start","detail":""}\n\n'));
       expect(await client.events('run_00000000000a', () => {}, new AbortController().signal)).toBe('lost');
@@ -170,8 +206,18 @@ describe('ServiceClient', () => {
       expect(await client.events('run_00000000000a', (e) => odd.push(e), new AbortController().signal)).toBe('lost');
       expect(odd).toHaveLength(1);
 
-      svc.down = true;
+      svc.on('GET /reviews/:runId/events', () => new Response('data: {not json\n\n'));
       expect(await client.events('run_00000000000a', () => {}, new AbortController().signal)).toBe('lost');
+    });
+
+    it('is offline when the request or the read fails at the network level', async () => {
+      const { svc, client } = setup();
+      const run = svc.startRun('acme/widgets', 1, 'run_00000000000a');
+      run.emit(stage('intake', 'start'));
+      const broken = client.events('run_00000000000a', () => queueMicrotask(() => run.lose()), new AbortController().signal);
+      expect(await broken).toBe('offline');
+      svc.down = true;
+      expect(await client.events('run_00000000000a', () => {}, new AbortController().signal)).toBe('offline');
     });
 
     it('stops when its signal is aborted', async () => {
@@ -179,10 +225,37 @@ describe('ServiceClient', () => {
       svc.startRun('acme/widgets', 1, 'run_00000000000a');
       const abort = new AbortController();
       const result = client.events('run_00000000000a', () => {}, abort.signal);
-      await new Promise((r) => setTimeout(r, 0));
+      await tick();
       abort.abort();
       expect(await result).toBe('lost');
       expect(svc.runs.get('run_00000000000a')?.listeners.size).toBe(0);
+    });
+
+    it('is lost after 45 seconds with no bytes, counted by the given timers and reset by every chunk', async () => {
+      const { svc, client, timers } = setup();
+      const run = svc.startRun('acme/widgets', 1, 'run_00000000000a');
+      const seen: ServiceEvent[] = [];
+      const result = client.events('run_00000000000a', (e) => seen.push(e), new AbortController().signal);
+      await tick();
+      expect(timers.delays()).toEqual([45_000]);
+      const armed = [...timers.pending.keys()];
+      run.emit(stage('intake', 'start'));
+      await tick();
+      expect(seen).toHaveLength(1);
+      expect(timers.delays()).toEqual([45_000]);
+      expect([...timers.pending.keys()]).not.toEqual(armed);
+      timers.fire();
+      expect(await result).toBe('lost');
+      expect(run.listeners.size).toBe(0);
+      expect(timers.delays()).toEqual([]);
+    });
+
+    it('leaves no timer behind once the stream has ended', async () => {
+      const { svc, client, timers } = setup();
+      const run = svc.startRun('acme/widgets', 1, 'run_00000000000a');
+      run.emit({ type: 'failed', message: 'Stopped.' });
+      expect(await client.events('run_00000000000a', () => {}, new AbortController().signal)).toBe('ended');
+      expect(timers.delays()).toEqual([]);
     });
 
     it('throws the mapped error for a refused stream', async () => {

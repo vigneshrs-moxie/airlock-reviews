@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readEventStream } from '../../src/client/event-stream';
+import { EventDataError, readEventStream } from '../../src/client/event-stream';
 
 /** A stream that hands over exactly these byte chunks, in order. */
 function streamOf(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
@@ -55,7 +55,7 @@ describe('readEventStream', () => {
   it('rejects when an event is not JSON, after delivering the events before it', async () => {
     const seen: unknown[] = [];
     const body = streamOf(split('data: {"ok":1}\n\ndata: <html>\n\ndata: {"ok":2}\n\n', []));
-    await expect(readEventStream(body, (d) => seen.push(d))).rejects.toThrow();
+    await expect(readEventStream(body, (d) => seen.push(d))).rejects.toBeInstanceOf(EventDataError);
     expect(seen).toEqual([{ ok: 1 }]);
   });
 
@@ -79,4 +79,18 @@ describe('readEventStream', () => {
     expect(seen).toEqual([1]);
     expect(cancelled).toBe(true);
   });
+
+  it('reads one very large single-line event arriving in many small chunks in linear time', async () => {
+    // 8 MB of data on one line, in 512-byte chunks: rescanning or re-joining the pending text on every chunk
+    // would touch about 64 GB of characters; reading it once touches 8 MB.
+    const big = 'x'.repeat(8 * 1024 * 1024);
+    const bytes = new TextEncoder().encode(`data: "${big}"\n\n`);
+    const chunks: Uint8Array[] = [];
+    for (let at = 0; at < bytes.length; at += 512) chunks.push(bytes.subarray(at, at + 512));
+    const started = performance.now();
+    const seen = await collect(chunks);
+    const ms = performance.now() - started;
+    expect(seen).toEqual([big]);
+    expect(ms).toBeLessThan(4000);
+  }, 60_000);
 });

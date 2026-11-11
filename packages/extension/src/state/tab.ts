@@ -28,10 +28,17 @@ export function createTabWatcher(tabs: TabsLike): TabWatcher {
   let found: Promise<{ tabId: number; url: string | undefined }> | undefined;
   let tabId: number | undefined;
   const current = (): Promise<{ tabId: number; url: string | undefined }> => {
-    found ??= tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-      tabId = tab?.id ?? NO_TAB;
-      return { tabId, url: tab?.url };
-    });
+    found ??= tabs.query({ active: true, currentWindow: true }).then(
+      ([tab]) => {
+        tabId = tab?.id ?? NO_TAB;
+        return { tabId, url: tab?.url };
+      },
+      (error: unknown) => {
+        // Not kept: the next call (Retry) asks Chrome again.
+        found = undefined;
+        throw error;
+      },
+    );
     return found;
   };
   return {

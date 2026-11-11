@@ -4,16 +4,19 @@ import {
   type DismissBody, type Dismissal, type Hello, type LatestReply, type PairReply, type PrSummary, type RestoreBody,
   type RestoreReply, type ServiceEvent, type ServiceStatus, type StartReviewBody, type StartReviewReply,
 } from '@airlock/shared';
-import { readEventStream } from './event-stream';
+import { EventDataError, readEventStream } from './event-stream';
+import { realTimers, type Timers } from './timers';
 
 export const NOT_UNDERSTOOD = 'Airlock got a reply from its service that it does not understand.';
 const NO_TOKEN = 'This panel is not paired with the Airlock service yet.';
 const REFUSED_TOKEN = 'The Airlock service does not accept this panel’s pairing token.';
 const OFFLINE = 'The Airlock service is not answering.';
 
-/** How long a call may take before the service counts as not answering. The event stream has no limit. */
-const HELLO_TIMEOUT_MS = 5_000;
-const CALL_TIMEOUT_MS = 60_000;
+/** How long a call may take, reply read included, before the service counts as not answering. */
+export const HELLO_TIMEOUT_MS = 5_000;
+export const CALL_TIMEOUT_MS = 60_000;
+/** The service sends a keep-alive every 15 seconds; a stream silent for three of them is lost. */
+export const STREAM_IDLE_MS = 45_000;
 
 /**
  * Why a call to the service failed, in the panel's terms: `offline` (no answer), `unpaired` (no token, or the
@@ -34,6 +37,8 @@ const RunningReplySchema = StartReviewReplySchema.pick({ runId: true });
 
 /** Thrown inside the stream reader to stop it after a `done` or `failed` event. */
 const LAST_EVENT = new Error('last event');
+/** Errors the stream when it has been silent too long. */
+const IDLE = new Error('the stream was silent too long');
 
 type Call = { method: 'GET' | 'POST'; path: string; query?: Record<string, string>; body?: unknown };
 
@@ -45,48 +50,57 @@ export class ServiceClient {
     private readonly base: string,
     private readonly token: () => Promise<string | null>,
     fetchFn?: typeof fetch,
+    private readonly timers: Timers = realTimers,
   ) {
     // Called through a wrapper: an extension page's fetch throws when called without its window as `this`.
     this.fetchFn = fetchFn ?? ((input, init) => fetch(input, init));
   }
 
-  async hello(): Promise<Hello | 'offline'> {
-    let res: Response;
+  /** `signal`, on this and the other reads, lets the panel drop a call for a pull request the tab has left. */
+  async hello(signal?: AbortSignal): Promise<Hello | 'offline'> {
     try {
-      res = await this.fetchFn(this.url('/hello'), { signal: AbortSignal.timeout(HELLO_TIMEOUT_MS) });
-    } catch {
-      return 'offline';
+      return await this.timed(HELLO_TIMEOUT_MS, signal, async (both) => {
+        const res = await this.fetchFn(this.url('/hello'), { signal: both }).catch(() => {
+          throw new ServiceError('offline', OFFLINE);
+        });
+        if (!res.ok) throw await failure(res);
+        return parse(res, HelloSchema);
+      });
+    } catch (error) {
+      if (error instanceof ServiceError && error.kind === 'offline') return 'offline';
+      throw error;
     }
-    if (!res.ok) throw await failure(res);
-    return parse(res, HelloSchema);
   }
 
   /** Offers a token the person typed. Refusals come back as the service's words; only no answer at all throws. */
-  async pair(token: string): Promise<PairReply | { error: string }> {
-    const res = await this.send({ method: 'POST', path: '/pair' }, token);
-    if (res.ok) return parse(res, PairReplySchema);
-    return { error: (await failure(res)).message };
+  pair(token: string): Promise<PairReply | { error: string }> {
+    return this.timed(CALL_TIMEOUT_MS, undefined, async (signal) => {
+      const res = await this.send({ method: 'POST', path: '/pair' }, token, signal);
+      if (res.ok) return parse(res, PairReplySchema);
+      return { error: (await failure(res)).message };
+    });
   }
 
   status(): Promise<ServiceStatus> {
     return this.call({ method: 'GET', path: '/status' }, ServiceStatusSchema);
   }
 
-  pr(repo: string, number: number): Promise<PrSummary> {
-    return this.call({ method: 'GET', path: '/pr', query: prQuery(repo, number) }, PrSummarySchema);
+  pr(repo: string, number: number, signal?: AbortSignal): Promise<PrSummary> {
+    return this.call({ method: 'GET', path: '/pr', query: prQuery(repo, number) }, PrSummarySchema, false, signal);
   }
 
   start(body: StartReviewBody): Promise<StartReviewReply> {
     return this.call({ method: 'POST', path: '/reviews', body }, StartReviewReplySchema);
   }
 
-  async running(repo: string, number: number): Promise<string | null> {
-    const reply = await this.call({ method: 'GET', path: '/reviews/running', query: prQuery(repo, number) }, RunningReplySchema, true);
+  async running(repo: string, number: number, signal?: AbortSignal): Promise<string | null> {
+    const call = { method: 'GET', path: '/reviews/running', query: prQuery(repo, number) } as const;
+    const reply = await this.call(call, RunningReplySchema, true, signal);
     return reply === null ? null : reply.runId;
   }
 
-  latest(repo: string, number: number): Promise<LatestReply | null> {
-    return this.call({ method: 'GET', path: '/reviews/latest', query: prQuery(repo, number) }, LatestReplySchema, true);
+  latest(repo: string, number: number, signal?: AbortSignal): Promise<LatestReply | null> {
+    return this.call({ method: 'GET', path: '/reviews/latest', query: prQuery(repo, number) }, LatestReplySchema, true, signal);
   }
 
   dismiss(body: DismissBody): Promise<Dismissal> {
@@ -98,46 +112,101 @@ export class ServiceClient {
   }
 
   /**
-   * Follows a run's events from its first one. `'ended'` once a `done` or `failed` event arrived; `'lost'` when the
-   * stream broke, closed early, was aborted, or carried an event that does not match the contract (that event is
-   * not passed on). A refused stream throws the mapped `ServiceError`.
+   * Follows a run's events from its first one.
+   * - `'ended'`: a `done` or `failed` event arrived (reading stops there).
+   * - `'offline'`: the request or the read failed at the network level.
+   * - `'lost'`: the stream closed without a last event, was silent for `STREAM_IDLE_MS`, was aborted by `signal`,
+   *   or carried an event that is not JSON or does not match the contract (that event is not passed on).
+   * A refused stream throws the mapped `ServiceError`.
    */
-  async events(runId: string, onEvent: (e: ServiceEvent) => void, signal: AbortSignal): Promise<'ended' | 'lost'> {
+  async events(runId: string, onEvent: (e: ServiceEvent) => void, signal: AbortSignal): Promise<'ended' | 'lost' | 'offline'> {
     if (!RunIdSchema.safeParse(runId).success) throw new ServiceError('problem', NOT_UNDERSTOOD);
-    let res: Response;
+    const token = await this.storedToken();
+    const silent = new AbortController();
+    let idle = false;
+    let watcher: TransformStreamDefaultController<Uint8Array> | undefined;
+    let timer: unknown;
+    const arm = (): void => {
+      if (timer !== undefined) this.timers.clearTimeout(timer);
+      timer = this.timers.setTimeout(() => {
+        idle = true;
+        silent.abort();
+        watcher?.error(IDLE);
+      }, STREAM_IDLE_MS);
+    };
+    // Why a stream that stopped without its last event stopped.
+    const cut = (error: unknown): 'lost' | 'offline' =>
+      idle || signal.aborted || error instanceof EventDataError || (error instanceof ServiceError && error.kind === 'problem')
+        ? 'lost'
+        : 'offline';
+
+    arm();
     try {
-      res = await this.send({ method: 'GET', path: `/reviews/${runId}/events` }, await this.storedToken(), signal);
-    } catch (error) {
-      if (error instanceof ServiceError && error.kind !== 'offline') throw error;
-      return 'lost';
+      let res: Response;
+      try {
+        res = await this.send({ method: 'GET', path: `/reviews/${runId}/events` }, token, AbortSignal.any([signal, silent.signal]));
+      } catch (error) {
+        return cut(error);
+      }
+      if (!res.ok) {
+        const refused = await failure(res).catch((error: unknown) => error);
+        if (refused instanceof ServiceError && refused.kind !== 'offline') throw refused;
+        return cut(refused);
+      }
+      if (res.body === null) return 'lost';
+      const watched = res.body.pipeThrough(
+        new TransformStream<Uint8Array, Uint8Array>({
+          start(controller) {
+            watcher = controller;
+          },
+          transform(chunk, controller) {
+            arm();
+            controller.enqueue(chunk);
+          },
+        }),
+      );
+      let ended = false;
+      try {
+        await readEventStream(watched, (data) => {
+          const event = ServiceEventSchema.safeParse(data);
+          if (!event.success) throw new ServiceError('problem', NOT_UNDERSTOOD);
+          onEvent(event.data);
+          if (event.data.type === 'done' || event.data.type === 'failed') {
+            ended = true;
+            throw LAST_EVENT;
+          }
+        });
+      } catch (error) {
+        return ended ? 'ended' : cut(error);
+      }
+      return ended ? 'ended' : 'lost';
+    } finally {
+      this.timers.clearTimeout(timer);
     }
-    if (!res.ok) throw await failure(res);
-    if (res.body === null) return 'lost';
-    let ended = false;
-    try {
-      await readEventStream(res.body, (data) => {
-        const event = ServiceEventSchema.safeParse(data);
-        if (!event.success) throw new ServiceError('problem', NOT_UNDERSTOOD);
-        onEvent(event.data);
-        // The service closes the stream after the last event; stop reading here rather than rely on it.
-        if (event.data.type === 'done' || event.data.type === 'failed') {
-          ended = true;
-          throw LAST_EVENT;
-        }
-      });
-    } catch {
-      // Reading stopped: after the last event, or because the stream broke or carried something unexpected.
-    }
-    return ended ? 'ended' : 'lost';
   }
 
   private call<T>(call: Call, schema: Schema<T>): Promise<T>;
-  private call<T>(call: Call, schema: Schema<T>, noneOn404: true): Promise<T | null>;
-  private async call<T>(call: Call, schema: Schema<T>, noneOn404 = false): Promise<T | null> {
-    const res = await this.send(call, await this.storedToken());
-    if (noneOn404 && res.status === 404) return null;
-    if (!res.ok) throw await failure(res);
-    return parse(res, schema);
+  private call<T>(call: Call, schema: Schema<T>, noneOn404: false, signal?: AbortSignal): Promise<T>;
+  private call<T>(call: Call, schema: Schema<T>, noneOn404: true, signal?: AbortSignal): Promise<T | null>;
+  private async call<T>(call: Call, schema: Schema<T>, noneOn404 = false, signal?: AbortSignal): Promise<T | null> {
+    const token = await this.storedToken();
+    return this.timed(CALL_TIMEOUT_MS, signal, async (both) => {
+      const res = await this.send(call, token, both);
+      if (noneOn404 && res.status === 404) return null;
+      if (!res.ok) throw await failure(res);
+      return parse(res, schema);
+    });
+  }
+
+  /** Runs `work` with a signal that aborts after `ms` on the injected timers, or when `outer` aborts. */
+  private async timed<T>(ms: number, outer: AbortSignal | undefined, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const timeout = new AbortController();
+    const handle = this.timers.setTimeout(() => timeout.abort(), ms);
+    try {
+      return await work(outer === undefined ? timeout.signal : AbortSignal.any([outer, timeout.signal]));
+    } finally {
+      this.timers.clearTimeout(handle);
+    }
   }
 
   private async storedToken(): Promise<string> {
@@ -146,13 +215,9 @@ export class ServiceClient {
     return token;
   }
 
-  private async send(call: Call, token: string, signal?: AbortSignal): Promise<Response> {
+  private async send(call: Call, token: string, signal: AbortSignal): Promise<Response> {
     const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-    const init: RequestInit = {
-      method: call.method,
-      headers,
-      signal: signal ?? AbortSignal.timeout(CALL_TIMEOUT_MS),
-    };
+    const init: RequestInit = { method: call.method, headers, signal };
     if (call.body !== undefined) {
       headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(call.body);
