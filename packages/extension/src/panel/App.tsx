@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { ServiceStatus } from '@airlock/shared';
 import { ServiceClient } from '../client/service';
 import { realTimers } from '../client/timers';
@@ -62,7 +62,15 @@ export function App({ start = (onState) => startRealPanel(onState), services }: 
   const { depth, failed, setDepth } = useDefaultDepth(services?.settings);
   const [pageReport, setPageReport] = useState<PageReport | null>(null);
   const jump = services?.jump;
-  const onJump = useMemo((): Jump | undefined => (jump ? (pr, place) => jump(pr, place, setPageReport) : undefined), [jump]);
+  // Only the latest jump's report is kept: an earlier jump that reports later is dropped.
+  const latestJump = useRef(0);
+  const onJump = useMemo((): Jump | undefined => {
+    if (!jump) return undefined;
+    return (pr, place) => {
+      const mine = ++latestJump.current;
+      return jump(pr, place, (report) => { if (mine === latestJump.current) setPageReport(report); });
+    };
+  }, [jump]);
   return (
     <PanelScreen
       state={state} dispatch={dispatch} defaultDepth={depth} onDefaultDepth={setDepth} depthFailed={failed}

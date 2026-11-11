@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { JumpReply, JumpRequest } from '../../src/page/messages';
+import type { Timers } from '../../src/client/timers';
+import type { JumpReply, JumpRequest } from '../../src/page/protocol';
 import {
-  LOAD_MS, connectedPlace, jumpTo, ownPlace, pageWords, tabLoaded,
-  type JumpChrome, type JumpPlace, type PageReport, type TabsEvents,
+  ANSWER_MS, LOAD_MS, RETRY_MS, connectedPlace, jumpTo, ownPlace, pageWords, tabLoaded,
+  type JumpChrome, type JumpPlace, type Loaded, type PageReport, type TabsEvents,
 } from '../../src/state/jump';
 import { FakeTimers } from '../helpers/fake-timers';
 import { finding } from '../screens/review-fixtures';
@@ -12,28 +13,66 @@ const HEAD = 'b'.repeat(40);
 const PR = { repo: 'acme/widgets', number: 1, headSha: HEAD };
 const TAB = 7;
 const FILES = 'https://github.com/acme/widgets/pull/1/files';
+const CONVERSATION = 'https://github.com/acme/widgets/pull/1';
+const COULD_NOT_REACH = 'Airlock could not reach the GitHub page. Reload it, then try again.';
 
-type Answer = JumpReply | 'no-receiver' | unknown;
+type Answer = JumpReply | 'no-receiver' | 'never' | unknown;
 const NO_RECEIVER = 'no-receiver';
+/** A content script that takes the message and never answers. */
+const NEVER = 'never';
+
+/** Timers that run each callback on the next real turn, and record every delay but the answer timeout as a wait. */
+function autoTimers(log: string[]): Timers & { delays: number[] } {
+  const delays: number[] = [];
+  return {
+    delays,
+    setTimeout: (fn, ms) => {
+      delays.push(ms);
+      if (ms !== ANSWER_MS) log.push(`wait ${ms}`);
+      return globalThis.setTimeout(fn, 0);
+    },
+    clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof globalThis.setTimeout>),
+  };
+}
+
+interface FakeOptions {
+  /** The tab's address when asked; the conversation page unless given. */
+  url?: string;
+  update?: () => Promise<unknown>;
+  create?: () => Promise<unknown>;
+  /** How each wait for a load ends, in order; `complete` when not given. */
+  loads?: Loaded[];
+}
 
 /** A tab that answers each message with the next scripted answer, and records what was done to it, in order. */
-function fakeChrome(answers: Answer[], opts: { update?: () => Promise<unknown>; create?: () => Promise<unknown> } = {}) {
+function fakeChrome(answers: Answer[], opts: FakeOptions = {}) {
   const log: string[] = [];
   const sent: JumpRequest[] = [];
   const reports: PageReport[] = [];
+  const loads = [...(opts.loads ?? [])];
   const chrome: JumpChrome = {
     async sendMessage(tabId, message) {
       expect(tabId).toBe(TAB);
       sent.push(message);
       log.push('send');
       const answer = answers.shift();
+      if (answer === NEVER) return new Promise(() => undefined);
       if (answer === NO_RECEIVER || answer === undefined) throw new Error('Could not establish connection. Receiving end does not exist.');
       return answer;
+    },
+    async tabUrl(tabId) {
+      expect(tabId).toBe(TAB);
+      log.push('read address');
+      return opts.url ?? CONVERSATION;
     },
     async updateTab(tabId, props) {
       expect(tabId).toBe(TAB);
       log.push(`update ${props.url}`);
       return opts.update?.();
+    },
+    async reloadTab(tabId) {
+      expect(tabId).toBe(TAB);
+      log.push('reload');
     },
     async createTab(props) {
       log.push(`create ${props.url}`);
@@ -42,7 +81,9 @@ function fakeChrome(answers: Answer[], opts: { update?: () => Promise<unknown>; 
     async loaded(tabId) {
       expect(tabId).toBe(TAB);
       log.push('watch load');
+      return loads.shift() ?? 'complete';
     },
+    timers: autoTimers(log),
     onReport: (report) => void reports.push(report),
   };
   return { chrome, log, sent, reports };
@@ -55,7 +96,7 @@ describe('jumpTo on the Files changed page', () => {
   it('sends the anchor and line and says it is showing the line', async () => {
     const f = fakeChrome([line]);
     expect(await jumpTo(f.chrome, TAB, PR, place())).toBe('Showing src/pause.ts:11.');
-    expect(f.sent).toEqual([{ type: 'airlock:jump', anchorId: PAUSE, path: 'src/pause.ts', line: 11 }]);
+    expect(f.sent).toEqual([{ type: 'airlock:jump', repo: 'acme/widgets', number: 1, anchorId: PAUSE, path: 'src/pause.ts', line: 11 }]);
     expect(f.log).toEqual(['send']);
     expect(f.reports).toEqual([{ view: 'classic', missing: [] }]);
   });
@@ -105,41 +146,94 @@ describe('jumpTo on the Files changed page', () => {
 });
 
 describe('jumpTo away from the Files changed page', () => {
+  const navigated = (hash: string) => ['read address', 'watch load', `update ${FILES}#${hash}`, 'send'];
+
   it('jumpTo navigates to the Files changed page when the tab is on the conversation', async () => {
     const f = fakeChrome([{ ok: false, reason: 'not-files-page', view: null, missing: [] }, line]);
     expect(await jumpTo(f.chrome, TAB, PR, place())).toBe('Showing src/pause.ts:11.');
-    expect(f.log).toEqual(['send', 'watch load', `update ${FILES}#${PAUSE}R11`, 'send']);
+    expect(f.log).toEqual(['send', ...navigated(`${PAUSE}R11`)]);
     expect(f.reports).toEqual([{ view: 'classic', missing: [] }]);
+  });
+
+  it('navigates when the tab is on another pull request’s Files changed page', async () => {
+    const f = fakeChrome([{ ok: false, reason: 'not-files-page', view: null, missing: [] }, line], { url: 'https://github.com/acme/widgets/pull/2/files' });
+    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe('Showing src/pause.ts:11.');
+    expect(f.log).toEqual(['send', ...navigated(`${PAUSE}R11`)]);
   });
 
   it('navigates without the line for a line outside the changed lines', async () => {
     const f = fakeChrome([NO_RECEIVER, { ok: true, how: 'file', view: 'classic', missing: [] }]);
     expect(await jumpTo(f.chrome, TAB, PR, place({ kind: 'outside' }))).toBe('Showing src/pause.ts; that line is outside the changed lines.');
-    expect(f.log).toEqual(['send', 'watch load', `update ${FILES}#${PAUSE}`, 'send']);
+    expect(f.log).toEqual(['send', ...navigated(PAUSE)]);
   });
 
   it('treats a tab with no content script like one that is not on the Files changed page', async () => {
     const f = fakeChrome([NO_RECEIVER, line]);
     expect(await jumpTo(f.chrome, TAB, PR, place())).toBe('Showing src/pause.ts:11.');
-    expect(f.log).toEqual(['send', 'watch load', `update ${FILES}#${PAUSE}R11`, 'send']);
+    expect(f.log).toEqual(['send', ...navigated(`${PAUSE}R11`)]);
+  });
+
+  it('retries a missing receiver after navigating: one that appears on the second retry answers', async () => {
+    const f = fakeChrome([NO_RECEIVER, NO_RECEIVER, NO_RECEIVER, line]);
+    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe('Showing src/pause.ts:11.');
+    expect(f.log).toEqual(['send', ...navigated(`${PAUSE}R11`), 'wait 250', 'send', 'wait 500', 'send']);
+    expect(RETRY_MS).toEqual([250, 500, 1000]);
+  });
+
+  it('on the same Files changed page with no live script, retries without navigating, then reloads the tab once', async () => {
+    const f = fakeChrome([NO_RECEIVER, NO_RECEIVER, NO_RECEIVER, NO_RECEIVER, line], { url: `${FILES}#diff-old` });
+    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe('Showing src/pause.ts:11.');
+    expect(f.log).toEqual([
+      'send', 'read address', 'wait 250', 'send', 'wait 500', 'send', 'wait 1000', 'send', 'watch load', 'reload', 'send',
+    ]);
+  });
+
+  it('a tab that never answers gets one reload and then a sentence, not a loop', async () => {
+    const f = fakeChrome([], { url: FILES });
+    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe(COULD_NOT_REACH);
+    expect(f.log.filter((e) => e === 'reload')).toHaveLength(1);
+    expect(f.log.filter((e) => e === 'send')).toHaveLength(5);
+    expect(f.reports).toEqual([]);
+    const g = fakeChrome([]);
+    expect(await jumpTo(g.chrome, TAB, PR, place())).toBe(COULD_NOT_REACH);
+    expect(g.log).toEqual([
+      'send', ...navigated(`${PAUSE}R11`), 'wait 250', 'send', 'wait 500', 'send', 'wait 1000', 'send', 'watch load', 'reload', 'send',
+    ]);
+  });
+
+  it('treats a request with no answer within five seconds as no receiver', async () => {
+    const f = fakeChrome([NEVER, NEVER, NEVER, NEVER, NEVER, NEVER]);
+    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe(COULD_NOT_REACH);
+    expect(ANSWER_MS).toBe(5_000);
+    expect((f.chrome.timers as ReturnType<typeof autoTimers>).delays.filter((ms) => ms === ANSWER_MS)).toHaveLength(6);
   });
 
   it('treats a reply it does not understand as no answer', async () => {
     const f = fakeChrome([{ ok: true, how: 'everything' }, { ok: 'yes' }]);
-    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe('Airlock opened the Files changed page but could not reach it. Try the button again.');
+    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe(COULD_NOT_REACH);
     expect(f.reports).toEqual([]);
   });
 
-  it('says it could not reach the page when the navigation never completes and nothing answers', async () => {
-    const f = fakeChrome([NO_RECEIVER, NO_RECEIVER]);
-    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe('Airlock opened the Files changed page but could not reach it. Try the button again.');
-    expect(f.log).toEqual(['send', 'watch load', `update ${FILES}#${PAUSE}R11`, 'send']);
-  });
-
-  it('says the same when the page after navigating is still not the Files changed page', async () => {
+  it('gives up when the page after navigating says it is still not the Files changed page, without retrying', async () => {
     const notFiles: JumpReply = { ok: false, reason: 'not-files-page', view: null, missing: [] };
     const f = fakeChrome([notFiles, notFiles]);
-    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe('Airlock opened the Files changed page but could not reach it. Try the button again.');
+    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe(COULD_NOT_REACH);
+    expect(f.log).toEqual(['send', ...navigated(`${PAUSE}R11`)]);
+  });
+
+  it('carries on after a load that never completes', async () => {
+    const f = fakeChrome([NO_RECEIVER, line], { loads: ['timeout'] });
+    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe('Showing src/pause.ts:11.');
+  });
+
+  it('stops at once when the tab is closed while it waits for a load', async () => {
+    const closed = 'Airlock could not jump: the GitHub tab was closed.';
+    const f = fakeChrome([NO_RECEIVER], { loads: ['closed'] });
+    expect(await jumpTo(f.chrome, TAB, PR, place())).toBe(closed);
+    expect(f.log).toEqual(['send', 'read address', 'watch load', `update ${FILES}#${PAUSE}R11`]);
+    const g = fakeChrome([], { url: FILES, loads: ['closed'] });
+    expect(await jumpTo(g.chrome, TAB, PR, place())).toBe(closed);
+    expect(g.log.at(-1)).toBe('reload');
   });
 
   it('never throws: a failed navigation resolves to a sentence', async () => {
@@ -186,6 +280,17 @@ describe('jumpTo opens nothing and says so when the path cannot be put in an add
     }
   });
 
+  it('refuses a path longer than 1,000 characters before sending anything, showing it cut to 80', async () => {
+    const path = `src/${'a'.repeat(997)}`;
+    for (const kind of ['changed', 'outside', 'elsewhere'] as const) {
+      const f = fakeChrome([line]);
+      expect(await jumpTo(f.chrome, TAB, PR, place({ path, kind }))).toBe(`Airlock cannot build a link to ${path.slice(0, 80)}….`);
+      expect(f.log).toEqual([]);
+    }
+    const f = fakeChrome([line]);
+    expect(await jumpTo(f.chrome, TAB, PR, place({ path: `src/${'a'.repeat(996)}` }))).toMatch(/^Showing /);
+  });
+
   it('when blobUrl returns null for a bad commit, nothing is opened', async () => {
     const f = fakeChrome([]);
     expect(await jumpTo(f.chrome, TAB, { ...PR, headSha: 'nope' }, place({ kind: 'elsewhere' }))).toBe('Airlock cannot build a link to src/pause.ts.');
@@ -195,28 +300,46 @@ describe('jumpTo opens nothing and says so when the path cannot be put in an add
 
 describe('tabLoaded', () => {
   type Listener = Parameters<TabsEvents['onUpdated']['addListener']>[0];
+  type Removed = Parameters<TabsEvents['onRemoved']['addListener']>[0];
   function events() {
     const listeners = new Set<Listener>();
+    const removed = new Set<Removed>();
     const tabs: TabsEvents = {
       onUpdated: { addListener: (fn) => void listeners.add(fn), removeListener: (fn) => void listeners.delete(fn) },
+      onRemoved: { addListener: (fn) => void removed.add(fn), removeListener: (fn) => void removed.delete(fn) },
     };
-    return { tabs, listeners, update: (id: number, status: string) => { for (const fn of [...listeners]) fn(id, { status }); } };
+    return {
+      tabs, listeners, removed,
+      update: (id: number, status: string) => { for (const fn of [...listeners]) fn(id, { status }); },
+      remove: (id: number) => { for (const fn of [...removed]) fn(id); },
+    };
   }
 
   it('resolves when that tab finishes loading, and stops watching', async () => {
     const e = events();
     const timers = new FakeTimers();
     let done = false;
-    const p = tabLoaded(e.tabs, TAB, timers).then(() => { done = true; });
+    const p = tabLoaded(e.tabs, TAB, timers).then((how) => { done = true; return how; });
     expect(timers.delays()).toEqual([LOAD_MS]);
     e.update(8, 'complete');
     e.update(TAB, 'loading');
     await Promise.resolve();
     expect(done).toBe(false);
     e.update(TAB, 'complete');
-    await p;
+    expect(await p).toBe('complete');
     expect(e.listeners.size).toBe(0);
+    expect(e.removed.size).toBe(0);
     expect(timers.pending.size).toBe(0);
+  });
+
+  it('ends at once when that tab is closed', async () => {
+    const e = events();
+    const timers = new FakeTimers();
+    const p = tabLoaded(e.tabs, TAB, timers);
+    e.remove(8);
+    e.remove(TAB);
+    expect(await p).toBe('closed');
+    expect(e.listeners.size + e.removed.size + timers.pending.size).toBe(0);
   });
 
   it('resolves after fifteen seconds when the load never completes', async () => {
@@ -225,7 +348,7 @@ describe('tabLoaded', () => {
     const p = tabLoaded(e.tabs, TAB, timers);
     expect(LOAD_MS).toBe(15_000);
     timers.fire();
-    await p;
+    expect(await p).toBe('timeout');
     expect(e.listeners.size).toBe(0);
   });
 });

@@ -119,6 +119,12 @@ test('clicking Jump to line in the panel scrolls the classic fixture page to the
   await expect(cell).not.toHaveClass(/airlock-target/);
   const guard = await diffAnchorId('src/guard.ts');
   await expect(classicCell(github, guard, 4)).toHaveClass(/airlock-target/);
+
+  // The script's own fragment change does not wipe its mark; any other change of address does, pushState included.
+  await github.waitForTimeout(1_500);
+  await expect(github.locator('.airlock-target')).toHaveCount(3);
+  await github.evaluate(() => history.pushState(null, '', '/acme/widgets/pull/1/files?w=1'));
+  await expect(github.locator('.airlock-target')).toHaveCount(0);
   await github.close();
   await panel.close();
 });
@@ -149,4 +155,11 @@ test('from the conversation page, Jump to line opens the Files changed page and 
   await expect(cell).toBeInViewport();
   await github.close();
   await panel.close();
+});
+
+test('the built content script is small and carries no schema library', async () => {
+  const script = await readFile(join(BUILT, 'content-scripts', 'github.js'), 'utf8');
+  expect(Buffer.byteLength(script)).toBeLessThan(15 * 1024);
+  expect(script).not.toMatch(/zod/i);
+  expect(script).not.toContain('ReviewDocument');
 });

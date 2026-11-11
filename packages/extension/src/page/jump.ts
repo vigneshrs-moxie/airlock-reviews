@@ -1,8 +1,9 @@
-import { prRefFromUrl } from '@airlock/shared';
+// Imported by path, not from '@airlock/shared': this module has no zod, and the content script must stay small.
+import { prRefFromUrl } from '../../../shared/src/pr-ref';
 import { detectView, findFile, findLine, targetsOf } from './locate';
-import { JumpRequestSchema, type JumpReply, type JumpRequest } from './messages';
-import { missingFor, type View } from './selectors';
-import type { SoftNavigation } from './soft-nav';
+import { notFilesPage, parseJumpRequest, type JumpReply, type JumpRequest, type View } from './protocol';
+import { missingFor } from './selectors';
+import type { PageMove } from './soft-nav';
 
 /** How long the script looks for the row after setting the address fragment, and how often. */
 export const LOOK_MS = 3_000;
@@ -21,10 +22,14 @@ export interface PageEnv {
 }
 
 export interface Page {
-  /** Answers one jump request; see JumpReplySchema for what each reply means. */
+  /** Answers one jump request; see JumpReply (protocol.ts) for what each reply means. */
   answer(request: JumpRequest): Promise<JumpReply>;
-  /** GitHub moved within the page: the mark is removed, unless this is the popstate of the address the script set. */
-  softNavigated(event: SoftNavigation): void;
+  /**
+   * GitHub moved within the page, or the address changed: the mark is removed, unless this is a popstate or address
+   * change to the address the mark was made at (the script's own fragment). `to` is the new address when the event names
+   * it; WXT's watcher can fire before the address is committed, so `location.href` may still be the old one.
+   */
+  softNavigated(event: PageMove, to?: string): void;
 }
 
 /** Puts the one mark on `targets`, taking it off the previous target first. An empty list only takes it off. */
@@ -63,7 +68,9 @@ export function createPage(env: PageEnv): Page {
     async answer(request) {
       const mine = ++latest;
       const ref = prRefFromUrl(location.href);
-      if (ref === null || ref.page !== 'files') return { ok: false, reason: 'not-files-page', view: null, missing: [] };
+      const samePull = ref !== null && ref.page === 'files' && ref.number === request.number
+        && ref.repo.toLowerCase() === request.repo.toLowerCase();
+      if (!samePull) return notFilesPage();
 
       // GitHub's own permalink form: in both views GitHub scrolls to the line and marks it. Everything after is extra.
       location.hash = `#${request.anchorId}${request.line === null ? '' : `R${request.line}`}`;
@@ -83,10 +90,12 @@ export function createPage(env: PageEnv): Page {
 
       const missing = missingFor(doc, view);
       if (missing.length > 0) console.warn(`Airlock: selectors that found nothing on this page: ${missing.join(', ')}`);
+      const fileOnly = view !== null && file !== null && request.line === null;
       if (mine === latest) {
         mark(row !== null && view !== null ? targetsOf(view, row) : []);
         // Also when GitHub does not scroll: setting the fragment it already has is not a navigation.
-        row?.scrollIntoView({ block: 'center' });
+        if (row !== null) row.scrollIntoView({ block: 'center' });
+        else if (fileOnly) file?.scrollIntoView({ block: 'start' });
       }
 
       if (view === null) return { ok: true, how: 'asked', view, missing };
@@ -94,8 +103,8 @@ export function createPage(env: PageEnv): Page {
       if (row !== null) return { ok: true, how: 'line', view, missing };
       return { ok: true, how: request.line === null ? 'file' : 'asked', view, missing };
     },
-    softNavigated(event) {
-      if (event === 'popstate' && markedAt === location.href) return;
+    softNavigated(event, to) {
+      if ((event === 'popstate' || event === 'locationchange') && markedAt === (to ?? location.href)) return;
       mark([]);
     },
   };
@@ -112,15 +121,18 @@ export interface RuntimeLike {
 
 const listening = new WeakSet<object>();
 
-/** Answers jump requests from this extension only; every other message gets no reply. Registers once per runtime. */
+/**
+ * Answers jump requests from this extension only, and always answers them (a failure answers not-files-page); every
+ * other message gets no reply. Registers once per runtime.
+ */
 export function listen(runtime: RuntimeLike, page: Page): void {
   if (listening.has(runtime.onMessage)) return;
   listening.add(runtime.onMessage);
   runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (sender.id !== runtime.id) return undefined;
-    const request = JumpRequestSchema.safeParse(message);
-    if (!request.success) return undefined;
-    void page.answer(request.data).then(sendResponse);
+    const request = parseJumpRequest(message);
+    if (request === null) return undefined;
+    void page.answer(request).then(sendResponse, () => sendResponse(notFilesPage()));
     return true;
   });
 }

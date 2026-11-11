@@ -297,6 +297,18 @@ describe('the detail of a finding', () => {
     fireEvent.click(button(/src\/other\.ts:7/));
     expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/other.ts', line: 7, kind: 'elsewhere' });
   });
+  it('shows only the latest jump’s answer when an earlier one answers later', async () => {
+    const answers: ((text: string) => void)[] = [];
+    const onJump = vi.fn(() => new Promise<string>((resolve) => answers.push(resolve)));
+    show(reviewState([full]), { onJump });
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    fireEvent.click(button('Jump to line'));
+    fireEvent.click(button(/src\/other\.ts:7/));
+    await act(async () => { answers[1]!('Opened src/other.ts in a new tab; it is not part of this pull request.'); });
+    await act(async () => { answers[0]!('Asked GitHub to show src/file1.ts:10.'); });
+    expect(screen.getByText('Opened src/other.ts in a new tab; it is not part of this pull request.')).toBeTruthy();
+    expect(screen.queryByText('Asked GitHub to show src/file1.ts:10.')).toBeNull();
+  });
   it('jumps from a review shown read-only while the service is away', async () => {
     const onJump = vi.fn().mockResolvedValue('Showing src/file1.ts:10.');
     const kept = reviewState([full]);

@@ -1,4 +1,5 @@
 import type { Depth, DismissReason, Finding, PrSummary, Severity } from '@airlock/shared';
+import { placeText } from '../place-text';
 
 export const CODE_QUOTE_LIMIT = 160;
 
@@ -20,8 +21,7 @@ export function clipQuote(quote: string): string {
   return chars.length <= CODE_QUOTE_LIMIT ? quote : `${chars.slice(0, CODE_QUOTE_LIMIT).join('')}…`;
 }
 
-/** A path with a line, or the path alone when there is no line. */
-export const placeText = (path: string, line: number | null): string => (line === null ? path : `${path}:${line}`);
+export { placeText } from '../place-text';
 
 /** Where a finding is, by its anchor: the start line, or what is known when the line is not in the changed lines. */
 export function locationText(finding: Finding): string {

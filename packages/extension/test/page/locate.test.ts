@@ -20,7 +20,7 @@ describe('the fixtures', () => {
 describe('every selector has a name', () => {
   it('for both views, and the names are distinct', () => {
     const all = [...Object.values(CLASSIC), ...Object.values(REACT)];
-    expect(all.length).toBe(8);
+    expect(all.length).toBe(6);
     for (const s of all) {
       expect(s.name).not.toBe('');
       expect(() => document.querySelector(s.css)).not.toThrow();
@@ -55,6 +55,11 @@ describe('missingFor', () => {
     expect(missingFor(document, 'classic')).toEqual([]);
     load(REACT_HTML);
     expect(missingFor(document, 'react')).toEqual([]);
+  });
+
+  it('lists only selectors a lookup uses', () => {
+    expect(Object.values(CLASSIC).map((s) => s.name)).toEqual(['classic-file', 'classic-new-line-number']);
+    expect(Object.values(REACT).map((s) => s.name)).toEqual(['react-toolbar', 'react-file', 'react-row', 'react-line-number']);
   });
 
   it('names the selectors of the detected view that found nothing', () => {

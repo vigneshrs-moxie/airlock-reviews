@@ -1,7 +1,8 @@
-import { blobUrl, diffAnchorId, filesUrl, type Finding, type Place } from '@airlock/shared';
+import { blobUrl, diffAnchorId, filesUrl, prRefFromUrl, type Finding, type Place } from '@airlock/shared';
+import { z } from 'zod';
 import { realTimers, type Timers } from '../client/timers';
-import { JumpReplySchema, type JumpReply, type JumpRequest } from '../page/messages';
-import { placeText } from '../screens/words';
+import { PATH_MAX, type JumpReply, type JumpRequest } from '../page/protocol';
+import { clippedPath, placeText } from '../place-text';
 
 /**
  * Where a jump goes. `changed`: the path is among the review's files and the line is expected on the Files changed page.
@@ -16,39 +17,71 @@ export type Jump = (pr: JumpPr, place: JumpPlace) => Promise<string>;
 /** What the last jump found on the page: the view it recognised, and the selectors that found nothing. */
 export type PageReport = Pick<JumpReply, 'view' | 'missing'>;
 
-/** How long to wait for the tab to finish loading after sending it to the Files changed page. */
-export const LOAD_MS = 15_000;
+const report = { view: z.enum(['react', 'classic']).nullable(), missing: z.array(z.string()) };
+/** The content script's reply, checked on arrival; anything else counts as no answer. */
+const JumpReplySchema: z.ZodType<JumpReply> = z.discriminatedUnion('ok', [
+  z.object({ ok: z.literal(true), how: z.enum(['line', 'file', 'asked']), ...report }),
+  z.object({ ok: z.literal(false), reason: z.enum(['not-files-page', 'file-not-on-page']), ...report }),
+]);
 
-/** The Chrome calls a jump makes, so tests can pass fakes. */
+/** How long to wait for the tab to finish loading. */
+export const LOAD_MS = 15_000;
+/** How long a request may go unanswered before it counts as no receiver. */
+export const ANSWER_MS = 5_000;
+/** The gaps before each retry when no content script answers, before the tab is reloaded once. */
+export const RETRY_MS = [250, 500, 1_000] as const;
+
+/** How a wait for a load ended. */
+export type Loaded = 'complete' | 'timeout' | 'closed';
+
+/** The Chrome calls a jump makes, and its clock, so tests can pass fakes. */
 export interface JumpChrome {
-  /** Rejects when no content script answers in the tab. */
+  /** Rejects when no content script is listening in the tab. */
   sendMessage(tabId: number, message: JumpRequest): Promise<unknown>;
+  /** The tab's address, when Chrome shows it. */
+  tabUrl(tabId: number): Promise<string | undefined>;
   updateTab(tabId: number, props: { url: string }): Promise<unknown>;
+  reloadTab(tabId: number): Promise<unknown>;
   createTab(props: { url: string }): Promise<unknown>;
-  /** Starts watching when called; resolves when the tab next finishes loading, or after `LOAD_MS`. Never rejects. */
-  loaded(tabId: number): Promise<void>;
+  /** Starts watching when called; ends when the tab next finishes loading, after `LOAD_MS`, or when it closes. Never rejects. */
+  loaded(tabId: number): Promise<Loaded>;
+  timers: Timers;
   /** Told what the page answered, for the Packs screen. */
   onReport?(report: PageReport): void;
 }
 
 export const COULD_NOT_JUMP = 'Airlock could not jump to that place.';
-const COULD_NOT_REACH = 'Airlock opened the Files changed page but could not reach it. Try the button again.';
+const COULD_NOT_REACH = 'Airlock could not reach the GitHub page. Reload it, then try again.';
+const TAB_CLOSED = 'Airlock could not jump: the GitHub tab was closed.';
 const NOT_RECOGNISED = ' Airlock does not recognise this version of the page.';
 
 const usableLine = (line: number | null): number | null =>
   line !== null && Number.isSafeInteger(line) && line > 0 ? line : null;
 
-/** The page's reply, or null when nothing answered or the answer is not one Airlock understands. */
+const sleep = (timers: Timers, ms: number): Promise<void> => new Promise((resolve) => { timers.setTimeout(resolve, ms); });
+
+/** The page's reply; null when nothing is listening, nothing answers within `ANSWER_MS`, or the answer is not understood. */
 async function ask(chrome: JumpChrome, tabId: number, request: JumpRequest): Promise<JumpReply | null> {
+  let timer: unknown;
+  const silence = new Promise<undefined>((resolve) => { timer = chrome.timers.setTimeout(() => resolve(undefined), ANSWER_MS); });
   try {
-    const reply = JumpReplySchema.safeParse(await chrome.sendMessage(tabId, request));
+    const answer = await Promise.race([chrome.sendMessage(tabId, request), silence]);
+    const reply = JumpReplySchema.safeParse(answer);
     return reply.success ? reply.data : null;
   } catch {
     return null;
+  } finally {
+    chrome.timers.clearTimeout(timer);
   }
 }
 
 const unreached = (reply: JumpReply | null): boolean => reply === null || (!reply.ok && reply.reason === 'not-files-page');
+
+/** Whether `address` is the same pull request's Files changed page, whatever its fragment. */
+function onFilesPage(address: string | undefined, pr: JumpPr): boolean {
+  const ref = address === undefined ? null : prRefFromUrl(address);
+  return ref !== null && ref.page === 'files' && ref.number === pr.number && ref.repo.toLowerCase() === pr.repo.toLowerCase();
+}
 
 function sentence(reply: JumpReply, place: JumpPlace, line: number | null): string {
   const { path } = place;
@@ -61,14 +94,18 @@ function sentence(reply: JumpReply, place: JumpPlace, line: number | null): stri
 }
 
 /**
- * Takes the tab `tabId` to `place` and resolves to the sentence to show. A place outside the pull request opens in a new
- * tab. Otherwise the tab's content script is asked; when the tab is not on the Files changed page, or nothing answers,
- * the tab is sent there, and asked once more when it has loaded.
+ * Takes the tab `tabId` to `place` and resolves to the sentence to show; never rejects. A place outside the pull request
+ * opens in a new tab. Otherwise the tab's content script is asked. When it is not on this pull request's Files changed
+ * page (or nothing answers and the tab is elsewhere), the tab is sent there and asked again once it has loaded. A tab
+ * with no live script (the extension was reloaded) is asked again after each of `RETRY_MS`, then reloaded once and asked
+ * a last time.
  */
 export async function jumpTo(chrome: JumpChrome, tabId: number, pr: JumpPr, place: JumpPlace): Promise<string> {
   const { path } = place;
   const cannotLink = `Airlock cannot build a link to ${path}.`;
   try {
+    // Longer than the content script accepts: refused here, shown cut so the sentence stays readable.
+    if (path.length > PATH_MAX) return `Airlock cannot build a link to ${clippedPath(path)}.`;
     if (place.kind === 'elsewhere') {
       const url = blobUrl(pr.repo, pr.headSha, path, place.line);
       if (url === null) return cannotLink;
@@ -80,14 +117,32 @@ export async function jumpTo(chrome: JumpChrome, tabId: number, pr: JumpPr, plac
     const anchorId = await diffAnchorId(path);
     const url = filesUrl(pr.repo, pr.number, anchorId, line ?? undefined);
     if (url === null) return cannotLink;
-    const request: JumpRequest = { type: 'airlock:jump', anchorId, path, line };
+    const request: JumpRequest = { type: 'airlock:jump', repo: pr.repo, number: pr.number, anchorId, path, line };
+
+    /** Runs `act` and waits for the load it starts; false when the tab was closed meanwhile. */
+    const andLoad = async (act: () => Promise<unknown>): Promise<boolean> => {
+      const loaded = chrome.loaded(tabId);
+      await act();
+      return (await loaded) !== 'closed';
+    };
 
     let reply = await ask(chrome, tabId, request);
     if (unreached(reply)) {
-      const loaded = chrome.loaded(tabId);
-      await chrome.updateTab(tabId, { url });
-      await loaded;
-      reply = await ask(chrome, tabId, request);
+      // Moving to the same document with a new fragment would not load a script, so that tab is not navigated.
+      const address = await chrome.tabUrl(tabId).catch(() => undefined);
+      if (!onFilesPage(address, pr)) {
+        if (!(await andLoad(() => chrome.updateTab(tabId, { url })))) return TAB_CLOSED;
+        reply = await ask(chrome, tabId, request);
+      }
+      for (const ms of RETRY_MS) {
+        if (reply !== null) break;
+        await sleep(chrome.timers, ms);
+        reply = await ask(chrome, tabId, request);
+      }
+      if (reply === null) {
+        if (!(await andLoad(() => chrome.reloadTab(tabId)))) return TAB_CLOSED;
+        reply = await ask(chrome, tabId, request);
+      }
     }
     if (reply === null || unreached(reply)) return COULD_NOT_REACH;
     chrome.onReport?.({ view: reply.view, missing: reply.missing });
@@ -98,24 +153,31 @@ export async function jumpTo(chrome: JumpChrome, tabId: number, pr: JumpPr, plac
 }
 
 type UpdatedListener = (tabId: number, changeInfo: { status?: string }) => void;
+type RemovedListener = (tabId: number) => void;
 /** The part of `chrome.tabs` that `tabLoaded` uses. */
 export interface TabsEvents {
   onUpdated: { addListener(fn: UpdatedListener): void; removeListener(fn: UpdatedListener): void };
+  onRemoved: { addListener(fn: RemovedListener): void; removeListener(fn: RemovedListener): void };
 }
 
-/** Resolves when tab `tabId` next reports `complete`, or after `ms`; stops watching either way. */
-export function tabLoaded(tabs: TabsEvents, tabId: number, timers: Timers = realTimers, ms = LOAD_MS): Promise<void> {
+/** Ends when tab `tabId` next reports `complete`, after `ms`, or when it is closed; stops watching either way. */
+export function tabLoaded(tabs: TabsEvents, tabId: number, timers: Timers = realTimers, ms = LOAD_MS): Promise<Loaded> {
   return new Promise((resolve) => {
-    const done = (): void => {
+    const done = (how: Loaded): void => {
       timers.clearTimeout(timer);
-      tabs.onUpdated.removeListener(listener);
-      resolve();
+      tabs.onUpdated.removeListener(updated);
+      tabs.onRemoved.removeListener(removed);
+      resolve(how);
     };
-    const listener: UpdatedListener = (id, changeInfo) => {
-      if (id === tabId && changeInfo.status === 'complete') done();
+    const updated: UpdatedListener = (id, changeInfo) => {
+      if (id === tabId && changeInfo.status === 'complete') done('complete');
     };
-    const timer = timers.setTimeout(done, ms);
-    tabs.onUpdated.addListener(listener);
+    const removed: RemovedListener = (id) => {
+      if (id === tabId) done('closed');
+    };
+    const timer = timers.setTimeout(() => done('timeout'), ms);
+    tabs.onUpdated.addListener(updated);
+    tabs.onRemoved.addListener(removed);
   });
 }
 
@@ -123,9 +185,12 @@ export function tabLoaded(tabs: TabsEvents, tabId: number, timers: Timers = real
 export function browserJumpChrome(onReport: (report: PageReport) => void): JumpChrome {
   return {
     sendMessage: (tabId, message) => browser.tabs.sendMessage(tabId, message),
+    tabUrl: async (tabId) => (await browser.tabs.get(tabId)).url,
     updateTab: (tabId, props) => browser.tabs.update(tabId, props),
+    reloadTab: (tabId) => browser.tabs.reload(tabId),
     createTab: (props) => browser.tabs.create(props),
     loaded: (tabId) => tabLoaded(browser.tabs, tabId),
+    timers: realTimers,
     onReport,
   };
 }

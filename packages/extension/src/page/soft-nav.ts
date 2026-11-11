@@ -2,6 +2,8 @@
 // and GitHub's own soft-nav end on the document, and the history's popstate on the window. Not yet checked on a live page.
 
 export type SoftNavigation = 'turbo:render' | 'soft-nav:end' | 'popstate';
+/** A soft navigation, or any change of the page's address (WXT's location watcher, wired in the entry point). */
+export type PageMove = SoftNavigation | 'locationchange';
 
 /** Calls `fn` on each of GitHub's soft navigations until the returned function is called. */
 export function onSoftNavigation(doc: EventTarget, win: EventTarget, fn: (event: SoftNavigation) => void): () => void {

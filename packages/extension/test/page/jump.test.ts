@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { LOOK_MS, STEP_MS, createPage, listen, type PageEnv, type RuntimeLike } from '../../src/page/jump';
-import type { JumpRequest } from '../../src/page/messages';
+import { LOOK_MS, STEP_MS, createPage, listen, type Page, type PageEnv, type RuntimeLike } from '../../src/page/jump';
+import { parseJumpRequest, type JumpRequest } from '../../src/page/protocol';
 import { CLASSIC, REACT } from '../../src/page/selectors';
 import { onSoftNavigation } from '../../src/page/soft-nav';
 import { CLASSIC_HTML, GUARD, PAUSE, REACT_HTML, load } from './page-fixtures';
@@ -30,7 +30,9 @@ function env(href = FILES, onWait: (elapsed: number) => void = () => undefined) 
   return { env: e, log, waits, go: (next: string) => { url = new URL(next); } };
 }
 
-const request = (over: Partial<JumpRequest> = {}): JumpRequest => ({ type: 'airlock:jump', anchorId: PAUSE, path: 'src/pause.ts', line: 11, ...over });
+const request = (over: Partial<JumpRequest> = {}): JumpRequest => ({
+  type: 'airlock:jump', repo: 'acme/widgets', number: 1, anchorId: PAUSE, path: 'src/pause.ts', line: 11, ...over,
+});
 /** A message as it might arrive, valid or not. */
 const raw = (over: Record<string, unknown>): Record<string, unknown> => ({ ...request(), ...over });
 const marked = (): Element[] => [...document.querySelectorAll(`.${MARK}`)];
@@ -145,6 +147,33 @@ describe('answering a jump on the Files changed page', () => {
     warn.mockRestore();
   });
 
+  it('scrolls to the file container on every file-only jump, also when the fragment is unchanged', async () => {
+    load(CLASSIC_HTML);
+    const page = env();
+    const p = createPage(page.env);
+    const scrolled = vi.spyOn(HTMLElement.prototype, 'scrollIntoView');
+    for (let i = 0; i < 2; i++) {
+      expect(await p.answer(request({ line: null }))).toMatchObject({ ok: true, how: 'file' });
+    }
+    expect(page.env.location.hash).toBe(`#${PAUSE}`);
+    const file = document.getElementById(PAUSE);
+    expect(scrolled.mock.contexts).toEqual([file, file]);
+    expect(scrolled.mock.calls).toEqual([[{ block: 'start' }], [{ block: 'start' }]]);
+    scrolled.mockRestore();
+  });
+
+  it('answers not-files-page on another pull request\'s Files changed page, and matches the repository ignoring case', async () => {
+    load(CLASSIC_HTML);
+    for (const href of ['https://github.com/acme/widgets/pull/2/files', 'https://github.com/acme/gadgets/pull/1/files']) {
+      const page = env(href);
+      expect(await createPage(page.env).answer(request())).toEqual({ ok: false, reason: 'not-files-page', view: null, missing: [] });
+      expect(page.log).toEqual([]);
+    }
+    const page = env('https://github.com/ACME/Widgets/pull/1/files');
+    expect(await createPage(page.env).answer(request())).toMatchObject({ ok: true, how: 'line' });
+    expect(await createPage(env('https://github.com/acme/widgets/pull/1/changes').env).answer(request({ repo: 'Acme/WIDGETS' }))).toMatchObject({ ok: true, how: 'line' });
+  });
+
   it('answers not-files-page on any other page and leaves its address alone', async () => {
     load(CLASSIC_HTML);
     for (const href of ['https://github.com/acme/widgets/pull/1', 'https://github.com/acme/widgets/pull/1/commits', 'https://github.com/acme/widgets']) {
@@ -188,6 +217,18 @@ describe('answering a jump on the Files changed page', () => {
     expect(marked()).toEqual([]);
   });
 
+  it('clears the mark on any address change, except to the address it was made at', async () => {
+    load(REACT_HTML);
+    const page = env();
+    const p = createPage(page.env);
+    await p.answer(request());
+    p.softNavigated('locationchange', page.env.location.href);
+    expect(marked()).toHaveLength(1);
+    // The watcher can report a change before the address is committed: the destination decides, not location.href.
+    p.softNavigated('locationchange', `${FILES}?w=1`);
+    expect(marked()).toEqual([]);
+  });
+
   it('creates no element but its one stylesheet and never sets markup', async () => {
     load(REACT_HTML);
     const before = document.querySelectorAll('*').length;
@@ -222,6 +263,15 @@ describe('the message listener', () => {
     const { kept, replies } = await r.send(request());
     expect(kept).toBe(true);
     expect(replies).toEqual([{ ok: true, how: 'line', view: 'classic', missing: [] }]);
+  });
+
+  it('always replies: a failure inside the answer replies not-files-page', async () => {
+    const r = runtime();
+    const failing: Page = { answer: () => Promise.reject(new Error('boom')), softNavigated: () => undefined };
+    listen(r.rt, failing);
+    const { kept, replies } = await r.send(request());
+    expect(kept).toBe(true);
+    expect(replies).toEqual([{ ok: false, reason: 'not-files-page', view: null, missing: [] }]);
   });
 
   it('registers its listener once', () => {
@@ -270,6 +320,15 @@ describe('the message listener', () => {
       raw({ line: '11' }),
       raw({ line: undefined }),
       raw({ extra: true }),
+      raw({ repo: 'acme' }),
+      raw({ repo: 'acme/widgets/x' }),
+      raw({ repo: 7 }),
+      raw({ number: 0 }),
+      raw({ number: 1.5 }),
+      raw({ number: '1' }),
+      raw({ number: 2 ** 53 }),
+      (({ repo: _repo, ...rest }) => rest)(request()),
+      [request()],
     ];
     for (const message of bad) {
       const { kept, replies } = await r.send(message);
@@ -294,5 +353,16 @@ describe('onSoftNavigation', () => {
     stop();
     document.dispatchEvent(new Event('turbo:render'));
     expect(seen).toHaveLength(3);
+  });
+});
+
+describe('parseJumpRequest', () => {
+  it('accepts exactly the six fields with valid values, and nothing else', () => {
+    expect(parseJumpRequest(request())).toEqual(request());
+    expect(parseJumpRequest(request({ line: null }))).toEqual(request({ line: null }));
+    expect(parseJumpRequest({ ...request(), line: 11.0 })).toEqual(request());
+    expect(parseJumpRequest({ ...request(), constructor: 1 })).toBeNull();
+    expect(parseJumpRequest(undefined)).toBeNull();
+    expect(parseJumpRequest('{"type":"airlock:jump"}')).toBeNull();
   });
 });

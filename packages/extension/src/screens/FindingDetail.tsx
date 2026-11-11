@@ -49,8 +49,11 @@ export function FindingDetail({ finding, packs, previous, next, canDismiss, fixP
     title.current?.focus();
   }, [visible]);
 
+  // Only the latest jump's answer is shown: an earlier one that answers later is dropped.
+  const latestJump = useRef(0);
   const jump = (key: string, place: JumpPlace): void => {
-    const said = (text: string): void => setNote({ key, text });
+    const mine = ++latestJump.current;
+    const said = (text: string): void => { if (mine === latestJump.current) setNote({ key, text }); };
     const failed = (): void => said(COULD_NOT_JUMP);
     try {
       Promise.resolve(onJump(place)).then(said, failed);
