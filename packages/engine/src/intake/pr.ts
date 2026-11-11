@@ -20,7 +20,7 @@ export function detectStage(baseRef: string, rules: StageRule[]): Stage {
 
 interface GhPull {
   title: string; body: string | null; additions: number; deletions: number; changed_files: number;
-  html_url: string; user: { login: string };
+  html_url: string; user: { login: string }; state?: unknown; merged?: unknown;
   base: { ref: string; sha: string; repo: { full_name: string } };
   head: { ref: string; sha: string; repo: { full_name: string } | null };
 }
@@ -38,5 +38,7 @@ export async function fetchPr(exec: Exec, repo: string, number: number, rules: S
     isFork: pull.head.repo?.full_name !== pull.base.repo.full_name,
     additions: pull.additions, deletions: pull.deletions, changedFiles: pull.changed_files,
     url: pull.html_url, stage: detectStage(pull.base.ref, rules),
+    ...(typeof pull.state === 'string' ? { state: pull.state } : {}),
+    ...(typeof pull.merged === 'boolean' ? { merged: pull.merged } : {}),
   };
 }

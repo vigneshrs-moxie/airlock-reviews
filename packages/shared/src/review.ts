@@ -16,6 +16,8 @@ export const PrInfoSchema = z.object({
   viewer: z.string(), baseRef: z.string(), headRef: z.string(), baseSha: z.string(), headSha: z.string(),
   isFork: z.boolean(), additions: z.number().int(), deletions: z.number().int(),
   changedFiles: z.number().int(), url: z.string(), stage: StageSchema,
+  /** GitHub's `state` (`open` or `closed`) and whether the pull request was merged, when fetched from GitHub. */
+  state: z.string().optional(), merged: z.boolean().optional(),
 });
 export type PrInfo = z.infer<typeof PrInfoSchema>;
 

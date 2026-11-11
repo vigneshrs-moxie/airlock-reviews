@@ -296,7 +296,8 @@ describe('runReview', () => {
     await s.remote.git('checkout', 'feature');
     await s.remote.git('merge', '--no-ff', '-m', 'Merge main into feature', 'main');
     const head = await s.remote.git('rev-parse', 'HEAD');
-    const { doc, calls } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: head }) });
+    // GitHub agrees: a merge that brings in nothing new lists no changed files.
+    const { doc, calls } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: head, changedFiles: 0 }) });
     expect(doc.range.kind).toBe('sync-merge');
     expect(calls).toEqual([]);
     expect(doc.stageErrors).toEqual([]);

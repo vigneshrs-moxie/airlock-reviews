@@ -124,13 +124,17 @@ export async function buildScenario(
   return { remote, baseSha, headSha };
 }
 
-export interface GhOptions { baseSha: string; headSha: string; author?: string; viewer?: string; failClone?: string }
+export interface GhOptions {
+  baseSha: string; headSha: string; author?: string; viewer?: string; failClone?: string;
+  /** GitHub's count of changed files (default 5). */
+  changedFiles?: number;
+}
 
 /** Answers the two `gh api` calls of fetchPr, refuses every other gh call, and passes everything else to realExec. */
 export function fakeGh(opts: GhOptions): Exec & { calls: string[][] } {
   const calls: string[][] = [];
   const pull = {
-    title: 'Add refunds', body: 'Refunds reuse formatMoney.', additions: 9, deletions: 0, changed_files: 5,
+    title: 'Add refunds', body: 'Refunds reuse formatMoney.', additions: 9, deletions: 0, changed_files: opts.changedFiles ?? 5,
     html_url: `https://github.com/${REPO}/pull/${NUMBER}`, user: { login: opts.author ?? 'alice' },
     base: { ref: 'main', sha: opts.baseSha, repo: { full_name: REPO } },
     head: { ref: 'feature', sha: opts.headSha, repo: { full_name: REPO } },

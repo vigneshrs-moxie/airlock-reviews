@@ -213,6 +213,114 @@ describe('prepareWorkspace', () => {
     await ws.dispose();
   });
 
+  describe('the base of a merged pull request, or one whose base branch is gone', () => {
+    /** main at `root`, feature with one commit, then (optionally) feature merged into main. */
+    async function merged(mergeIt: boolean) {
+      const r = await remote();
+      await r.write('a.txt', 'root');
+      const root = await r.commit('root');
+      await r.git('checkout', '-b', 'feature');
+      await r.write('b.txt', 'feature');
+      const head = await r.commit('feature work');
+      await r.git('checkout', 'main');
+      if (mergeIt) await r.git('merge', '--no-ff', '-m', 'Merge feature', 'feature');
+      return { r, root, head };
+    }
+    const spy = () => {
+      const seen: string[][] = [];
+      const exec: Exec = async (cmd, args, opts) => { seen.push(args); return realExec(cmd, args, opts); };
+      return { seen, exec };
+    };
+
+    it('a merged pull request whose base branch contains its head is reviewed from the base GitHub recorded', async () => {
+      const { r, root, head } = await merged(true);
+      const { seen, exec } = spy();
+      const ws = await prepareWorkspace(exec, {
+        repo: 'acme/app', remoteUrl: r.dir, pr: { number: 7, baseRef: 'main', headSha: head, baseSha: root, merged: true }, reviewId: 'm1',
+      });
+      expect(ws.range).toEqual({ baseSha: root, headSha: head, kind: 'full' });
+      expect(seen.find((a) => a.includes('merge-base'))!.slice(-2)).toEqual([root, head]);
+      await ws.dispose();
+    });
+
+    it('a pull request whose base branch was deleted is reviewed from the recorded base too', async () => {
+      const r = await remote();
+      await r.write('a.txt', 'root');
+      const root = await r.commit('root');
+      await r.git('checkout', '-b', 'release');
+      await r.git('checkout', '-b', 'feature');
+      await r.write('b.txt', 'feature');
+      const head = await r.commit('feature work');
+      await r.git('checkout', 'main');
+      await r.git('branch', '-D', 'release');
+      const ws = await prepareWorkspace(realExec, {
+        repo: 'acme/app', remoteUrl: r.dir, pr: { number: 7, baseRef: 'release', headSha: head, baseSha: root }, reviewId: 'm2',
+      });
+      expect(ws.range).toEqual({ baseSha: root, headSha: head, kind: 'full' });
+      await ws.dispose();
+    });
+
+    it('an open pull request whose base branch exists keeps the branch\'s tip as before, whatever base GitHub recorded', async () => {
+      const r = await remote();
+      await r.write('a.txt', '1');
+      const older = await r.commit('older');
+      await r.write('a.txt', '2');
+      const branchPoint = await r.commit('branch point');
+      await r.git('checkout', '-b', 'feature');
+      await r.write('b.txt', '3');
+      const head = await r.commit('feature work');
+      await r.git('checkout', 'main');
+      const { seen, exec } = spy();
+      const ws = await prepareWorkspace(exec, {
+        repo: 'acme/app', remoteUrl: r.dir, pr: { number: 7, baseRef: 'main', headSha: head, baseSha: older, merged: false }, reviewId: 'm3',
+      });
+      const mirror = join(home, 'repos', 'acme__app.git');
+      expect(seen.filter((a) => a.includes('merge-base'))).toEqual([['--git-dir', mirror, 'merge-base', 'refs/heads/main', head]]);
+      expect(ws.range.baseSha).toBe(branchPoint);
+      await ws.dispose();
+    });
+
+    it('fetches a recorded base the mirror does not have, once, by its id', async () => {
+      const { r, head } = await merged(true);
+      // A commit on no branch or tag, so a mirror of the branches does not have it.
+      await r.git('checkout', '-b', 'gone', 'feature~1');
+      await r.write('c.txt', 'only here');
+      const hidden = await r.commit('hidden base');
+      await r.git('update-ref', 'refs/hidden/base', hidden);
+      await r.git('checkout', 'main');
+      await r.git('branch', '-D', 'gone');
+      await r.git('config', 'uploadpack.allowAnySHA1InWant', 'true');
+      const { seen, exec } = spy();
+      // A file:// address makes git copy only what the branches reach, as a clone from GitHub does.
+      const ws = await prepareWorkspace(exec, {
+        repo: 'acme/app', remoteUrl: `file://${r.dir}`, pr: { number: 7, baseRef: 'main', headSha: head, baseSha: hidden, merged: true }, reviewId: 'm4',
+      });
+      expect(seen.filter((a) => a.includes('fetch') && a.includes(hidden))).toHaveLength(1);
+      expect(ws.range.headSha).toBe(head);
+      await ws.dispose();
+    });
+
+    it('says plainly when the recorded base cannot be fetched', async () => {
+      const { r, head } = await merged(true);
+      const missing = 'f'.repeat(40);
+      const { seen, exec } = spy();
+      await expect(prepareWorkspace(exec, {
+        repo: 'acme/app', remoteUrl: r.dir, pr: { number: 7, baseRef: 'main', headSha: head, baseSha: missing, merged: true }, reviewId: 'm5',
+      })).rejects.toThrow(`The base commit of pull request #7 (${missing}) could not be fetched, so the pull request cannot be reviewed.`);
+      expect(seen.filter((a) => a.includes('fetch') && a.includes(missing))).toHaveLength(1);
+    });
+
+    it('refuses a recorded base that is not a full commit id before any git call', async () => {
+      const calls: string[][] = [];
+      const exec: Exec = async (cmd, args) => { calls.push(args); return { stdout: '', stderr: '', code: 0 }; };
+      for (const baseSha of ['abc1234', 'g'.repeat(40), `${'a'.repeat(40)}\n`, '--upload-pack=x', 'a'.repeat(41)]) {
+        const req: WorkspaceRequest = { repo: 'acme/app', remoteUrl: '/x', pr: { number: 7, baseRef: 'main', headSha: 'a'.repeat(40), baseSha, merged: true }, reviewId: 'b9' };
+        await expect(prepareWorkspace(exec, req)).rejects.toThrow(/is not a full commit id/);
+      }
+      expect(calls).toEqual([]);
+    });
+  });
+
   it('removes review folders left under work for more than a day, and keeps newer ones', async () => {
     const r = await remote();
     await r.write('a.txt', '1');

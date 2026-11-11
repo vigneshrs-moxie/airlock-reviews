@@ -145,7 +145,9 @@ async function openWorkspace(exec: Exec, req: ReviewRequest, pr: PrInfo, reviewI
   try {
     return await prepareWorkspace(exec, {
       repo: req.repo, remoteUrl: req.remoteUrl ?? `https://github.com/${req.repo}.git`, reviewId,
-      ...(req.explicit ? { explicit: req.explicit } : { pr: { number: req.number, baseRef: pr.baseRef, headSha: pr.headSha } }),
+      ...(req.explicit ? { explicit: req.explicit } : {
+        pr: { number: req.number, baseRef: pr.baseRef, headSha: pr.headSha, baseSha: pr.baseSha, ...(pr.merged === undefined ? {} : { merged: pr.merged }) },
+      }),
     });
   } catch (err) {
     if (!CREDENTIAL_TROUBLE.test(messageOf(err))) throw err;
@@ -182,6 +184,16 @@ function fallbackSelection(
 /** The stage error that keeps a sync merge from being reported as reviewed. */
 const unreviewedMerge = (changed: number): string =>
   `This pull request only merges another branch in. Airlock did not review it: ${changed === 1 ? '1 changed file was' : `${changed} changed files were`} not looked at.`;
+
+/**
+ * For a live pull request (no explicit range): when the diff has no files but GitHub lists changed files, the sentence for
+ * a stage error, since nothing was reviewed; otherwise null.
+ */
+function emptyDiff(files: FileDiff[], pr: PrInfo, explicit: boolean): string | null {
+  if (explicit || files.length > 0 || pr.changedFiles <= 0) return null;
+  const listed = pr.changedFiles === 1 ? '1 changed file' : `${pr.changedFiles} changed files`;
+  return `GitHub lists ${listed} for this pull request, but the diff Airlock computed is empty. Nothing was reviewed.`;
+}
 
 /** Most paths named in the stage error for a pull request none of whose changed files could be reviewed. */
 const MAX_UNREVIEWED_NAMED = 5;
@@ -250,7 +262,7 @@ async function reviewInWorkspace(
 
   const gathered = (await log.run('facts', async (rec) => {
     const tiers = await rec.attempt(() => classifyFiles(files, packs), [] as FileFact[]);
-    const unreviewed = notReviewed(files, tiers);
+    const unreviewed = notReviewed(files, tiers) ?? emptyDiff(files, pr, req.explicit !== undefined);
     if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
     const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead), [] as Fact[])];
     const found = await rec.attempt(
@@ -272,7 +284,9 @@ async function reviewInWorkspace(
     log.skip('map', skipWhy);
     log.emit({ type: 'map', map }); // empty, so a listener waiting for the map is not left hanging
     log.skip('brief', skipWhy);
-    brief = files.length === 0 ? EMPTY_SYNC_MERGE_BRIEF : SYNC_MERGE_BRIEF;
+    // A merge with no files is one that changes nothing only when GitHub agrees (or the range was given explicitly).
+    const nothingChanged = files.length === 0 && emptyDiff(files, pr, req.explicit !== undefined) === null;
+    brief = nothingChanged ? EMPTY_SYNC_MERGE_BRIEF : files.length === 0 ? EMPTY_BRIEF : SYNC_MERGE_BRIEF;
   } else {
     map = ((await limitedOut('map')) ? undefined : await log.run('map', async (rec) => {
       const r = await buildChangeMap(capped, {

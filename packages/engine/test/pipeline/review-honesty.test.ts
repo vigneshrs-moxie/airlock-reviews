@@ -84,6 +84,33 @@ function withBody(inner: Exec, body: string): Exec {
 }
 
 describe('what a model was not shown is written down', () => {
+  describe('an empty diff', () => {
+    const EMPTY = 'GitHub lists 3 changed files for this pull request, but the diff Airlock computed is empty. Nothing was reviewed.';
+
+    it('is never a clean review when GitHub says the pull request changes files', async () => {
+      const s = await scenario(BASE_FILES, {}); // the head is the base: the diff is empty
+      const { doc } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha, changedFiles: 3 }) });
+      expect(doc.verdict.label).toBe('incomplete');
+      expect(doc.stageErrors).toContainEqual({ stage: 'facts', cohortId: null, message: EMPTY });
+      expect(doc.brief.whatItDoes.join(' ')).not.toMatch(/changes no files/);
+    });
+
+    it('keeps today\'s result when GitHub agrees that nothing changed', async () => {
+      const s = await scenario(BASE_FILES, {});
+      const { doc } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha, changedFiles: 0 }) });
+      expect(doc.stageErrors).toEqual([]);
+      expect(doc.verdict.label).not.toBe('incomplete');
+    });
+
+    it('is never checked against GitHub\'s count for an explicit range', async () => {
+      const s = await scenario(BASE_FILES, {});
+      const { doc } = await review({
+        s, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha, changedFiles: 3 }), req: { explicit: { baseSha: s.baseSha, headSha: s.headSha } },
+      });
+      expect(doc.stageErrors).toEqual([]);
+    });
+  });
+
   it('collects every limit in the document and prints them under Not shown to the reviewer', async () => {
     const longMoney = `${HEAD_FILES['src/money.ts']}${Array.from({ length: 1600 }, (_, i) => `// note ${i}`).join('\n')}\n`;
     const s = await scenario({ ...BASE_FILES, 'CLAUDE.md': 'r'.repeat(65_000) }, { ...HEAD_FILES, 'src/money.ts': longMoney });
