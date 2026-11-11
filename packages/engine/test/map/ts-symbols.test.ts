@@ -1,4 +1,6 @@
-import { rm } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { changedExports, makeResolver, readSymbols } from '../../src/map/ts-symbols.js';
 import { makeChange } from '../helpers/change-repo.js';
@@ -113,6 +115,20 @@ describe('makeResolver', () => {
     const resolve = await makeResolver(r.dir, null);
     expect(resolve('src/a.ts', '~lib/time')).toBe('src/lib/time.ts');
     expect(resolve('src/a.ts', 'lib/time')).toBeNull();
+  });
+
+  it('ignores a tsconfig.json that links to a file outside the repository', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'airlock-outside-'));
+    try {
+      await writeFile(join(outside, 'tsconfig.json'), JSON.stringify({ compilerOptions: { paths: { '@/*': ['./src/*'] } } }));
+      const r = await repo({ 'src/lib/time.ts': 'export const now = 1;\n' });
+      await symlink(join(outside, 'tsconfig.json'), join(r.dir, 'tsconfig.json'));
+      const resolve = await makeResolver(r.dir, null);
+      expect(resolve('src/a.ts', './lib/time')).toBe('src/lib/time.ts');
+      expect(resolve('src/a.ts', '@/lib/time')).toBeNull();
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('resolves only relative specifiers when there is no tsconfig', async () => {

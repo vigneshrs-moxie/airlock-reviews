@@ -39,7 +39,7 @@ describe('findNeighbours', () => {
       'src/swaps/actions.ts': swaps(2),
       'src/swaps/page.tsx': "import { approveSwap } from './actions';\nexport const Q = approveSwap();\n",
     });
-    const links = await findLinks(realExec, r.dir, files, []);
+    const { links } = await findLinks(realExec, r.dir, files, []);
     expect(await findNeighbours(realExec, r.dir, files, links, [])).toEqual([
       { path: 'src/swaps/panel.tsx', role: 'caller', forFiles: ['src/swaps/actions.ts'], why: 'uses approveSwap, declineSwap' },
     ]);
@@ -60,7 +60,7 @@ describe('findNeighbours', () => {
       'src/core/near2.ts': caller('./lib.js'),
       'src/core/near1.ts': caller('./lib.js'),
     }, { 'src/core/lib.ts': 'export function computeTotals() { return 2; }\n' });
-    const links = await findLinks(realExec, r.dir, files, []);
+    const { links } = await findLinks(realExec, r.dir, files, []);
     const found = await findNeighbours(realExec, r.dir, files, links, []);
     expect(found.map((n) => n.path)).toEqual([
       'src/core/near1.ts', 'src/core/near2.ts', 'src/far/f1.ts', 'src/far/f2.ts', 'src/far/f3.ts', 'src/far/f4.ts',
@@ -121,7 +121,7 @@ describe('findNeighbours', () => {
       'src/lib.ts': 'export function shared() { return 2; }\n',
       'src/a.ts': "import { shared } from './lib.js';\nshared(); shared();\n",
     });
-    const links = await findLinks(realExec, r.dir, files, []);
+    const { links } = await findLinks(realExec, r.dir, files, []);
     expect(links.length).toBeGreaterThan(0);
     expect(await findNeighbours(realExec, r.dir, files, links, [])).toEqual([]);
   });

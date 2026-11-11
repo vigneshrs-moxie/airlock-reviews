@@ -2,17 +2,32 @@ import type { Exec } from '../util/exec.js';
 
 export interface GrepHit { path: string; line: number }
 
-/** Whole-word, fixed-string `git grep` over tracked text files, in path then line order. */
-export async function gitGrep(exec: Exec, headDir: string, token: string, pathspecs: string[] = []): Promise<GrepHit[]> {
-  const args = ['grep', '-n', '-z', '-I', '-w', '-F', '-e', token];
+const GREP_MAX_BUFFER = 256 * 1024 * 1024;
+
+/**
+ * Whole-word, fixed-string `git grep` over tracked text files: one hit per matching line, in path then line order.
+ * `-o` keeps the output to the matched word. A result too large for `maxBuffer` throws rather than reading as no match.
+ */
+export async function gitGrep(
+  exec: Exec, headDir: string, token: string, pathspecs: string[] = [], maxBuffer = GREP_MAX_BUFFER,
+): Promise<GrepHit[]> {
+  const args = ['grep', '-n', '-o', '-z', '-I', '-w', '-F', '-e', token];
   if (pathspecs.length > 0) args.push('--', ...pathspecs);
-  const res = await exec('git', args, { cwd: headDir });
+  const res = await exec('git', args, { cwd: headDir, maxBuffer });
+  // realExec reports an overflow as exit 1; a real "no match" exit 1 prints nothing.
+  if (res.code === 1 && (res.stdout !== '' || /maxBuffer/i.test(res.stderr))) {
+    throw new Error(`git grep ${JSON.stringify(token)}: output overflowed the ${maxBuffer}-byte buffer`);
+  }
   if (res.code === 1) return [];
   if (res.code !== 0) throw new Error(`git grep ${JSON.stringify(token)} failed (exit ${res.code}): ${res.stderr}`);
   const hits: GrepHit[] = [];
+  let last = '';
   for (const record of res.stdout.split('\n')) {
     const [path, line] = record.split('\0');
-    if (path && line && /^\d+$/.test(line)) hits.push({ path, line: Number(line) });
+    if (!path || !line || !/^\d+$/.test(line)) continue;
+    const key = `${path}\0${line}`;
+    if (key !== last) hits.push({ path, line: Number(line) }); // -o repeats a line once per match on it
+    last = key;
   }
   return hits;
 }

@@ -11,6 +11,7 @@ import {
 } from './ts-symbols.js';
 
 const HITS_PER_NAME = 40;
+const MAX_NAMES = 600;
 const STOP_NAMES = new Set([
   'default', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'metadata', 'config', 'dynamic',
   'revalidate', 'runtime', 'maxDuration', 'generateMetadata',
@@ -60,13 +61,37 @@ interface CompiledRule { rule: LinkRule; capture: RegExp; applies: (path: string
 
 function compileRules(packs: Pack[]): CompiledRule[] {
   return packs.flatMap((pack) => pack.linkRules.map((rule) => {
-    try {
-      return { rule, capture: new RegExp(rule.capture, 'g'), applies: picomatch(rule.from, { dot: true }) };
-    } catch (err) {
-      const why = err instanceof Error ? err.message : String(err);
-      throw new Error(`pack "${pack.id}" link rule "${rule.id}": invalid capture ${JSON.stringify(rule.capture)}: ${why}`);
-    }
+    const build = <T>(step: string, source: string, make: () => T): T => {
+      try {
+        return make();
+      } catch (err) {
+        const why = err instanceof Error ? err.message : String(err);
+        throw new Error(`pack "${pack.id}" link rule "${rule.id}": invalid ${step} ${JSON.stringify(source)}: ${why}`);
+      }
+    };
+    const applies = build('from glob', rule.from, () => picomatch(rule.from, { dot: true }));
+    const capture = build('capture', rule.capture, () => new RegExp(rule.capture, 'g'));
+    return { rule, capture, applies };
   }));
+}
+
+interface FileNames { path: string; added: boolean; names: string[] }
+
+/** The (name, defining file) pairs to search, at most 600 distinct names: added files first, then files with fewer names, then path. */
+function pickNames(files: FileNames[]): { picks: { name: string; path: string }[]; skippedNames: number } {
+  const order = [...files].sort((a, b) => Number(b.added) - Number(a.added) || a.names.length - b.names.length || cmp(a.path, b.path));
+  const kept = new Set<string>();
+  const all = new Set<string>();
+  const picks: { name: string; path: string }[] = [];
+  for (const f of order) {
+    for (const name of f.names) {
+      all.add(name);
+      if (!kept.has(name) && kept.size >= MAX_NAMES) continue;
+      kept.add(name);
+      picks.push({ name, path: f.path });
+    }
+  }
+  return { picks, skippedNames: all.size - kept.size };
 }
 
 /** Reads each file of the head at most once; files outside `headDir` read as missing. */
@@ -86,8 +111,11 @@ function symbolReader(headDir: string, resolve: Resolve): (path: string) => Prom
   };
 }
 
-/** Code-only links between the changed files and the rest of the head: imports, uses, tests and pack conventions. */
-export async function findLinks(exec: Exec, headDir: string, files: FileDiff[], packs: Pack[]): Promise<Link[]> {
+/**
+ * Code-only links between the changed files and the rest of the head: imports, uses, tests and pack conventions.
+ * `skippedNames` counts changed names left unsearched once 600 distinct names were reached.
+ */
+export async function findLinks(exec: Exec, headDir: string, files: FileDiff[], packs: Pack[]): Promise<{ links: Link[]; skippedNames: number }> {
   const rules = compileRules(packs);
   const limit = limiter(8);
   const greps = new Map<string, Promise<GrepHit[]>>();
@@ -112,11 +140,13 @@ export async function findLinks(exec: Exec, headDir: string, files: FileDiff[], 
 
   const links: Link[] = [];
   const searches: Promise<Link[]>[] = [];
+  const named: FileNames[] = [];
 
   const uses = async (name: string, defining: string): Promise<Link[]> => {
-    const hits = (await grep(name)).filter((h) => h.path !== defining).slice(0, HITS_PER_NAME);
     const out: Link[] = [];
-    for (const h of hits) {
+    for (const h of await grep(name)) {
+      if (out.length >= HITS_PER_NAME) break;
+      if (h.path === defining) continue;
       if (isScript(h.path) && !(await symbols(h.path)).imports.some((i) => i.resolved === defining)) continue;
       out.push({ from: h.path, to: defining, kind: 'uses', detail: name, line: h.line });
     }
@@ -143,7 +173,7 @@ export async function findLinks(exec: Exec, headDir: string, files: FileDiff[], 
     } else {
       names = [...new Set(added.flatMap((l) => OTHER_NAME_RE.exec(l.text)?.[1] ?? []))];
     }
-    for (const n of names) if (n.length >= 4 && !STOP_NAMES.has(n)) searches.push(uses(n, f.path));
+    named.push({ path: f.path, added: f.status === 'added', names: names.filter((n) => n.length >= 4 && !STOP_NAMES.has(n)) });
 
     if (isTestFile(f.path)) {
       const subject = testSubject(f.path, byDir);
@@ -162,8 +192,11 @@ export async function findLinks(exec: Exec, headDir: string, files: FileDiff[], 
     }
   }
 
+  const { picks, skippedNames } = pickNames(named);
+  for (const p of picks) searches.push(uses(p.name, p.path));
   links.push(...(await Promise.all(searches)).flat());
   const unique = new Map(links.map((l) => [JSON.stringify([l.from, l.to, l.kind, l.detail, l.line]), l]));
-  return [...unique.values()].sort((a, b) =>
+  const sorted = [...unique.values()].sort((a, b) =>
     cmp(a.from, b.from) || cmp(a.to, b.to) || cmp(a.kind, b.kind) || (a.line ?? 0) - (b.line ?? 0) || cmp(a.detail, b.detail));
+  return { links: sorted, skippedNames };
 }
