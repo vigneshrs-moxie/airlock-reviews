@@ -1,0 +1,23 @@
+id: sample
+title: Sample pack
+version: v3
+repos: [acme/web]
+appRoot: app
+stageRules:
+  - { base: main, stage: pr3 }
+  - { default: true, stage: other }
+tiers:
+  read: ["app/**"]
+  trust: ["vendor/**"]
+  ignore: ["dist/**"]
+siblings:
+  - { id: tests, glob: "test/**" }
+linkRules:
+  - { id: view-to-ctrl, from: "views/(.*)\\.html", capture: "1", transform: pascal, searchIn: ["app/**"], detail: "Controller for the view" }
+checks:
+  - { id: no-console, kind: added-line-matches, paths: ["app/**"], pattern: "console\\.log", message: "No console.log" }
+standards:
+  - { name: Conventions, file: standards/conventions.md, dated: true }
+  - { name: Style, file: standards/style.md, dated: false }
+lenses:
+  - { id: security, title: Security, file: lenses/security.md }
