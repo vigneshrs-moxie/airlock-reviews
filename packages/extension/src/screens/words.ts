@@ -38,3 +38,24 @@ export function fromText(finding: Finding, packs: readonly Pick<PrSummary['packs
   const how = lens ?? ruleId;
   return how === null ? title : `${title} · ${how}`;
 }
+
+const WHERE: Record<string, string> = {
+  schema: 'when checking its format',
+  anchor: 'when finding its line',
+  challenge: 'in the challenge',
+  select: 'when ranking',
+  lenses: 'while reading the code',
+  'lenses-deep': 'in the closer second pass',
+  sweep: 'in the rule sweep',
+  seams: 'when checking how the parts fit',
+  map: 'when grouping the changes',
+  brief: 'when working out what the pull request does',
+  intake: 'when getting the pull request',
+  packs: 'when loading the rule packs',
+  shape: 'when checking the kind of pull request',
+  facts: 'when sorting the files',
+  store: 'when saving the review',
+};
+
+/** Where something was dropped or failed, in words; a stage not listed is shown as written. */
+export const stageWhere = (stage: string): string => (Object.hasOwn(WHERE, stage) ? (WHERE[stage] as string) : stage);

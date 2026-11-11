@@ -23,7 +23,6 @@ export function Offline({ state, dispatch, timers, onJump, onDismiss }: {
         <CommandBox intro="In the airlock-reviews folder, run:" command="npm run service" {...t} />
         <p className="muted">Airlock checks again every few seconds.</p>
       </section>
-      {review !== undefined && <p className="muted">Your last review is kept and will come back when the service does.</p>}
       {review !== undefined && (
         <>
           <p className="muted">Shown from before the service stopped.</p>
@@ -33,8 +32,8 @@ export function Offline({ state, dispatch, timers, onJump, onDismiss }: {
           />
         </>
       )}
-      {progress?.brief != null && <BriefBlock brief={progress.brief} />}
-      {progress?.map != null && <MapBlock map={progress.map} />}
+      {review === undefined && progress?.brief != null && <BriefBlock brief={progress.brief} />}
+      {review === undefined && progress?.map != null && <MapBlock map={progress.map} />}
     </>
   );
 }

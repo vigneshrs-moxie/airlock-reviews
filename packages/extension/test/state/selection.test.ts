@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { listFindings, neighbours, selectedInOrder, toggled } from '../../src/state/selection';
-import { also, dismissal, finding, reviewState } from '../screens/review-fixtures';
+import { also, dismissal, finding } from '../screens/review-fixtures';
 
 describe('listFindings', () => {
   it('puts the top list in rank order, then also found in document order', () => {
@@ -52,8 +52,5 @@ describe('selection', () => {
     expect(neighbours(order, order[1]!.id)).toEqual({ previous: order[0], next: order[2] });
     expect(neighbours(order, order[2]!.id)).toEqual({ previous: order[1], next: null });
     expect(neighbours(order, 'gone')).toEqual({ previous: null, next: null });
-  });
-  it('builds a review state for tests', () => {
-    expect(reviewState([]).stale).toBe(false);
   });
 });

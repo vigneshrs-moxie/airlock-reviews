@@ -6,7 +6,9 @@ export function Collapsible({ title, open, onToggle, children }: { title: string
   return (
     <section className="card">
       <h2 className="label">
-        <button type="button" className="fold" aria-expanded={open} aria-controls={id} onClick={onToggle}>{title}</button>
+        <button type="button" className="fold" aria-expanded={open} {...(open ? { 'aria-controls': id } : {})} onClick={onToggle}>
+          <span aria-hidden="true" className="arrow">{open ? '▾ ' : '▸ '}</span>{title}
+        </button>
       </h2>
       {open && <div id={id}>{children}</div>}
     </section>

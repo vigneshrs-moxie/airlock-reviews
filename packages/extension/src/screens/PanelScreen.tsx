@@ -1,6 +1,7 @@
 import type { Timers } from '../client/timers';
 import type { PanelState, UserAction } from '../state/reduce';
-import { Frame, connectionOf } from './Frame';
+import { useEffect, useRef } from 'react';
+import { Frame, connectionOf, useAnnounce } from './Frame';
 import { Offline } from './Offline';
 import { Pair } from './Pair';
 import { Problem } from './Problem';
@@ -39,10 +40,22 @@ function Body({ state, dispatch, timers, onJump, onDismiss }: Omit<PanelScreenPr
   }
 }
 
+/** Says a review has finished, once, when the panel moves from a running review to the finished one. */
+function FinishedAnnouncer({ kind }: { kind: PanelState['kind'] }) {
+  const announce = useAnnounce();
+  const was = useRef(kind);
+  useEffect(() => {
+    if (was.current === 'running' && kind === 'review') announce('Review finished.');
+    was.current = kind;
+  }, [announce, kind]);
+  return null;
+}
+
 /** The frame and the screen for one state. */
 export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, onDismiss }: PanelScreenProps) {
   return (
     <Frame status={connectionOf(state)} onOpenPacks={onOpenPacks}>
+      <FinishedAnnouncer kind={state.kind} />
       <Body state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={onDismiss} />
     </Frame>
   );

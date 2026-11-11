@@ -88,10 +88,13 @@ describe('offline', () => {
     expect(screen.getByText('Adds a totals column.')).toBeTruthy();
     expect(screen.getByText('Data layer')).toBeTruthy();
   });
-  it('says the last review is kept when it holds one', () => {
+  it('shows a kept review under one line and no brief or map from a running review', () => {
     const pr = prSummary();
-    show({ kind: 'offline', review: { pr, latest: latestFor(pr), stale: false } });
-    expect(screen.getByText('Your last review is kept and will come back when the service does.')).toBeTruthy();
+    show({ kind: 'offline', review: { pr, latest: latestFor(pr), stale: false }, progress: { pr, brief, map, startedAt: null } });
+    expect(screen.getAllByText('Shown from before the service stopped.')).toHaveLength(1);
+    expect(screen.queryByText(/Your last review is kept/)).toBeNull();
+    expect(screen.queryByText('Adds a totals column.')).toBeNull();
+    expect(screen.queryByText('Data layer')).toBeNull();
   });
 });
 
@@ -265,6 +268,14 @@ describe('running', () => {
     expect(regions).toHaveLength(1);
     expect(regions[0]?.textContent).toContain('Mapping the change: Done');
     expect(regions[0]?.closest('.panel')).not.toBeNull();
+  });
+  it('does not announce a finished review that was there when the panel opened, or one shown read-only', () => {
+    const pr = prSummary();
+    show({ kind: 'review', pr, latest: latestFor(pr), stale: false });
+    expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe('');
+    cleanup();
+    show({ kind: 'offline', review: { pr, latest: latestFor(pr), stale: false } });
+    expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe('');
   });
   it('announces the move to a finished review through the same region', () => {
     const { rerender, dispatch } = show(running());

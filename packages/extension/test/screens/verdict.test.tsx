@@ -45,7 +45,7 @@ describe('the verdict and the top findings', () => {
   it('words the verdict by the pull request stage', () => {
     const state = reviewState([], { doc: { verdict: { label: 'ready-for-pr2', sentence: 'Nothing found.', counts: { block: 0, fix: 0, ask: 0, note: 0 } } } });
     show({ ...state, latest: { ...state.latest, document: { ...state.latest.document, pr: { ...state.latest.document.pr, stage: 'pr2' } } } });
-    expect(heading('Ready for PR #3')).toBeTruthy();
+    expect(heading('Ready to merge')).toBeTruthy();
   });
   it('names each pack by title on the reviewed line, and by id when it has no title', () => {
     review([], { doc: { packs: [{ id: 'orbit', version: 'v1' }, { id: 'mystery', version: 'v2' }] } });
@@ -90,9 +90,9 @@ describe('stage errors, the notice and a stale review', () => {
       },
     });
     expect(follows(heading('Stage errors'), heading('Findings'))).toBe(true);
-    expect(screen.getByText('lenses, Totals: Timed out')).toBeTruthy();
-    expect(screen.getByText('brief: No reply')).toBeTruthy();
-    expect(heading('Incomplete')).toBeTruthy();
+    expect(screen.getByText('Totals. Failed while reading the code: Timed out')).toBeTruthy();
+    expect(screen.getByText('Failed when working out what the pull request does: No reply')).toBeTruthy();
+    expect(heading('Review incomplete')).toBeTruthy();
   });
   it('shows the notice under the verdict', () => {
     review([finding(1)], { notice: 'Another review is running.' });
@@ -202,24 +202,23 @@ describe('the lists around the findings', () => {
   it('disables Restore while busy', () => {
     const f = finding(1);
     review([f], { dismissals: [dismissal(f)], busy: true });
-    fireEvent.click(button('Dismissed: 1'));
+    // With every finding dismissed the section is already open.
     expect((screen.getByRole('button', { name: /Restore/ }) as HTMLButtonElement).disabled).toBe(true);
   });
   it('shows timing for stages that made a model run, with a total row', () => {
     const t = (stage: string, ms: number, agentRuns: number, inputTokens: number, outputTokens: number) => ({ stage, ms, agentRuns, inputTokens, outputTokens, costUsd: null });
-    review([], { doc: { timings: [t('intake', 500, 0, 0, 0), t('brief', 2500, 1, 1000, 200), t('lenses', 12000, 4, 5000, 800)] } });
+    review([], { doc: { timings: [t('intake', 500, 0, 0, 0), t('brief', 2500, 1, 1000, 200), t('lenses', 12000, 4, 5000, 800), t('store', 0, 0, 0, 0)] } });
     const toggle = button('Timing');
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     fireEvent.click(toggle);
-    const rows = within(screen.getByRole('table')).getAllByRole('row').map((r) => r.textContent);
-    expect(rows).toHaveLength(4);
-    expect(rows[1]).toContain('2.5');
-    expect(rows[1]).toContain('1,200');
-    expect(rows[3]).toContain('Total');
-    expect(rows[3]).toContain('15.0');
-    expect(rows[3]).toContain('5');
-    expect(rows[3]).toContain('7,000');
-    expect(rows.join('|')).not.toContain('Reading the pull request');
+    const cells = within(screen.getByRole('table')).getAllByRole('row').map((r) => [...r.querySelectorAll('th, td')].map((c) => c.textContent));
+    expect(cells).toEqual([
+      ['Stage', 'Seconds', 'Runs', 'Tokens'],
+      ['Reading the pull request', '0.5', '–', '–'],
+      ['Working out what the pull request does', '2.5', '1', '1,200'],
+      ['Looking through each lens', '12.0', '4', '5,800'],
+      ['Total', '15.0', '5', '7,000'],
+    ]);
   });
   it('shows a section only when it has something in it', () => {
     review([]);
@@ -425,8 +424,8 @@ describe('the dropped sheet', () => {
     });
     fireEvent.click(button('Dropped: 3'));
     const dialog = screen.getByRole('dialog');
-    expect(within(dialog).getByText('Dropped at challenge: The base already handles it.')).toBeTruthy();
-    expect(within(dialog).getByText('Dropped at anchor: Not in the diff.')).toBeTruthy();
+    expect(within(dialog).getByText('Dropped in the challenge: The base already handles it.')).toBeTruthy();
+    expect(within(dialog).getByText('Dropped when finding its line: Not in the diff.')).toBeTruthy();
     expect(within(dialog).getAllByText('Proof')).toHaveLength(2);
     expect(within(dialog).getByText('src/base.ts:3')).toBeTruthy();
     expect(within(dialog).getByText('before the pull request')).toBeTruthy();
@@ -499,7 +498,7 @@ describe('text from a review is only ever text', () => {
     fireEvent.click(button('Also found'));
     expect(screen.getByText(js, { selector: 'span' })).toBeTruthy();
     fireEvent.click(button('Dropped: 1'));
-    expect(screen.getByText(`Dropped at challenge: ${evil}`)).toBeTruthy();
+    expect(screen.getByText(`Dropped in the challenge: ${evil}`)).toBeTruthy();
     expect(screen.getByText(evil, { selector: 'pre, code' })).toBeTruthy();
     noMarkup();
     fireEvent.click(button('Close'));
@@ -507,5 +506,202 @@ describe('text from a review is only ever text', () => {
     expect(screen.getByText(evil, { selector: 'pre, code' })).toBeTruthy();
     expect(screen.getAllByRole('button').some((b) => b.textContent?.includes('p.ts:1') && b.textContent.includes(evil))).toBe(true);
     noMarkup();
+  });
+});
+
+describe('dismissing the open finding', () => {
+  it('closes the detail, focuses the Findings heading, and a restore does not reopen it', () => {
+    const f = [finding(1), finding(2)];
+    const { rerender } = show(reviewState(f));
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    expect(heading('Problem 1')).toBeTruthy();
+    const draw = (opts: ReviewOptions) => rerender(<PanelScreen state={reviewState(f, opts)} dispatch={vi.fn()} onOpenPacks={() => undefined} />);
+    draw({ dismissals: [dismissal(f[0]!)] });
+    expect(queryButton('Back to the review')).toBeNull();
+    expect(document.activeElement).toBe(heading('Findings'));
+    draw({});
+    expect(queryButton('Back to the review')).toBeNull();
+    expect(cards()).toHaveLength(2);
+  });
+  it('focuses the verdict heading when no findings are left', () => {
+    const f = finding(1);
+    const { rerender } = show(reviewState([f]));
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    rerender(<PanelScreen state={reviewState([f], { dismissals: [dismissal(f)] })} dispatch={vi.fn()} onOpenPacks={() => undefined} />);
+    expect(document.activeElement).toBe(heading('Approve after fixes'));
+  });
+  it('returns from Next into the collapsed Also found by opening it and focusing the line', () => {
+    review([finding(1), also(2)]);
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    fireEvent.click(button('Next'));
+    fireEvent.click(button('Back to the review'));
+    expect(button('Also found').getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement).toBe(button(/Problem 2/));
+  });
+  it('keeps the notice and the stale banner above an open detail', () => {
+    review([finding(1)], { notice: 'Another review is running.', stale: true });
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    expect(heading('Problem 1')).toBeTruthy();
+    expect(screen.getByText('Another review is running.')).toBeTruthy();
+    expect(screen.getByText('This pull request has new commits since this review.')).toBeTruthy();
+    expect(button('Review again')).toBeTruthy();
+  });
+  it('disables both Previous and Next for a single finding', () => {
+    review([finding(1)]);
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    expect((button('Previous') as HTMLButtonElement).disabled).toBe(true);
+    expect((button('Next') as HTMLButtonElement).disabled).toBe(true);
+  });
+  it('renders a very long title whole', () => {
+    const title = `${'Very long title '.repeat(40)}end`;
+    review([finding(1, { title })]);
+    expect(within(cards()[0]!).getByText(title)).toBeTruthy();
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    expect(heading(title)).toBeTruthy();
+  });
+});
+
+describe('a verdict never stands alone', () => {
+  it('says an incomplete review is not cleared when there are no findings', () => {
+    review([], { doc: { verdict: { label: 'incomplete', sentence: 'It stopped.', counts: { block: 0, fix: 0, ask: 0, note: 0 } } } });
+    expect(screen.getByText('The review did not finish, so nothing here is cleared.')).toBeTruthy();
+    expect(screen.queryByText('No findings.')).toBeNull();
+  });
+  it('says no open findings and opens Dismissed when all are dismissed', () => {
+    const f = [finding(1), also(2)];
+    review(f, { dismissals: f.map((x) => dismissal(x)) });
+    expect(screen.getByText('No open findings. 2 dismissed.')).toBeTruthy();
+    expect(button('Dismissed: 2').getAttribute('aria-expanded')).toBe('true');
+  });
+  it('says No findings when there are none, and nothing of the kind when some are shown', () => {
+    review([]);
+    expect(screen.getByText('No findings.')).toBeTruthy();
+    cleanup();
+    review([finding(1)]);
+    expect(screen.queryByText(/No findings|No open findings|did not finish/)).toBeNull();
+  });
+});
+
+describe('selection and the dropped sheet, second look', () => {
+  it('a finding ticked, dismissed and restored comes back unticked', () => {
+    const f = [finding(1), finding(2)];
+    const { rerender } = show(reviewState(f));
+    tick('Problem 1');
+    const draw = (opts: ReviewOptions) => rerender(<PanelScreen state={reviewState(f, opts)} dispatch={vi.fn()} onOpenPacks={() => undefined} />);
+    draw({ dismissals: [dismissal(f[0]!)] });
+    draw({});
+    expect((screen.getByRole('checkbox', { name: /Problem 1$/ }) as HTMLInputElement).checked).toBe(false);
+    expect(queryButton(/Copy fix prompt/)).toBeNull();
+  });
+  const longProof = { path: 'src/base.ts', line: 3, role: 'head', quote: 'q'.repeat(300) };
+  const drop = { candidate: finding(9), stage: 'challenge' as const, reason: 'Held.', refutation: longProof };
+  it('Show all reveals the rest of a clipped quote', () => {
+    review([], { doc: { dropped: [drop] } });
+    fireEvent.click(button('Dropped: 1'));
+    expect(screen.queryByText('q'.repeat(300))).toBeNull();
+    fireEvent.click(button('Show all'));
+    expect(screen.getByText('q'.repeat(300))).toBeTruthy();
+    expect(queryButton('Show all')).toBeNull();
+  });
+  it('closes on a click on the backdrop and gives focus back to the opener', () => {
+    review([], { doc: { dropped: [drop] } });
+    const opener = button('Dropped: 1');
+    fireEvent.click(opener);
+    fireEvent.click(document.querySelector('.sheet')!);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(opener);
+  });
+  it('does not close on a click inside the sheet', () => {
+    review([], { doc: { dropped: [drop] } });
+    fireEvent.click(button('Dropped: 1'));
+    fireEvent.click(screen.getByText('Held.', { exact: false }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+  it('keeps Tab and Shift+Tab inside the sheet', () => {
+    review([], { doc: { dropped: [drop] } });
+    fireEvent.click(button('Dropped: 1'));
+    const dialog = screen.getByRole('dialog');
+    const close = within(dialog).getByRole('button', { name: 'Close' });
+    const all = within(dialog).getByRole('button', { name: 'Show all' });
+    all.focus();
+    fireEvent.keyDown(all, { key: 'Tab' });
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(close, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(all);
+    (dialog.querySelector('h2') as HTMLElement).focus();
+    fireEvent.keyDown(document.activeElement!, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(all);
+  });
+});
+
+describe('collapsible sections', () => {
+  it('points aria-controls only at an element that exists, and hides the arrow from assistive technology', () => {
+    review([finding(1), also(2)]);
+    const toggle = button('Also found');
+    expect(toggle.hasAttribute('aria-controls')).toBe(false);
+    expect(toggle.querySelector('[aria-hidden="true"]')).not.toBeNull();
+    fireEvent.click(toggle);
+    const id = toggle.getAttribute('aria-controls')!;
+    expect(document.getElementById(id)).not.toBeNull();
+  });
+});
+
+describe('a jump that fails', () => {
+  const full = finding(1);
+  const sentence = 'Airlock could not jump to that place.';
+  it('says so when onJump rejects', async () => {
+    show(reviewState([full]), { onJump: () => Promise.reject(new Error('no')) });
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    fireEvent.click(button('Jump to line'));
+    expect(await screen.findByText(sentence)).toBeTruthy();
+  });
+  it('says so when onJump throws', async () => {
+    show(reviewState([full]), { onJump: () => { throw new Error('no'); } });
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    fireEvent.click(button('Jump to line'));
+    expect(await screen.findByText(sentence)).toBeTruthy();
+  });
+});
+
+describe('every field of document text is only text', () => {
+  const NO_ELEMENTS = 'script, img, a, iframe, svg';
+  const h = (field: string): string => `<img src=x onerror="${field}()"><svg onload=${field}></svg>[x](javascript:${field})`;
+  const literal = (box: Element | null, field: string): void => {
+    expect(box, field).not.toBeNull();
+    expect(box!.textContent, field).toContain(h(field));
+    expect(box!.querySelectorAll(NO_ELEMENTS), field).toHaveLength(0);
+  };
+  const section = (name: string): Element | null => heading(name).closest('section');
+
+  it('in the lists, the notice, the stage errors and the dismissed section', () => {
+    const gone = also(3, { title: 'Gone' });
+    review([finding(1), gone], {
+      notice: h('notice'),
+      pr: { packs: [{ id: 'generic', title: h('pack') }] },
+      dismissals: [dismissal(gone, { reason: 'intended', text: h('saved') })],
+      doc: {
+        whoseCall: [h('whose')], checksAfterMerge: [h('check')],
+        stageErrors: [{ stage: 'lenses', cohortId: 'c1', message: h('error') }],
+        map: { cohorts: [{ id: 'c1', title: h('group'), summary: '', neighbours: [], inferredLinks: [], layers: [] }], standalone: [], links: [] },
+      },
+    });
+    literal(document.querySelector('.notice'), 'notice');
+    literal(document.querySelector('.verdict'), 'pack');
+    literal(cards()[0]!, 'pack');
+    literal(section('Whose call'), 'whose');
+    literal(section('Check after merge'), 'check');
+    literal(section('Stage errors'), 'error');
+    literal(section('Stage errors'), 'group');
+    fireEvent.click(button('Dismissed: 1'));
+    literal(button('Dismissed: 1').closest('section'), 'saved');
+  });
+  it('in the detail', () => {
+    review([finding(1, { happens: h('happens'), why: h('why'), checked: h('checked'), wouldBeWrongIf: h('wrong'), suggestedChange: h('change') })]);
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    literal(heading('What happens').closest('section'), 'happens');
+    literal(heading('Why').closest('section'), 'why');
+    literal(heading('Checked').closest('section'), 'checked');
+    literal(heading('Would be wrong if').closest('section'), 'wrong');
+    literal(heading('Suggested change').closest('section'), 'change');
   });
 });

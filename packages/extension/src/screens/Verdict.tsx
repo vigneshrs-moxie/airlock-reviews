@@ -14,7 +14,7 @@ import { FindingDetail, notConnected, type OnJump } from './FindingDetail';
 import { useAnnounce } from './Frame';
 import { MapBlock } from './MapBlock';
 import { StageErrors } from './StageErrors';
-import { TimingTable } from './TimingTable';
+import { TimingTable, tookTime } from './TimingTable';
 import { depthWord } from './words';
 
 export interface VerdictProps {
@@ -50,6 +50,8 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const nodes = useRef(new Map<string, HTMLButtonElement>());
   const droppedButton = useRef<HTMLButtonElement>(null);
   const shownDetail = useRef<string | null>(null);
+  const verdictHeading = useRef<HTMLHeadingElement>(null);
+  const findingsHeading = useRef<HTMLHeadingElement>(null);
 
   const chosen = selectedInOrder(lists.order, selected);
   const detail = openId === null ? undefined : lists.order.find((f) => f.id === openId);
@@ -61,8 +63,6 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
     else nodes.current.set(id, node);
   }, []);
 
-  useEffect(() => { if (!readOnly) announce('Review finished.'); }, [announce, readOnly]);
-
   const count = chosen.length;
   const counted = useRef(count);
   useEffect(() => {
@@ -71,12 +71,35 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
     announce(count === 0 ? 'Selection cleared' : `${count} selected`);
   }, [announce, count]);
 
-  // Opening a finding is announced by the focus on its heading; leaving it puts focus back on the line that opened it.
+  // A selection never holds a finding that is not shown (one dismissed since), so a restored finding comes back unticked.
+  useEffect(() => {
+    const visible = new Set(lists.order.map((f) => f.id));
+    setSelected((was) => {
+      const kept = [...was].filter((id) => visible.has(id));
+      return kept.length === was.size ? was : new Set(kept);
+    });
+  }, [lists.order]);
+
+  // An open finding that is no longer shown (dismissed) is forgotten, so restoring it does not reopen it.
+  useEffect(() => { if (openId !== null && detail === undefined) setOpenId(null); }, [openId, detail]);
+
+  // Opening a finding is announced by the focus on its heading. Leaving it puts focus back on the line that opened it (opening
+  // Also found when the line is in it), or on the Findings heading, or the verdict, when that finding is gone.
   useEffect(() => {
     if (detailId !== null) { shownDetail.current = detailId; return; }
-    if (shownDetail.current !== null) nodes.current.get(shownDetail.current)?.focus();
+    const id = shownDetail.current;
+    if (id === null) return;
+    const node = nodes.current.get(id);
+    if (node) { node.focus(); shownDetail.current = null; return; }
+    if (lists.also.some((f) => f.id === id) && !folds.has('also')) { setFolds((was) => toggled(was, 'also')); return; }
+    (findingsHeading.current ?? verdictHeading.current)?.focus();
     shownDetail.current = null;
-  }, [detailId]);
+  }, [detailId, folds, lists]);
+
+  const empty = lists.order.length === 0;
+  const unfinished = doc.verdict.label === 'incomplete';
+  const allDismissed = empty && !unfinished && lists.dismissed.length > 0;
+  useEffect(() => { if (allDismissed) setFolds((was) => (was.has('dismissed') ? was : toggled(was, 'dismissed'))); }, [allDismissed]);
 
   const fold = (key: Fold): void => setFolds((was) => toggled(was, key));
   const closeSheet = useCallback((): void => setSheet(false), []);
@@ -89,28 +112,8 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const restore = (d: Dismissal): void => dispatch({ type: 'restore', fingerprint: d.fingerprint });
   const promptFor = (findings: Finding[]) => (): string => fixPrompt(doc, findings);
 
-  if (detail !== undefined) {
-    const { previous, next } = neighbours(lists.order, detail.id);
-    return (
-      <FindingDetail
-        key={detail.id} finding={detail} packs={pr.packs} previous={previous} next={next} canDismiss={!disabled}
-        fixPrompt={promptFor([detail])} onBack={() => setOpenId(null)} onOpen={(f) => setOpenId(f.id)}
-        onJump={onJump} onDismiss={onDismiss} {...t}
-      />
-    );
-  }
-
-  const titles = doc.packs.map((p) => pr.packs.find((known) => known.id === p.id)?.title ?? p.id).join(', ');
-  const tiers = new Map<string, Tier>(doc.files.map((f) => [f.path, f.tier]));
-  const ran = doc.timings.some((x) => x.agentRuns > 0);
-
-  return (
+  const banners = (
     <>
-      <section className="card verdict">
-        <h2 className="title">{verdictWords(doc.verdict.label, doc.pr.stage)}</h2>
-        <p>{doc.verdict.sentence}</p>
-        <p className="muted">{`Reviewed at ${doc.pr.headSha.slice(0, 7)} · ${depthWord(doc.depth)}${titles === '' ? '' : ` · ${titles}`}`}</p>
-      </section>
       {stale && (
         <section className="card banner">
           <p>This pull request has new commits since this review.</p>
@@ -118,10 +121,45 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
         </section>
       )}
       {state.notice !== undefined && <p role="alert" className="notice">{state.notice}</p>}
+    </>
+  );
+
+  if (detail !== undefined) {
+    const { previous, next } = neighbours(lists.order, detail.id);
+    return (
+      <>
+      {banners}
+      <FindingDetail
+        key={detail.id} finding={detail} packs={pr.packs} previous={previous} next={next} canDismiss={!disabled}
+        fixPrompt={promptFor([detail])} onBack={() => setOpenId(null)} onOpen={(f) => setOpenId(f.id)}
+        onJump={onJump} onDismiss={onDismiss} {...t}
+      />
+      </>
+    );
+  }
+
+  const titles = doc.packs.map((p) => pr.packs.find((known) => known.id === p.id)?.title ?? p.id).join(', ');
+  const tiers = new Map<string, Tier>(doc.files.map((f) => [f.path, f.tier]));
+  const ran = doc.timings.some(tookTime);
+
+  return (
+    <>
+      <section className="card verdict">
+        <h2 className="title" tabIndex={-1} ref={verdictHeading}>{verdictWords(doc.verdict.label, doc.pr.stage)}</h2>
+        <p>{doc.verdict.sentence}</p>
+        {empty && (
+          <p>
+            {unfinished ? 'The review did not finish, so nothing here is cleared.'
+              : lists.dismissed.length > 0 ? `No open findings. ${lists.dismissed.length} dismissed.` : 'No findings.'}
+          </p>
+        )}
+        <p className="muted">{`Reviewed at ${doc.pr.headSha.slice(0, 7)} · ${depthWord(doc.depth)}${titles === '' ? '' : ` · ${titles}`}`}</p>
+      </section>
+      {banners}
       <StageErrors errors={doc.stageErrors} map={doc.map} />
       {lists.top.length > 0 && (
         <section>
-          <h2 className="label">Findings</h2>
+          <h2 className="label" tabIndex={-1} ref={findingsHeading}>Findings</h2>
           {count > 0 && (
             <div className="bar">
               <CopyButton key={chosen.map((f) => f.id).join()} text={promptFor(chosen)} label={`Copy fix prompt for ${count} selected`} {...t} />

@@ -42,7 +42,12 @@ export function FindingDetail({ finding, packs, previous, next, canDismiss, fixP
 
   const jump = (key: string, place: JumpTarget): void => {
     const said = (text: string): void => setNote({ key, text });
-    Promise.resolve(onJump(place)).then(said, () => said('Jumping failed.'));
+    const failed = (): void => said('Airlock could not jump to that place.');
+    try {
+      Promise.resolve(onJump(place)).then(said, failed);
+    } catch {
+      failed();
+    }
   };
   const noteFor = (key: string) => (note?.key === key ? <p className="muted" role="status">{note.text}</p> : null);
 
