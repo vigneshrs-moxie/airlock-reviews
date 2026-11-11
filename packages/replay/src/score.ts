@@ -20,6 +20,8 @@ export interface CaseScore {
   defectsShown: number;
   partialInTop: number;
   asQuestion: number;
+  /** Known problems whose matched item is also the match for another known problem of the case. */
+  sharedMatches: number;
   lostAt: Record<LostStage, number>;
   crossFileKnown: number;
   crossFileInTop: number;
@@ -44,10 +46,23 @@ export interface RunSummary {
   recallShown: number;
   recallTopDefects: number;
   crossFileRecallTop: number;
+  /** Over positive cases only. */
+  sharedMatches: number;
   negativesWithBlockOrFix: number;
   incompleteCases: string[];
+  /** Positive cases whose review did not finish; their known problems stay in the recall denominator. */
+  positivesIncomplete: number;
+  negativesIncomplete: number;
   totals: { ms: number; inputTokens: number; outputTokens: number; agentRuns: number };
-  meets: { halfInTop: boolean; cleanControls: true | 'needs a human look' };
+  meets: {
+    /** 'not tested' when the run has no positive cases. */
+    halfInTop: boolean | 'not tested';
+    /**
+     * 'not tested' with no negative cases; else 'needs a human look' when one shows a Block or Fix;
+     * else 'incomplete' when one's review did not finish; else true.
+     */
+    cleanControls: true | 'needs a human look' | 'not tested' | 'incomplete';
+  };
 }
 
 /** Where a match left its known problem, if it was lost: null when it was shown or came back as a question. */
@@ -67,12 +82,29 @@ function lostStage(doc: ReviewDocument, m: Match | undefined): LostStage | null 
   }
 }
 
+/**
+ * The items that are the match for more than one of the case's known problems, each with
+ * those known ids in the case's order.
+ */
+export function sharedMatchItems(c: ReplayCase, matches: Match[]): Map<string, string[]> {
+  const byKnown = new Map(matches.map((m) => [m.knownId, m]));
+  const byItem = new Map<string, string[]>();
+  for (const k of c.known) {
+    const itemId = byKnown.get(k.id)?.itemId;
+    if (itemId == null) continue;
+    byItem.set(itemId, [...(byItem.get(itemId) ?? []), k.id]);
+  }
+  for (const [itemId, knownIds] of byItem) if (knownIds.length < 2) byItem.delete(itemId);
+  return byItem;
+}
+
 /** Scores one case from its review document and the judge's matches. */
 export function scoreCase(c: ReplayCase, doc: ReviewDocument, matches: Match[]): CaseScore {
   const byKnown = new Map(matches.map((m) => [m.knownId, m]));
   const s: CaseScore = {
     caseId: c.id, kind: c.kind, known: c.known.length, knownDefects: 0, inTop: 0, shown: 0, raised: 0,
     defectsInTop: 0, defectsShown: 0, partialInTop: 0, asQuestion: 0,
+    sharedMatches: sum([...sharedMatchItems(c, matches).values()], (ids) => ids.length),
     lostAt: { lenses: 0, schema: 0, anchor: 0, challenge: 0, select: 0 },
     crossFileKnown: 0, crossFileInTop: 0, findingsShown: doc.findings.length,
     blockOrFixShown: doc.findings.filter((f) => f.severity === 'block' || f.severity === 'fix').length,
@@ -111,7 +143,9 @@ export function scoreCase(c: ReplayCase, doc: ReviewDocument, matches: Match[]):
 }
 
 const ratio = (part: number, whole: number): number => (whole === 0 ? 0 : part / whole);
-const sum = (scores: CaseScore[], pick: (s: CaseScore) => number): number => scores.reduce((n, s) => n + pick(s), 0);
+function sum<T>(items: T[], pick: (item: T) => number): number {
+  return items.reduce((n, item) => n + pick(item), 0);
+}
 
 /**
  * Totals a run. Recalls are over positive cases only (0 when there are none); the kind of
@@ -131,17 +165,28 @@ export function summarise(runId: string, model: string, depth: Depth, scores: Ca
   const inTopTotal = sum(positive, (s) => s.inTop);
   const recallTop = ratio(inTopTotal, knownTotal);
   const negativesWithBlockOrFix = negative.filter((s) => s.blockOrFixShown > 0).length;
+  const incomplete = (s: CaseScore): boolean => s.verdict === 'incomplete';
+  const negativesIncomplete = negative.filter(incomplete).length;
   return {
     runId, model, depth, cases: scores, knownTotal, inTopTotal, recallTop,
     recallShown: ratio(sum(positive, (s) => s.shown), knownTotal),
     recallTopDefects: ratio(sum(positive, (s) => s.defectsInTop), sum(positive, (s) => s.knownDefects)),
     crossFileRecallTop: ratio(sum(positive, (s) => s.crossFileInTop), sum(positive, (s) => s.crossFileKnown)),
+    sharedMatches: sum(positive, (s) => s.sharedMatches),
     negativesWithBlockOrFix,
-    incompleteCases: scores.filter((s) => s.verdict === 'incomplete').map((s) => s.caseId),
+    incompleteCases: scores.filter(incomplete).map((s) => s.caseId),
+    positivesIncomplete: positive.filter(incomplete).length,
+    negativesIncomplete,
     totals: {
       ms: sum(scores, (s) => s.ms), inputTokens: sum(scores, (s) => s.inputTokens),
       outputTokens: sum(scores, (s) => s.outputTokens), agentRuns: sum(scores, (s) => s.agentRuns),
     },
-    meets: { halfInTop: recallTop >= 0.5, cleanControls: negativesWithBlockOrFix === 0 ? true : 'needs a human look' },
+    meets: {
+      halfInTop: positive.length === 0 ? 'not tested' : recallTop >= 0.5,
+      cleanControls: negative.length === 0 ? 'not tested'
+        : negativesWithBlockOrFix > 0 ? 'needs a human look'
+          : negativesIncomplete > 0 ? 'incomplete'
+            : true,
+    },
   };
 }

@@ -42,13 +42,17 @@ async function loadJudgeTemplate(): Promise<string> {
   return template;
 }
 
-/** Makes a value safe for one `|`-separated line of material: line breaks become spaces. */
-const oneLine = (text: string): string => text.replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ').trim();
+/**
+ * Makes free text safe as one field of a `|`-separated line of material: line breaks become
+ * spaces, and backslashes and pipes are escaped, so only the separators are bare pipes.
+ */
+const field = (text: string): string =>
+  text.replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ').trim().replaceAll('\\', '\\\\').replaceAll('|', '\\|');
 
 interface Item { id: string; kind: string; severity: string; path: string; title: string; happens: string }
 
 const fromCandidate = (c: Candidate, kind: string): Item =>
-  ({ id: c.id, kind, severity: c.severity, path: c.path, title: c.title, happens: c.happens });
+  ({ id: c.id, kind, severity: c.severity, path: field(c.path), title: field(c.title), happens: c.happens });
 
 /** Every item the review produced, in the order the judge sees them. */
 function listItems(doc: ReviewDocument): Item[] {
@@ -74,10 +78,10 @@ function locateItem(doc: ReviewDocument, itemId: string): Exclude<MatchWhere, 'n
 }
 
 const knownLine = (k: KnownProblem): string =>
-  oneLine(`${k.id} | ${k.path ?? '-'}:${k.line ?? '-'} | summary: ${k.summary} | reviewer's words: ${k.comment}`);
+  `${k.id} | ${k.path === null ? '-' : field(k.path)}:${k.line ?? '-'} | summary: ${field(k.summary)} | reviewer's words: ${field(k.comment)}`;
 
 const itemLine = (i: Item): string =>
-  oneLine(`${i.id} | ${i.kind} | ${i.severity} | ${i.path} | ${i.title} | happens: ${i.happens}`);
+  `${i.id} | ${i.kind} | ${i.severity} | ${i.path} | ${i.title} | happens: ${field(i.happens)}`;
 
 function material(c: ReplayCase, doc: ReviewDocument): string {
   const items = listItems(doc);

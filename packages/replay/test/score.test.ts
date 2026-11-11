@@ -72,6 +72,13 @@ describe('scoreCase', () => {
     expect(s).toMatchObject({ known: 4, knownDefects: 3, inTop: 2, defectsInTop: 1, shown: 3, defectsShown: 2, crossFileKnown: 2, crossFileInTop: 1 });
   });
 
+  it('counts known problems whose matched item is also another known problem\'s match', () => {
+    const c = replayCase({ known: ['A', 'B', 'C', 'D', 'E'].map((id) => problem({ id })) });
+    const d = doc({ findings: [finding('f1', 'top'), finding('f2', 'also')] });
+    const s = scoreCase(c, d, [match('A', 'top', 'f1'), match('B', 'top', 'f1', true), match('C', 'also', 'f2'), match('D', 'none', null), match('E', 'none', null)]);
+    expect(s.sharedMatches).toBe(2);
+  });
+
   it('counts shown findings, block or fix among them, time, tokens and the verdict', () => {
     const d = doc({
       findings: [finding('f1', 'top', { severity: 'block' }), finding('f2', 'top', { severity: 'ask' }), finding('f3', 'also', { severity: 'fix' })],
@@ -90,7 +97,7 @@ describe('scoreCase', () => {
 function score(over: Partial<CaseScore>): CaseScore {
   return {
     caseId: 'pr1', kind: 'positive', known: 0, knownDefects: 0, inTop: 0, shown: 0, raised: 0, defectsInTop: 0,
-    defectsShown: 0, partialInTop: 0, asQuestion: 0, lostAt: { ...ZERO_LOST }, crossFileKnown: 0, crossFileInTop: 0,
+    defectsShown: 0, partialInTop: 0, asQuestion: 0, sharedMatches: 0, lostAt: { ...ZERO_LOST }, crossFileKnown: 0, crossFileInTop: 0,
     findingsShown: 0, blockOrFixShown: 0, ms: 0, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: 'approve',
     ...over,
   };
@@ -144,7 +151,52 @@ describe('summarise', () => {
   it('recalls are 0 with no positive cases', () => {
     const s = summarise('r', 'm', 'quick', [score({ caseId: 'n', kind: 'negative' })], [replayCase({ id: 'n', kind: 'negative', known: [] })]);
     expect(s).toMatchObject({ knownTotal: 0, recallTop: 0, recallShown: 0, recallTopDefects: 0, crossFileRecallTop: 0 });
-    expect(s.meets.halfInTop).toBe(false);
+    expect(s.meets.halfInTop).toBe('not tested');
+  });
+
+  it('cleanControls is not tested with no negative cases', () => {
+    const s = summarise('r', 'm', 'standard', [score({ known: 2, inTop: 2 })], [replayCase()]);
+    expect(s.meets.cleanControls).toBe('not tested');
+    expect(s.meets.halfInTop).toBe(true);
+  });
+
+  it('an incomplete negative case with nothing shown makes cleanControls incomplete', () => {
+    const scores = [
+      score({ caseId: 'n1', kind: 'negative' }),
+      score({ caseId: 'n2', kind: 'negative', verdict: 'incomplete' }),
+    ];
+    const s = summarise('r', 'm', 'standard', scores, [replayCase({ id: 'n1', kind: 'negative' }), replayCase({ id: 'n2', kind: 'negative' })]);
+    expect(s.meets.cleanControls).toBe('incomplete');
+    expect(s.negativesIncomplete).toBe(1);
+  });
+
+  it('a block on a negative case outranks an incomplete one', () => {
+    const scores = [
+      score({ caseId: 'n1', kind: 'negative', blockOrFixShown: 1 }),
+      score({ caseId: 'n2', kind: 'negative', verdict: 'incomplete' }),
+    ];
+    const s = summarise('r', 'm', 'standard', scores, [replayCase({ id: 'n1', kind: 'negative' }), replayCase({ id: 'n2', kind: 'negative' })]);
+    expect(s.meets.cleanControls).toBe('needs a human look');
+    expect(s.negativesIncomplete).toBe(1);
+  });
+
+  it('an incomplete positive case keeps its known problems in the recall denominator', () => {
+    const scores = [
+      score({ caseId: 'a', known: 2, inTop: 2 }),
+      score({ caseId: 'b', known: 2, inTop: 0, verdict: 'incomplete' }),
+    ];
+    const s = summarise('r', 'm', 'standard', scores, [replayCase({ id: 'a' }), replayCase({ id: 'b' })]);
+    expect(s).toMatchObject({ knownTotal: 4, inTopTotal: 2, recallTop: 0.5, positivesIncomplete: 1 });
+  });
+
+  it('totals shared matches over positive cases', () => {
+    const scores = [
+      score({ caseId: 'a', sharedMatches: 2 }),
+      score({ caseId: 'b', sharedMatches: 3 }),
+      score({ caseId: 's', kind: 'secondary', sharedMatches: 4 }),
+    ];
+    const s = summarise('r', 'm', 'standard', scores, [replayCase({ id: 'a' }), replayCase({ id: 'b' }), replayCase({ id: 's', kind: 'secondary' })]);
+    expect(s.sharedMatches).toBe(5);
   });
 
   it('a block on a negative case makes cleanControls need a human look', () => {

@@ -70,6 +70,23 @@ describe('judgeCase', () => {
     expect(req.material.indexOf('C2 |')).toBeLessThan(req.material.indexOf('f1 |'));
   });
 
+  it('escapes | and backslashes in every free-text field so each line splits on its separators', async () => {
+    const c = replayCase({ known: [problem({ id: 'K1', path: 'src/a|b.ts', line: 3, summary: 'x || y is wrong', comment: 'use a\\|b' })] });
+    const d = doc({
+      findings: [finding('f1', 'top', { path: 'src/a|b.ts', title: 'A | B', happens: 'p | q' })],
+      questions: [{ text: 'Is a | b intended?', cohortId: null, source: { pack: 'core', lens: null, ruleId: null } }],
+    });
+    const runner = createFakeRunner(() => answer(m('K1', null)));
+    await judgeCase(runner, c, d, 'claude-opus-5-5');
+    const lines = runner.calls[0]!.material.split('\n');
+    expect(lines).toContain("K1 | src/a\\|b.ts:3 | summary: x \\|\\| y is wrong | reviewer's words: use a\\\\\\|b");
+    expect(lines).toContain('f1 | top | fix | src/a\\|b.ts | A \\| B | happens: p \\| q');
+    expect(lines).toContain('q1 | question | - | - | - | happens: Is a \\| b intended?');
+    const separators = (l: string): number => (l.match(/(?<!\\)(?:\\\\)*\| /g) ?? []).length;
+    expect(separators(lines.find((l) => l.startsWith('K1 |'))!)).toBe(3);
+    expect(separators(lines.find((l) => l.startsWith('f1 |'))!)).toBe(5);
+  });
+
   it('passes a cwd when one is given', async () => {
     const runner = createFakeRunner(() => answer(m('K1', null)));
     await judgeCase(runner, replayCase(), doc(), 'claude-fable-5-2', '/work/here');

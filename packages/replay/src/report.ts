@@ -1,22 +1,22 @@
 import type { Finding, ReviewDocument } from '@airlock/shared';
 import type { KnownProblem, ReplayCase } from './dataset.js';
 import type { Match } from './judge.js';
+import { sharedMatchItems } from './score.js';
 import type { CaseScore, RunSummary } from './score.js';
 
 type Details = Record<string, { doc: ReviewDocument; matches: Match[] }>;
 
 /**
  * Makes text from a review or the dataset safe inside one Markdown line, list item or table cell:
- * line breaks become spaces, and backslashes, pipes and `<` are escaped.
+ * line breaks become spaces, and the characters that make tables, emphasis, code, links, images
+ * or HTML (`\ | * _ ` [ ] ! < >`) are backslash-escaped so they show as themselves.
  */
 function md(text: string): string {
   return text
     .replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ')
     .replace(/\t/g, ' ')
     .trim()
-    .replaceAll('\\', '\\\\')
-    .replaceAll('|', '\\|')
-    .replaceAll('<', '\\<');
+    .replace(/[\\|*_`[\]!<>]/g, '\\$&');
 }
 
 const SEVERITY_WORD = { block: 'Block', fix: 'Fix', ask: 'Ask', note: 'Note' } as const;
@@ -24,6 +24,12 @@ const SEVERITY_WORD = { block: 'Block', fix: 'Fix', ask: 'Ask', note: 'Note' } a
 const percent = (r: number): string => `${Math.round(r * 100)}%`;
 const count = (n: number): string => n.toLocaleString('en-US');
 const yesNo = (b: boolean): string => (b ? 'Yes' : 'No');
+const plural = (n: number, one: string, many: string): string => (n === 1 ? one : many);
+
+/** "A", "A and B", "A, B and C". */
+function andList(items: string[]): string {
+  return items.length <= 1 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+}
 
 function duration(ms: number): string {
   const seconds = Math.round(ms / 1000);
@@ -114,19 +120,46 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
 
   out.push(`# Replay ${md(summary.runId)}`, '', `Model: ${md(summary.model)}. Depth: ${md(summary.depth)}.`, '');
 
+  const names = (scores: CaseScore[]): string => scores.map((s) => prName(caseById.get(s.caseId), s.caseId)).join(', ');
+  const unfinished = (scores: CaseScore[]): CaseScore[] => scores.filter((s) => s.verdict === 'incomplete');
+
   out.push('## The two tests', '');
-  out.push(
-    `1. At least half of the known problems should be in the top five. ` +
-      `${summary.inTopTotal} of ${summary.knownTotal} were (${percent(summary.recallTop)}). ${yesNo(summary.meets.halfInTop)}.`,
-  );
-  const cleanAnswer = summary.meets.cleanControls === true
-    ? 'None was given a Block or Fix. Yes.'
-    : `This needs your look: ${summary.negativesWithBlockOrFix} clean pull requests were given a Block or Fix; they are listed below.`;
-  out.push(
-    `2. Clean pull requests should not be given wrong blocking findings. ` +
-      `There were ${negatives.length} clean pull requests in this run. ${cleanAnswer}`,
-    '',
-  );
+  const half = summary.meets.halfInTop;
+  let first = 'At least half of the known problems should be in the top five. ';
+  if (half === 'not tested') {
+    first += 'Not tested in this run: there were no pull requests with known problems.';
+  } else {
+    first += `${summary.inTopTotal} of ${summary.knownTotal} were (${percent(summary.recallTop)}). ${yesNo(half)}.`;
+    const failed = unfinished(positives);
+    if (failed.length > 0) {
+      first += ` ${plural(failed.length, 'The review', 'The reviews')} of ${failed.length} of these pull requests did not finish ` +
+        `(${names(failed)}); ${plural(failed.length, 'its', 'their')} known problems are counted as missed.`;
+    }
+  }
+  out.push(`1. ${first}`);
+
+  const clean = summary.meets.cleanControls;
+  let second = 'Clean pull requests should not be given wrong blocking findings. ';
+  if (clean === 'not tested') {
+    second += 'Not tested in this run: there were no clean pull requests.';
+  } else {
+    const n = negatives.length;
+    second += `There ${plural(n, 'was', 'were')} ${n} clean ${plural(n, 'pull request', 'pull requests')} in this run.`;
+    const flagged = summary.negativesWithBlockOrFix;
+    if (clean === 'needs a human look') {
+      second += ` This needs your look: ${flagged} clean ${plural(flagged, 'pull request was', 'pull requests were')} given a Block or Fix; ` +
+        `${plural(flagged, 'it is', 'they are')} listed below.`;
+    }
+    const failed = unfinished(negatives);
+    if (failed.length > 0) {
+      second += ` ${plural(failed.length, 'The review', 'The reviews')} of ${failed.length} clean ` +
+        `${plural(failed.length, 'pull request', 'pull requests')} did not finish (${names(failed)}), ` +
+        `so ${plural(failed.length, 'it', 'they')} cannot be counted as clean.`;
+    }
+    if (clean === 'incomplete') second += ` This test has no answer until ${plural(failed.length, 'it is', 'they are')} run again.`;
+    if (clean === true) second += ' None was given a Block or Fix. Yes.';
+  }
+  out.push(`2. ${second}`, '');
 
   out.push('## Other numbers', '');
   out.push(
@@ -141,8 +174,9 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
   );
 
   out.push('## Each pull request', '');
-  out.push(...table(
-    ['Pull request', 'Size (lines)', 'Known problems', 'In top five', 'Shown', 'Missed'],
+  if (positives.length === 0) out.push('There were no pull requests with known problems in this run.', '');
+  else out.push(...table(
+    ['Pull request', 'Size (lines)', 'Known problems', 'In top five', 'Shown', 'Not shown'],
     positives.map((s) => {
       const c = caseById.get(s.caseId);
       const lines = c?.lines;
@@ -150,21 +184,42 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
     }),
   ), '');
 
-  out.push('## What was missed and where it was lost', '');
-  let anyMissed = false;
+  const shared: string[] = [];
   for (const s of positives) {
     const c = caseById.get(s.caseId);
     const d = details[s.caseId];
     if (!c || !d) continue;
+    for (const [itemId, knownIds] of sharedMatchItems(c, d.matches)) {
+      const title = itemTitle(d.matches.find((m) => m.itemId === itemId), d.doc);
+      shared.push(`- ${prName(c, s.caseId)}: ${md(itemId)}${title === null ? '' : ` (${md(title)})`} matched ${andList(knownIds.map(md))}.`);
+    }
+  }
+  if (shared.length > 0) {
+    out.push('## One finding matched to several known problems', '');
+    out.push('The judge matched each of these to more than one known problem. Check that it really describes each of them.', '');
+    out.push(...shared, '');
+  }
+
+  out.push('## What was missed and where it was lost', '');
+  let anyListed = false;
+  for (const s of positives) {
+    const c = caseById.get(s.caseId);
+    const d = details[s.caseId];
+    if (!c || !d) {
+      anyListed = true;
+      out.push(`### ${prName(c, s.caseId)}`, '', 'Details not available.', '');
+      continue;
+    }
     const byKnown = new Map(d.matches.map((m) => [m.knownId, m]));
     const missed = c.known.filter((k) => byKnown.get(k.id)?.where !== 'top');
     if (missed.length === 0) continue;
-    anyMissed = true;
+    anyListed = true;
     out.push(`### ${prName(c, s.caseId)}`, '');
     for (const k of missed) out.push(...missedLines(k, byKnown.get(k.id), d.doc));
     out.push('');
   }
-  if (!anyMissed) out.push('Nothing. Every known problem was in the top five.', '');
+  if (positives.length === 0) out.push('There were no pull requests with known problems in this run.', '');
+  else if (!anyListed) out.push('Nothing. Every known problem was in the top five.', '');
 
   out.push('## Findings on clean pull requests', '');
   out.push('These pull requests were approved with no comment. Mark each finding wrong or right.', '');

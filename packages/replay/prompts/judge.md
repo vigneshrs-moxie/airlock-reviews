@@ -6,6 +6,8 @@ The first block lists the known problems: the problems the human reviewer raised
 
 The second block lists the tool's items. Each line reads `<item id> | <kind> | <severity> | <path> | <title> | happens: <what happens>`. The kind says where the item ended up: `top` is in the tool's top five, `also` is shown below them, `dropped (<stage>)` was removed by the tool at that stage, `candidate` was raised by the tool but not shown, and `question` is a question the tool asked instead of a finding. For a question, the text after `happens:` is the question itself.
 
+Fields are separated by ` | `. Inside a field, `\|` is a pipe that belongs to the text and `\\` is a backslash.
+
 For each known problem, pick the ONE item that describes the same underlying problem, or none.
 
 The same underlying problem means the same cause in the code AND the same consequence. Both must match.
@@ -17,6 +19,8 @@ The wording does not need to match. The item does not need to propose the same f
 Some summaries state two defects joined by "; and". When an item correctly describes one of the two, it is a match: give its id and set `partial` to true. Otherwise set `partial` to false.
 
 When two items describe the problem equally well, prefer a shown item over a dropped or raw one: `top` first, then `also`.
+
+An item may be the match for a second known problem only when it fully describes that problem too. Otherwise mark the second match as `partial`, or answer none.
 
 Be strict. When you are unsure, answer none. A wrong match is worse than a missed one.
 
