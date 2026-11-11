@@ -44,9 +44,9 @@ export type ServiceStatus = z.infer<typeof ServiceStatusSchema>;
 
 export const PrSummarySchema = z.object({
   repo, number, title: z.string(), author: z.string(), viewer: z.string(),
-  isOwn: z.boolean(), stage: StageSchema, baseRef: z.string(), headRef: z.string(), headSha: z.string(),
+  isOwn: z.boolean(), stage: StageSchema, baseRef: z.string(), headRef: z.string(), headSha: z.string().regex(/^[0-9a-f]{7,64}$/),
   additions: z.number().int(), deletions: z.number().int(), changedFiles: z.number().int(),
-  packs: z.array(z.object({ id: z.string(), title: z.string() })), suggestedDepth: DepthSchema,
+  packs: z.array(z.object({ id: PackIdSchema, title: z.string() })), suggestedDepth: DepthSchema,
 });
 export type PrSummary = z.infer<typeof PrSummarySchema>;
 
@@ -71,7 +71,7 @@ export type DismissReason = z.infer<typeof DismissReasonSchema>;
 export const DismissalSchema = z.object({
   fingerprint: FingerprintSchema, findingId: FindingIdSchema, reviewId: ReviewIdSchema, reason: DismissReasonSchema,
   text: z.string(), at: z.string(),
-  learned: z.object({ packId: z.string(), kind: z.enum(['wrong', 'intended']), date: z.string() }).nullable(),
+  learned: z.object({ packId: PackIdSchema, kind: z.enum(['wrong', 'intended']), date: z.string() }).nullable(),
 });
 export type Dismissal = z.infer<typeof DismissalSchema>;
 
@@ -104,6 +104,8 @@ export type RestoreReply = z.infer<typeof RestoreReplySchema>;
 export const PairReplySchema = z.object({ paired: z.literal(true), extension: z.enum(['new', 'same']) });
 export type PairReply = z.infer<typeof PairReplySchema>;
 
+// The document is the engine's own output read back from its store, not a front door, so it is not re-validated
+// field by field here; the panel builds every address through filesUrl and blobUrl, which check their inputs.
 export const LatestReplySchema = z.object({ document: ReviewDocumentSchema, dismissals: z.array(DismissalSchema) });
 export type LatestReply = z.infer<typeof LatestReplySchema>;
 

@@ -81,7 +81,7 @@ describe('request and reply schemas', () => {
   it('requires every field of a pull request summary', () => {
     const summary = {
       repo: 'acme/widgets', number: 1, title: 't', author: 'a', viewer: 'v', isOwn: false, stage: 'pr1',
-      baseRef: 'main', headRef: 'x', headSha: 'abc', additions: 1, deletions: 2, changedFiles: 1,
+      baseRef: 'main', headRef: 'x', headSha: 'abcdef1', additions: 1, deletions: 2, changedFiles: 1,
       packs: [{ id: 'core', title: 'Core' }], suggestedDepth: 'quick',
     };
     expect(PrSummarySchema.safeParse(summary).success).toBe(true);
@@ -213,3 +213,26 @@ describe('checkLearnedText', () => {
     expect(checkLearnedText('', 'intended')).not.toBeNull();
   });
 });
+
+describe('remaining reply fields', () => {
+  const summary = {
+    repo: 'acme/widgets', number: 1, title: 't', author: 'a', viewer: 'v', isOwn: false, stage: 'pr1',
+    baseRef: 'main', headRef: 'x', headSha: 'abcdef1', additions: 1, deletions: 2, changedFiles: 1,
+    packs: [{ id: 'core', title: 'Core' }], suggestedDepth: 'quick',
+  };
+  it('refuses a pack id that is not a pack id in a summary', () => {
+    expect(PrSummarySchema.safeParse(summary).success).toBe(true);
+    expect(PrSummarySchema.safeParse({ ...summary, packs: [{ id: '../x', title: 'X' }] }).success).toBe(false);
+  });
+  it('refuses a head sha that is not hex of 7 to 64 characters', () => {
+    expect(PrSummarySchema.safeParse({ ...summary, headSha: 'zz' }).success).toBe(false);
+    expect(PrSummarySchema.safeParse({ ...summary, headSha: 'ABCDEF1' }).success).toBe(false);
+    expect(PrSummarySchema.safeParse({ ...summary, headSha: 'a'.repeat(40) }).success).toBe(true);
+  });
+  it('refuses a learned pack id that is not a pack id', () => {
+    const base = { fingerprint: '0123456789abcdef', findingId: 'c_01234567', reviewId: 'r_0123456789', reason: 'wrong', text: '', at: 'x' };
+    expect(DismissalSchema.safeParse({ ...base, learned: { packId: 'a/b', kind: 'wrong', date: 'd' } }).success).toBe(false);
+    expect(DismissalSchema.safeParse({ ...base, learned: { packId: 'core', kind: 'wrong', date: 'd' } }).success).toBe(true);
+  });
+});
+
