@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -118,6 +118,29 @@ describe('prepareWorkspace', () => {
     await ws.dispose();
     expect(await exists(ws.headDir)).toBe(false);
     expect(await exists(ws.baseDir)).toBe(false);
+  });
+
+  it('checks a symbolic link out as a small regular file holding its target, so nothing outside can be read through it', async () => {
+    const r = await remote();
+    const outside = await mkdtemp(join(tmpdir(), 'airlock-outside-'));
+    const secret = join(outside, 'secret.txt');
+    await writeFile(secret, 'SECRET OUTSIDE THE REPOSITORY');
+    await r.write('a.txt', 'one');
+    const base = await r.commit('one');
+    await symlink(secret, join(r.dir, 'link.txt'));
+    const head = await r.commit('add a link');
+    try {
+      const ws = await prepareWorkspace(realExec, {
+        repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: base, headSha: head }, reviewId: 'links',
+      });
+      const path = join(ws.headDir, 'link.txt');
+      expect((await lstat(path)).isSymbolicLink()).toBe(false);
+      expect((await lstat(path)).isFile()).toBe(true);
+      expect(await readFile(path, 'utf8')).toBe(secret);
+      await ws.dispose();
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('fails with a clear message when a SHA is unknown', async () => {

@@ -6,7 +6,8 @@
     "paths": {
       "@airlock/shared": ["./packages/shared/src/index.ts"],
       "@airlock/engine": ["./packages/engine/src/index.ts"],
-      "@airlock/replay": ["./packages/replay/src/index.ts"]
+      "@airlock/replay": ["./packages/replay/src/index.ts"],
+      "@airlock/service": ["./packages/service/src/index.ts"]
     }
   },
   "include": ["packages/*/src", "packages/*/test", "vitest.config.ts"],

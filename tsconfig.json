@@ -3,6 +3,7 @@
   "references": [
     { "path": "packages/shared" },
     { "path": "packages/engine" },
-    { "path": "packages/replay" }
+    { "path": "packages/replay" },
+    { "path": "packages/service" }
   ]
 }

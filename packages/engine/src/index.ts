@@ -2,3 +2,16 @@ export type { AgentRequest, AgentResult, AgentRunner, AgentUsage } from './agent
 export { withRetry } from './agent/runner.js';
 export { createFakeRunner } from './agent/fake-runner.js';
 export { asMaterial, fill } from './agent/prompt.js';
+export { createSdkRunner, findClaude } from './agent/sdk-runner.js';
+export { choosePacks } from './pipeline/packs.js';
+export { runReview, type EngineDeps, type ReviewRequest } from './pipeline/review.js';
+export { latestReview, reviewById, saveReview } from './store/store.js';
+export { renderReview } from './render/terminal.js';
+export { parseArgs, usage } from './cli-args.js';
+export { fetchPr, parsePrRef } from './intake/pr.js';
+export { loadPack } from './packs/load.js';
+export { selectPacks } from './packs/select.js';
+export { appendLearned, removeLearned } from './packs/learned.js';
+export type { Holdout, LearnedEntry, Pack } from './packs/types.js';
+export { realExec, type Exec } from './util/exec.js';
+export { airlockHome, repoSlug } from './util/paths.js';

@@ -5,7 +5,6 @@ import { findQuote } from '../anchor/anchor.js';
 import { learnedListName, standardDocuments } from '../lenses/context.js';
 import { datedEntries } from '../packs/holdout.js';
 import type { Pack } from '../packs/types.js';
-import { isWholeEntry, isWholeUnits } from './standards-text.js';
 
 export type Ground = 'unreachable' | 'pre-existing' | 'guarded-elsewhere' | 'documented-intent' | 'smaller' | 'none';
 export interface Refutation { path: string; quote: string; where: 'head' | 'base' | 'standard' }
@@ -18,12 +17,11 @@ export type ReadFile = (where: 'head' | 'base', path: string) => Promise<string 
 export type Proof = { place: Place; source: string } | { place: null; ownCode: boolean };
 
 /**
- * A recorded decision that can prove documented intent: one dated entry of a corrections log (quoted as whole
- * sentences) or one learned entry (quoted whole). `path` and `source` name it precisely.
+ * A recorded decision that can prove documented intent, quoted whole: one dated entry of a corrections log or one
+ * learned entry. `text` is the record as stored; `path` and `source` name it precisely.
  */
 interface DecisionRecord {
   text: string;
-  quotedWhole: boolean;
   path: string;
   role: 'standard' | 'learned';
   source: string;
@@ -32,8 +30,8 @@ interface DecisionRecord {
 /** What a refutation is checked against: files on either side, the diff, and the recorded decisions. */
 export interface Evidence {
   read: ReadFile;
-  /** The diff by path key (normalised, letter case ignored). */
-  files: Map<string, FileDiff>;
+  /** Every diff entry by path key (normalised, letter case ignored); two entries share a key when their paths differ only in case. */
+  files: Map<string, FileDiff[]>;
   records: DecisionRecord[];
 }
 
@@ -63,19 +61,34 @@ function readOnce(read: ReadFile): ReadFile {
  */
 function decisionRecords(packs: Pack[]): DecisionRecord[] {
   const entries = standardDocuments(packs).filter((d) => d.dated).flatMap((d) => datedEntries(d.text).map((e) => ({
-    text: e.body, quotedWhole: false, path: `${d.name}#${e.date}`, role: 'standard' as const,
-    source: `the ${e.date} entry in ${d.name}`,
+    text: e.body, path: `${d.name}#${e.date}`, role: 'standard' as const, source: `the ${e.date} entry in ${d.name}`,
   })));
   const learned = packs.flatMap((p) => p.learned.map((e) => ({
-    text: e.text, quotedWhole: true, path: `${learnedListName(e.kind)}#${e.date}`, role: 'learned' as const,
+    text: e.text, path: `${learnedListName(e.kind)}#${e.date}`, role: 'learned' as const,
     source: `a recorded ${e.kind === 'intended' ? 'product fact' : 'earlier correction'} dated ${e.date}`,
   })));
   return [...entries, ...learned];
 }
 
-/** The evidence for one run: `read` is called at most once per side and path, and the diff is looked up by path key. */
+/** The evidence for one run: `read` is called at most once per side and path, and the diff is grouped by path key. */
 export function createEvidence(read: ReadFile, files: FileDiff[], packs: Pack[]): Evidence {
-  return { read: readOnce(read), files: new Map(files.map((f) => [pathKey(f.path), f])), records: decisionRecords(packs) };
+  const byKey = new Map<string, FileDiff[]>();
+  for (const f of files) byKey.set(pathKey(f.path), [...(byKey.get(pathKey(f.path)) ?? []), f]);
+  return { read: readOnce(read), files: byKey, records: decisionRecords(packs) };
+}
+
+/** A leading list marker such as `- `, `* ` or `1. `; the challenger may copy it with a learned entry. */
+const LIST_MARKER = /^\s*(?:[-*+]|\d+[.)])\s+/;
+/** A record proves intent only when it is this long without whitespace and has this many words. */
+const MIN_RECORD_CHARS = 40;
+const MIN_RECORD_WORDS = 4;
+const collapse = (text: string): string => text.replace(/\s+/g, ' ').trim();
+
+/** True when `quote` is the whole record (runs of whitespace collapsed, a leading list marker allowed) and the record is long enough. */
+function isWholeRecord(quote: string, record: string): boolean {
+  const longEnough = record.replace(/\s+/g, '').length >= MIN_RECORD_CHARS
+    && record.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length >= MIN_RECORD_WORDS;
+  return longEnough && collapse(quote.replace(LIST_MARKER, '')) === collapse(record);
 }
 
 /**
@@ -119,32 +132,39 @@ async function proveOnHead(item: Item, ref: Refutation, { read }: Evidence): Pro
   return { place: { path, line, role: 'head', quote: ref.quote }, source: `${path}:${line} on the head` };
 }
 
-/** True when a place with a line sits in a file this pull request added, or inside a hunk of its file. */
-const changedHere = (files: Evidence['files'], path: string, lines: Lines): boolean => {
-  const file = files.get(pathKey(path));
-  return file !== undefined && (file.status === 'added' || insideHunk(file, lines));
-};
+/**
+ * True unless a connected place can be shown untouched. A place whose file is not in the diff is untouched. In the diff,
+ * it is touched when its file was added or deleted, when it has no resolved line, when its line falls inside a hunk, or
+ * when the diff holds its path twice in different letter case.
+ */
+function mayBeTouched(files: Evidence['files'], place: Item['connected'][number]): boolean {
+  const entries = files.get(pathKey(place.path)) ?? [];
+  if (entries.length === 0) return false;
+  if (entries.length > 1 || place.line === null) return true;
+  const file = entries[0]!;
+  return file.status === 'added' || file.status === 'deleted' || insideHunk(file, { startLine: place.line, endLine: place.line });
+}
 
 /**
- * Ground 2: the finding's own code is unchanged and was already there. All must hold: the refutation names the
- * finding's own file (or its old path, when renamed) on the base; the finding's lines are outside every hunk of its
- * file; no connected place with a line was changed by this pull request; the finding's whole quote is on the head at
- * its anchored lines; and it is in that base file. The record cites the finding's quote on the base, under the file's
- * real path.
+ * Ground 2: the finding's own code is unchanged and was already there. All must hold: the diff holds the finding's
+ * file at most once; the refutation names the finding's own file (or its old path, when renamed) on the base; the
+ * finding's lines are outside every hunk of its file; every connected place can be shown untouched; the finding's
+ * whole quote is on the head at its anchored lines; and it is in that base file. The record cites the finding's quote
+ * on the base, under the file's real path.
  */
 async function provePreExisting(item: Item, ref: Refutation, { read, files }: Evidence): Promise<Proof> {
   const line = item.anchor.startLine;
   if (ref.where !== 'base' || !isSafePath(ref.path) || line === null) return NO_PROOF;
   const end = item.anchor.endLine ?? line;
   const headPath = posix.normalize(item.path);
-  const file = files.get(pathKey(item.path));
+  const entries = files.get(pathKey(item.path)) ?? [];
+  if (entries.length > 1) return NO_PROOF;
+  const file = entries[0];
   const own = [headPath, ...(file?.status === 'renamed' && file.oldPath ? [file.oldPath] : [])];
   const path = own.find((p) => samePath(p, ref.path));
   if (path === undefined) return NO_PROOF;
   if (file !== undefined && insideHunk(file, { startLine: line, endLine: end })) return NO_PROOF;
-  if (item.connected.some((p) => p.line !== null && changedHere(files, p.path, { startLine: p.line, endLine: p.line }))) {
-    return NO_PROOF;
-  }
+  if (item.connected.some((p) => mayBeTouched(files, p))) return NO_PROOF;
   const onHead = findQuote(await read('head', headPath), item.quote).some((f) => f.startLine === line && f.endLine === end);
   if (!onHead) return NO_PROOF;
   const found = findQuote(await read('base', path), item.quote);
@@ -157,14 +177,14 @@ async function provePreExisting(item: Item, ref: Refutation, { read, files }: Ev
 }
 
 /**
- * Ground 4: a recorded decision says so. The quote is a whole learned entry, or whole consecutive sentences inside one
- * dated entry of a corrections log.
+ * Ground 4: a recorded decision says so. The quote is one whole record: a learned entry, or a dated entry of a
+ * corrections log from the first word after its date to its end. The refutation records the record as stored.
  */
 function proveIntent(ref: Refutation, { records }: Evidence): Proof {
   if (ref.where !== 'standard') return NO_PROOF;
-  const record = records.find((r) => (r.quotedWhole ? isWholeEntry(ref.quote, r.text) : isWholeUnits(ref.quote, r.text)));
+  const record = records.find((r) => isWholeRecord(ref.quote, r.text));
   if (record === undefined) return NO_PROOF;
-  return { place: { path: record.path, line: null, role: record.role, quote: ref.quote }, source: record.source };
+  return { place: { path: record.path, line: null, role: record.role, quote: record.text }, source: record.source };
 }
 
 /** The place a drop's refutation proves, if it does; each ground is tied to the side and place that can prove it. */

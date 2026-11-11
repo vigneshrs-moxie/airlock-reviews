@@ -13,7 +13,9 @@
     "typecheck": "tsc -b && tsc -p tsconfig.tests.json && npm run typecheck -w @airlock/extension",
     "test": "vitest run",
     "check": "npm run typecheck && npm run test",
-    "e2e": "npm run build:e2e -w @airlock/extension && playwright test -c packages/extension/e2e"
+    "e2e": "npm run build:e2e -w @airlock/extension && playwright test -c packages/extension/e2e",
+    "airlock": "node packages/engine/dist/cli.js",
+    "airlock-replay": "node packages/replay/dist/cli.js"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
