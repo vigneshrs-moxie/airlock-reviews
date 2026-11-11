@@ -1,0 +1,14 @@
+diff --git "a/dir with space/file.ts" "b/dir with space/file.ts"
+index bbbbbbb..ccccccc 100644
+--- "a/dir with space/file.ts"
++++ "b/dir with space/file.ts"
+@@ -1 +1,2 @@
+ hello
++world
+diff --git a/plain dir/x.ts b/plain dir/x.ts
+index bbbbbbb..ccccccc 100644
+--- a/plain dir/x.ts	
++++ b/plain dir/x.ts	
+@@ -1 +1 @@
+-a
++b

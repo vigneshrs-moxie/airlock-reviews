@@ -1,0 +1,15 @@
+diff --git a/src/app.ts b/src/app.ts
+index 1111111..2222222 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -10,3 +12,4 @@ function main() {
+ const a = 1;
++const b = 2;
+ const c = 3;
+ const d = 4;
+@@ -40,4 +43,3 @@ function other() {
+ keep1();
+-gone();
+-gone2();
++replaced();
+ keep2();
