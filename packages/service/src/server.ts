@@ -6,6 +6,7 @@ import {
 } from '@airlock/engine';
 import type { Dismissal, Hello, PairReply } from '@airlock/shared';
 import { pair, pairedOrigin, readOrCreateToken, type ServiceConfig } from './config.js';
+import { dismissalsFor } from './dismissals.js';
 import { createRouter, type Auth, type Route } from './http.js';
 import { reviewRoutes } from './routes.js';
 import type { Timers } from './runs.js';
@@ -23,7 +24,7 @@ export interface ServiceDeps {
   limits?: { requestTimeoutMs?: number; headersTimeoutMs?: number; runMinutes?: number };
   /** The keep-alive and the dropping of finished runs; real timers by default. */
   timers?: Timers;
-  /** The dismissals recorded for a pull request; none by default. */
+  /** The dismissals recorded for a pull request; the stored ones (under the service's home) by default. */
   dismissals?: (repo: string, number: number) => Promise<Dismissal[]>;
 }
 
@@ -74,7 +75,8 @@ export function createServer(deps: ServiceDeps): { listen(): Promise<{ port: num
     throw new RangeError(`limits.runMinutes must be a positive number, got ${runMinutes}`);
   }
   const hidePaths = [deps.config.home, homedir()];
-  const reviews = reviewRoutes(deps, hidePaths);
+  const reviews = reviewRoutes(
+    { ...deps, dismissals: deps.dismissals ?? ((repo, number) => dismissalsFor(deps.config.home, repo, number)) }, hidePaths);
   let server: http.Server | undefined;
   return {
     async listen() {

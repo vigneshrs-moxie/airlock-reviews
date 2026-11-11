@@ -1,10 +1,11 @@
 import { choosePacks, fetchPr, findClaude, latestReview, runReview, type ReviewRequest } from '@airlock/engine';
 import {
-  ApiErrorSchema, LatestReplySchema, PrNumberSchema, PrSummarySchema, RepoSchema, RunIdSchema, ServiceStatusSchema,
-  StartReviewBodySchema, StartReviewReplySchema, suggestedDepth, type Dismissal, type LatestReply, type PrSummary,
+  ApiErrorSchema, DismissalSchema, DismissBodySchema, LatestReplySchema, PrNumberSchema, PrSummarySchema, RepoSchema, RestoreBodySchema, RestoreReplySchema, RunIdSchema, ServiceStatusSchema,
+  StartReviewBodySchema, StartReviewReplySchema, suggestedDepth, type DismissBody, type Dismissal, type LatestReply, type RestoreBody, type RestoreReply, type PrSummary,
   type PrInfo, type ServiceStatus, type StartReviewBody,
 } from '@airlock/shared';
 import { z, type ZodType } from 'zod';
+import { dismiss, DismissError, dismissalsFor, restore } from './dismissals.js';
 import { plainMessage, type Req, type Res, type Route } from './http.js';
 import { LimitError, realTimers, Runs } from './runs.js';
 import type { ServiceDeps } from './server.js';
@@ -59,7 +60,7 @@ export function reviewRoutes(deps: ServiceDeps, hidePaths: readonly string[]): {
   const { config, engine } = deps;
   const timers = deps.timers ?? realTimers;
   const review = deps.review ?? runReview;
-  const dismissals = deps.dismissals ?? (async (): Promise<Dismissal[]> => []);
+  const dismissals = deps.dismissals ?? ((repo: string, number: number): Promise<Dismissal[]> => dismissalsFor(config.home, repo, number));
   const runs = new Runs({
     timers,
     ...(deps.limits?.runMinutes === undefined ? {} : { runMinutes: deps.limits.runMinutes }),
@@ -150,6 +151,21 @@ export function reviewRoutes(deps: ServiceDeps, hidePaths: readonly string[]): {
         if (runs.events(runId) === null) return refuse(404, RUN_GONE);
         return runStream(() => runs.events(runId), timers);
       },
+    },
+    {
+      method: 'POST', path: '/dismissals', body: DismissBodySchema,
+      handler: async (req) => {
+        try {
+          return reply<Dismissal>(DismissalSchema, 200, await dismiss(deps, req.body as DismissBody));
+        } catch (e) {
+          if (e instanceof DismissError) return refuse(e.status, e.message);
+          throw e;
+        }
+      },
+    },
+    {
+      method: 'POST', path: '/dismissals/restore', body: RestoreBodySchema,
+      handler: async (req) => reply<RestoreReply>(RestoreReplySchema, 200, await restore(deps, req.body as RestoreBody)),
     },
   ];
   return { routes, stop: () => runs.close() };
