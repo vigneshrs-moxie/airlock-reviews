@@ -11,3 +11,4 @@ coverage/
 .airlock/
 replay-work/
 .superpowers/
+*.tsbuildinfo
