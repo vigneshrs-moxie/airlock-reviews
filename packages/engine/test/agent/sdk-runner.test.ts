@@ -283,6 +283,19 @@ describe('createSdkRunner limits and failure kinds', () => {
     expect(await run(fake)).toMatchObject({ ok: false, kind: 'usage-limit', error: `Claude's usage limit was reached; it resets at ${time}` });
   });
 
+  it('refuses to run on an API key found in the environment', async () => {
+    const fake = yielding([
+      { type: 'system', subtype: 'init', apiKeySource: 'ANTHROPIC_API_KEY' },
+      resultMsg({ structured_output: { files: [] } }),
+    ]);
+    expect(await run(fake)).toMatchObject({
+      ok: false, kind: 'other',
+      error: 'Airlock runs on your Claude login, but an API key was found in the environment. Unset it and try again.',
+    });
+    const login = yielding([{ type: 'system', subtype: 'init', apiKeySource: 'none' }, resultMsg({ structured_output: { files: [] } })]);
+    expect(await run(login)).toMatchObject({ ok: true });
+  });
+
   it('recognises the usage limit from the result text when there is no event', async () => {
     const fake = yielding([resultMsg({ is_error: true, result: 'Claude AI usage limit reached' })]);
     expect(await run(fake)).toMatchObject({ ok: false, kind: 'usage-limit', error: "Claude's usage limit was reached" });
@@ -304,10 +317,15 @@ describe('findClaude', () => {
     await chmod(join(exec, 'claude'), 0o755);
     const path = [empty, plain, exec].join(delimiter);
 
-    expect(await findClaude({ AIRLOCK_CLAUDE_PATH: '/custom/claude', PATH: path })).toBe('/custom/claude');
+    expect(await findClaude({ AIRLOCK_CLAUDE_PATH: join(plain, 'claude'), PATH: path })).toBe(join(plain, 'claude'));
     expect(await findClaude({ PATH: path })).toBe(join(exec, 'claude'));
     expect(await findClaude({ PATH: [empty, plain].join(delimiter) })).toBeNull();
     expect(await findClaude({})).toBeNull();
+  });
+
+  it('findClaude refuses an AIRLOCK_CLAUDE_PATH that does not exist', async () => {
+    await expect(findClaude({ AIRLOCK_CLAUDE_PATH: '/nowhere/claude', PATH: '' }))
+      .rejects.toThrow('AIRLOCK_CLAUDE_PATH is /nowhere/claude, which does not exist.');
   });
 
   it('findClaude ignores relative paths', async () => {

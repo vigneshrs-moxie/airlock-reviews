@@ -38,6 +38,9 @@ export function roleLimits(role: string): { timeoutMs: number; maxTurns: number 
 }
 
 const USAGE_LIMIT = "Claude's usage limit was reached";
+const API_KEY_FOUND = 'Airlock runs on your Claude login, but an API key was found in the environment. Unset it and try again.';
+/** The init message's apiKeySource values that mean no API key is used: the login (and a legacy name for it). */
+const NO_API_KEY = new Set(['none', 'oauth']);
 /** What the CLI says in a result when the plan's limit stops a run. */
 const USAGE_LIMIT_TEXT = /usage limit|hit your (?:[a-z]+ )?limit/i;
 const PLAIN_JSON = 'Reply with one JSON object and nothing else.';
@@ -86,13 +89,18 @@ function reviewOptions(
 }
 
 /**
- * AIRLOCK_CLAUDE_PATH when set, else the first executable `claude` on PATH, else null (the SDK's bundled CLI).
+ * AIRLOCK_CLAUDE_PATH when set (it must name a file; otherwise this throws), else the first executable `claude` on PATH,
+ * else null (the SDK's bundled CLI).
  * Relative paths are ignored: the CLI starts in the repository under review, so a relative path could pick
  * up an executable from the pull request.
  */
 export async function findClaude(env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   const configured = env.AIRLOCK_CLAUDE_PATH;
-  if (configured !== undefined && isAbsolute(configured)) return configured;
+  if (configured !== undefined && isAbsolute(configured)) {
+    const found = await stat(configured).then((s) => s.isFile(), () => false);
+    if (!found) throw new Error(`AIRLOCK_CLAUDE_PATH is ${configured}, which does not exist.`);
+    return configured;
+  }
   for (const dir of (env.PATH ?? '').split(delimiter)) {
     if (!isAbsolute(dir)) continue;
     const candidate = join(dir, 'claude');
@@ -126,7 +134,7 @@ export function createSdkRunner(deps: SdkRunnerDeps = {}): AgentRunner {
       let timedOut = false;
       const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
 
-      const run: RunState = { result: undefined, thrown: undefined, rateLimit: undefined };
+      const run: RunState = { result: undefined, thrown: undefined, rateLimit: undefined, apiKey: false };
       let schemaSent = false;
       try {
         const [shared, path, query] = await Promise.all([loadTemplate('_shared'), resolveClaude(), loadQuery()]);
@@ -141,6 +149,12 @@ export function createSdkRunner(deps: SdkRunnerDeps = {}): AgentRunner {
         for await (const msg of query({ prompt, options })) {
           if (msg.type === 'result') run.result = msg;
           else if (msg.type === 'rate_limit_event') run.rateLimit = msg.rate_limit_info;
+          else if (msg.type === 'system' && msg.subtype === 'init' && usesApiKey(msg.apiKeySource)) {
+            // Stop before the first model call is paid for with a key.
+            run.apiKey = true;
+            controller.abort();
+            break;
+          }
         }
       } catch (err) {
         run.thrown = err;
@@ -165,7 +179,12 @@ interface RunState {
   result: SDKResultMessage | undefined;
   thrown: unknown;
   rateLimit: SDKRateLimitInfo | undefined;
+  /** The init message said an API key is being used. */
+  apiKey: boolean;
 }
+
+/** True when the init message names an API key as the credential; a missing value is not taken as one. */
+const usesApiKey = (source: unknown): boolean => typeof source === 'string' && !NO_API_KEY.has(source);
 
 /** `Claude's usage limit was reached`, with `; it resets at <local time>` when the report gives a reset time. */
 function usageLimitMessage(info: SDKRateLimitInfo | undefined): string {
@@ -198,6 +217,7 @@ function settle<T>(
 ): AgentResult<T> {
   const fail = (error: string, kind: StageErrorKind): AgentResult<T> => ({ ok: false, error, kind, usage });
   const { result, thrown, rateLimit } = run;
+  if (run.apiKey) return fail(API_KEY_FOUND, 'other');
   // A message can break the SDK's types, so its text is read loosely.
   const loose = result as { result?: unknown; errors?: unknown } | undefined;
   const said = [

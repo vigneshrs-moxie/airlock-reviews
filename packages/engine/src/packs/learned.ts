@@ -1,5 +1,6 @@
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import type { LearnedEntry } from './types.js';
 
 const SEP = ' · ';
@@ -27,6 +28,21 @@ export function parseLearned(text: string, kind: LearnedEntry['kind'], file: str
   return entries;
 }
 
+/**
+ * Replaces the file whole: the text goes to a temporary file beside it, which is then renamed over it, so a review that
+ * loads its packs at the same moment reads either the old file or the new one, never a part-written one.
+ */
+async function writeWhole(file: string, text: string): Promise<void> {
+  const temp = join(dirname(file), `.${basename(file)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+  try {
+    await writeFile(temp, text);
+    await rename(temp, file);
+  } catch (err) {
+    await rm(temp, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
 export async function appendLearned(packDir: string, e: LearnedEntry): Promise<void> {
   const file = learnedPath(packDir, e.kind);
   const line = formatLine(e);
@@ -40,7 +56,7 @@ export async function appendLearned(packDir: string, e: LearnedEntry): Promise<v
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
   const lead = existing !== '' && !existing.endsWith('\n') ? '\n' : '';
-  await appendFile(file, `${lead}${line}\n`);
+  await writeWhole(file, `${existing}${lead}${line}\n`);
 }
 
 export async function removeLearned(packDir: string, e: LearnedEntry): Promise<boolean> {
@@ -54,6 +70,6 @@ export async function removeLearned(packDir: string, e: LearnedEntry): Promise<b
   const at = lines.findIndex((l) => l.replace(/\r$/, '') === formatLine(e));
   if (at < 0) return false;
   lines.splice(at, 1);
-  await writeFile(file, lines.join('\n'));
+  await writeWhole(file, lines.join('\n'));
   return true;
 }

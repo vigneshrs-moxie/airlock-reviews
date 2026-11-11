@@ -60,5 +60,9 @@ describe('paths', () => {
     delete process.env.AIRLOCK_HOME;
     expect(airlockHome()).toMatch(/\.airlock$/);
   });
+  it('treats an empty AIRLOCK_HOME as unset', () => {
+    process.env.AIRLOCK_HOME = '';
+    expect(airlockHome()).toMatch(/\.airlock$/);
+  });
   it('slugs a repo', () => expect(repoSlug('acme/app')).toBe('acme__app'));
 });
