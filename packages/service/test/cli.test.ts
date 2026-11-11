@@ -319,6 +319,29 @@ describe('start', () => {
     expect(h.out.join('')).not.toContain('GET /after');
   });
 
+  it('reports a rotation that fails once, stops trying, and logs on in the same file', async () => {
+    const h = harness();
+    const log = join(h.root, 'service.log');
+    // A folder with something in it where the old log would go: every rename fails.
+    mkdirSync(`${log}.1`);
+    writeFileSync(join(`${log}.1`, 'in-the-way'), 'x');
+    h.overrides.env = { ...h.overrides.env, AIRLOCK_LOG_FILE: log };
+    const done = main(['start'], h.io, h.overrides);
+    await waitFor(() => h.handlers.has('SIGTERM'));
+    const write = h.created[0]!.log;
+    const big = 'x'.repeat(10_000);
+    for (let i = 0; i < 1_000; i += 1) write(big);
+    write('GET /last 200 1ms');
+    h.handlers.get('SIGTERM')?.();
+    expect(await done).toBe(0);
+    const reports = h.err.join('').split('\n').filter((l) => l.includes('could not be rotated'));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toContain('It is not rotated again until the service starts again.');
+    expect(statSync(log).size).toBeGreaterThan(1_000 * 10_000);
+    expect(readFileSync(log, 'utf8').endsWith('GET /last 200 1ms\n')).toBe(true);
+    expect(h.out.join('')).not.toContain('GET /last');
+  });
+
   it('makes a relative AIRLOCK_LOG_FILE absolute against the folder it was started in', async () => {
     const h = harness();
     h.overrides.env = { ...h.overrides.env, AIRLOCK_LOG_FILE: 'relative.log' };

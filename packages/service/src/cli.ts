@@ -190,6 +190,8 @@ async function start(io: CliIo, o: CliOverrides): Promise<number> {
       let fd: number | null = openSync(logFile, 'a', 0o600);
       await (o.chmodFile ?? chmod)(logFile, 0o600);
       let lines = 0;
+      /** A rotation failed: it is said once, and not tried again until the service starts again. */
+      let rotationFailed = false;
       const rotateWhileRunning = (open: number): void => {
         if (fstatSync(open).size <= MAX_LOG_BYTES) return;
         closeSync(open);
@@ -214,11 +216,13 @@ async function start(io: CliIo, o: CliOverrides): Promise<number> {
           return;
         }
         lines += 1;
-        if (lines % LOG_CHECK_LINES !== 0) return;
+        if (rotationFailed || lines % LOG_CHECK_LINES !== 0) return;
         try {
           rotateWhileRunning(fd);
         } catch (e) {
-          io.err(`The log file ${clean(given)} could not be rotated (${messageOf(e)}).${fd === null ? ' Logging to the terminal instead.' : ''}\n`);
+          rotationFailed = true;
+          const after = fd === null ? ' Logging to the terminal instead.' : ' It is not rotated again until the service starts again.';
+          io.err(`The log file ${clean(given)} could not be rotated (${messageOf(e)}).${after}\n`);
         }
       };
       closeLog = () => { try { if (fd !== null) closeSync(fd); } catch { /* already closed */ } };
