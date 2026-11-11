@@ -62,6 +62,12 @@ function section<T extends z.ZodType>(doc: Obj, key: string, schema: T, file: st
   return parsed.data;
 }
 
+function onlyWhenAlone(l: Obj, file: string): boolean {
+  if (!Object.hasOwn(l, 'onlyWhenAlone')) return false;
+  if (typeof l.onlyWhenAlone !== 'boolean') throw new Error(`${file}: "onlyWhenAlone" must be true or false (lens "${String(l.id)}")`);
+  return l.onlyWhenAlone;
+}
+
 function dated(s: Obj, file: string): boolean {
   if (typeof s.dated !== 'boolean') throw new Error(`${file}: "dated" must be true or false (standard "${String(s.name)}")`);
   return s.dated;
@@ -130,6 +136,7 @@ export async function loadPack(dir: string): Promise<Pack> {
     lenses.push({
       id: str(l, 'id', yamlPath), title: str(l, 'title', yamlPath),
       instructions: await readText(join(root, str(l, 'file', yamlPath))),
+      onlyWhenAlone: onlyWhenAlone(l, yamlPath),
     });
   }
   const standards: Pack['standards'] = [];

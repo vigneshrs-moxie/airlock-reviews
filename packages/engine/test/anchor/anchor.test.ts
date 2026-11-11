@@ -1,7 +1,7 @@
 import { candidate } from '@airlock/shared';
 import type { FileDiff } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
-import { anchorCandidates, anchorQuote } from '../../src/anchor/anchor.js';
+import { anchorCandidates, anchorQuote, findQuote } from '../../src/anchor/anchor.js';
 
 const file = (over: Partial<FileDiff> & { addedLines?: number[] }): FileDiff => ({
   path: 'a.ts', oldPath: null, status: 'modified', binary: false, additions: 0, deletions: 0,
@@ -51,6 +51,24 @@ describe('anchorQuote', () => {
   it('is not-found for null text or a blank quote', () => {
     expect(anchorQuote(null, 'x', null, undefined).status).toBe('not-found');
     expect(anchorQuote('x', ' \n\t', null, undefined)).toEqual({ status: 'not-found', startLine: null, endLine: null });
+  });
+});
+
+describe('findQuote', () => {
+  it('needs every line of the quote and never falls back', () => {
+    const t = 'short\nconst result = compute(alpha, beta);\nend';
+    expect(findQuote(t, 'if (x) {\nconst result = compute(alpha, beta);')).toEqual([]);
+    expect(findQuote(t, '\n  const result = compute(alpha, beta);\nend\n')).toEqual([{ startLine: 2, endLine: 3 }]);
+  });
+
+  it('returns every place the quote occurs, in file order', () => {
+    const t = ['a1;', 'b2;', 'x;', 'a1;', 'b2;'].join('\n');
+    expect(findQuote(t, 'a1;\nb2;')).toEqual([{ startLine: 1, endLine: 2 }, { startLine: 4, endLine: 5 }]);
+  });
+
+  it('finds nothing in a missing file or for a blank quote', () => {
+    expect(findQuote(null, 'a1;')).toEqual([]);
+    expect(findQuote('a1;', ' \n\t')).toEqual([]);
   });
 });
 

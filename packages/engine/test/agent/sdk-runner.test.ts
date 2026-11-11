@@ -1,6 +1,6 @@
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, isAbsolute, join, relative } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { loadTemplate } from '../../src/agent/prompt.js';
@@ -39,6 +39,8 @@ const resultMsg = (over: Record<string, unknown> = {}) => ({
 });
 
 const schema = z.object({ files: z.array(z.string()) });
+/** Cannot be turned into JSON Schema, so the runner omits outputFormat and reads JSON from the text. */
+const textSchema = z.custom<{ files: string[] }>((v) => schema.safeParse(v).success);
 const req = (over: Partial<AgentRequest<{ files: string[] }>> = {}): AgentRequest<{ files: string[] }> => ({
   role: 'lens', instructions: 'List the files.', material: '<material label="x">\nstuff\n</material>', schema,
   cwd: '/repo/base', model: 'claude-haiku-5-5', effort: 'high', ...over,
@@ -129,17 +131,46 @@ describe('createSdkRunner results', () => {
     expect(r.usage.turns).toBe(3);
   });
 
-  it('falls back to the last JSON object in the text when there is no structured output', async () => {
-    const text = 'First try {"files":["old"]}. Note the "}" and "{" in prose.\n```json\n{"files":["a {b}.ts","c\\"}.ts"],"x":{"y":1}}\n```\nDone.';
+  it('falls back to the last JSON object in the text when the schema could not be sent', async () => {
+    const text = 'First try {"files":["old"]}. Note the "}" in prose.\n```json\n{"files":["a {b}.ts","c\\"}.ts"],"x":{"y":1}}\n```\nDone.';
     const fake = yielding([resultMsg({ result: text })]);
-    const r = await createSdkRunner({ query: fake.query, claudePath: null }).run(req());
+    const r = await createSdkRunner({ query: fake.query, claudePath: null }).run(req({ schema: textSchema }));
+    expect('outputFormat' in fake.calls[0]!.options).toBe(false);
     expect(r).toMatchObject({ ok: true, output: { files: ['a {b}.ts', 'c"}.ts'] } });
+  });
+
+  it('ignores JSON in the text when a JSON schema was sent', async () => {
+    const fake = yielding([resultMsg({ result: 'Here it is: {"files":["a.ts"]}' })]);
+    const r = await createSdkRunner({ query: fake.query, claudePath: null }).run(req());
+    expect('outputFormat' in fake.calls[0]!.options).toBe(true);
+    expect(r).toMatchObject({ ok: false, error: 'no output' });
+  });
+
+  it('does not take an object nested inside a malformed one', async () => {
+    const fake = yielding([resultMsg({ result: '{"files":["a"], "x": {"files":["b"]} oops}' })]);
+    const r = await createSdkRunner({ query: fake.query, claudePath: null }).run(req({ schema: textSchema }));
+    expect(r).toMatchObject({ ok: false, error: 'no output' });
   });
 
   it('reports no output when the text holds no JSON object', async () => {
     const fake = yielding([resultMsg({ result: 'I could not finish { the task.' })]);
-    const r = await createSdkRunner({ query: fake.query, claudePath: null }).run(req());
+    const r = await createSdkRunner({ query: fake.query, claudePath: null }).run(req({ schema: textSchema }));
     expect(r).toMatchObject({ ok: false, error: 'no output' });
+  });
+
+  it('returns a failure with the usage when the schema throws while parsing', async () => {
+    const throwing = schema.refine(() => { throw new Error('boom'); });
+    const fake = yielding([resultMsg({ structured_output: { files: [] } })]);
+    const r = await createSdkRunner({ query: fake.query, claudePath: null }).run(req({ schema: throwing }));
+    expect(r).toMatchObject({ ok: false, error: 'boom' });
+    expect(r.usage).toMatchObject({ inputTokens: 100, outputTokens: 20, costUsd: 0.002, turns: 3 });
+  });
+
+  it('survives a result message missing errors and modelUsage', async () => {
+    const fake = yielding([resultMsg({ subtype: 'error_max_turns', is_error: true, num_turns: 7, errors: undefined, modelUsage: undefined })]);
+    const r = await createSdkRunner({ query: fake.query, claudePath: null }).run(req());
+    expect(r).toMatchObject({ ok: false, error: 'error_max_turns' });
+    expect(r.usage).toMatchObject({ inputTokens: 0, outputTokens: 0, turns: 7, costUsd: 0.002 });
   });
 
   it('keeps the error result when the loop throws after it', async () => {
@@ -215,5 +246,18 @@ describe('findClaude', () => {
     expect(await findClaude({ PATH: path })).toBe(join(exec, 'claude'));
     expect(await findClaude({ PATH: [empty, plain].join(delimiter) })).toBeNull();
     expect(await findClaude({})).toBeNull();
+  });
+
+  it('findClaude ignores relative paths', async () => {
+    const exec = await mkdtemp(join(tmpdir(), 'airlock-claude-d-'));
+    dirs.push(exec);
+    await writeFile(join(exec, 'claude'), '#!/bin/sh\n');
+    await chmod(join(exec, 'claude'), 0o755);
+    const rel = relative(process.cwd(), exec);
+    expect(isAbsolute(rel)).toBe(false);
+
+    expect(await findClaude({ PATH: rel })).toBeNull();
+    expect(await findClaude({ AIRLOCK_CLAUDE_PATH: join(rel, 'claude'), PATH: '' })).toBeNull();
+    expect(await findClaude({ AIRLOCK_CLAUDE_PATH: join(rel, 'claude'), PATH: [rel, exec].join(delimiter) })).toBe(join(exec, 'claude'));
   });
 });
