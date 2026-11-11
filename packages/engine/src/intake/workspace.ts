@@ -48,7 +48,14 @@ async function requireCommit(exec: Exec, mirror: string, sha: string): Promise<v
   if (r.code !== 0) throw new Error(`Commit ${sha} was not found in the mirror of this repository`);
 }
 
-export function prepareWorkspace(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
+/** A branch name git cannot read as an option or as anything but a branch: letters, digits, `.`, `_`, `/`, `-`. */
+const BRANCH_NAME = /^[A-Za-z0-9._/-]+$/;
+
+export async function prepareWorkspace(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
+  const baseRef = req.pr?.baseRef;
+  if (baseRef !== undefined && (!BRANCH_NAME.test(baseRef) || baseRef.startsWith('-'))) {
+    throw new Error(`The base branch ${JSON.stringify(baseRef)} is not a branch name Airlock can use.`);
+  }
   return serialised(join(airlockHome(), 'repos', `${repoSlug(req.repo)}.git`), () => prepare(exec, req));
 }
 
@@ -66,7 +73,8 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     const fetched = await exec('git', ['--git-dir', mirror, 'fetch', 'origin', `pull/${number}/head`], { timeoutMs: SLOW_EXEC_TIMEOUT_MS });
     if (fetched.code === TIMED_OUT) throw new Error(`git fetch pull/${number}/head: ${fetched.stderr}`);
     await requireCommit(exec, mirror, headSha);
-    const baseSha = must(await exec('git', ['--git-dir', mirror, 'merge-base', baseRef, headSha]), `git merge-base ${baseRef} ${headSha}`).trim();
+    // The full ref, so a tag of the same name cannot stand in for the branch.
+    const baseSha = must(await exec('git', ['--git-dir', mirror, 'merge-base', `refs/heads/${baseRef}`, headSha]), `git merge-base ${baseRef} ${headSha}`).trim();
     range = { baseSha, headSha, kind: 'full' };
   } else {
     throw new Error('prepareWorkspace needs either pr or explicit');

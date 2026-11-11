@@ -183,4 +183,33 @@ describe('prepareWorkspace', () => {
     expect(slow.every((s) => s.timeoutMs === 600_000)).toBe(true);
     expect(seen.filter((s) => !slow.includes(s)).every((s) => s.timeoutMs === undefined)).toBe(true);
   });
+
+  it('refuses a base branch name that is not a plain branch name before any git call', async () => {
+    const calls: string[][] = [];
+    const exec: Exec = async (cmd, args) => { calls.push(args); return { stdout: '', stderr: '', code: 0 }; };
+    for (const baseRef of ['-main', 'main;rm', 'main branch', '']) {
+      const req: WorkspaceRequest = { repo: 'acme/app', remoteUrl: '/x', pr: { number: 7, baseRef, headSha: 'a'.repeat(40) }, reviewId: 'b1' };
+      await expect(prepareWorkspace(exec, req)).rejects.toThrow(/is not a branch name Airlock can use/);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('gives merge-base the full branch ref, so a tag of the same name cannot stand in for it', async () => {
+    const r = await remote();
+    await r.write('a.txt', '1');
+    const root = await r.commit('root');
+    await r.git('checkout', '-b', 'feature');
+    await r.write('b.txt', '2');
+    const head = await r.commit('feature work');
+    await r.git('checkout', 'main');
+    await r.write('c.txt', '3');
+    await r.commit('main advances');
+    await r.git('tag', 'main', head); // a tag named like the base branch, pointing at the head
+    const seen: string[][] = [];
+    const exec: Exec = async (cmd, args, opts) => { seen.push(args); return realExec(cmd, args, opts); };
+    const ws = await prepareWorkspace(exec, { repo: 'acme/app', remoteUrl: r.dir, pr: { number: 7, baseRef: 'main', headSha: head }, reviewId: 'b2' });
+    expect(seen.find((a) => a.includes('merge-base'))).toContain('refs/heads/main');
+    expect(ws.range.baseSha).toBe(root);
+    await ws.dispose();
+  });
 });

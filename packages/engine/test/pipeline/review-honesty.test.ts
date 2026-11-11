@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
+import { createFakeRunner } from '../../src/agent/fake-runner.js';
 import type { AgentRequest } from '../../src/agent/runner.js';
+import { runReview } from '../../src/pipeline/review.js';
 import { renderReview } from '../../src/render/terminal.js';
 import type { Exec } from '../../src/util/exec.js';
 import { block, rawCandidate } from '../helpers/lens-context.js';
-import { BASE_FILES, fakeGh, HEAD_FILES, scenarioScript, useReviewHarness } from '../helpers/review-scenario.js';
+import {
+  BASE_FILES, fakeGh, HEAD_FILES, KIT_DIR, NOW, PACKS_DIR, scenarioScript, useReviewHarness,
+} from '../helpers/review-scenario.js';
 
 const SLOW = 20_000;
 const { scenario, review } = useReviewHarness();
@@ -100,5 +104,34 @@ describe('what a model was not shown is written down', () => {
     const { doc } = await review();
     expect(doc.limits).toEqual([]);
     expect(renderReview(doc)).not.toContain('Not shown to the reviewer');
+  }, SLOW);
+});
+
+describe('the request is checked before anything runs', () => {
+  it.each([
+    ['acme', 7, 'The repository must be written as <owner>/<name>, got "acme".'],
+    ['acme/..', 7, 'The repository must be written as <owner>/<name>, got "acme/..".'],
+    ['acme/app?x=1', 7, 'The repository must be written as <owner>/<name>, got "acme/app?x=1".'],
+    ['../app', 7, 'The repository must be written as <owner>/<name>, got "../app".'],
+    ['acme/app', 0, 'The pull request number must be a whole number of at least 1, got 0.'],
+    ['acme/app', 1.5, 'The pull request number must be a whole number of at least 1, got 1.5.'],
+  ])('refuses repository %s with number %s', async (repo, number, message) => {
+    const calls: string[][] = [];
+    const exec: Exec = async (cmd, args) => { calls.push([cmd, ...args]); return { stdout: '', stderr: '', code: 1 }; };
+    const runner = createFakeRunner(() => new Error('no request expected'));
+    await expect(runReview({ repo, number, packsDir: PACKS_DIR, kitDir: KIT_DIR }, { exec, runner, now: () => NOW })).rejects.toThrow(message);
+    expect(calls).toEqual([]);
+    expect(runner.calls).toEqual([]);
+  });
+
+  it('uses the title and description given with the request in place of the fetched ones', async () => {
+    const { doc, calls } = await review({ req: { prText: { title: 'Title at review', body: 'BODY_AT_REVIEW' } } });
+    expect(doc.pr.title).toBe('Title at review');
+    expect(doc.pr.body).toBe('BODY_AT_REVIEW');
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c.material, c.role).not.toContain('Refunds reuse formatMoney.');
+      if (c.material.includes('<material label="pull request">')) expect(block(c.material, 'pull request'), c.role).toContain('BODY_AT_REVIEW');
+    }
   }, SLOW);
 });

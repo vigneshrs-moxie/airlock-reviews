@@ -65,6 +65,20 @@ export interface EngineDeps {
   signal?: AbortSignal;
 }
 
+/** One part of `<owner>/<name>`: letters, digits, `_`, `.` and `-`, and not only dots. */
+const REPO_PART = /^(?!\.+$)[A-Za-z0-9_.-]+$/;
+
+/** The repository and number go into a `gh api` path and a clone address, so they are checked before anything runs. */
+function checkRequest(req: ReviewRequest): void {
+  const parts = typeof req.repo === 'string' ? req.repo.split('/') : [];
+  if (parts.length !== 2 || !parts.every((p) => REPO_PART.test(p))) {
+    throw new Error(`The repository must be written as <owner>/<name>, got ${JSON.stringify(req.repo)}.`);
+  }
+  if (!Number.isSafeInteger(req.number) || req.number < 1) {
+    throw new Error(`The pull request number must be a whole number of at least 1, got ${String(req.number)}.`);
+  }
+}
+
 /** What runReview rejects with when its signal was aborted; the workspace has been disposed by then. */
 export const REVIEW_STOPPED = 'The review was stopped.';
 
@@ -369,6 +383,7 @@ async function reviewInWorkspace(
  * workspace that cannot be prepared rejects. The workspace is always disposed.
  */
 export async function runReview(req: ReviewRequest, deps: EngineDeps, onEvent?: (e: ReviewEvent) => void): Promise<ReviewDocument> {
+  checkRequest(req);
   const { signal } = deps;
   if (signal?.aborted) throw new Error(REVIEW_STOPPED);
   try {
@@ -404,7 +419,9 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
   let reviewed: Reviewed;
   try {
     intake = (await log.run('intake', async (rec) => {
-      const fetched = await fetchPr(exec, req.repo, req.number, stageRulesOf(chosen.packs));
+      const live = await fetchPr(exec, req.repo, req.number, stageRulesOf(chosen.packs));
+      // The title and description as they were when the pull request was reviewed, when given, replace today's everywhere.
+      const fetched = req.prText ? { ...live, title: req.prText.title, body: req.prText.body } : live;
       const ws = await openWorkspace(exec, req, fetched, id);
       opened = ws;
       const pr = req.explicit ? { ...fetched, baseSha: ws.range.baseSha, headSha: ws.range.headSha } : fetched;
