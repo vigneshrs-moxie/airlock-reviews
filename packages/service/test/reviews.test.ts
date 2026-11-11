@@ -453,7 +453,7 @@ describe('GET /pr', () => {
     expect(down.json).toEqual({ error: 'GitHub did not answer: gh api pulls/9: error connecting to api.github.com; see <path>' });
   });
 
-  it('makes only read calls to gh', async () => {
+  it('makes only read calls to gh for GET /pr and GET /status (the review itself runs in the engine, faked here)', async () => {
     const s = await startService();
     await s.call('GET', `/pr?repo=${REPO}&number=7`);
     await s.call('GET', '/status');

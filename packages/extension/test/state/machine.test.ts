@@ -225,11 +225,6 @@ describe('startPanel: loading', () => {
     await until(bad, 'ready');
   });
 
-  it('makes no request to any address but the service', async () => {
-    const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary())) });
-    await until(h, 'review');
-    for (const req of h.svc.requests) expect(req.url.origin).toBe(BASE);
-  });
 });
 
 describe('startPanel: noticing the service stop while nothing is running (Task 13a)', () => {

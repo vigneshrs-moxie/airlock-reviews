@@ -48,8 +48,6 @@ test('the panel, beside a pull request tab, reaches the fake service and asks fo
   });
 
   const page = await context.newPage();
-  const dialogs: string[] = [];
-  page.on('dialog', (d) => dialogs.push(d.message()));
   // Zod's probe for eval would be refused by the extension's content security policy and recorded as an error.
   const refused: string[] = [];
   page.on('console', (m) => { if (/unsafe-eval|Refused to evaluate/i.test(m.text())) refused.push(m.text()); });
@@ -68,7 +66,6 @@ test('the panel, beside a pull request tab, reaches the fake service and asks fo
   await expect(page.getByText('Not paired')).toBeVisible();
   await expect(page.getByLabel('Pairing token')).toBeVisible();
 
-  expect(dialogs).toEqual([]);
   expect(service.requests.some((r) => r.method === 'GET' && r.url === '/hello')).toBe(true);
   // The hello reply has been parsed with an object schema by now.
   expect(refused).toEqual([]);

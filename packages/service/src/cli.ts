@@ -8,7 +8,7 @@ import { cleanForTerminal, realExec, type EngineDeps, type Exec } from '@airlock
 import { HelloSchema, ServiceStatusSchema, type Hello } from '@airlock/shared';
 import { loadConfig, readOrCreateToken, unpair, type ServiceConfig } from './config.js';
 import { hidePathsIn } from './http.js';
-import { createServer, defaultEngineDeps, type ServiceDeps } from './server.js';
+import { createServer, defaultEngineDeps, type Service, type ServiceDeps } from './server.js';
 
 export interface CliIo { out: (text: string) => void; err: (text: string) => void }
 
@@ -16,7 +16,7 @@ type Signal = 'SIGINT' | 'SIGTERM';
 
 /** Everything that touches the machine. The defaults are the real ones; tests replace them. */
 export interface CliOverrides {
-  createServer?: (deps: ServiceDeps) => ReturnType<typeof createServer>;
+  createServer?: (deps: ServiceDeps) => Pick<Service, 'listen' | 'close'>;
   engineDeps?: () => EngineDeps;
   loadConfig?: (env: NodeJS.ProcessEnv) => ServiceConfig;
   readOrCreateToken?: (home: string) => Promise<string>;

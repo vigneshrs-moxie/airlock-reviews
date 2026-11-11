@@ -68,8 +68,15 @@ function frontRoutes(deps: ServiceDeps): Route[] {
   ];
 }
 
+export interface Service {
+  /** Every route the service answers, in the order the router tries them. */
+  readonly routes: readonly Route[];
+  listen(): Promise<{ port: number; address: string; family: string }>;
+  close(): Promise<void>;
+}
+
 /** Throws a RangeError for a run limit that is not a positive number. */
-export function createServer(deps: ServiceDeps): { listen(): Promise<{ port: number; address: string; family: string }>; close(): Promise<void> } {
+export function createServer(deps: ServiceDeps): Service {
   const runMinutes = deps.limits?.runMinutes;
   if (runMinutes !== undefined && !(Number.isFinite(runMinutes) && runMinutes > 0)) {
     throw new RangeError(`limits.runMinutes must be a positive number, got ${runMinutes}`);
@@ -77,12 +84,13 @@ export function createServer(deps: ServiceDeps): { listen(): Promise<{ port: num
   const hidePaths = [deps.config.home, homedir()];
   const reviews = reviewRoutes(
     { ...deps, dismissals: deps.dismissals ?? ((repo, number) => dismissalsFor(deps.config.home, repo, number)) }, hidePaths);
+  const routes = [...frontRoutes(deps), ...reviews.routes];
   let server: http.Server | undefined;
   return {
+    routes,
     async listen() {
       const token = await readOrCreateToken(deps.config.home);
       const auth: Auth = { token, port: deps.config.port, pairedOrigin: () => pairedOrigin(deps.config.home) };
-      const routes = [...frontRoutes(deps), ...reviews.routes];
       const created = http.createServer({ connectionsCheckingInterval: 5_000 }, createRouter(routes, auth, deps.log, { hidePaths }));
       created.requestTimeout = deps.limits?.requestTimeoutMs ?? 30_000;
       created.headersTimeout = deps.limits?.headersTimeoutMs ?? 15_000;
