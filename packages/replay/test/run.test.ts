@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFakeRunner, withRetry } from '@airlock/engine';
-import type { AgentRequest, ReviewRequest } from '@airlock/engine';
+import type { AgentRequest, EngineDeps, ReviewRequest } from '@airlock/engine';
 import { ReviewDocumentSchema } from '@airlock/shared';
 import type { ReviewDocument } from '@airlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -49,11 +49,11 @@ function reviewFor(req: ReviewRequest): ReviewDocument {
 
 type FakeReview = NonNullable<ReplayDeps['review']> & { requests: ReviewRequest[] };
 
-function fakeReview(behaviour: (req: ReviewRequest) => Promise<ReviewDocument> | ReviewDocument = reviewFor): FakeReview {
+function fakeReview(behaviour: (req: ReviewRequest, engine: EngineDeps) => Promise<ReviewDocument> | ReviewDocument = reviewFor): FakeReview {
   const requests: ReviewRequest[] = [];
-  const review = async (req: ReviewRequest): Promise<ReviewDocument> => {
+  const review = async (req: ReviewRequest, engine: EngineDeps): Promise<ReviewDocument> => {
     requests.push(req);
-    return behaviour(req);
+    return behaviour(req, engine);
   };
   return Object.assign(review, { requests });
 }
@@ -750,6 +750,96 @@ describe('runReplay', () => {
       expect(summary.cases.find((s) => s.caseId === 'pr2')).toMatchObject({ inTop: 1, verdict: 'approve' });
       expect(summary.cases.find((s) => s.caseId === 'pr5')).toMatchObject({ inTop: 1, verdict: 'approve' });
       expect(summary.stopped).toEqual({ reason: 'usage-limit', caseId: 'pr1', notStarted: ['pr3', 'pr4'] });
+    });
+  });
+
+  describe('an exit signal stops the run', () => {
+    const four = [1, 2, 3, 4].map((n) => replayCase({
+      id: `pr${n}`, pr: n, baseSha: String(n).repeat(40), headSha: 'e'.repeat(40), known: [problem({ id: `K${n}` })],
+    }));
+    const answerAll = (req: AgentRequest<unknown>) => ({
+      matches: four.map((c) => c.known[0]!.id).filter((id) => isFor(req, id)).map((knownId) => ({ knownId, items: [{ itemId: 'f1', partial: false, reason: 'Same.' }], reason: 'Same.' })),
+    });
+    /** Waits for the review's signal, then rejects as the engine does when it is stopped. */
+    const untilStopped = (engine: EngineDeps): Promise<never> => new Promise((_, reject) => {
+      engine.signal!.addEventListener('abort', () => reject(new Error('The review was stopped.')), { once: true });
+    });
+    /** A review of pr2 that stops the run while it is in flight; the other cases review as usual. */
+    const stoppingAtPr2 = (controller: AbortController): FakeReview => fakeReview((req, engine) => {
+      if (req.number !== 2) return reviewFor(req);
+      setTimeout(() => controller.abort(), 5);
+      return untilStopped(engine);
+    });
+
+    it('an abort during the second of four cases starts no other case, judges nothing after it, and a second run picks up exactly the unfinished cases', async () => {
+      const controller = new AbortController();
+      const review = stoppingAtPr2(controller);
+      const runner = createFakeRunner(answerAll);
+      const { events, onCase } = recorder();
+      const summary = await runReplay(options({ cases: four, parallelCases: 1 }), { ...deps(review, runner), signal: controller.signal }, onCase);
+
+      expect(review.requests.map((r) => r.number)).toEqual([1, 2]);
+      expect(runner.calls).toHaveLength(1);
+      expect(runner.calls.filter((r) => isFor(r, 'K2'))).toHaveLength(0);
+      // pr2 had no folder before this call, and has none after it: no error.txt, nothing else.
+      for (const id of ['pr2', 'pr3', 'pr4']) await expect(stat(caseDir(id))).rejects.toThrow(/ENOENT/);
+      expect(events.filter((e) => e.caseId === 'pr2').map((e) => e.status)).toEqual(['start', 'stopped']);
+      expect(events.some((e) => e.caseId === 'pr3' || e.caseId === 'pr4')).toBe(false);
+      expect(summary.incompleteCases).toEqual(['pr2', 'pr3', 'pr4']);
+      expect(summary.stopped).toEqual({ reason: 'exit-signal' });
+      expect(await readJson(join(outDir, 'run-a', 'summary.json'))).toEqual(summary);
+      expect(await exists(join(outDir, 'run-a', 'report.md'))).toBe(true);
+
+      const healthy = fakeReview();
+      const again = createFakeRunner(answerAll);
+      const second = await runReplay(options({ cases: four, parallelCases: 1 }), deps(healthy, again));
+      expect(healthy.requests.map((r) => r.number)).toEqual([2, 3, 4]);
+      expect(again.calls).toHaveLength(3);
+      expect(second.incompleteCases).toEqual([]);
+      expect(second.stopped).toBeUndefined();
+    });
+
+    it('a stopped case\'s folder is left as it was before the call', async () => {
+      await runReplay(options({ cases: four, parallelCases: 1 }), deps(fakeReview((req) => {
+        if (req.number === 2) throw new Error('clone failed');
+        return reviewFor(req);
+      }), createFakeRunner(answerAll)));
+      const before = await snapshot(caseDir('pr2'));
+      expect(Object.keys(before)).toEqual(['error.txt']);
+
+      const controller = new AbortController();
+      await runReplay(options({ cases: four, parallelCases: 1 }), { ...deps(stoppingAtPr2(controller), createFakeRunner(answerAll)), signal: controller.signal });
+      expect(await snapshot(caseDir('pr2'))).toEqual(before);
+    });
+
+    it('a review that finishes after the stop is saved but not judged, and no error.txt is written', async () => {
+      const controller = new AbortController();
+      const review = fakeReview((req) => {
+        if (req.number === 1) controller.abort();
+        return reviewFor(req);
+      });
+      const runner = createFakeRunner(answerAll);
+      const summary = await runReplay(options({ cases: four, parallelCases: 1 }), { ...deps(review, runner), signal: controller.signal });
+      expect(review.requests.map((r) => r.number)).toEqual([1]);
+      expect(runner.calls).toHaveLength(0);
+      expect((await readdir(caseDir('pr1'))).sort()).toEqual(['review.json']);
+      expect(summary.incompleteCases).toEqual(['pr1', 'pr2', 'pr3', 'pr4']);
+      expect(summary.stopped).toEqual({ reason: 'exit-signal' });
+
+      const again = createFakeRunner(answerAll);
+      const resumed = fakeReview();
+      await runReplay(options({ cases: four, parallelCases: 1 }), deps(resumed, again));
+      expect(resumed.requests.map((r) => r.number)).toEqual([2, 3, 4]);
+      expect(again.calls).toHaveLength(4);
+    });
+
+    it('every judge request carries the run\'s stop signal', async () => {
+      const controller = new AbortController();
+      const runner = createFakeRunner(answerAll);
+      const summary = await runReplay(options({ cases: four }), { ...deps(fakeReview(), runner), signal: controller.signal });
+      expect(runner.calls).toHaveLength(4);
+      expect(runner.calls.every((r) => r.signal === controller.signal)).toBe(true);
+      expect(summary.stopped).toBeUndefined();
     });
   });
 

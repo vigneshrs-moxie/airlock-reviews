@@ -295,6 +295,24 @@ describe('airlock-replay', () => {
     expect(t.out[0]).toBe(join(work, RUN_ID, 'report.md'));
   });
 
+  it('stops on an exit signal, says how many cases were not finished and returns 130', async () => {
+    const controller = new AbortController();
+    const h = harness({ deps: { signal: controller.signal } });
+    const review = h.overrides.deps!.review!;
+    h.overrides.deps!.review = async (req, engine) => {
+      if (req.number !== 2) return review(req, engine);
+      controller.abort();
+      throw new Error('The review was stopped.');
+    };
+    const t = io();
+    const code = await keepingEnv(() => main(['run', '--cases', 'all', '--out', work], t.io, h.overrides));
+    expect(code).toBe(130);
+    expect(h.requests.map((r) => r.number)).toEqual([1]);
+    expect(t.err).toContain('pr2: stopped');
+    expect(t.err).toContain('Stopped. 2 cases were not finished. Run the same command again to continue.');
+    expect(t.out[0]).toBe(join(work, RUN_ID, 'report.md'));
+  });
+
   it('prints text from outside without terminal control characters, each message on one line', async () => {
     const h = harness({ review: (req) => { if (req.number === 2) throw new Error('bad\u001b[2K\rthing\nsecond line'); return reviewFor(req); } });
     const t = io();

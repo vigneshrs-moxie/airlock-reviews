@@ -74,10 +74,11 @@ export interface RunSummary {
   /** `ms` is the wall clock when there is one, else the sum of the cases' times (`msSummed`). */
   totals: { ms: number; msSummed: boolean; inputTokens: number; outputTokens: number; agentRuns: number };
   /**
-   * Present when the run stopped early because Claude's usage limit was reached during `caseId`: the cases in
-   * `notStarted` were left untouched. Only the run itself knows this; a summary rebuilt from the folder does not have it.
+   * Present when the run stopped early: because Claude's usage limit was reached during `caseId`, when the cases in
+   * `notStarted` were left untouched; or because of an exit signal (Ctrl-C), when no case started after it and the cases
+   * in flight were stopped. Only the run itself knows this; a summary rebuilt from the folder does not have it.
    */
-  stopped?: { reason: 'usage-limit'; caseId: string; notStarted: string[] };
+  stopped?: { reason: 'usage-limit'; caseId: string; notStarted: string[] } | { reason: 'exit-signal' };
   meets: {
     /**
      * 'not tested' when the run has no positive cases; 'not comparable' when the run folder was made by an earlier

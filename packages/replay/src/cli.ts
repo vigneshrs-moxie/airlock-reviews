@@ -17,6 +17,8 @@ export interface ReplayCliOverrides { deps?: ReplayDeps; packsDir?: string; kit?
 type Io = { out: (t: string) => void; err: (t: string) => void };
 
 const DEFAULT_MODEL = 'claude-opus-5-5';
+/** The exit code of a run stopped by Ctrl-C, as a shell gives a command ended by SIGINT. */
+const EXIT_STOPPED = 130;
 const DEFAULT_OUT = fileURLToPath(new URL('../../../replay-work', import.meta.url));
 const DEFAULT_PACKS = fileURLToPath(new URL('../../../packs', import.meta.url));
 
@@ -175,16 +177,21 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
     const n = unfinished.length;
     io.err(`${n} ${n === 1 ? 'case' : 'cases'} did not finish: ${clean(unfinished.join(', '))}. The report lists ${n === 1 ? 'it' : 'them'}.`);
   }
-  if (summary.stopped) {
+  if (summary.stopped?.reason === 'usage-limit') {
     const n = summary.stopped.notStarted.length;
     io.err(
       `Claude's usage limit was reached during ${clean(summary.stopped.caseId)}. ` +
         `The run stopped there; ${n} ${n === 1 ? 'case was' : 'cases were'} not started. Run the same command again later to continue.`,
     );
   }
+  const stopped = summary.stopped?.reason === 'exit-signal';
+  if (stopped) {
+    const n = unfinished.length;
+    io.err(`Stopped. ${n} ${n === 1 ? 'case was' : 'cases were'} not finished. Run the same command again to continue.`);
+  }
   io.out(clean(join(opts.out, summary.runId, 'report.md')));
   for (const line of closingLines(summary, all)) io.out(line);
-  return 0;
+  return stopped ? EXIT_STOPPED : 0;
 }
 
 async function reportCommand(args: string[], io: Io, overrides: ReplayCliOverrides): Promise<number> {
@@ -209,8 +216,8 @@ async function reportCommand(args: string[], io: Io, overrides: ReplayCliOverrid
 }
 
 /**
- * The airlock-replay command. Returns the exit code: 0 when the run finished, 2 for a usage error or a run folder made
- * by an earlier version, 1 otherwise.
+ * The airlock-replay command. Returns the exit code: 0 when the run finished, 130 when Ctrl-C stopped it, 2 for a
+ * usage error or a run folder made by an earlier version, 1 otherwise.
  */
 export async function main(argv: string[], io: Io, overrides: ReplayCliOverrides = {}): Promise<number> {
   const [command, ...rest] = argv;

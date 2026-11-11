@@ -167,15 +167,20 @@ function material(c: ReplayCase, doc: ReviewDocument): string {
   ].join('\n\n');
 }
 
+/** What judgeCase rejects with when its signal was aborted before the request was sent. */
+export const JUDGE_STOPPED = 'The judge was stopped.';
+
 /**
  * Asks the judge which items of `doc` describe each known problem of `c`, without telling it where any item ended up,
  * and chooses the best placed of them. Returns one match per known problem in the case's order. Throws when the
- * request fails; with a UsageLimitError when Claude's usage limit was reached.
+ * request fails; with a UsageLimitError when Claude's usage limit was reached. The request carries `signal`, and none
+ * is sent once it is aborted.
  */
 export async function judgeCase(
-  runner: AgentRunner, c: ReplayCase, doc: ReviewDocument, model: string, cwd: string = tmpdir(),
+  runner: AgentRunner, c: ReplayCase, doc: ReviewDocument, model: string, cwd: string = tmpdir(), signal?: AbortSignal,
 ): Promise<Match[]> {
   if (c.known.length === 0) return [];
+  if (signal?.aborted) throw new Error(JUDGE_STOPPED);
   const instructions = await loadJudgeTemplate();
   let result: AgentResult<z.infer<typeof answerSchema>>;
   const failed = (error: string, usageLimit: boolean): Error => {
@@ -183,7 +188,9 @@ export async function judgeCase(
     return usageLimit || mentionsUsageLimit(error) ? new UsageLimitError(message) : new Error(message);
   };
   try {
-    result = await runner.run({ role: 'judge', instructions, material: material(c, doc), schema: answerSchema, cwd, model, effort: 'high' });
+    result = await runner.run({
+      role: 'judge', instructions, material: material(c, doc), schema: answerSchema, cwd, model, effort: 'high', ...(signal ? { signal } : {}),
+    });
   } catch (err) {
     throw failed(err instanceof Error ? err.message : String(err), false);
   }

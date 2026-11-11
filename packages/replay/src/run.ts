@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { limiter, runReview } from '@airlock/engine';
@@ -56,10 +56,10 @@ export type ReplayCombine = (typeof REPLAY_COMBINE)[number];
  */
 export interface ReplayDeps extends EngineDeps { review?: typeof runReview }
 
-/** One step of one case. The case's last event (`skipped`, `judged` or `failed`) carries its score. */
+/** One step of one case. The case's last event (`skipped`, `judged`, `failed` or `stopped`) carries its score. */
 export type CaseEvent = {
   caseId: string;
-  status: 'start' | 'skipped' | 'reviewed' | 'judged' | 'failed';
+  status: 'start' | 'skipped' | 'reviewed' | 'judged' | 'failed' | 'stopped';
   message?: string;
   score?: CaseScore;
 };
@@ -479,6 +479,9 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   // Set when a review or the judge reaches Claude's usage limit: no case starts after that, so none is spoiled.
   let limitReachedIn: string | null = null;
   const notStarted = new Set<string>();
+  // An exit signal does the same and more: the reviews in flight are stopped through it, and no judge request follows.
+  const exitSignal = (): boolean => deps.signal?.aborted === true;
+  let stoppedBySignal = false;
 
   // The run's own wall clock: from the first case this call works on to the last one's end.
   let firstStart: string | undefined;
@@ -487,27 +490,34 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
 
   /**
    * Works on one case until it is done: reviews it unless a finished review of it is saved, then judges it. A review
-   * that comes back incomplete is saved, in place of the old one, and not judged. Never throws.
+   * that comes back incomplete is saved, in place of the old one, and not judged. A case stopped by an exit signal
+   * keeps its folder as it was before this call, apart from a review that finished. Never throws.
    */
   const processCase = async (c: ReplayCase): Promise<Scored> => {
     const dir = join(runDir, c.id);
     let kept: ReviewDocument | null = null;
     let lead = 'The case folder could not be prepared';
     let started = false;
+    let made = false;
+    /** Leaves the folder as it was (a folder this call made is removed while it is empty) and scores what is there. */
+    const stop = async (): Promise<Scored> => {
+      stoppedBySignal = true;
+      if (made) await rmdir(dir).catch(() => undefined);
+      return finish(c, await readOutcome(dir, c), 'stopped');
+    };
     try {
       const saved = await readOutcome(dir, c);
       if (saved.kind === 'done') return finish(c, saved, 'skipped');
-      if (limitReachedIn !== null) {
+      if (limitReachedIn !== null || exitSignal()) {
         notStarted.add(c.id);
+        if (exitSignal()) stoppedBySignal = true;
         return scoreOutcome(c, saved, scoring);
       }
 
       firstStart = earlier(firstStart, stamp());
       started = true;
       emit({ caseId: c.id, status: 'start', ...(saved.kind === 'not-judged' ? { message: 'judging the saved review again' } : {}) });
-      await mkdir(dir, { recursive: true });
-      await rm(join(dir, 'error.txt'), { recursive: true, force: true });
-      await rm(join(dir, 'matches.json'), { force: true });
+      made = (await mkdir(dir, { recursive: true })) !== undefined;
 
       if (saved.kind === 'not-judged') {
         kept = saved.doc;
@@ -515,6 +525,9 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
         lead = 'The review failed';
         const doc = ReviewDocumentSchema.parse(await review(reviewRequest(c, opts), engineDeps));
         lead = 'Saving the review failed';
+        // What the folder says about an earlier review goes before the new review is saved, so it is never read with it.
+        await rm(join(dir, 'matches.json'), { force: true });
+        await rm(join(dir, 'error.txt'), { recursive: true, force: true });
         await writeAtomic(join(dir, 'review.json'), json(doc));
         emit({ caseId: c.id, status: 'reviewed' });
         if (hitUsageLimit(doc)) limitReachedIn ??= c.id;
@@ -525,12 +538,15 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
         kept = doc;
       }
 
+      if (exitSignal()) return await stop();
       lead = 'The judge failed';
-      const matches = await judgeCase(deps.runner, c, kept, judgeModel, judgeDir);
+      const matches = await judgeCase(deps.runner, c, kept, judgeModel, judgeDir, deps.signal);
       lead = 'Saving the matches failed';
       await writeAtomic(join(dir, 'matches.json'), json(matches));
+      await rm(join(dir, 'error.txt'), { recursive: true, force: true });
       return finish(c, { kind: 'done', doc: kept, matches }, 'judged');
     } catch (err) {
+      if (exitSignal()) return await stop();
       if (err instanceof UsageLimitError) limitReachedIn ??= c.id;
       const error = failureText(lead, err);
       await writeAtomic(join(dir, 'error.txt'), `${error}\n`).catch(() => undefined);
@@ -568,7 +584,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   }
   const summary: RunSummary = {
     ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases, opts.dataset ?? opts.cases, { wallClock: wallClockOf(run) }),
-    ...(limitReachedIn === null ? {} : {
+    ...(stoppedBySignal ? { stopped: { reason: 'exit-signal' } } : limitReachedIn === null ? {} : {
       stopped: { reason: 'usage-limit', caseId: limitReachedIn, notStarted: opened.cases.filter((c) => notStarted.has(c.id)).map((c) => c.id) },
     }),
   };
