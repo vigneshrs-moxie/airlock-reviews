@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { must, realExec } from '../../src/util/exec.js';
 import { airlockHome, repoSlug } from '../../src/util/paths.js';
 
@@ -32,13 +32,16 @@ describe('realExec', () => {
 });
 
 describe('paths', () => {
+  const saved = process.env.AIRLOCK_HOME;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.AIRLOCK_HOME;
+    else process.env.AIRLOCK_HOME = saved;
+  });
   it('uses AIRLOCK_HOME when set', () => {
-    const old = process.env.AIRLOCK_HOME;
     process.env.AIRLOCK_HOME = '/tmp/al';
     expect(airlockHome()).toBe('/tmp/al');
     delete process.env.AIRLOCK_HOME;
     expect(airlockHome()).toMatch(/\.airlock$/);
-    if (old !== undefined) process.env.AIRLOCK_HOME = old;
   });
   it('slugs a repo', () => expect(repoSlug('acme/app')).toBe('acme__app'));
 });
