@@ -5,7 +5,7 @@ import {
   type PrInfo, type ServiceStatus, type StartReviewBody,
 } from '@airlock/shared';
 import { z, type ZodType } from 'zod';
-import { dismiss, DismissError, dismissalsFor, restore } from './dismissals.js';
+import { dismiss, DismissError, restore } from './dismissals.js';
 import { plainMessage, type Req, type Res, type Route } from './http.js';
 import { LimitError, realTimers, Runs } from './runs.js';
 import type { ServiceDeps } from './server.js';
@@ -56,11 +56,12 @@ export function engineRequest(body: StartReviewBody, packsDir: string): ReviewRe
  * Status, pull request summary, starting and following reviews, and the latest stored review. `stop` is called when the
  * server closes, and clears the registry's timers.
  */
-export function reviewRoutes(deps: ServiceDeps, hidePaths: readonly string[]): { routes: Route[]; stop: () => void } {
+export function reviewRoutes(
+  deps: ServiceDeps & { dismissals: NonNullable<ServiceDeps['dismissals']> }, hidePaths: readonly string[]): { routes: Route[]; stop: () => void } {
   const { config, engine } = deps;
   const timers = deps.timers ?? realTimers;
   const review = deps.review ?? runReview;
-  const dismissals = deps.dismissals ?? ((repo: string, number: number): Promise<Dismissal[]> => dismissalsFor(config.home, repo, number));
+  const { dismissals } = deps;
   const runs = new Runs({
     timers,
     ...(deps.limits?.runMinutes === undefined ? {} : { runMinutes: deps.limits.runMinutes }),
@@ -165,7 +166,14 @@ export function reviewRoutes(deps: ServiceDeps, hidePaths: readonly string[]): {
     },
     {
       method: 'POST', path: '/dismissals/restore', body: RestoreBodySchema,
-      handler: async (req) => reply<RestoreReply>(RestoreReplySchema, 200, await restore(deps, req.body as RestoreBody)),
+      handler: async (req) => {
+        try {
+          return reply<RestoreReply>(RestoreReplySchema, 200, await restore(deps, req.body as RestoreBody));
+        } catch (e) {
+          if (e instanceof DismissError) return refuse(e.status, e.message);
+          throw e;
+        }
+      },
     },
   ];
   return { routes, stop: () => runs.close() };

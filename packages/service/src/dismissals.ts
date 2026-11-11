@@ -1,11 +1,11 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
   appendLearned, choosePacks, removeLearned, repoSlug, reviewById, type LearnedEntry, type Pack,
 } from '@airlock/engine';
 import {
-  checkLearnedText, DismissalSchema, type DismissBody, type Dismissal, type RestoreBody, type RestoreReply,
+  checkLearnedText, DismissalSchema, type DismissBody, type Dismissal, type RestoreBody, type RestoreReply, type ReviewDocument,
 } from '@airlock/shared';
 import { z } from 'zod';
 import type { ServiceConfig } from './config.js';
@@ -15,6 +15,8 @@ export interface DismissDeps {
   config: Pick<ServiceConfig, 'home' | 'packsDir'>;
   now: () => Date;
   log: (line: string) => void;
+  /** Saves a pull request's list; atomic by default. Tests replace it to make a save fail. */
+  write?: (path: string, list: Dismissal[]) => Promise<void>;
 }
 
 /** A refusal with the status the route answers with; the message is for the person. */
@@ -25,6 +27,7 @@ export class DismissError extends Error {
   }
 }
 
+/** The team kit's pack. Must stay equal to the engine's KIT_PACK_ID (pipeline/packs.ts), which is not exported. */
 export const KIT_PACK = 'raj-standard';
 const GENERIC_PACK = 'generic';
 const NOT_FOUND = 'Airlock cannot find that finding in the stored review.';
@@ -52,17 +55,30 @@ export async function assertWritable(pack: Pack, packsDir: string): Promise<void
   }
 }
 
-const dismissalsPath = (home: string, repo: string, number: number): string =>
-  join(home, 'dismissals', repoSlug(repo), `${number}.json`);
-
-/** Everything that changes one pull request's file runs one after another. */
-const queues = new Map<string, Promise<unknown>>();
-function serialised<T>(key: string, work: () => Promise<T>): Promise<T> {
-  const run = (queues.get(key) ?? Promise.resolve()).then(work, work);
-  const tail = run.catch(() => undefined);
-  queues.set(key, tail);
-  void tail.then(() => { if (queues.get(key) === tail) queues.delete(key); });
+/**
+ * Every change, for every pull request, runs one after another: the learned files of a pack are shared by all pull
+ * requests, so a per-pull-request queue could lose a line.
+ */
+let tail: Promise<unknown> = Promise.resolve();
+function serialised<T>(work: () => Promise<T>): Promise<T> {
+  const run = tail.then(work, work);
+  tail = run.catch(() => undefined);
   return run;
+}
+
+/**
+ * The file for a pull request. A folder that spells the repository in another letter case is the same folder, so a
+ * request is matched to it whatever case it uses; a new file gets the repository's own spelling.
+ */
+async function dismissalsPath(home: string, repo: string, number: number): Promise<string> {
+  const root = join(home, 'dismissals');
+  const slug = repoSlug(repo);
+  let folder = slug;
+  try {
+    const names = await readdir(root);
+    folder = names.includes(slug) ? slug : names.find((n) => n.toLowerCase() === slug.toLowerCase()) ?? slug;
+  } catch { /* no dismissals yet */ }
+  return join(root, folder, `${number}.json`);
 }
 
 async function readList(path: string): Promise<{ list: Dismissal[]; broken: boolean }> {
@@ -81,7 +97,7 @@ async function readList(path: string): Promise<{ list: Dismissal[]; broken: bool
 /** The dismissals stored for the pull request; none when there is no file or it cannot be read. */
 export async function dismissalsFor(home: string, repo: string, number: number): Promise<Dismissal[]> {
   try {
-    return (await readList(dismissalsPath(home, repo, number))).list;
+    return (await readList(await dismissalsPath(home, repo, number))).list;
   } catch {
     return [];
   }
@@ -91,7 +107,7 @@ export async function dismissalsFor(home: string, repo: string, number: number):
 async function listForChange(path: string, now: Date, log: (line: string) => void): Promise<Dismissal[]> {
   const { list, broken } = await readList(path);
   if (broken) {
-    const aside = `${path}.broken-${now.getTime()}`;
+    const aside = `${path}.broken-${now.getTime()}-${randomBytes(4).toString('hex')}`;
     await rename(path, aside);
     log(`the dismissals file ${path} could not be read; it was set aside as ${aside}`);
   }
@@ -132,14 +148,26 @@ async function packById(packsDir: string, repo: string, id: string, selected: Pa
   return (await choosePacks(packsDir, repo, [id])).packs[0] ?? null;
 }
 
-/** Takes the line a dismissal wrote out of its pack again. False when the line was no longer there. */
-async function removeWritten(deps: DismissDeps, repo: string, old: Dismissal, selected: Pack[]): Promise<{ removed: boolean; pack: Pack | null }> {
-  if (old.learned === null) return { removed: true, pack: null };
+/**
+ * Takes the line a dismissal wrote out of its pack again. Refuses (500) when the pack cannot be opened, so a line is never
+ * orphaned silently; `removed` is false only when the pack was read and the line was not in it.
+ */
+async function removeWritten(
+  deps: DismissDeps, repo: string, old: Dismissal, selected: Pack[],
+): Promise<{ removed: boolean; pack: Pack | null; entry: LearnedEntry | null }> {
+  if (old.learned === null) return { removed: true, pack: null, entry: null };
   const pack = await packById(deps.config.packsDir, repo, old.learned.packId, selected);
-  if (pack === null) return { removed: false, pack };
+  if (pack === null) {
+    throw new DismissError(500, `Airlock could not open the pack ${old.learned.packId} to undo an earlier line. Fix the pack and try again.`);
+  }
   await assertWritable(pack, deps.config.packsDir);
   const entry: LearnedEntry = { date: old.learned.date, repo, kind: old.learned.kind, text: old.text };
-  return { removed: await removeLearned(pack.dir, entry), pack };
+  return { removed: await removeLearned(pack.dir, entry), pack, entry };
+}
+
+/** The repository as the stored review of an earlier dismissal has it, or the given one when that review is gone. */
+async function reviewOf(repo: string, number: number, old: Dismissal): Promise<ReviewDocument | null> {
+  return reviewById(repo, number, old.reviewId);
 }
 
 /**
@@ -161,7 +189,7 @@ export async function dismiss(deps: DismissDeps, body: DismissBody): Promise<Dis
   const learnsLine = body.reason !== 'not-now';
   const kind = body.reason === 'wrong' ? 'wrong' : 'intended';
   const date = localDate(now);
-  const selected = (await choosePacks(deps.config.packsDir, body.repo)).packs;
+  const selected = (await choosePacks(deps.config.packsDir, doc.pr.repo)).packs;
   const target = learnsLine ? learnedTarget(selected) : null;
   if (target !== null) await assertWritable(target, deps.config.packsDir);
 
@@ -171,28 +199,28 @@ export async function dismiss(deps: DismissDeps, body: DismissBody): Promise<Dis
   });
   const line: LearnedEntry = { date, repo: doc.pr.repo, kind, text: body.text };
 
-  const path = dismissalsPath(deps.config.home, doc.pr.repo, doc.pr.number);
-  return serialised(path, async () => {
+  return serialised(async () => {
+    const path = await dismissalsPath(deps.config.home, doc.pr.repo, doc.pr.number);
     const list = await listForChange(path, now, deps.log);
     const old = list.find((d) => d.fingerprint === record.fingerprint);
-    let oldRemoved: { pack: Pack; entry: LearnedEntry } | null = null;
+    let removedOld: { pack: Pack; entry: LearnedEntry } | null = null;
     let written = false;
     try {
       if (old?.learned) {
-        const gone = await removeWritten(deps, doc.pr.repo, old, selected);
-        if (gone.removed && gone.pack !== null) {
-          oldRemoved = { pack: gone.pack, entry: { date: old.learned.date, repo: doc.pr.repo, kind: old.learned.kind, text: old.text } };
-        }
+        // The old line carries the repository of the old review.
+        const oldRepo = (await reviewOf(body.repo, body.number, old))?.pr.repo ?? doc.pr.repo;
+        const gone = await removeWritten(deps, oldRepo, old, selected);
+        if (gone.removed && gone.pack !== null && gone.entry !== null) removedOld = { pack: gone.pack, entry: gone.entry };
       }
       if (target !== null) {
         await appendLearned(target.dir, line);
         written = true;
       }
-      await writeList(path, [...list.filter((d) => d.fingerprint !== record.fingerprint), record]);
+      await (deps.write ?? writeList)(path, [...list.filter((d) => d.fingerprint !== record.fingerprint), record]);
     } catch (err) {
       // Leave nothing half-done: take the new line out again and put the old one back.
       if (written && target !== null) await removeLearned(target.dir, line).catch(() => undefined);
-      if (oldRemoved !== null) await appendLearned(oldRemoved.pack.dir, oldRemoved.entry).catch(() => undefined);
+      if (removedOld !== null) await appendLearned(removedOld.pack.dir, removedOld.entry).catch(() => undefined);
       throw err;
     }
     return record;
@@ -204,21 +232,23 @@ export async function dismiss(deps: DismissDeps, body: DismissBody): Promise<Dis
  * pack the dismissal is still removed and the reply says so.
  */
 export async function restore(deps: DismissDeps, body: RestoreBody): Promise<RestoreReply> {
-  const path = dismissalsPath(deps.config.home, body.repo, body.number);
-  return serialised(path, async () => {
+  return serialised(async () => {
+    const path = await dismissalsPath(deps.config.home, body.repo, body.number);
     const list = await listForChange(path, deps.now(), deps.log);
     const old = list.find((d) => d.fingerprint === body.fingerprint);
     if (old === undefined) return { restored: false, note: null };
+    // The review the dismissal was made on must belong to this pull request.
+    const doc = await reviewOf(body.repo, body.number, old);
+    if (doc !== null && (doc.pr.repo.toLowerCase() !== body.repo.toLowerCase() || doc.pr.number !== body.number)) {
+      return { restored: false, note: null };
+    }
     let note: string | null = null;
     if (old.learned !== null) {
       // The line carries the repository as the stored review has it.
-      const doc = await reviewById(body.repo, body.number, old.reviewId);
-      const repo = doc?.pr.repo ?? body.repo;
-      const selected = (await choosePacks(deps.config.packsDir, body.repo)).packs;
-      const { removed, pack } = await removeWritten(deps, repo, old, selected);
+      const { removed, pack } = await removeWritten(deps, doc?.pr.repo ?? body.repo, old, (await choosePacks(deps.config.packsDir, body.repo)).packs);
       if (!removed) note = `The saved line was no longer in ${pack?.title ?? old.learned.packId}'s ${learnedFile(old.learned.kind)}; nothing was removed from the pack.`;
     }
-    await writeList(path, list.filter((d) => d.fingerprint !== body.fingerprint));
+    await (deps.write ?? writeList)(path, list.filter((d) => d.fingerprint !== body.fingerprint));
     return { restored: true, note };
   });
 }
