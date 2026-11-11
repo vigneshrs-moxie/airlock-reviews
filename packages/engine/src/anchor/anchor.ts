@@ -60,7 +60,17 @@ export function anchorQuote(headText: string | null, quote: string, lineHint: nu
   return { status: inDiff.length > 0 ? 'in-diff' : 'outside-diff', startLine: best, endLine: best + span - 1 };
 }
 
-/** Anchor every candidate to the head commit; drop the ones whose quoted code does not exist. */
+/** The file's own lines from `startLine` to `endLine` (1-based), as they are written. */
+const linesAt = (text: string, startLine: number, endLine: number): string => text.split('\n').slice(startLine - 1, endLine).join('\n');
+
+const NOT_IN_FILE = 'not found in the file';
+
+/**
+ * Anchor every candidate to the head commit and drop the ones whose quoted code does not exist there, or whose file
+ * cannot be read. A kept candidate's quote becomes the file's own lines at the anchored range, so a finding never shows
+ * code that is not in the file. A connected place is quoted the same way when found; when its quote or file is not
+ * found it keeps its path, role and quote, gets no line, and its role says it was not found.
+ */
 export async function anchorCandidates(
   cands: Candidate[],
   files: FileDiff[],
@@ -79,19 +89,28 @@ export async function anchorCandidates(
 
   const anchored: (Candidate & { anchor: Anchor })[] = [];
   const dropped: Dropped[] = [];
+  const drop = (c: Candidate, reason: string): void => { dropped.push({ candidate: c, stage: 'anchor', reason, refutation: null }); };
   for (const c of cands) {
-    const anchor = anchorQuote(await read(c.path), c.quote, c.lineHint, byPath.get(c.path));
-    if (anchor.status === 'not-found') {
-      dropped.push({ candidate: c, stage: 'anchor', reason: `quoted code is not in ${c.path} at the head commit`, refutation: null });
+    const deleted = byPath.get(c.path)?.status === 'deleted';
+    const text = await read(c.path);
+    if (text === null && !deleted) { drop(c, `the file ${c.path} could not be read`); continue; }
+    const anchor = anchorQuote(text, c.quote, c.lineHint, byPath.get(c.path));
+    if (text === null || anchor.status === 'not-found' || anchor.startLine === null || anchor.endLine === null) {
+      drop(c, `quoted code is not in ${c.path} at the head commit`);
       continue;
     }
     const connected: Place[] = [];
     for (const p of c.connected) {
       if (p.quote.trim() === '') { connected.push({ ...p, line: null }); continue; }
-      const found = anchorQuote(await read(p.path), p.quote, p.line, byPath.get(p.path));
-      connected.push({ ...p, line: found.status === 'not-found' ? null : found.startLine });
+      const placeText = await read(p.path);
+      const found = anchorQuote(placeText, p.quote, p.line, byPath.get(p.path));
+      if (placeText === null || found.startLine === null || found.endLine === null) {
+        connected.push({ ...p, line: null, role: p.role.trim() === '' ? NOT_IN_FILE : `${p.role} (${NOT_IN_FILE})` });
+      } else {
+        connected.push({ ...p, line: found.startLine, quote: linesAt(placeText, found.startLine, found.endLine) });
+      }
     }
-    anchored.push({ ...c, connected, anchor });
+    anchored.push({ ...c, quote: linesAt(text, anchor.startLine, anchor.endLine), connected, anchor });
   }
   return { anchored, dropped };
 }

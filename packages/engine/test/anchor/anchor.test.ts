@@ -1,7 +1,11 @@
 import { candidate } from '@airlock/shared';
 import type { FileDiff } from '@airlock/shared';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { anchorCandidates, anchorQuote, findQuote } from '../../src/anchor/anchor.js';
+import { MAX_SAFE_READ_BYTES, safeRead } from '../../src/util/safe-read.js';
 
 const file = (over: Partial<FileDiff> & { addedLines?: number[] }): FileDiff => ({
   path: 'a.ts', oldPath: null, status: 'modified', binary: false, additions: 0, deletions: 0,
@@ -109,7 +113,43 @@ describe('anchorCandidates', () => {
     const before = structuredClone(c);
     const res = await anchorCandidates([c], [], readHead);
     expect(res.anchored[0]?.connected.map((p) => p.line)).toEqual([2, null, null, null]);
+    expect(res.anchored[0]?.connected.map((p) => p.role)).toEqual([
+      'caller', 'x (not found in the file)', 'x (not found in the file)', 'x',
+    ]);
     expect(c).toEqual(before);
     expect(reads.sort()).toEqual(['a.ts', 'b.ts', 'c.ts']);
+  });
+
+  it('replaces the quote with the file\'s own lines at the anchored range', async () => {
+    const t = 'short\n    const result = compute(alpha, beta);\nend';
+    const c = {
+      ...candidate(), path: 'r.ts', quote: 'if (x) {\nconst result = compute(alpha, beta);\n  oops();',
+      connected: [{ path: 'r.ts', line: null, role: 'the end', quote: 'end' }],
+    };
+    const res = await anchorCandidates([c], [], async () => t);
+    expect(res.anchored[0]?.anchor).toEqual({ status: 'outside-diff', startLine: 2, endLine: 2 });
+    expect(res.anchored[0]?.quote).toBe('    const result = compute(alpha, beta);');
+    expect(res.anchored[0]?.connected[0]).toEqual({ path: 'r.ts', line: 3, role: 'the end', quote: 'end' });
+    const whole = await anchorCandidates([{ ...c, quote: 'const   result = compute(alpha, beta);\nend' }], [], async () => t);
+    expect(whole.anchored[0]?.quote).toBe('    const result = compute(alpha, beta);\nend');
+  });
+
+  it('says the file could not be read when it cannot, rather than that the quote is not in it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'airlock-anchor-'));
+    try {
+      await writeFile(join(dir, 'a%20b.ts'), 'three\n');
+      await writeFile(join(dir, 'big.ts'), `three\n${'x'.repeat(MAX_SAFE_READ_BYTES)}`);
+      const read = (p: string) => safeRead(dir, p);
+      const res = await anchorCandidates([
+        { ...candidate(), id: 'pct', path: 'a%20b.ts', quote: 'three' },
+        { ...candidate(), id: 'big', path: 'big.ts', quote: 'three' },
+      ], [], read);
+      expect(res.anchored).toEqual([]);
+      expect(res.dropped.map((d) => [d.candidate.id, d.reason])).toEqual([
+        ['pct', 'the file a%20b.ts could not be read'], ['big', 'the file big.ts could not be read'],
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
