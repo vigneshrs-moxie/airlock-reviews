@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -55,5 +55,18 @@ describe('loadRepoRules', () => {
     await symlink(join(dir, 'AGENTS.md'), join(dir, 'a', 'AGENTS.md')); // inside: kept
     const rules = await loadRepoRules(dir, ['a/f.ts']);
     expect(rules.map((r) => r.path)).toEqual(['AGENTS.md', 'a/AGENTS.md']);
+  });
+
+  it('skips a nested file reached through a directory symlink that leaves the base directory', async () => {
+    const outside = await repo({ 'AGENTS.md': 'outside' });
+    const dir = await repo({ 'CLAUDE.md': 'root' });
+    await symlink(outside, join(dir, 'a'));
+    expect((await loadRepoRules(dir, ['a/f.ts'])).map((r) => r.path)).toEqual(['CLAUDE.md']);
+  });
+
+  it('skips a file that cannot be read instead of failing the load', async () => {
+    const dir = await repo({ 'CLAUDE.md': 'secret', 'AGENTS.md': 'ok' });
+    await chmod(join(dir, 'CLAUDE.md'), 0o000);
+    expect((await loadRepoRules(dir, [])).map((r) => r.path)).toEqual(['AGENTS.md']);
   });
 });

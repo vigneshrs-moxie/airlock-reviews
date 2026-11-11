@@ -47,10 +47,11 @@ export async function syncKit(exec: Exec, opts: { ref?: string } = {}): Promise<
   const root = join(airlockHome(), 'kit');
   const resolved = await runGh(exec, ['api', `repos/${KIT_REPO}/commits/${opts.ref ?? 'main'}`, '--jq', '.sha']);
   const sha = resolved.stdout.trim();
-  if (resolved.code !== 0 || sha === '') {
+  if (resolved.code !== 0 || !/^[0-9a-f]{40}$/.test(sha)) {
     const cached = await newestCachedKit(root);
     if (cached) return { ...cached, stale: true };
-    throw new Error(`The review kit could not be fetched and none is cached: ${resolved.stderr.trim()}`);
+    const why = resolved.code !== 0 ? resolved.stderr.trim() : `unexpected commit value "${sha.slice(0, 80)}"`;
+    throw new Error(`The review kit could not be fetched and none is cached: ${why}`);
   }
 
   const dir = join(root, sha);
@@ -66,13 +67,22 @@ export async function syncKit(exec: Exec, opts: { ref?: string } = {}): Promise<
       if (res.code !== 0) throw new Error(`The review kit could not be fetched (${path}): ${res.stderr.trim()}`);
       await writeFile(join(tmp, basename(path)), res.stdout);
     }
-    await rm(dir, { recursive: true, force: true }); // an incomplete leftover
-    await rename(tmp, dir);
+    try {
+      await rename(tmp, dir);
+    } catch (err) {
+      // an incomplete leftover blocks the rename; clear it once and retry
+      if (await isComplete(dir)) { await rm(tmp, { recursive: true, force: true }); return { sha, dir, stale: false }; }
+      await rm(dir, { recursive: true, force: true });
+      try { await rename(tmp, dir); } catch (err2) {
+        if (await isComplete(dir)) { await rm(tmp, { recursive: true, force: true }); return { sha, dir, stale: false }; } // another sync finished first
+        throw err2 ?? err;
+      }
+    }
+    return { sha, dir, stale: false };
   } catch (err) {
     await rm(tmp, { recursive: true, force: true });
     throw err;
   }
-  return { sha, dir, stale: false };
 }
 
 /** Returns a new pack with the kit's standards attached; the adapter is not changed. */

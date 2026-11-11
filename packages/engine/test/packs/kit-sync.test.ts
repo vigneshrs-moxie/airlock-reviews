@@ -73,12 +73,31 @@ describe('syncKit', () => {
     await mk('old', true, 1000);
     await mk('new', true, 2000);
     await mk('newest-but-partial', false, 3000);
+    await mk('.new-download-abc123', true, 4000); // in-progress temp folder: ignored
     const result = await syncKit(fakeGh({ resolveFails: true }).exec);
     expect(result).toEqual({ sha: 'new', dir: join(home, 'kit', 'new'), stale: true });
   });
 
   it('throws with gh stderr when the commit cannot be resolved and nothing is cached', async () => {
     await expect(syncKit(fakeGh({ resolveFails: true }).exec)).rejects.toThrow(/kit could not be fetched.*could not resolve host/s);
+  });
+
+  it('treats a malformed commit value as unresolved and deletes nothing', async () => {
+    await mkdir(join(home, 'kit'), { recursive: true });
+    await writeFile(join(home, 'sentinel.txt'), 'keep');
+    for (const bad of ['..', '../x', 'abc', `${SHA}\nextra`]) {
+      await expect(syncKit(fakeGh({ sha: bad }).exec)).rejects.toThrow(/kit could not be fetched/);
+    }
+    expect(await readFile(join(home, 'sentinel.txt'), 'utf8')).toBe('keep');
+  });
+
+  it('lets two syncs of the same commit run at once and both return the same folder', async () => {
+    const gh = fakeGh();
+    const [a, b] = await Promise.all([syncKit(gh.exec), syncKit(gh.exec)]);
+    expect(a).toEqual({ sha: SHA, dir: join(home, 'kit', SHA), stale: false });
+    expect(b).toEqual(a);
+    expect((await readdir(join(home, 'kit'))).sort()).toEqual([SHA]);
+    expect((await readdir(a.dir)).sort()).toEqual(['SKILL.md', 'calibration.md', 'orbit.md', 'profile.md']);
   });
 
   it('does not treat a half-finished download as cached', async () => {

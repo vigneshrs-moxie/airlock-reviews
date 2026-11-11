@@ -26,12 +26,17 @@ export async function loadRepoRules(baseDir: string, changedPaths: string[]): Pr
     if (out.length >= MAX_FILES) break;
     const full = join(baseDir, path);
     let real: string;
+    let size: number;
     try {
       real = await realpath(full);
-      if (!(await stat(real)).isFile()) continue;
+      const info = await stat(real);
+      if (!info.isFile()) continue;
+      size = info.size;
     } catch { continue; }
     if (real !== root && !real.startsWith(root + sep)) continue;
-    const text = await readFile(real, 'utf8');
+    if (total + size > MAX_BYTES) break;
+    let text: string;
+    try { text = await readFile(real, 'utf8'); } catch { continue; }
     const bytes = Buffer.byteLength(text, 'utf8');
     if (total + bytes > MAX_BYTES) break;
     total += bytes;
