@@ -53,7 +53,7 @@ Each candidate needs all of these:
 
 If you cannot give an exact quote, a concrete consequence and what would prove it wrong, it is not a finding.
 
-A doubt that has a place in the code is a finding. When you can quote the exact code and say what goes wrong for a real person if the answer turns out to be "no", it is a finding with severity `ask`, even though only the author or the business can say whether it is right. Give it the quote, the consequence and what would prove it wrong, like any other finding.
+A doubt you can place in the code is a finding when you can quote the exact code and say what goes wrong for a real person if the answer turns out to be "no". Give it severity `ask`, even though only the author or the business can say whether it is right, and give it the quote, the consequence and what would prove it wrong, like any other finding. A doubt about a place in the code with no consequence you can state is neither a finding nor a question: leave it out.
 
 `questions` is only for a doubt that has no place in the code: a product decision the diff cannot show, or a piece of context that is missing. Write each as one sentence the author can answer. Never put the same doubt in both a finding and `questions`.
 
