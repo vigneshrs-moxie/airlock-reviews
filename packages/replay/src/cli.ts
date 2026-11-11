@@ -8,7 +8,7 @@ import { DepthSchema } from '@airlock/shared';
 import { loadCases, pickCases } from './dataset.js';
 import type { ReplayCase } from './dataset.js';
 import { coverage, halfInTopWord } from './report.js';
-import { checkRunId, HOME_FOLDER, loadRun, runReplay, saveRunReport } from './run.js';
+import { checkRunId, HOME_FOLDER, loadRun, REPLAY_COMBINE, REPLAY_EFFORTS, runReplay, saveRunReport } from './run.js';
 import type { CaseEvent, ReplayDeps } from './run.js';
 
 export interface ReplayCliOverrides { deps?: ReplayDeps; packsDir?: string; kit?: { dir: string; sha: string }; cases?: ReplayCase[] }
@@ -23,7 +23,8 @@ export function usage(): string {
   return [
     'Usage:',
     '  airlock-replay run --cases <selection> [--model <id>] [--depth quick|standard|deep] [--out <dir>] [--run <id>]',
-    '                     [--judge-model <id>] [--parallel <n>]',
+    '                     [--judge-model <id>] [--parallel <n>] [--effort low|medium|high] [--sweep-model <id>]',
+    '                     [--combine never|no-read-tier]',
     '  airlock-replay report <runDir>',
     '  airlock-replay help',
     '',
@@ -35,6 +36,10 @@ export function usage(): string {
     '  --run <id>                   the run folder name; give an earlier run\'s id to resume it',
     `  --judge-model <id>           model that judges each review (default ${DEFAULT_MODEL})`,
     '  --parallel <n>               pull requests reviewed at once, 1 to 3 (default 1)',
+    '  --effort low|medium|high     how hard every model of every review works (default high)',
+    '  --sweep-model <id>           model for the rule sweep, in place of --model',
+    '  --combine never|no-read-tier one combined lens request for a group with no read-tier file (default never)',
+    'A run folder is only resumed with the same model, depth, judge model, kit, effort, sweep model and combine setting.',
     '',
     'report rewrites summary.json and report.md from a run folder without any model call.',
   ].join('\n');
@@ -62,6 +67,7 @@ function parseRun(args: string[]) {
       options: {
         cases: { type: 'string' }, model: { type: 'string' }, depth: { type: 'string' }, out: { type: 'string' },
         run: { type: 'string' }, 'judge-model': { type: 'string' }, parallel: { type: 'string' },
+        effort: { type: 'string' }, 'sweep-model': { type: 'string' }, combine: { type: 'string' },
       },
       strict: true,
       allowPositionals: false,
@@ -76,7 +82,11 @@ function parseRun(args: string[]) {
   if (!depth.success) throw new UsageError(`--depth must be quick, standard or deep, got "${values.depth}".`);
   const parallel = values.parallel ?? '1';
   if (!/^[1-3]$/.test(parallel)) throw new UsageError(`--parallel must be 1, 2 or 3, got "${parallel}".`);
-  for (const flag of ['model', 'judge-model'] as const) {
+  const effort = values.effort ?? 'high';
+  if (!(REPLAY_EFFORTS as readonly string[]).includes(effort)) throw new UsageError(`--effort must be low, medium or high, got "${values.effort}".`);
+  const combine = values.combine ?? 'never';
+  if (!(REPLAY_COMBINE as readonly string[]).includes(combine)) throw new UsageError(`--combine must be never or no-read-tier, got "${values.combine}".`);
+  for (const flag of ['model', 'judge-model', 'sweep-model'] as const) {
     if (values[flag] !== undefined && values[flag].trim() === '') throw new UsageError(`--${flag} needs a model id.`);
   }
   if (values.run !== undefined) {
@@ -85,6 +95,8 @@ function parseRun(args: string[]) {
   return {
     selection: values.cases, model: values.model ?? DEFAULT_MODEL, depth: depth.data, out: resolve(values.out ?? DEFAULT_OUT),
     runId: values.run, judgeModel: values['judge-model'] ?? DEFAULT_MODEL, parallel: Number(parallel),
+    effort: effort as (typeof REPLAY_EFFORTS)[number], combine: combine as (typeof REPLAY_COMBINE)[number],
+    sweepModel: values['sweep-model'],
   };
 }
 
@@ -140,6 +152,7 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
     summary = await runReplay({
       cases, dataset: all, model: opts.model, depth: opts.depth, outDir: opts.out, packsDir: overrides.packsDir ?? process.env.AIRLOCK_PACKS_DIR ?? DEFAULT_PACKS,
       kitDir: kit.dir, kitSha: kit.sha, judgeModel: opts.judgeModel, parallelCases: opts.parallel,
+      effort: opts.effort, combine: opts.combine, ...(opts.sweepModel === undefined ? {} : { sweepModel: opts.sweepModel }),
       ...(opts.runId === undefined ? {} : { runId: opts.runId }),
     }, deps, progress(io));
   } catch (err) {

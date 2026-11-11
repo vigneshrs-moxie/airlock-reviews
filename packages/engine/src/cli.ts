@@ -108,7 +108,13 @@ async function run(argv: string[], io: CliIo, overrides: CliOverrides = {}): Pro
 
   const request: ReviewRequest = { repo: target.repo, number: target.number, depth: args.depth, packsDir };
   if (args.packs !== undefined) request.packIds = args.packs;
-  if (args.model !== undefined) request.models = { main: args.model, challenger: args.model, sweep: args.model };
+  // --model sets main, challenger and sweep; --sweep-model then replaces the sweep's; --effort sets every stage's effort.
+  const models: ReviewRequest['models'] = {
+    ...(args.model === undefined ? {} : { main: args.model, challenger: args.model, sweep: args.model }),
+    ...(args.sweepModel === undefined ? {} : { sweep: args.sweepModel }),
+    ...(args.effort === undefined ? {} : { effort: args.effort }),
+  };
+  if (Object.keys(models).length > 0) request.models = models;
   if (args.combine !== undefined) request.combine = args.combine;
   if (args.base !== undefined && args.head !== undefined) request.explicit = { baseSha: args.base, headSha: args.head };
 

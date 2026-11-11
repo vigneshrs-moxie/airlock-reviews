@@ -101,8 +101,8 @@ describe('runReplay', () => {
     cases().forEach((c, i) => {
       const req = review.requests[i]!;
       expect(req).toStrictEqual({
-        repo: c.repo, number: c.pr, depth: 'deep',
-        models: { main: 'claude-fable-5-2', challenger: 'claude-fable-5-2', sweep: 'claude-fable-5-2' },
+        repo: c.repo, number: c.pr, depth: 'deep', combine: 'never',
+        models: { main: 'claude-fable-5-2', challenger: 'claude-fable-5-2', sweep: 'claude-fable-5-2', effort: 'high' },
         explicit: { baseSha: c.baseSha, headSha: c.headSha },
         prText: { title: c.titleAtReview, body: c.bodyAtReview },
         holdout: { pr: c.pr, reviewedAt: c.reviewedAt },
@@ -110,6 +110,28 @@ describe('runReplay', () => {
       });
       expect('packIds' in req).toBe(false);
     });
+  });
+
+  it('passes the effort, the sweep model and the combine setting to every review and records them in run.json', async () => {
+    const review = fakeReview();
+    await runReplay(options({ effort: 'medium', sweepModel: 'claude-sonnet-5-5', combine: 'no-read-tier' }), deps(review));
+    for (const req of review.requests) {
+      expect(req.models).toEqual({ main: MODEL, challenger: MODEL, sweep: 'claude-sonnet-5-5', effort: 'medium' });
+      expect(req.combine).toBe('no-read-tier');
+    }
+    expect(JSON.parse(await readFile(join(outDir, 'run-a', 'run.json'), 'utf8'))).toMatchObject({
+      model: MODEL, effort: 'medium', sweepModel: 'claude-sonnet-5-5', combine: 'no-read-tier',
+    });
+  });
+
+  it('reads a run.json written before effort, sweep model and combine were recorded as the defaults', async () => {
+    await runReplay(options(), deps(fakeReview()));
+    const path = join(outDir, 'run-a', 'run.json');
+    const { effort: _e, sweepModel: _s, combine: _c, ...older } = JSON.parse(await readFile(path, 'utf8'));
+    await writeFile(path, JSON.stringify(older));
+    await expect(runReplay(options(), deps(fakeReview()))).resolves.toBeDefined();
+    await writeFile(path, JSON.stringify(older));
+    await expect(runReplay(options({ effort: 'low' }), deps(fakeReview()))).rejects.toThrow(/effort high, not low/);
   });
 
   it('every request carries the pull request\'s title and description as they stood at review time', async () => {
@@ -153,6 +175,7 @@ describe('runReplay', () => {
     ])))));
     expect(await readJson(join(runDir, 'run.json'))).toEqual({
       runId, model: MODEL, depth: 'standard', judgeModel: 'claude-opus-5-5', kitSha: KIT_SHA,
+      effort: 'high', sweepModel: MODEL, combine: 'never',
       caseIds: ['pr1', 'pr2', 'pr3'], startedAt: NOW.toISOString(),
       casesStartedAt: NOW.toISOString(), casesFinishedAt: NOW.toISOString(),
     });
@@ -254,6 +277,9 @@ describe('runReplay', () => {
     await expect(runReplay(options({ depth: 'quick' }), deps(review))).rejects.toThrow(/depth/);
     await expect(runReplay(options({ kitSha: 'd'.repeat(40) }), deps(review))).rejects.toThrow(/kit/);
     await expect(runReplay(options({ judgeModel: 'claude-fable-5-2' }), deps(review))).rejects.toThrow(/judge model/);
+    await expect(runReplay(options({ effort: 'medium' }), deps(review))).rejects.toThrow(/effort high, not medium/);
+    await expect(runReplay(options({ sweepModel: 'claude-sonnet-5-5' }), deps(review))).rejects.toThrow(/sweep model/);
+    await expect(runReplay(options({ combine: 'no-read-tier' }), deps(review))).rejects.toThrow(/combine never, not no-read-tier/);
     expect(review.requests).toHaveLength(0);
 
     // A folder with case folders but no run.json is refused too.

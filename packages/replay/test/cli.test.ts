@@ -161,8 +161,35 @@ describe('airlock-replay', () => {
     // With --parallel 2 the two reviews start in either order.
     expect(other.requests.map((r) => [r.number, r.depth, r.models?.main]).sort()).toEqual([[1, 'quick', 'claude-fable-5-2'], [2, 'quick', 'claude-fable-5-2']]);
     expect(other.runner.calls.map((r) => r.model)).toEqual(['claude-haiku-5-5', 'claude-haiku-5-5']);
+    expect(other.requests.map((r) => [r.models?.sweep, r.models?.effort, r.combine])).toEqual([
+      ['claude-fable-5-2', 'high', 'never'], ['claude-fable-5-2', 'high', 'never'],
+    ]);
     expect(u.out[0]).toBe(join(work, 'mine', 'report.md'));
     expect(u.out[2]).toBe('Clean pull requests stay clean: not tested');
+  });
+
+  it('passes --effort, --sweep-model and --combine to every review and refuses bad values', async () => {
+    const h = harness();
+    const t = io();
+    const code = await keepingEnv(() => main([
+      'run', '--cases', 'pr1', '--out', work, '--run', 'tuned', '--effort', 'medium', '--sweep-model', 'claude-sonnet-5-5', '--combine', 'no-read-tier',
+    ], t.io, h.overrides));
+    expect(code).toBe(0);
+    expect(h.requests[0]).toMatchObject({
+      models: { main: 'claude-opus-5-5', challenger: 'claude-opus-5-5', sweep: 'claude-sonnet-5-5', effort: 'medium' }, combine: 'no-read-tier',
+    });
+    expect(JSON.parse(await readFile(join(work, 'tuned', 'run.json'), 'utf8'))).toMatchObject({
+      effort: 'medium', sweepModel: 'claude-sonnet-5-5', combine: 'no-read-tier',
+    });
+    for (const [flag, value, message] of [
+      ['--effort', 'max', /--effort must be low, medium or high, got "max"/],
+      ['--combine', 'always', /--combine must be never or no-read-tier, got "always"/],
+      ['--sweep-model', ' ', /--sweep-model needs a model id/],
+    ] as const) {
+      const u = io();
+      expect(await keepingEnv(() => main(['run', '--cases', 'pr1', '--out', work, flag, value], u.io, harness().overrides))).toBe(2);
+      expect(u.err.join('\n')).toMatch(message);
+    }
   });
 
   it('returns 1 when the kit cannot be fetched', async () => {

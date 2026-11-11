@@ -37,7 +37,18 @@ export interface ReplayOptions {
   judgeModel?: string;
   /** Default 1. */
   parallelCases?: number;
+  /** How hard every model of every review works. Default 'high'. */
+  effort?: ReplayEffort;
+  /** The rule sweep's model. Default: `model`. */
+  sweepModel?: string;
+  /** Whether a group's lenses may share one request (see ReviewRequest.combine). Default 'never'. */
+  combine?: ReplayCombine;
 }
+
+export const REPLAY_EFFORTS = ['low', 'medium', 'high'] as const;
+export type ReplayEffort = (typeof REPLAY_EFFORTS)[number];
+export const REPLAY_COMBINE = ['never', 'no-read-tier'] as const;
+export type ReplayCombine = (typeof REPLAY_COMBINE)[number];
 
 /**
  * The engine's dependencies; tests pass a fake `review`. `runner` must already retry a failed request (as
@@ -97,6 +108,10 @@ const RunFileSchema = z.object({
   depth: DepthSchema,
   judgeModel: z.string(),
   kitSha: z.string(),
+  /** Absent in a run.json written before they were recorded: then `high`, the main model and `never`, as those runs used. */
+  effort: z.enum(REPLAY_EFFORTS).optional(),
+  sweepModel: z.string().optional(),
+  combine: z.enum(REPLAY_COMBINE).optional(),
   caseIds: z.array(z.string()),
   startedAt: z.string(),
   /** When the first case the run worked on started, and when the last one ended, over every call. */
@@ -212,7 +227,7 @@ async function readOutcome(dir: string, c: ReplayCase): Promise<Outcome> {
  * A valid document for a case whose review did not finish: verdict `incomplete`, no findings and one intake stage error.
  * Never saved; the run and `loadRun` both build it from the case and error.txt.
  */
-function notFinishedDocument(c: ReplayCase, run: { model: string; depth: Depth; createdAt: string }, message: string): ReviewDocument {
+function notFinishedDocument(c: ReplayCase, run: RunInfo, message: string): ReviewDocument {
   return {
     schemaVersion: 1,
     id: `not-finished-${c.id}`,
@@ -225,7 +240,7 @@ function notFinishedDocument(c: ReplayCase, run: { model: string; depth: Depth; 
     range: { baseSha: c.baseSha, headSha: c.headSha, kind: 'explicit' },
     depth: run.depth,
     packs: [],
-    models: { main: run.model, challenger: run.model, sweep: run.model, effort: 'high' },
+    models: { main: run.model, challenger: run.model, sweep: run.sweepModel, effort: run.effort },
     files: [],
     facts: [],
     map: { cohorts: [], standalone: [], links: [] },
@@ -250,7 +265,17 @@ const notJudged = (c: ReplayCase, reason: string): Match[] =>
 const NOT_LOST: CaseScore['lostAt'] = { lenses: 0, schema: 0, anchor: 0, merge: 0, challenge: 0, select: 0 };
 
 type Scored = { score: CaseScore; detail: { doc: ReviewDocument; matches: Match[] } };
-type RunInfo = { model: string; depth: Depth; createdAt: string };
+type RunInfo = { model: string; sweepModel: string; effort: ReplayEffort; depth: Depth; createdAt: string };
+
+/** The settings of a run, with the defaults filled in for a run.json written before they were recorded. */
+function settingsOf(run: RunFile): { effort: ReplayEffort; sweepModel: string; combine: ReplayCombine } {
+  return { effort: run.effort ?? 'high', sweepModel: run.sweepModel ?? run.model, combine: run.combine ?? 'never' };
+}
+
+const runInfo = (run: RunFile): RunInfo => {
+  const { effort, sweepModel } = settingsOf(run);
+  return { model: run.model, sweepModel, effort, depth: run.depth, createdAt: run.startedAt };
+};
 
 /**
  * The score and report details of one case. A case that is not done is scored `incomplete` with every known problem
@@ -289,6 +314,7 @@ function defaultRunId(now: Date, model: string, depth: Depth): string {
 }
 
 const COMPARED = [['model', 'model'], ['depth', 'depth'], ['judgeModel', 'judge model'], ['kitSha', 'kit version']] as const;
+const COMPARED_SETTINGS = [['effort', 'effort'], ['sweepModel', 'sweep model'], ['combine', 'combine']] as const;
 
 /** The dataset's cases with these ids, in dataset order; throws for an id the dataset does not have. */
 function inDatasetOrder(ids: Iterable<string>, dataset: ReplayCase[], runDir: string): ReplayCase[] {
@@ -322,7 +348,11 @@ async function openRunFolder(runDir: string, run: RunFile, dataset: ReplayCase[]
       throw new Error(`The run folder ${runDir} has a run.json that cannot be read. Use another run id.`);
     }
     const prev = previous;
-    const differences = COMPARED.filter(([key]) => prev[key] !== run[key]).map(([key, words]) => `${words} ${prev[key]}, not ${run[key]}`);
+    const [was, now] = [settingsOf(prev), settingsOf(run)];
+    const differences = [
+      ...COMPARED.filter(([key]) => prev[key] !== run[key]).map(([key, words]) => `${words} ${prev[key]}, not ${run[key]}`),
+      ...COMPARED_SETTINGS.filter(([key]) => was[key] !== now[key]).map(([key, words]) => `${words} ${was[key]}, not ${now[key]}`),
+    ];
     if (differences.length > 0) {
       throw new Error(
         `The run folder ${runDir} was made with ${differences.join('; ')}. ` +
@@ -383,7 +413,8 @@ function reviewRequest(c: ReplayCase, opts: ReplayOptions): ReviewRequest {
     repo: c.repo,
     number: c.pr,
     depth: opts.depth,
-    models: { main: opts.model, challenger: opts.model, sweep: opts.model },
+    combine: opts.combine ?? 'never',
+    models: { main: opts.model, challenger: opts.model, sweep: opts.sweepModel ?? opts.model, effort: opts.effort ?? 'high' },
     explicit: { baseSha: c.baseSha, headSha: c.headSha },
     prText: { title: c.titleAtReview, body: c.bodyAtReview },
     holdout: { pr: c.pr, reviewedAt: c.reviewedAt },
@@ -410,10 +441,11 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   const runDir = join(opts.outDir, runId);
   const opened = await openRunFolder(runDir, {
     runId, model: opts.model, depth: opts.depth, judgeModel, kitSha: opts.kitSha,
+    effort: opts.effort ?? 'high', sweepModel: opts.sweepModel ?? opts.model, combine: opts.combine ?? 'never',
     caseIds: opts.cases.map((c) => c.id), startedAt: now.toISOString(),
   }, opts.dataset, opts.cases);
   let { run } = opened;
-  const scoring: RunInfo = { model: run.model, depth: run.depth, createdAt: run.startedAt };
+  const scoring = runInfo(run);
 
   const review = deps.review ?? runReview;
   const engineDeps: EngineDeps = { exec: deps.exec, runner: deps.runner, now: deps.now, ...(deps.signal ? { signal: deps.signal } : {}) };
@@ -542,7 +574,7 @@ export async function loadRun(runDir: string, cases: ReplayCase[]): Promise<{ su
   }
   const selected = inDatasetOrder(run.caseIds, cases, runDir);
   checkCases(selected);
-  const scoring: RunInfo = { model: run.model, depth: run.depth, createdAt: run.startedAt };
+  const scoring = runInfo(run);
   const results = await Promise.all(selected.map(async (c) => scoreOutcome(c, await readOutcome(join(runDir, c.id), c), scoring)));
   const summary = summarise(run.runId, run.model, run.depth, results.map((r) => r.score), selected, cases, wallClockOf(run));
   const details: RunDetails = Object.fromEntries(selected.map((c, i) => [c.id, results[i]!.detail]));
