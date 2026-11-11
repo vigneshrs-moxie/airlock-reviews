@@ -246,6 +246,44 @@ describe('start', () => {
     expect(h.out.join('')).not.toContain('GET /x');
   });
 
+  it('rotates while running once the file passes 5 MB, and goes on in a new file with mode 0600', async () => {
+    const h = harness();
+    const log = join(h.root, 'service.log');
+    h.overrides.env = { ...h.overrides.env, AIRLOCK_LOG_FILE: log };
+    const done = main(['start'], h.io, h.overrides);
+    await waitFor(() => h.handlers.has('SIGTERM'));
+    const write = h.created[0]!.log;
+    const big = 'x'.repeat(10_000);
+    // Six hundred lines of about 10 KB: past 5 MB at the 600th, where the size is checked.
+    for (let i = 0; i < 599; i += 1) write(big);
+    expect(existsSync(`${log}.1`)).toBe(false);
+    write(big);
+    expect(statSync(`${log}.1`).size).toBeGreaterThan(5 * 1024 * 1024);
+    expect(existsSync(log)).toBe(true);
+    expect(statSync(log).size).toBe(0);
+    write('GET /after 200 1ms');
+    expect(readFileSync(log, 'utf8')).toBe('2026-11-11T09:00:00.000Z GET /after 200 1ms\n');
+    expect(statSync(log).mode & 0o777).toBe(0o600);
+    // Under the bound again: the next checks rotate nothing.
+    for (let i = 0; i < 400; i += 1) write('GET /x 200 1ms');
+    expect(readFileSync(log, 'utf8').split('\n')).toHaveLength(402);
+    h.handlers.get('SIGTERM')?.();
+    expect(await done).toBe(0);
+    expect(h.out.join('')).not.toContain('GET /after');
+  });
+
+  it('makes a relative AIRLOCK_LOG_FILE absolute against the folder it was started in', async () => {
+    const h = harness();
+    h.overrides.env = { ...h.overrides.env, AIRLOCK_LOG_FILE: 'relative.log' };
+    const done = main(['start'], h.io, h.overrides);
+    await waitFor(() => h.handlers.has('SIGTERM'));
+    h.created[0]?.log('GET /r 200 1ms');
+    h.handlers.get('SIGTERM')?.();
+    await done;
+    expect(readFileSync(join(h.root, 'relative.log'), 'utf8')).toBe('2026-11-11T09:00:00.000Z GET /r 200 1ms\n');
+    expect(h.chmodCalls).toEqual([{ path: join(h.root, 'relative.log'), mode: 0o600 }]);
+  });
+
   it('sets an existing log file to 0600 when it opens it, through the chmod override', async () => {
     const h = harness();
     const log = join(h.root, 'service.log');
@@ -324,8 +362,10 @@ describe('start', () => {
           req.on('error', reject);
         });
       }
-      await waitFor(() => lines.length >= 2);
-      expect(lines.join('\n')).toMatch(/GET \/hello 200 \d+ms/);
+      await waitFor(() => lines.length >= 1);
+      // A /hello answered with 200 is not logged; the refused request is.
+      expect(lines.join('\n')).toMatch(/GET \/nothing-here 404 \d+ms/);
+      expect(lines.join('\n')).not.toContain('/hello');
       const text = lines.join('\n');
       expect(text).not.toContain(token);
       expect(text.toLowerCase()).not.toContain('authorization');

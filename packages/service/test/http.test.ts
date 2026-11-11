@@ -318,6 +318,18 @@ describe('errors and logging', () => {
   });
 });
 
+describe('a quiet log (fix round)', () => {
+  it('adds no line for a thousand GET /hello answered with 200, and still logs a refused one', async () => {
+    const { port, log } = await routerRig();
+    for (let i = 0; i < 1000; i += 1) expect((await send(port, 'GET', '/hello')).status).toBe(200);
+    expect((await send(port, 'GET', '/hello', { headers: { Host: 'evil.example' } })).status).toBe(403);
+    await send(port, 'GET', '/things/1', { headers: bearer });
+    for (let i = 0; i < 100 && !log.some((l) => l.startsWith('GET /things/1 ')); i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect(log.filter((l) => l.startsWith('GET /hello 200'))).toEqual([]);
+    expect(log.filter((l) => /^GET \/hello 403 \d+ms$/.test(l))).toHaveLength(1);
+  });
+});
+
 describe('streams', () => {
   it('sends event-stream headers and one data line per event, then ends', async () => {
     const { port } = await routerRig();

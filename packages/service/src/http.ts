@@ -193,9 +193,11 @@ export function createRouter(
     const rawPath = queryStart === -1 ? url : url.slice(0, queryStart);
     const rawQuery = queryStart === -1 ? '' : url.slice(queryStart + 1);
 
-    // The log line is written once the response is over: method, path without its query, status, time.
+    // The log line is written once the response is over: method, path without its query, status, time. A /hello that
+    // was answered is not logged: every open panel asks it every few seconds.
     const started = Date.now();
     res.on('close', () => {
+      if (method === 'GET' && rawPath === '/hello' && res.statusCode === 200) return;
       log(`${method} ${rawPath.slice(0, MAX_LOGGED_PATH)} ${res.statusCode} ${Date.now() - started}ms`);
     });
 

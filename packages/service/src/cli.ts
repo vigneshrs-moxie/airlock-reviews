@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { accessSync, closeSync, constants, openSync, realpathSync, statSync, writeSync } from 'node:fs';
+import { accessSync, closeSync, constants, fchmodSync, fstatSync, openSync, realpathSync, renameSync, statSync, writeSync } from 'node:fs';
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -54,6 +54,8 @@ const messageOf = (e: unknown): string => clean(e instanceof Error ? e.message :
 export const LABEL = 'com.airlock.service';
 const START_HINT = 'npm run service';
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
+/** While the service runs, the log's size is checked after every this many lines. */
+const LOG_CHECK_LINES = 200;
 const SYSTEM_PATH = ['/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const COMMANDS = ['claude', 'gh', 'git'] as const;
 
@@ -167,26 +169,53 @@ async function start(io: CliIo, o: CliOverrides): Promise<number> {
   await (o.readOrCreateToken ?? readOrCreateToken)(config.home);
   const now = o.now ?? ((): Date => new Date());
 
-  // Under launchd the request log goes to the file AIRLOCK_LOG_FILE names, which this process rotates and opens itself.
-  // A failure here never stops the service: it logs to the terminal instead.
+  // Under launchd the request log goes to the file AIRLOCK_LOG_FILE names, which this process rotates and opens itself:
+  // at start, and again while it runs (the size is checked every LOG_CHECK_LINES lines), so the file and its one
+  // predecessor stay near 5 MB each. A failure never stops the service: it logs to the terminal instead.
   let sink: (text: string) => void = io.out;
   let closeLog = (): void => undefined;
-  const logFile = env['AIRLOCK_LOG_FILE'];
-  if (logFile !== undefined && logFile !== '') {
+  const given = env['AIRLOCK_LOG_FILE'];
+  if (given !== undefined && given !== '') {
+    const logFile = resolve(o.cwd ?? process.cwd(), given);
     try {
       await rotateLog(logFile);
-      const fd = openSync(logFile, 'a', 0o600);
+      let fd: number | null = openSync(logFile, 'a', 0o600);
       await (o.chmodFile ?? chmod)(logFile, 0o600);
+      let lines = 0;
+      const rotateWhileRunning = (open: number): void => {
+        if (fstatSync(open).size <= MAX_LOG_BYTES) return;
+        closeSync(open);
+        fd = null;
+        try {
+          renameSync(logFile, `${logFile}.1`);
+        } finally {
+          // A new file after the rename; the same one again if the rename failed.
+          fd = openSync(logFile, 'a', 0o600);
+          fchmodSync(fd, 0o600);
+        }
+      };
       sink = (text) => {
+        if (fd === null) {
+          io.out(text);
+          return;
+        }
         try {
           writeSync(fd, text);
         } catch {
           io.out(text);
+          return;
+        }
+        lines += 1;
+        if (lines % LOG_CHECK_LINES !== 0) return;
+        try {
+          rotateWhileRunning(fd);
+        } catch (e) {
+          io.err(`The log file ${clean(given)} could not be rotated (${messageOf(e)}).${fd === null ? ' Logging to the terminal instead.' : ''}\n`);
         }
       };
-      closeLog = () => { try { closeSync(fd); } catch { /* already closed */ } };
+      closeLog = () => { try { if (fd !== null) closeSync(fd); } catch { /* already closed */ } };
     } catch (e) {
-      io.err(`The log file ${clean(logFile)} could not be used (${messageOf(e)}). Logging to the terminal instead.\n`);
+      io.err(`The log file ${clean(given)} could not be used (${messageOf(e)}). Logging to the terminal instead.\n`);
     }
   }
 
