@@ -6,23 +6,39 @@ const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), textarea:not(:di
  * A dialog over the panel: it has a role and a label, closes on Escape or a click on the backdrop, takes focus when it
  * opens, keeps focus inside while open and gives focus back to what had it before. The content is the children.
  */
-export function Sheet({ labelledBy, initialFocus, returnFocusTo, onClose, children }: {
+export function Sheet({ labelledBy, initialFocus, returnFocusTo, fallbackFocus, active = true, onClose, children }: {
   /** The id of the heading that names the dialog. */
   labelledBy: string;
   /** What takes focus when the sheet opens. */
   initialFocus: RefObject<HTMLElement | null>;
   /** Where focus goes on close, when the control that opened the sheet is not the one that had focus. */
   returnFocusTo?: RefObject<HTMLElement | null>;
+  /** Where focus goes on close when the opener is gone; read when the sheet closes. */
+  fallbackFocus?: () => HTMLElement | null;
+  /** False while the sheet is kept out of sight (hidden): it then neither traps focus nor reacts to keys. */
+  active?: boolean;
   onClose: () => void;
   children: ReactNode;
 }) {
   const sheet = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
   close.current = onClose;
+  const fallback = useRef(fallbackFocus);
+  fallback.current = fallbackFocus;
 
   useEffect(() => {
-    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const was = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     initialFocus.current?.focus();
+    return () => {
+      const opener = returnFocusTo?.current ?? was;
+      // Back to the opener; when it is gone (a dismissed finding's button), to where the panel says, or its content.
+      if (opener?.isConnected === true && !opener.hasAttribute('disabled')) opener.focus();
+      else (fallback.current?.() ?? document.querySelector<HTMLElement>('main'))?.focus();
+    };
+  }, [initialFocus, returnFocusTo]);
+
+  useEffect(() => {
+    if (!active) return undefined;
     const inside = (node: EventTarget | null): boolean => node instanceof Node && sheet.current?.contains(node) === true;
     const first = (): HTMLElement | null | undefined => sheet.current?.querySelector<HTMLElement>(FOCUSABLE);
     const onKey = (event: KeyboardEvent): void => {
@@ -37,12 +53,8 @@ export function Sheet({ labelledBy, initialFocus, returnFocusTo, onClose, childr
     return () => {
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('focusin', onFocusIn);
-      // Back to the opener; when it is gone (a dismissed finding's button), to the panel's content.
-      const opener = returnFocusTo?.current ?? active;
-      if (opener?.isConnected === true && !opener.hasAttribute('disabled')) opener.focus();
-      else document.querySelector<HTMLElement>('main')?.focus();
     };
-  }, [initialFocus, returnFocusTo]);
+  }, [active]);
 
   // Tab and Shift+Tab go round the sheet's controls and never leave it.
   const trap = (event: React.KeyboardEvent): void => {

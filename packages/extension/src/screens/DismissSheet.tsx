@@ -1,6 +1,8 @@
-import { checkLearnedText, LEARNED_TEXT_MAX, type DismissReason, type Finding } from '@airlock/shared';
+import { checkLearnedText, LEARNED_TEXT_MAX, type DismissReason, type Finding, type LatestReply, type PrSummary } from '@airlock/shared';
 import { useEffect, useId, useRef, useState } from 'react';
-import type { PanelState, UserAction } from '../state/reduce';
+import type { UserAction } from '../state/reduce';
+import { listFindings } from '../state/selection';
+import { CopyButton } from './CopyButton';
 import { useAnnounce } from './Frame';
 import { Sheet } from './Sheet';
 
@@ -26,58 +28,124 @@ export function draftFor(reason: DismissReason, finding: Pick<Finding, 'title' |
 /** A line break typed or pasted becomes a space; nothing else is changed. */
 const oneLine = (text: string): string => text.replace(/\r\n|[\r\n\u2028\u2029]/g, ' ');
 
-type ReviewState = Extract<PanelState, { kind: 'review' }>;
+/** What the person has done in the sheet. Kept by the panel screen, so it outlives the sheet being out of sight. */
+export interface SheetDraft {
+  finding: Finding;
+  /** The review the sheet was opened on; a dismissal is only ever sent to this one. */
+  reviewId: string;
+  reason: DismissReason | null;
+  text: string;
+  /** The person has typed in the field, so a change of reason keeps the text. */
+  typed: boolean;
+}
+
+export const newDraft = (finding: Finding, reviewId: string): SheetDraft => ({ finding, reviewId, reason: null, text: '', typed: false });
+
+/** The review on screen under the sheet: the finished review or the kept one while the service is away. */
+export interface SheetView {
+  pr: PrSummary;
+  latest: LatestReply;
+  offline: boolean;
+  notice?: string | undefined;
+  busy?: boolean | undefined;
+}
+
+export const OFFLINE_KEPT = 'Airlock could not reach its service. Your line is kept.';
+export const NOT_THIS_REVIEW = 'This review is no longer the one on screen, so this line cannot be saved to it.';
+
+/** One request to the service and what came back: `reply` is the state's notice once it is an answer to this request. */
+function useRequest(notice: string | undefined, busy: boolean) {
+  const [phase, setPhase] = useState<'no' | 'sent' | 'busy'>('no');
+  const before = useRef<string | undefined>(undefined);
+  useEffect(() => { if (busy) setPhase((was) => (was === 'sent' ? 'busy' : was)); }, [busy]);
+  const reply = phase !== 'no' && notice !== undefined && (notice !== before.current || (phase === 'busy' && !busy)) ? notice : null;
+  return {
+    reply,
+    begin: (): void => { before.current = notice; setPhase('sent'); },
+    reset: (): void => setPhase('no'),
+  };
+}
 
 /** Dismissing one finding: a reason, for Wrong and Intended the exact line saved to the pack, then the result with Undo. */
-export function DismissSheet({ state, finding, dispatch, onClose }: {
-  state: ReviewState;
-  finding: Finding;
+export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }: {
+  draft: SheetDraft;
+  onDraft: (next: SheetDraft) => void;
+  view: SheetView;
   dispatch: (action: UserAction) => void;
+  /** False while the sheet is kept out of sight. */
+  active: boolean;
+  /** Cancel or Done: the draft is dropped. */
   onClose: () => void;
 }) {
-  const { pr, latest } = state;
+  const { pr, latest, offline } = view;
+  const { finding, reason, text } = draft;
+  const doc = latest.document;
   const titleId = useId();
   const groupId = useId();
   const fieldId = useId();
   const errorId = useId();
   const heading = useRef<HTMLHeadingElement>(null);
   const announce = useAnnounce();
-  const [reason, setReason] = useState<DismissReason | null>(null);
-  const [text, setText] = useState('');
-  const typed = useRef(false);
-  const noticeAtOpen = useRef(state.notice);
-  // 'sent' once Save is pressed, 'busy' once the state has shown the save in flight.
-  const [sent, setSent] = useState<'no' | 'sent' | 'busy'>('no');
-  const busy = state.busy === true;
+  const busy = view.busy === true;
+  const save = useRequest(view.notice, busy);
+  const undo = useRequest(view.notice, busy);
 
-  const saved = latest.dismissals.find((d) => d.fingerprint === finding.fingerprint);
+  const current = doc.id === draft.reviewId && doc.findings.some((f) => f.id === finding.id);
+  const saved = current ? latest.dismissals.find((d) => d.fingerprint === finding.fingerprint) : undefined;
   const result = saved === undefined ? null
     : saved.learned === null ? 'Hidden on this pull request.'
       : `Saved to ${pr.packs.find((p) => p.id === saved.learned?.packId)?.title ?? saved.learned.packId}.`;
   useEffect(() => { if (result !== null) announce(result); }, [announce, result]);
-  useEffect(() => { if (busy) setSent((was) => (was === 'sent' ? 'busy' : was)); }, [busy]);
+
   // The control that had focus is gone when the sheet changes between its form and its result; focus goes to its heading.
-  const view = useRef(result === null);
+  const showing = !current ? 'stale' : result === null ? 'form' : 'result';
+  const was = useRef(showing);
   useEffect(() => {
-    if (view.current !== (result === null)) { view.current = result === null; heading.current?.focus(); }
-  }, [result]);
+    if (was.current !== showing) { was.current = showing; heading.current?.focus(); }
+  }, [showing]);
 
   const saves = reason !== null && reason !== 'not-now';
   const problem = saves ? checkLearnedText(text, reason) : null;
-  const refused = saved === undefined && state.notice !== undefined && (state.notice !== noticeAtOpen.current || (sent === 'busy' && !busy));
+  // Closing is for when the person can see how the request ended.
+  const close = (): void => { if (!busy) onClose(); };
+
+  // After a dismissal the finding's Dismiss button is gone: focus goes to the next card, else to a heading.
+  const focusAfter = (): HTMLElement | null => {
+    const cards = [...document.querySelectorAll<HTMLElement>('[data-finding-id]')];
+    const card = (id: string | undefined): HTMLElement | null => cards.find((c) => c.dataset.findingId === id) ?? null;
+    const shown = listFindings(doc.findings, latest.dismissals).order;
+    if (shown.some((f) => f.id === finding.id)) return card(finding.id);
+    const all = listFindings(doc.findings, latest.dismissals.filter((d) => d.fingerprint !== finding.fingerprint)).order;
+    const at = all.findIndex((f) => f.id === finding.id);
+    const near = at === -1 ? [] : [all[at + 1], all[at - 1]];
+    for (const f of near) { const found = card(f?.id); if (found !== null) return found; }
+    return document.querySelector<HTMLElement>('[data-focus="findings"]') ?? document.querySelector<HTMLElement>('[data-focus="verdict"]');
+  };
 
   const choose = (next: DismissReason): void => {
-    setReason(next);
+    save.reset();
+    undo.reset();
     // The draft is only for a person who has not typed yet.
-    if (!typed.current) setText(draftFor(next, finding));
+    onDraft({ ...draft, reason: next, ...(draft.typed ? {} : { text: draftFor(next, finding) }) });
+  };
+  const edit = (value: string): void => {
+    save.reset();
+    undo.reset();
+    onDraft({ ...draft, text: oneLine(value), typed: true });
   };
   const submit = (): void => {
     if (reason === null) return;
-    setSent('sent');
+    undo.reset();
+    save.begin();
     dispatch({
       type: 'dismiss',
-      body: { repo: pr.repo, number: pr.number, reviewId: latest.document.id, findingId: finding.id, reason, text: saves ? text : '' },
+      body: { repo: pr.repo, number: pr.number, reviewId: draft.reviewId, findingId: finding.id, reason, text: saves ? text : '' },
     });
+  };
+  const restore = (): void => {
+    save.reset();
+    undo.begin();
+    dispatch({ type: 'restore', fingerprint: finding.fingerprint });
   };
 
   const header = (
@@ -86,23 +154,43 @@ export function DismissSheet({ state, finding, dispatch, onClose }: {
       <p className="title">{finding.title}</p>
     </>
   );
+  const shell = (children: React.ReactNode) => (
+    <Sheet labelledBy={titleId} initialFocus={heading} fallbackFocus={focusAfter} active={active} onClose={close}>
+      {header}
+      {children}
+    </Sheet>
+  );
 
-  if (result !== null) {
-    return (
-      <Sheet labelledBy={titleId} initialFocus={heading} onClose={onClose}>
-        {header}
-        <p>{result}</p>
+  if (showing === 'stale') {
+    return shell(
+      <>
+        <p role="alert" className="notice">{NOT_THIS_REVIEW}</p>
+        {text !== '' && <pre className="quote">{text}</pre>}
         <div className="actions">
-          <button type="button" className="btn" disabled={busy} onClick={() => { setSent('no'); dispatch({ type: 'restore', fingerprint: finding.fingerprint }); }}>Undo</button>
-          <button type="button" className="btn primary" onClick={onClose}>Done</button>
+          <CopyButton text={() => text} label="Copy line" />
+          <button type="button" className="btn primary" disabled>Save</button>
+          <button type="button" className="btn" onClick={onClose}>Close</button>
         </div>
-      </Sheet>
+      </>,
     );
   }
 
-  return (
-    <Sheet labelledBy={titleId} initialFocus={heading} onClose={onClose}>
-      {header}
+  if (result !== null) {
+    return shell(
+      <>
+        <p>{result}</p>
+        {undo.reply !== null && <p role="alert" className="notice">{undo.reply}</p>}
+        <div className="actions">
+          <button type="button" className="btn" disabled={busy || offline} onClick={restore}>Undo</button>
+          <button type="button" className="btn primary" disabled={busy} onClick={onClose}>Done</button>
+        </div>
+        {offline && <p className="notice">{OFFLINE_KEPT}</p>}
+      </>,
+    );
+  }
+
+  return shell(
+    <>
       <div role="radiogroup" aria-labelledby={groupId}>
         <p className="label" id={groupId}>Why are you dismissing it?</p>
         {REASONS.map((r) => (
@@ -126,17 +214,20 @@ export function DismissSheet({ state, finding, dispatch, onClose }: {
             id={fieldId} className="input" rows={3} value={text} spellCheck={false}
             {...(reason === 'intended' ? { placeholder: INTENDED_PLACEHOLDER } : {})}
             {...(problem === null ? {} : { 'aria-describedby': errorId, 'aria-invalid': true })}
-            onChange={(e) => { typed.current = true; setText(oneLine(e.target.value)); }}
+            onChange={(e) => edit(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') e.preventDefault(); }}
           />
           <p className="muted">{`${[...text].length} of ${LEARNED_TEXT_MAX}`}</p>
           {problem !== null && <p id={errorId} className="detail">{problem}</p>}
         </div>
       )}
-      {refused && <p role="alert" className="notice">{state.notice}</p>}
+      {save.reply !== null && <p role="alert" className="notice">{save.reply}</p>}
+      {undo.reply !== null && <p role="status" className="muted">{undo.reply}</p>}
+      {offline && <p className="notice">{OFFLINE_KEPT}</p>}
       <div className="actions">
-        <button type="button" className="btn primary" disabled={reason === null || problem !== null || busy} onClick={submit}>Save</button>
-        <button type="button" className="btn" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn primary" disabled={reason === null || problem !== null || busy || offline} onClick={submit}>Save</button>
+        <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
       </div>
-    </Sheet>
+    </>,
   );
 }

@@ -47,20 +47,22 @@ function ServiceSection({ fetchStatus }: { fetchStatus: () => Promise<ServiceSta
           {fetched.status.running.map((r) => <li key={r.runId}>{`${r.repo} #${r.number}`}</li>)}
         </ul>
       )}
-      <button type="button" className="btn small" onClick={check}>Check again</button>
+      <button type="button" className="btn small" disabled={fetched.kind === 'loading'} onClick={check}>Check again</button>
     </section>
   );
 }
 
 /** Which packs apply and how the panel is connected; replaces the panel's content until Back. */
-export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onDefaultDepth, onBack, timers }: {
+export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onDefaultDepth, depthFailed = false, onBack, timers }: {
   pr: PrSummary | null;
   /** The packs of the review on screen with their versions; empty when no review is on screen. */
   packVersions: readonly PackRef[];
-  paired: boolean;
+  /** Whether the panel is paired; null when nothing on screen proves it either way. */
+  paired: boolean | null;
   fetchStatus: () => Promise<ServiceStatus>;
   defaultDepth: Depth | null;
   onDefaultDepth: (depth: Depth | null) => void;
+  depthFailed?: boolean;
   onBack: () => void;
   timers?: Timers;
 }) {
@@ -69,7 +71,7 @@ export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onD
   useEffect(() => { heading.current?.focus(); }, []);
 
   return (
-    <>
+    <div className="packs-screen">
       <div className="row">
         <h2 className="title" tabIndex={-1} ref={heading}>Packs and settings</h2>
         <button type="button" className="btn small" onClick={onBack}>Back</button>
@@ -93,7 +95,7 @@ export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onD
       <ServiceSection fetchStatus={fetchStatus} />
       <section className="card" aria-labelledby="packs-pairing">
         <h3 className="label" id="packs-pairing">Pairing</h3>
-        {paired ? (
+        {paired === null ? null : paired ? (
           <>
             <p>This panel is paired.</p>
             <CommandBox intro="To unpair, in the airlock-reviews folder run:" command={UNPAIR_COMMAND} {...(timers ? { timers } : {})} />
@@ -110,7 +112,8 @@ export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onD
             </label>
           ))}
         </div>
+        {depthFailed && <p role="alert" className="notice">Airlock could not save that setting.</p>}
       </section>
-    </>
+    </div>
   );
 }

@@ -28,19 +28,30 @@ export function usePanel(start: StartPanel): { state: PanelState; dispatch: (act
   return { state, dispatch: dispatchRef.current };
 }
 
-/** The stored default depth: read once when the panel starts, and updated when it is changed. */
-export function useDefaultDepth(settings: SettingsStore | undefined): { depth: Depth | null; setDepth: (depth: Depth | null) => void } {
-  const [depth, setStored] = useState<Depth | null>(null);
+/** The stored default depth: read once when the panel starts, and updated when it is changed. A change that cannot be stored is undone. */
+export function useDefaultDepth(settings: SettingsStore | undefined): { depth: Depth | null; failed: boolean; setDepth: (depth: Depth | null) => void } {
+  const [depth, setShown] = useState<Depth | null>(null);
+  const [failed, setFailed] = useState(false);
+  // What is known to be stored, to go back to.
+  const stored = useRef<Depth | null>(null);
   const changed = useRef(false);
   useEffect(() => {
     let live = true;
-    settings?.getDefaultDepth().then((value) => { if (live && !changed.current) setStored(value); }, () => undefined);
+    settings?.getDefaultDepth().then((value) => {
+      if (!live || changed.current) return;
+      stored.current = value;
+      setShown(value);
+    }, () => undefined);
     return () => { live = false; };
   }, [settings]);
   const setDepth = useCallback((next: Depth | null): void => {
     changed.current = true;
-    setStored(next);
-    settings?.setDefaultDepth(next).catch(() => undefined);
+    setFailed(false);
+    setShown(next);
+    settings?.setDefaultDepth(next).then(
+      () => { stored.current = next; },
+      () => { setShown(stored.current); setFailed(true); },
+    );
   }, [settings]);
-  return { depth, setDepth };
+  return { depth, failed, setDepth };
 }

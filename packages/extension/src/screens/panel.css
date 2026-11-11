@@ -93,3 +93,6 @@ div.quote { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible;
 .sheet-body > .row { justify-content: space-between; align-items: center; }
 .sheet-body li { padding: 8px 0; border-bottom: 1px solid var(--border); }
 .proof { margin-top: 4px; overflow-wrap: anywhere; }
+.kept { display: contents; }
+.kept[hidden] { display: none; }
+.packs-screen { display: contents; }

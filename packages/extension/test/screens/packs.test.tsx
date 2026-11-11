@@ -40,7 +40,7 @@ describe('the Packs and settings screen', () => {
   it('shows no versions without a review, and a sentence when no pull request is known', async () => {
     const { unmount } = show({ kind: 'ready', pr: prSummary() });
     await openPacks();
-    expect(screen.getByText('Generic')).toBeTruthy();
+    expect(within(document.querySelector<HTMLElement>('.packs-screen')!).getByText('Generic')).toBeTruthy();
     expect(screen.queryByText(/^version/)).toBeNull();
     unmount();
     show({ kind: 'no-pr' });
@@ -132,5 +132,80 @@ describe('the Ready screen and the stored default depth', () => {
     within(document.body).getByRole('radio', { name: /^Standard/ }).click();
     view.rerender(<PanelScreen state={state} dispatch={view.dispatch} onOpenPacks={() => undefined} defaultDepth="deep" />);
     expect(depthOf()).toBe('standard');
+  });
+});
+
+describe('the Packs screen (fix round 1)', () => {
+  it('says nothing about pairing when it does not know, and says it from the state when it does', async () => {
+    const { unmount } = show({ kind: 'no-pr' });
+    await openPacks();
+    expect(screen.getByRole('heading', { name: 'Pairing' })).toBeTruthy();
+    expect(screen.queryByText('This panel is paired.')).toBeNull();
+    expect(screen.queryByText('Not paired yet.')).toBeNull();
+    expect(screen.queryByText('npm run service -- unpair')).toBeNull();
+    unmount();
+    show({ kind: 'loading' });
+    await openPacks();
+    expect(screen.queryByText('This panel is paired.')).toBeNull();
+  });
+
+  it('is paired for running and review states, and for offline it does not know', async () => {
+    const { unmount } = show({ kind: 'running', pr: prSummary(), stages: [], brief: null, map: null });
+    await openPacks();
+    expect(screen.getByText('This panel is paired.')).toBeTruthy();
+    unmount();
+    const r = reviewState([finding(1)]);
+    show({ kind: 'offline', review: { pr: r.pr, latest: r.latest, stale: false } });
+    await openPacks();
+    expect(within(document.querySelector<HTMLElement>('.packs-screen')!).getByText('Generic')).toBeTruthy();
+    expect(screen.queryByText('This panel is paired.')).toBeNull();
+  });
+
+  it('keeps the Ready screen\'s choices while open and after Back', async () => {
+    show({ kind: 'ready', pr: prSummary() });
+    fireEvent.click(screen.getByRole('radio', { name: /^Deep/ }));
+    await openPacks();
+    const kept = document.querySelector('.kept')!;
+    expect(kept.hasAttribute('hidden')).toBe(true);
+    expect(kept.hasAttribute('inert')).toBe(true);
+    expect(kept.contains(document.activeElement)).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect((screen.getByRole('radio', { name: /^Deep/ }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('keeps an open finding and its sheet while open and after Back', async () => {
+    show(reviewState([finding(1)]));
+    fireEvent.click(document.querySelector('.finding-card button')!);
+    await openPacks();
+    expect(document.querySelector('.kept')!.hasAttribute('inert')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeTruthy();
+  });
+
+  it('changes nothing when a status fetch resolves after Back', async () => {
+    let resolve!: (s: ServiceStatus) => void;
+    const fetchStatus = vi.fn().mockReturnValue(new Promise<ServiceStatus>((r) => { resolve = r; }));
+    show({ kind: 'ready', pr: prSummary() }, { fetchStatus });
+    await openPacks();
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    await act(async () => { resolve(STATUS); });
+    expect(screen.queryByText('Claude: found')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Review' })).toBeTruthy();
+  });
+
+  it('disables Check again while a fetch is in flight', async () => {
+    let resolve!: (s: ServiceStatus) => void;
+    const fetchStatus = vi.fn().mockReturnValue(new Promise<ServiceStatus>((r) => { resolve = r; }));
+    show({ kind: 'ready', pr: prSummary() }, { fetchStatus });
+    await openPacks();
+    expect((screen.getByRole('button', { name: 'Check again' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { resolve(STATUS); });
+    expect((screen.getByRole('button', { name: 'Check again' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('shows that the setting could not be saved when told so', async () => {
+    show({ kind: 'ready', pr: prSummary() }, { depthFailed: true, defaultDepth: 'quick' });
+    await openPacks();
+    expect(screen.getByText('Airlock could not save that setting.')).toBeTruthy();
   });
 });

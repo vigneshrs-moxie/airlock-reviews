@@ -4,6 +4,7 @@ import type { DismissBody, Finding } from '@airlock/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PanelScreen } from '../../src/screens/PanelScreen';
 import type { PanelState } from '../../src/state/reduce';
+import { Verdict } from '../../src/screens/Verdict';
 import { dismissal, finding, reviewState, type ReviewOptions } from './review-fixtures';
 
 afterEach(cleanup);
@@ -237,5 +238,262 @@ describe('the dismiss sheet', () => {
   it('opens one sheet at a time over the review', () => {
     open();
     expect(screen.getAllByRole('dialog')).toHaveLength(1);
+  });
+});
+
+const offlineOf = (r: ReturnType<typeof reviewState>): PanelState => ({ kind: 'offline', review: { pr: r.pr, latest: r.latest, stale: false } });
+const dlg = () => within(screen.getByRole('dialog'));
+const KEPT = 'Airlock could not reach its service. Your line is kept.';
+
+describe('the sheet keeps the typed line (fix round 1)', () => {
+  it('stays open over a kept review when the service goes away, with Save disabled, and is usable again', () => {
+    const { rerender } = open();
+    fireEvent.click(radio('Intended'));
+    type('Totals are rounded on purpose');
+    rerender(offlineOf(reviewState([finding(1)])));
+    expect(dlg().getByText(KEPT)).toBeTruthy();
+    expect(field().value).toBe('Totals are rounded on purpose');
+    expect(save().disabled).toBe(true);
+    rerender(reviewState([finding(1)]));
+    expect(screen.queryByText(KEPT)).toBeNull();
+    expect(field().value).toBe('Totals are rounded on purpose');
+    expect(save().disabled).toBe(false);
+  });
+
+  it.each([
+    ['unpaired', { kind: 'unpaired' } as PanelState],
+    ['loading', { kind: 'loading' } as PanelState],
+    ['problem', { kind: 'problem', pr: null, message: 'No.' } as PanelState],
+  ])('hides the sheet in %s but brings it back with its text', (_name, away) => {
+    const { rerender } = open();
+    fireEvent.click(radio('Intended'));
+    type('Totals are rounded on purpose');
+    rerender(away);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    rerender(reviewState([finding(1)]));
+    expect(field().value).toBe('Totals are rounded on purpose');
+    expect((radio('Intended') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('is cleared by Cancel: the next sheet starts empty', () => {
+    const { rerender } = open();
+    fireEvent.click(radio('Intended'));
+    type('Totals are rounded on purpose');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    rerender({ kind: 'unpaired' });
+    rerender(reviewState([finding(1)]));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
+describe('a sheet acts only on the review it was opened on', () => {
+  it('becomes read-only when a different review is on screen', () => {
+    const { rerender, dispatch } = open();
+    fireEvent.click(radio('Intended'));
+    type('Totals are rounded on purpose');
+    rerender(reviewState([finding(1)], { doc: { id: 'r_0000000002' } }));
+    const d = dlg();
+    expect(d.getByText('This review is no longer the one on screen, so this line cannot be saved to it.')).toBeTruthy();
+    expect(d.getByText('Totals are rounded on purpose')).toBeTruthy();
+    expect(d.getByRole('button', { name: 'Copy line' })).toBeTruthy();
+    expect((d.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((d.getByRole('button', { name: 'Close' }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(d.getByRole('button', { name: 'Close' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('becomes read-only when the finding is no longer in the review', () => {
+    const { rerender } = open([finding(1), finding(2)]);
+    fireEvent.click(radio('Not now'));
+    rerender(reviewState([finding(2)]));
+    expect(dlg().getByText('This review is no longer the one on screen, so this line cannot be saved to it.')).toBeTruthy();
+  });
+
+  it('sends the review id of the document it was opened on', () => {
+    const { rerender, dispatch } = open();
+    fireEvent.click(radio('Not now'));
+    rerender(reviewState([finding(1)], { notice: 'Something else.' }));
+    fireEvent.click(save());
+    expect(bodyOf(dispatch).reviewId).toBe('r_0000000001');
+  });
+});
+
+describe('what the sheet says after Save and Undo (fix round 1)', () => {
+  const learned = { packId: 'orbit', kind: 'intended' as const, date: '2026-11-11' };
+  function saved() {
+    const f = finding(1);
+    const m = open([f]);
+    fireEvent.click(radio('Intended'));
+    type('Totals are rounded on purpose');
+    fireEvent.click(save());
+    const done = dismissal(f, { reason: 'intended', text: 'Totals are rounded on purpose', learned });
+    m.rerender(reviewState([f], { dismissals: [done] }));
+    return { ...m, f, done };
+  }
+
+  it('shows a refused Undo as an alert and keeps the result line', () => {
+    const { rerender, f, done } = saved();
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    rerender(reviewState([f], { dismissals: [done], notice: 'Could not undo that.' }));
+    expect(dlg().getByRole('alert').textContent).toBe('Could not undo that.');
+    expect(dlg().getByText('Saved to Orbit.')).toBeTruthy();
+  });
+
+  it('shows the note that comes with a restore as plain information', () => {
+    const { rerender, f } = saved();
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    rerender(reviewState([f], { notice: 'The saved line was no longer there.' }));
+    expect(field().value).toBe('Totals are rounded on purpose');
+    expect(dlg().getByText('The saved line was no longer there.')).toBeTruthy();
+    expect(within(screen.getByRole('dialog')).queryByRole('alert')).toBeNull();
+  });
+
+  it('does not show another finding\'s dismissal as this sheet\'s result', () => {
+    const { rerender } = open([finding(1), finding(2)]);
+    fireEvent.click(radio('Not now'));
+    rerender(reviewState([finding(1), finding(2)], { dismissals: [dismissal(finding(2), { reason: 'not-now' })] }));
+    expect(screen.queryByText('Hidden on this pull request.')).toBeNull();
+    expect(save()).toBeTruthy();
+  });
+
+  it('clears a refusal at the next edit or change of reason', () => {
+    const { rerender } = open();
+    fireEvent.click(radio('Intended'));
+    type('Totals are rounded on purpose');
+    fireEvent.click(save());
+    rerender({ ...reviewState([finding(1)]), notice: 'Refused once.' });
+    expect(dlg().getByText('Refused once.')).toBeTruthy();
+    type('Totals are rounded on purpose!');
+    expect(within(screen.getByRole('dialog')).queryByText('Refused once.')).toBeNull();
+    rerender({ ...reviewState([finding(1)]), notice: 'Refused twice.' });
+    fireEvent.click(radio('Wrong'));
+    expect(within(screen.getByRole('dialog')).queryByText('Refused twice.')).toBeNull();
+  });
+
+  it('still shows a refusal worded exactly like the notice before it', () => {
+    const { rerender } = open([finding(1)], { notice: 'Same words.' });
+    fireEvent.click(radio('Not now'));
+    fireEvent.click(save());
+    rerender(reviewState([finding(1)], { notice: 'Same words.', busy: true }));
+    rerender(reviewState([finding(1)], { notice: 'Same words.' }));
+    expect(dlg().getByText('Same words.')).toBeTruthy();
+  });
+});
+
+describe('closing', () => {
+  it('cannot happen while a save is in flight', () => {
+    const { rerender } = open();
+    fireEvent.click(radio('Not now'));
+    rerender(reviewState([finding(1)], { busy: true }));
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    fireEvent.click(document.querySelector('.sheet')!);
+    expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    rerender(reviewState([finding(1)]));
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('cannot happen with Done while an undo is in flight', () => {
+    const f = finding(1);
+    const { rerender } = open([f, finding(2)]);
+    fireEvent.click(radio('Not now'));
+    rerender(reviewState([f, finding(2)], { dismissals: [dismissal(f, { reason: 'not-now' })], busy: true }));
+    expect((screen.getByRole('button', { name: 'Done' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('returns focus to the Dismiss button after Cancel', () => {
+    const { opener } = open();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it('puts focus on the next finding\'s card after Done on a saved dismissal', () => {
+    const f = finding(1);
+    const { rerender } = open([f, finding(2)]);
+    fireEvent.click(radio('Not now'));
+    fireEvent.click(save());
+    rerender(reviewState([f, finding(2)], { dismissals: [dismissal(f, { reason: 'not-now' })] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(document.activeElement).toBe(document.querySelector('.finding-card button'));
+    expect(document.activeElement?.textContent).toContain('Problem 2');
+  });
+
+  it('puts focus on a heading when no finding is left', () => {
+    const f = finding(1);
+    const { rerender } = open([f]);
+    fireEvent.click(radio('Not now'));
+    fireEvent.click(save());
+    rerender(reviewState([f], { dismissals: [dismissal(f, { reason: 'not-now' })] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(document.activeElement?.tagName).toBe('H2');
+  });
+});
+
+describe('the field', () => {
+  it('does nothing on Enter', () => {
+    const { dispatch } = open();
+    fireEvent.click(radio('Intended'));
+    type('Totals are rounded');
+    const proceeded = fireEvent.keyDown(field(), { key: 'Enter' });
+    expect(proceeded).toBe(false);
+    expect(field().value).toBe('Totals are rounded');
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('sends inner double spaces, a decomposed accent and an emoji unchanged', () => {
+    const { dispatch } = open();
+    fireEvent.click(radio('Intended'));
+    const text = 'Keep  two  spaces, cafe\u0301 and \u{1F600} as typed';
+    type(text);
+    fireEvent.click(save());
+    expect(bodyOf(dispatch).text).toBe(text);
+    expect([...bodyOf(dispatch).text]).toEqual([...text]);
+  });
+
+  it.each([
+    ['a leading space', ' starts with a space here', 'The text starts or ends with a space; remove it.'],
+    ['a trailing space', 'ends with a space here ', 'The text starts or ends with a space; remove it.'],
+    ['a forbidden character', 'has a bell\u0007 in the middle', 'The text has a control, invisible or line-break character; use plain characters on one line.'],
+  ])('disables Save and gives the rule for %s', (_n, text, sentence) => {
+    open();
+    fireEvent.click(radio('Intended'));
+    type(text);
+    expect(save().disabled).toBe(true);
+    expect(screen.getByText(sentence)).toBeTruthy();
+  });
+
+  it.each([
+    ['a line break', 'Two\nlines'],
+    ['a zero-width character', 'Zero\u200bwidth'],
+    ['a right-to-left override', 'Over\u202eride'],
+    ['the draft\'s own words', 'x. Wrong because: y'],
+  ])('keeps Save disabled for a draft built from a title with %s', (_n, title) => {
+    open([finding(1, { title })]);
+    fireEvent.click(radio('Wrong'));
+    expect(save().disabled).toBe(true);
+    expect(field().value.endsWith('Wrong because: ')).toBe(true);
+  });
+
+  it('shows the count and the sentence when a long path pushes the draft past 500', () => {
+    open([finding(1, { path: `src/${'p'.repeat(500)}.ts` })]);
+    fireEvent.click(radio('Wrong'));
+    expect(screen.getByText(`${[...field().value].length} of 500`)).toBeTruthy();
+    expect(screen.getByText('The text starts or ends with a space; remove it.')).toBeTruthy();
+    type(`${field().value}x`);
+    expect(screen.getByText('The text is longer than 500 characters.')).toBeTruthy();
+    expect(save().disabled).toBe(true);
+  });
+});
+
+describe('Verdict on its own', () => {
+  it('still calls its onDismiss prop with the finding', () => {
+    const onDismiss = vi.fn();
+    const f = finding(1);
+    render(<Verdict state={reviewState([f])} dispatch={vi.fn()} onDismiss={onDismiss} />);
+    fireEvent.click(document.querySelector('.finding-card button')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(onDismiss).toHaveBeenCalledWith(f);
   });
 });

@@ -10,7 +10,7 @@ import { Running } from './Running';
 import { Verdict } from './Verdict';
 import type { OnJump } from './FindingDetail';
 import type { Depth, Finding, PackRef, PrSummary, ServiceStatus } from '@airlock/shared';
-import { DismissSheet } from './DismissSheet';
+import { DismissSheet, newDraft, type SheetDraft, type SheetView } from './DismissSheet';
 import { Packs } from './Packs';
 
 export interface PanelScreenProps {
@@ -28,6 +28,24 @@ export interface PanelScreenProps {
   defaultDepth?: Depth | null;
   /** Stores the default depth; null clears it. */
   onDefaultDepth?: (depth: Depth | null) => void;
+  /** Storing the default depth failed, so the screen shows what is stored again and says so. */
+  depthFailed?: boolean;
+}
+
+/** Whether this panel is paired, as far as the state proves it; null when it proves nothing. */
+function pairedOf(state: PanelState): boolean | null {
+  switch (state.kind) {
+    case 'unpaired': return false;
+    case 'ready': case 'running': case 'review': return true;
+    default: return null;
+  }
+}
+
+/** The review under a sheet: the finished one, or the kept one while the service is away; null when neither is on screen. */
+function sheetViewOf(state: PanelState): SheetView | null {
+  if (state.kind === 'review') return { pr: state.pr, latest: state.latest, offline: false, notice: state.notice, busy: state.busy };
+  if (state.kind === 'offline' && state.review !== undefined) return { pr: state.review.pr, latest: state.review.latest, offline: true };
+  return null;
 }
 
 const unreachable = (): Promise<ServiceStatus> => Promise.reject(new Error('no service'));
@@ -73,9 +91,10 @@ function FinishedAnnouncer({ kind }: { kind: PanelState['kind'] }) {
 }
 
 /** The frame and the screen for one state, with the Packs screen and the dismiss sheet over it. */
-export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, fetchStatus = unreachable, defaultDepth = null, onDefaultDepth }: PanelScreenProps) {
+export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, fetchStatus = unreachable, defaultDepth = null, onDefaultDepth, depthFailed = false }: PanelScreenProps) {
   const [packsOpen, setPacksOpen] = useState(false);
-  const [dismissing, setDismissing] = useState<Finding | null>(null);
+  // What is in the sheet outlives the sheet being out of sight; only Cancel and Done drop it.
+  const [draft, setDraft] = useState<SheetDraft | null>(null);
   const packsButton = useRef<HTMLButtonElement>(null);
   const wasOpen = useRef(false);
   // Back returns focus to the button that opened the screen.
@@ -83,7 +102,9 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, fetc
     if (packsOpen) wasOpen.current = true;
     else if (wasOpen.current) { wasOpen.current = false; packsButton.current?.focus(); }
   }, [packsOpen]);
-  const closeDismiss = useCallback((): void => setDismissing(null), []);
+  const closeDismiss = useCallback((): void => setDraft(null), []);
+  const startDismiss = (finding: Finding): void => { if (state.kind === 'review') setDraft(newDraft(finding, state.latest.document.id)); };
+  const sheetView = sheetViewOf(state);
   const known = knownOf(state);
   return (
     <Frame
@@ -91,19 +112,19 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, fetc
       onOpenPacks={() => { setPacksOpen(true); onOpenPacks?.(); }}
     >
       <FinishedAnnouncer kind={state.kind} />
-      {packsOpen ? (
+      {/* Packs opens beside the panel, which stays as it was, out of sight and out of reach. */}
+      <div className="kept" hidden={packsOpen} inert={packsOpen}>
+        <Body state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={startDismiss} defaultDepth={defaultDepth} />
+        {draft !== null && sheetView !== null && (
+          <DismissSheet draft={draft} onDraft={setDraft} view={sheetView} dispatch={dispatch} active={!packsOpen} onClose={closeDismiss} />
+        )}
+      </div>
+      {packsOpen && (
         <Packs
-          pr={known.pr} packVersions={known.packs} paired={state.kind !== 'unpaired'} fetchStatus={fetchStatus}
-          defaultDepth={defaultDepth} onDefaultDepth={onDefaultDepth ?? (() => undefined)} onBack={() => setPacksOpen(false)}
-          {...(timers ? { timers } : {})}
+          pr={known.pr} packVersions={known.packs} paired={pairedOf(state)} fetchStatus={fetchStatus}
+          defaultDepth={defaultDepth} onDefaultDepth={onDefaultDepth ?? (() => undefined)} depthFailed={depthFailed}
+          onBack={() => setPacksOpen(false)} {...(timers ? { timers } : {})}
         />
-      ) : (
-        <>
-          <Body state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={setDismissing} defaultDepth={defaultDepth} />
-          {dismissing !== null && state.kind === 'review' && (
-            <DismissSheet state={state} finding={dismissing} dispatch={dispatch} onClose={closeDismiss} />
-          )}
-        </>
       )}
     </Frame>
   );

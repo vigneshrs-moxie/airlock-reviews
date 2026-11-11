@@ -17,7 +17,7 @@ export function FindingCard({ finding, rank, packs, selected, onToggle, onOpen, 
         type="checkbox" className="pick" checked={selected} onChange={onToggle}
         aria-label={`Select for the fix prompt: ${finding.title}`}
       />
-      <button type="button" className="open" onClick={onOpen} ref={(node) => register(finding.id, node)}>
+      <button type="button" className="open" data-finding-id={finding.id} onClick={onOpen} ref={(node) => register(finding.id, node)}>
         <span className="head-line">
           <span className="rank">{rank}</span>
           <span className="sev">{severityWord(finding.severity)}</span>

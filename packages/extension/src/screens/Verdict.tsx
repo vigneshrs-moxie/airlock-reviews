@@ -139,7 +139,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   return (
     <>
       <section className="card verdict">
-        <h2 className="title" tabIndex={-1} ref={verdictHeading}>{verdictWords(doc.verdict.label, doc.pr.stage)}</h2>
+        <h2 className="title" tabIndex={-1} data-focus="verdict" ref={verdictHeading}>{verdictWords(doc.verdict.label, doc.pr.stage)}</h2>
         <p>{doc.verdict.sentence}</p>
         {empty && (
           <p>
@@ -153,7 +153,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
       <StageErrors errors={doc.stageErrors} map={doc.map} />
       {lists.top.length > 0 && (
         <section>
-          <h2 className="label" tabIndex={-1} ref={findingsHeading}>Findings</h2>
+          <h2 className="label" tabIndex={-1} data-focus="findings" ref={findingsHeading}>Findings</h2>
           {count > 0 && (
             <div className="bar">
               <CopyButton key={chosen.map((f) => f.id).join()} text={promptFor(chosen)} label={`Copy fix prompt for ${count} selected`} {...t} />

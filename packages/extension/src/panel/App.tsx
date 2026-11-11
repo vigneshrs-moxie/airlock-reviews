@@ -33,10 +33,10 @@ export function realServices(settings: SettingsStore = browserSettings()): Panel
 
 export function App({ start = (onState) => startRealPanel(onState), services }: { start?: StartPanel; services?: PanelServices }) {
   const { state, dispatch } = usePanel(start);
-  const { depth, setDepth } = useDefaultDepth(services?.settings);
+  const { depth, failed, setDepth } = useDefaultDepth(services?.settings);
   return (
     <PanelScreen
-      state={state} dispatch={dispatch} defaultDepth={depth} onDefaultDepth={setDepth}
+      state={state} dispatch={dispatch} defaultDepth={depth} onDefaultDepth={setDepth} depthFailed={failed}
       {...(services ? { fetchStatus: services.fetchStatus } : {})}
     />
   );
