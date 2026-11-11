@@ -1,6 +1,6 @@
 import type { Finding, ReviewDocument } from '@airlock/shared';
 import type { KnownProblem, ReplayCase } from './dataset.js';
-import type { Match } from './judge.js';
+import type { Match, OtherMatch } from './judge.js';
 import { sharedMatchItems } from './score.js';
 import type { CaseScore, RunSummary } from './score.js';
 
@@ -45,6 +45,52 @@ function table(header: string[], rows: string[][]): string[] {
   return [line(header), line(header.map(() => '---')), ...rows.map(line)];
 }
 
+/** A stage's name for a reader: `merge` in words, the others as they are. */
+export function stageWords(stage: string): string {
+  return stage === 'merge' ? 'merged into another finding' : stage;
+}
+
+/** Plain words for what a stage did to an item it dropped. */
+function droppedWords(stage: string | undefined): string {
+  switch (stage) {
+    case 'challenge':
+      return 'dropped by the challenge';
+    case 'anchor':
+      return 'dropped because the quoted code was not in the file';
+    case 'schema':
+      return 'dropped because the answer was not in the expected form';
+    case 'select':
+      return 'left out of the top five and not shown';
+    case 'merge':
+      return stageWords('merge');
+    default:
+      return 'dropped';
+  }
+}
+
+/** Plain words for where another item the judge named ended up. */
+function placeWords(o: OtherMatch, doc: ReviewDocument): string {
+  switch (o.where) {
+    case 'top':
+      return 'in the top five';
+    case 'also':
+      return 'shown under Also found';
+    case 'question':
+      return 'returned as a question';
+    case 'candidate':
+      return 'found by a lens but not shown';
+    case 'dropped':
+      return droppedWords(doc.dropped.find((d) => d.candidate.id === o.itemId)?.stage);
+  }
+}
+
+/** "q1, returned as a question; d1 (a partial match), dropped by the challenge", or null when there are none. */
+function othersText(m: Match | undefined, doc: ReviewDocument): string | null {
+  const others = m?.others ?? [];
+  if (others.length === 0) return null;
+  return others.map((o) => `${md(o.itemId)}${o.partial ? ' (a partial match)' : ''}, ${placeWords(o, doc)}`).join('; ');
+}
+
 /** Plain words for where a known problem that is not in the top five ended up. */
 function whereLost(m: Match | undefined, doc: ReviewDocument): string {
   switch (m?.where ?? 'none') {
@@ -64,6 +110,8 @@ function whereLost(m: Match | undefined, doc: ReviewDocument): string {
       switch (entry?.stage) {
         case 'challenge':
           return `It was found, then dropped by the challenge.${reason}`;
+        case 'merge':
+          return `It was found, then ${stageWords('merge')}.${reason}`;
         case 'anchor':
           return 'It was found, then dropped because the quoted code was not in the file.';
         case 'schema':
@@ -93,6 +141,8 @@ function missedLines(k: KnownProblem, m: Match | undefined, doc: ReviewDocument)
   const title = itemTitle(m, doc);
   if (title !== null) out.push(`  - Nearest item${m?.partial ? ' (a partial match)' : ''}: ${md(title)}`);
   if (m && m.reason.trim() !== '') out.push(`  - The judge's reason: ${md(m.reason)}`);
+  const others = othersText(m, doc);
+  if (others !== null) out.push(`  - The judge also named: ${others}.`);
   return out;
 }
 
@@ -242,6 +292,10 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
     for (const [itemId, knownIds] of sharedMatchItems(c, d.matches)) {
       const title = itemTitle(d.matches.find((m) => m.itemId === itemId), d.doc);
       shared.push(`- ${prName(c, s.caseId)}: ${md(itemId)}${title === null ? '' : ` (${md(title)})`} matched ${andList(knownIds.map(md))}.`);
+      for (const knownId of knownIds) {
+        const others = othersText(d.matches.find((m) => m.knownId === knownId), d.doc);
+        if (others !== null) shared.push(`  - For ${md(knownId)} the judge also named: ${others}.`);
+      }
     }
   }
   if (shared.length > 0) {
@@ -295,7 +349,7 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
     out.push('A step of these reviews failed, so they are not counted as clean.', '');
     for (const id of summary.incompleteCases) {
       out.push(`- ${prName(caseById.get(id), id)}`);
-      for (const e of details[id]?.doc.stageErrors ?? []) out.push(`  - ${md(e.stage)}: ${md(e.message)}`);
+      for (const e of details[id]?.doc.stageErrors ?? []) out.push(`  - ${md(stageWords(e.stage))}: ${md(e.message)}`);
     }
     out.push('');
   }

@@ -19,7 +19,7 @@ const CASES = [
 ];
 
 const judgeAnswer = () => ({
-  matches: ['K1', 'K2'].map((knownId) => ({ knownId, itemId: 'f1', partial: false, reason: 'Same cause.' })),
+  matches: ['K1', 'K2'].map((knownId) => ({ knownId, items: [{ itemId: 'f1', partial: false, reason: 'Same cause.' }], reason: 'Same cause.' })),
 });
 
 function reviewFor(req: ReviewRequest): ReviewDocument {

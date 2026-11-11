@@ -263,6 +263,51 @@ describe('renderReport', () => {
     });
   });
 
+  describe('the other items the judge named, and merges in words', () => {
+    const c = replayCase({ id: 'a', pr: 10, title: 'Others', known: ['A1', 'A2', 'A3'].map((id) => problem({ id, summary: `Summary of ${id}.` })) });
+    const d = doc({
+      findings: [finding('f1', 'top', { title: 'Rows stay claimed' }), finding('f2', 'also', { title: 'Second look' })],
+      dropped: [dropped('d1', 'challenge', 'Guarded.'), dropped('m1', 'merge', 'Merged with a finding that is gone.')],
+      questions: [{ text: 'Who reads this?', cohortId: null, source: { pack: 'core', lens: null, ruleId: null } }],
+      verdict: { label: 'incomplete', sentence: 's', counts: { block: 0, fix: 0, ask: 0, note: 0 } },
+      stageErrors: [{ stage: 'merge', cohortId: null, message: 'The merge request failed.' }],
+    });
+    const matches: Match[] = [
+      { ...match('A1', 'also', 'f2'), others: [{ itemId: 'q1', where: 'question', partial: false }, { itemId: 'd1', where: 'dropped', partial: true }] },
+      { ...match('A2', 'dropped', 'm1'), others: [] },
+      { ...match('A3', 'also', 'f2'), others: [{ itemId: 'd1', where: 'dropped', partial: false }] },
+    ];
+    const text = (): string => {
+      const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, matches)], [c]);
+      return renderReport(summary, [c], { a: { doc: d, matches } });
+    };
+
+    it('lists the other items under each missed problem, with where each ended up', () => {
+      const missed = section(text(), 'What was missed');
+      expect(missed).toContain('  - The judge also named: q1, returned as a question; d1 (a partial match), dropped by the challenge.');
+    });
+
+    it('lists the other items under each shared problem', () => {
+      const shared = section(text(), 'One finding matched to several known problems');
+      expect(shared).toContain('- #10 Others: f2 (Second look) matched A1 and A3.');
+      expect(shared).toContain('  - For A1 the judge also named: q1, returned as a question; d1 (a partial match), dropped by the challenge.');
+      expect(shared).toContain('  - For A3 the judge also named: d1, dropped by the challenge.');
+    });
+
+    it('says merge in words wherever a stage is named', () => {
+      const report = text();
+      expect(section(report, 'What was missed')).toContain('It was found, then merged into another finding. Its reason: Merged with a finding that is gone.');
+      expect(section(report, 'Incomplete reviews')).toContain('  - merged into another finding: The merge request failed.');
+      expect(report).not.toMatch(/\bmerge:/);
+    });
+
+    it('a match saved without others reads as having none', () => {
+      const old: Match[] = c.known.map((k) => match(k.id, 'none', null));
+      const summary = summarise('r', 'm', 'standard', [scoreCase(c, doc(), old)], [c]);
+      expect(section(renderReport(summary, [c], { a: { doc: doc(), matches: old } }), 'What was missed')).not.toContain('also named');
+    });
+  });
+
   it('lists a positive case with no details as details not available', () => {
     const c = replayCase({ id: 'a', pr: 10, title: 'Lost', known: [problem({ id: 'A1' })] });
     const summary = summarise('r', 'm', 'standard', [scoreCase(c, doc(), [])], [c]);

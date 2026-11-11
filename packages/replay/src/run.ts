@@ -10,7 +10,7 @@ import { z } from 'zod';
 import type { ReplayCase } from './dataset.js';
 import { judgeCase, mentionsUsageLimit, UsageLimitError } from './judge.js';
 import type { Match } from './judge.js';
-import { renderReport } from './report.js';
+import { renderReport, stageWords } from './report.js';
 import { scoreCase, summarise } from './score.js';
 import type { CaseScore, RunSummary } from './score.js';
 
@@ -84,6 +84,11 @@ const MatchesSchema = z.array(z.object({
   itemId: z.string().nullable(),
   partial: z.boolean(),
   reason: z.string(),
+  others: z.array(z.object({
+    itemId: z.string(),
+    where: z.enum(['top', 'also', 'dropped', 'candidate', 'question']),
+    partial: z.boolean(),
+  })).optional(),
 }));
 
 const RunFileSchema = z.object({
@@ -174,7 +179,7 @@ const NOT_JUDGED = 'The review finished but was not judged.';
 
 /** "The review did not finish (lenses, sweep)." from the stages that failed. */
 function didNotFinish(doc: ReviewDocument): string {
-  const stages = [...new Set(doc.stageErrors.map((e) => e.stage))];
+  const stages = [...new Set(doc.stageErrors.map((e) => stageWords(e.stage)))];
   return stages.length === 0 ? 'The review did not finish.' : `The review did not finish (${stages.join(', ')}).`;
 }
 

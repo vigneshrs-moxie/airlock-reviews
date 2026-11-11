@@ -58,12 +58,12 @@ function fakeReview(behaviour: (req: ReviewRequest) => Promise<ReviewDocument> |
   return Object.assign(review, { requests });
 }
 
-/** The judge puts K1 in the top list (as f1) and finds nothing for the others. */
+/** The judge names f1 (in the top list) for K1 and nothing for the others. */
 const judgeAnswer = () => ({
   matches: [
-    { knownId: 'K1', itemId: 'f1', partial: false, reason: 'Same cause.' },
-    { knownId: 'K2', itemId: null, partial: false, reason: 'Nothing like it.' },
-    { knownId: 'K3', itemId: null, partial: false, reason: 'Nothing like it.' },
+    { knownId: 'K1', items: [{ itemId: 'f1', partial: false, reason: 'Same cause.' }], reason: 'Same cause.' },
+    { knownId: 'K2', items: [], reason: 'Nothing like it.' },
+    { knownId: 'K3', items: [], reason: 'Nothing like it.' },
   ],
 });
 
@@ -138,8 +138,8 @@ describe('runReplay', () => {
       expect((await readdir(join(runDir, c.id))).sort()).toEqual(['matches.json', 'review.json']);
     }
     expect(await readJson(join(runDir, 'pr1', 'matches.json'))).toEqual([
-      { knownId: 'K1', where: 'top', itemId: 'f1', partial: false, reason: 'Same cause.' },
-      { knownId: 'K2', where: 'none', itemId: null, partial: false, reason: 'Nothing like it.' },
+      { knownId: 'K1', where: 'top', itemId: 'f1', partial: false, reason: 'Same cause.', others: [] },
+      { knownId: 'K2', where: 'none', itemId: null, partial: false, reason: 'Nothing like it.', others: [] },
     ]);
     expect(await readJson(join(runDir, 'pr3', 'matches.json'))).toEqual([]);
 
@@ -471,7 +471,7 @@ describe('runReplay', () => {
     it('a saved incomplete review is reviewed again, and the old file is replaced only when the new review is saved', async () => {
       await runReplay(options(), deps(fakeReview((req) => (req.number === 1 ? incomplete(req) : reviewFor(req)))));
       // An older run judged its incomplete review: that still does not make the case done.
-      await writeFile(join(caseDir('pr1'), 'matches.json'), JSON.stringify(judgeAnswer().matches.slice(0, 2).map((m) => ({ ...m, where: 'none', itemId: null }))));
+      await writeFile(join(caseDir('pr1'), 'matches.json'), JSON.stringify(['K1', 'K2'].map((knownId) => ({ knownId, where: 'none', itemId: null, partial: false, reason: 'x' }))));
       const before = await readFile(join(caseDir('pr1'), 'review.json'), 'utf8');
 
       const failing = fakeReview((req) => { if (req.number === 1) throw new Error('clone failed'); return reviewFor(req); });
@@ -528,7 +528,7 @@ describe('runReplay', () => {
         id: `pr${n}`, pr: n, baseSha: String(n).repeat(40), headSha: 'e'.repeat(40), known: [problem({ id: `K${n}` })],
       }));
       const answer = (req: AgentRequest<unknown>) => ({
-        matches: many.map((c) => c.known[0]!.id).filter((id) => isFor(req, id)).map((knownId) => ({ knownId, itemId: 'f1', partial: false, reason: 'Same.' })),
+        matches: many.map((c) => c.known[0]!.id).filter((id) => isFor(req, id)).map((knownId) => ({ knownId, items: [{ itemId: 'f1', partial: false, reason: 'Same.' }], reason: 'Same.' })),
       });
       const opts = { cases: many, dataset: many };
       await runReplay(options(opts), deps(fakeReview((req) => (req.number === 4 ? incomplete(req) : reviewFor(req))), createFakeRunner(answer)));
@@ -586,7 +586,7 @@ describe('runReplay', () => {
       id: `pr${n}`, pr: n, baseSha: String(n).repeat(40), headSha: 'e'.repeat(40), known: [problem({ id: `K${n}` })],
     }));
     const answerAll = (req: AgentRequest<unknown>) => ({
-      matches: five.map((c) => c.known[0]!.id).filter((id) => isFor(req, id)).map((knownId) => ({ knownId, itemId: 'f1', partial: false, reason: 'Same.' })),
+      matches: five.map((c) => c.known[0]!.id).filter((id) => isFor(req, id)).map((knownId) => ({ knownId, items: [{ itemId: 'f1', partial: false, reason: 'Same.' }], reason: 'Same.' })),
     });
     const limited = (req: ReviewRequest, error: { message: string; kind?: 'usage-limit' }): ReviewDocument => ({
       ...reviewFor(req),
@@ -668,6 +668,34 @@ describe('runReplay', () => {
       expect(summary.cases.find((s) => s.caseId === 'pr5')).toMatchObject({ inTop: 1, verdict: 'approve' });
       expect(summary.stopped).toEqual({ reason: 'usage-limit', caseId: 'pr1', notStarted: ['pr3', 'pr4'] });
     });
+  });
+
+  it('the other items the judge named are saved with the matches and read back by loadRun', async () => {
+    const runner = createFakeRunner(() => ({
+      matches: [{ knownId: 'K1', items: [{ itemId: 'q1', partial: false, reason: 'Asks it.' }, { itemId: 'f1', partial: true, reason: 'Half.' }], reason: 'Both.' }],
+    }));
+    const review = fakeReview((req) => ({
+      ...reviewFor(req), questions: [{ text: 'Is it clamped?', cohortId: null, source: { pack: 'core', lens: null, ruleId: null } }],
+    }));
+    const one = [replayCase({ id: 'pr1', pr: 1, baseSha: '1'.repeat(40), headSha: '2'.repeat(40), known: [problem({ id: 'K1' })] })];
+    const summary = await runReplay(options({ cases: one }), deps(review, runner));
+    expect(await readJson(join(caseDir('pr1'), 'matches.json'))).toEqual([
+      { knownId: 'K1', where: 'top', itemId: 'f1', partial: true, reason: 'Half.', others: [{ itemId: 'q1', where: 'question', partial: false }] },
+    ]);
+    const loaded = await loadRun(join(outDir, 'run-a'), one);
+    expect(loaded.summary).toEqual(summary);
+    expect(loaded.details.pr1!.matches[0]!.others).toEqual([{ itemId: 'q1', where: 'question', partial: false }]);
+  });
+
+  it('a stage named merge reads in words when a review does not finish', async () => {
+    const review = fakeReview((req) => ({
+      ...reviewFor(req),
+      verdict: { label: 'incomplete', sentence: 's', counts: { block: 0, fix: 0, ask: 0, note: 1 } },
+      stageErrors: [{ stage: 'merge', cohortId: null, message: 'The merge request failed.' }],
+    }));
+    const { events, onCase } = recorder();
+    await runReplay(options({ cases: [cases()[0]!] }), deps(review), onCase);
+    expect(events.at(-1)!.message).toBe('The review did not finish (merged into another finding).');
   });
 
   it('the judge runs in a fresh, empty folder made for the run and removed at the end', async () => {
