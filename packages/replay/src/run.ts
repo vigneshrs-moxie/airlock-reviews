@@ -20,6 +20,7 @@ export interface ReplayOptions {
   /**
    * The whole dataset (default `cases`). A run folder resumed with a narrower selection keeps the cases an earlier call
    * selected: they are looked up here and scored from their folders, so the summary and report cover all of them.
+   * Without it, earlier cases that are not in `cases` stay listed in run.json but cannot be scored by this call.
    */
   dataset?: ReplayCase[];
   model: string;
@@ -92,11 +93,17 @@ const RunFileSchema = z.object({
 });
 type RunFile = z.infer<typeof RunFileSchema>;
 
-/** What happened to one case, from the run or read back from its folder. */
+/**
+ * What happened to one case, from the run or read back from its folder:
+ * - `done`: a finished review of this case (verdict not `incomplete`) with matches that score against it;
+ * - `not-judged`: a finished review of this case without usable matches; it is judged again, not reviewed again;
+ * - `not-done`: no finished review of this case; it is reviewed again. `doc` is the saved review when it is this
+ *   case's but did not finish, else null. `reason` says why in words that are true for the folder's state.
+ */
 type Outcome =
-  | { kind: 'judged'; doc: ReviewDocument; matches: Match[] }
-  | { kind: 'judge-failed'; doc: ReviewDocument; error: string }
-  | { kind: 'review-failed'; error: string };
+  | { kind: 'done'; doc: ReviewDocument; matches: Match[] }
+  | { kind: 'not-judged'; doc: ReviewDocument; reason: string }
+  | { kind: 'not-done'; doc: ReviewDocument | null; reason: string };
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -129,15 +136,15 @@ async function readText(path: string): Promise<string | null> {
   }
 }
 
-/** Parses a JSON file with `schema`; null when the file is missing, is not JSON or does not match. */
-async function readValid<T>(path: string, schema: z.ZodType<T>): Promise<T | null> {
-  const text = await readText(path);
-  if (text === null) return null;
+/** A JSON file parsed with `schema`: 'missing' when there is no file; 'unreadable' when it cannot be read, is not JSON or does not match. */
+async function readSavedFile<T>(path: string, schema: z.ZodType<T>): Promise<T | 'missing' | 'unreadable'> {
   try {
+    const text = await readText(path);
+    if (text === null) return 'missing';
     const parsed = schema.safeParse(JSON.parse(text));
-    return parsed.success ? parsed.data : null;
+    return parsed.success ? parsed.data : 'unreadable';
   } catch {
-    return null;
+    return 'unreadable';
   }
 }
 
@@ -145,16 +152,48 @@ async function readValid<T>(path: string, schema: z.ZodType<T>): Promise<T | nul
 const reviewsCase = (doc: ReviewDocument, c: ReplayCase): boolean =>
   doc.pr.repo === c.repo && doc.pr.number === c.pr && doc.range.baseSha === c.baseSha && doc.range.headSha === c.headSha;
 
+/** True when matches answer exactly the case's known problems, in order, and can be scored against `doc`. */
+function scorable(c: ReplayCase, doc: ReviewDocument, matches: Match[]): boolean {
+  if (matches.length !== c.known.length || !matches.every((m, i) => m.knownId === c.known[i]!.id)) return false;
+  try {
+    scoreCase(c, doc, matches);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const NOT_RUN = 'This case has not been run.';
+const OTHER_COMMITS = 'The saved review is for other commits.';
+const UNREADABLE = 'The saved review cannot be read.';
+const NOT_JUDGED = 'The review finished but was not judged.';
+
+/** "The review did not finish (lenses, sweep)." from the stages that failed. */
+function didNotFinish(doc: ReviewDocument): string {
+  const stages = [...new Set(doc.stageErrors.map((e) => e.stage))];
+  return stages.length === 0 ? 'The review did not finish.' : `The review did not finish (${stages.join(', ')}).`;
+}
+
 /**
- * The case folder's saved review and matches. The review counts only when it is of this case; the matches only with
- * that review and when they answer exactly the case's known problems.
+ * Reads a case folder and says whether the case is done; the one rule used by the run and by `loadRun`. A case is done
+ * when it has a saved review of this case (repository, number and both commits) whose verdict is not `incomplete`,
+ * and saved matches that score against it. error.txt, when there is one, explains a case that is not done; one that
+ * cannot be read is ignored. Never throws.
  */
-async function readSaved(dir: string, c: ReplayCase): Promise<{ doc: ReviewDocument | null; matches: Match[] | null }> {
-  const saved = await readValid(join(dir, 'review.json'), ReviewDocumentSchema);
-  const doc = saved !== null && reviewsCase(saved, c) ? saved : null;
-  const matches = doc === null ? null : await readValid(join(dir, 'matches.json'), MatchesSchema);
-  const answersCase = matches !== null && matches.length === c.known.length && matches.every((m, i) => m.knownId === c.known[i]!.id);
-  return { doc, matches: answersCase ? matches : null };
+async function readOutcome(dir: string, c: ReplayCase): Promise<Outcome> {
+  const error = await readText(join(dir, 'error.txt')).then((t) => t?.trim() || null, () => null);
+  const review = await readSavedFile(join(dir, 'review.json'), ReviewDocumentSchema);
+  if (typeof review !== 'string' && reviewsCase(review, c) && review.verdict.label !== 'incomplete') {
+    const matches = await readSavedFile(join(dir, 'matches.json'), MatchesSchema);
+    if (typeof matches !== 'string' && scorable(c, review, matches)) return { kind: 'done', doc: review, matches };
+    return { kind: 'not-judged', doc: review, reason: error ?? NOT_JUDGED };
+  }
+  // A later attempt that failed explains the case better than the review it would have replaced.
+  if (error !== null) return { kind: 'not-done', doc: null, reason: error };
+  if (review === 'missing') return { kind: 'not-done', doc: null, reason: NOT_RUN };
+  if (review === 'unreadable') return { kind: 'not-done', doc: null, reason: UNREADABLE };
+  if (!reviewsCase(review, c)) return { kind: 'not-done', doc: null, reason: OTHER_COMMITS };
+  return { kind: 'not-done', doc: review, reason: didNotFinish(review) };
 }
 
 /**
@@ -202,31 +241,31 @@ type Scored = { score: CaseScore; detail: { doc: ReviewDocument; matches: Match[
 type RunInfo = { model: string; depth: Depth; createdAt: string };
 
 /**
- * The score and report details of one case. A case that did not finish (its review or its judge failed) is scored
- * `incomplete` with every known problem not found and lost at no stage, since it was never judged:
- * - a review that did not finish is scored from the stand-in document;
- * - a review whose judge failed is scored as real but unjudged, and the report's copy of its document gains a `judge`
- *   stage error so the report says why.
- * Saved matches that cannot be scored against their review count as a failed judge.
+ * The score and report details of one case. A case that is not done is scored `incomplete` with every known problem
+ * not found and lost at no stage, since it was never judged:
+ * - with no review of its own that it could keep, it is scored from the stand-in document, whose stage error is the reason;
+ * - a saved review that did not finish is scored from that review, whose stage errors say which stages failed;
+ * - a finished review that was not judged is scored as real but unjudged, and the report's copy of its document gains
+ *   a `judge` stage error so the report says why.
  */
 function scoreOutcome(c: ReplayCase, o: Outcome, run: RunInfo): Scored {
   switch (o.kind) {
-    case 'judged':
+    case 'done':
       try {
         return { score: scoreCase(c, o.doc, o.matches), detail: { doc: o.doc, matches: o.matches } };
       } catch (err) {
-        return scoreOutcome(c, { kind: 'judge-failed', doc: o.doc, error: failureText('The matches could not be scored', err) }, run);
+        return scoreOutcome(c, { kind: 'not-judged', doc: o.doc, reason: failureText('The matches could not be scored', err) }, run);
       }
-    case 'judge-failed': {
+    case 'not-judged': {
       const matches = notJudged(c, 'Not judged: the judge did not finish on this pull request.');
       const score: CaseScore = { ...scoreCase(c, o.doc, matches), verdict: 'incomplete', lostAt: { ...NOT_LOST } };
-      const doc: ReviewDocument = { ...o.doc, stageErrors: [...o.doc.stageErrors, { stage: 'judge', cohortId: null, message: o.error }] };
+      const doc: ReviewDocument = { ...o.doc, stageErrors: [...o.doc.stageErrors, { stage: 'judge', cohortId: null, message: o.reason }] };
       return { score, detail: { doc, matches } };
     }
-    case 'review-failed': {
-      const doc = notFinishedDocument(c, run, o.error);
+    case 'not-done': {
+      const doc = o.doc ?? notFinishedDocument(c, run, o.reason);
       const matches = notJudged(c, 'Not judged: the review did not finish.');
-      return { score: { ...scoreCase(c, doc, matches), lostAt: { ...NOT_LOST } }, detail: { doc, matches } };
+      return { score: { ...scoreCase(c, doc, matches), verdict: 'incomplete', lostAt: { ...NOT_LOST } }, detail: { doc, matches } };
     }
   }
 }
@@ -250,9 +289,11 @@ function inDatasetOrder(ids: Iterable<string>, dataset: ReplayCase[], runDir: st
 /**
  * Creates the run folder and writes run.json, or checks an existing run.json against this run. Refuses a folder made
  * with another model, depth, judge model or kit version, and a folder with case folders but no run.json. A resumed run
- * keeps its start time and its cases: run.json lists the earlier cases and this call's, in dataset order.
+ * keeps its start time and its cases: run.json lists the earlier cases and this call's, in dataset order. Without a
+ * `dataset`, earlier cases that are not among this call's cannot be scored: they stay in run.json, after the others,
+ * and are left out of the cases returned.
  */
-async function openRunFolder(runDir: string, run: RunFile, dataset: ReplayCase[]): Promise<{ run: RunFile; cases: ReplayCase[] }> {
+async function openRunFolder(runDir: string, run: RunFile, dataset: ReplayCase[] | undefined, selected: ReplayCase[]): Promise<{ run: RunFile; cases: ReplayCase[] }> {
   await mkdir(runDir, { recursive: true });
   const path = join(runDir, 'run.json');
   const text = await readText(path);
@@ -277,9 +318,11 @@ async function openRunFolder(runDir: string, run: RunFile, dataset: ReplayCase[]
       );
     }
   }
-  const cases = inDatasetOrder([...(previous?.caseIds ?? []), ...run.caseIds], dataset, runDir);
+  const known = new Set((dataset ?? selected).map((c) => c.id));
+  const unknown = dataset === undefined ? (previous?.caseIds ?? []).filter((id) => !known.has(id)) : [];
+  const cases = inDatasetOrder([...(previous?.caseIds ?? []).filter((id) => !unknown.includes(id)), ...run.caseIds], dataset ?? selected, runDir);
   checkCases(cases);
-  const merged: RunFile = { ...run, caseIds: cases.map((c) => c.id), startedAt: previous?.startedAt ?? run.startedAt };
+  const merged: RunFile = { ...run, caseIds: [...cases.map((c) => c.id), ...unknown], startedAt: previous?.startedAt ?? run.startedAt };
   await writeAtomic(path, json(merged));
   return { run: merged, cases };
 }
@@ -320,22 +363,6 @@ function reviewRequest(c: ReplayCase, opts: ReplayOptions): ReviewRequest {
   };
 }
 
-/** What a case folder holds: judged, reviewed but not judged, or not reviewed (with error.txt's text when there is one). */
-async function readOutcome(dir: string, c: ReplayCase): Promise<Outcome> {
-  try {
-    const saved = await readSaved(dir, c);
-    if (saved.doc && saved.matches) return { kind: 'judged', doc: saved.doc, matches: saved.matches };
-    const error = (await readText(join(dir, 'error.txt')))?.trim();
-    if (saved.doc) return { kind: 'judge-failed', doc: saved.doc, error: error || 'The review was saved but not judged.' };
-    if (error) return { kind: 'review-failed', error };
-  } catch {
-    // An unreadable case folder is a case with no usable outcome.
-  }
-  return { kind: 'review-failed', error: NOT_RUN };
-}
-
-const NOT_RUN = 'This case has not been run.';
-
 /**
  * Replays past pull requests through the review pipeline, judges each review against the case's known problems and
  * scores the run. Resumes a run folder left by an earlier call; the summary and report cover every case the run has
@@ -354,7 +381,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   const opened = await openRunFolder(runDir, {
     runId, model: opts.model, depth: opts.depth, judgeModel, kitSha: opts.kitSha,
     caseIds: opts.cases.map((c) => c.id), startedAt: now.toISOString(),
-  }, opts.dataset ?? opts.cases);
+  }, opts.dataset, opts.cases);
   const { run } = opened;
   const scoring: RunInfo = { model: run.model, depth: run.depth, createdAt: run.startedAt };
 
@@ -372,40 +399,47 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   // The judge reads nothing from disk: it runs in an empty folder made for this run.
   const judgeDir = await mkdtemp(join(tmpdir(), 'airlock-replay-judge-'));
 
-  /** Reviews (unless a saved review is reused) and judges one case. Never throws. */
+  /**
+   * Works on one case until it is done: reviews it unless a finished review of it is saved, then judges it. A review
+   * that comes back incomplete is saved, in place of the old one, and not judged. Never throws.
+   */
   const processCase = async (c: ReplayCase): Promise<Scored> => {
     const dir = join(runDir, c.id);
     let kept: ReviewDocument | null = null;
-    let lead = 'The review failed';
+    let lead = 'The case folder could not be prepared';
     try {
-      const saved = await readSaved(dir, c);
-      if (saved.doc && saved.matches) return finish(c, { kind: 'judged', doc: saved.doc, matches: saved.matches }, 'skipped');
+      const saved = await readOutcome(dir, c);
+      if (saved.kind === 'done') return finish(c, saved, 'skipped');
 
-      emit({ caseId: c.id, status: 'start', ...(saved.doc ? { message: 'judging the saved review again' } : {}) });
+      emit({ caseId: c.id, status: 'start', ...(saved.kind === 'not-judged' ? { message: 'judging the saved review again' } : {}) });
       await mkdir(dir, { recursive: true });
-      await rm(join(dir, 'error.txt'), { force: true });
+      await rm(join(dir, 'error.txt'), { recursive: true, force: true });
       await rm(join(dir, 'matches.json'), { force: true });
 
-      if (saved.doc) {
+      if (saved.kind === 'not-judged') {
         kept = saved.doc;
       } else {
-        await rm(join(dir, 'review.json'), { force: true });
+        lead = 'The review failed';
         const doc = ReviewDocumentSchema.parse(await review(reviewRequest(c, opts), engineDeps));
         lead = 'Saving the review failed';
         await writeAtomic(join(dir, 'review.json'), json(doc));
-        kept = doc;
         emit({ caseId: c.id, status: 'reviewed' });
+        if (doc.verdict.label === 'incomplete') {
+          const reason = didNotFinish(doc);
+          return finish(c, { kind: 'not-done', doc, reason }, 'failed', reason);
+        }
+        kept = doc;
       }
 
       lead = 'The judge failed';
       const matches = await judgeCase(deps.runner, c, kept, judgeModel, judgeDir);
       lead = 'Saving the matches failed';
       await writeAtomic(join(dir, 'matches.json'), json(matches));
-      return finish(c, { kind: 'judged', doc: kept, matches }, 'judged');
+      return finish(c, { kind: 'done', doc: kept, matches }, 'judged');
     } catch (err) {
       const error = failureText(lead, err);
       await writeAtomic(join(dir, 'error.txt'), `${error}\n`).catch(() => undefined);
-      return finish(c, kept ? { kind: 'judge-failed', doc: kept, error } : { kind: 'review-failed', error }, 'failed', error);
+      return finish(c, kept ? { kind: 'not-judged', doc: kept, reason: error } : { kind: 'not-done', doc: null, reason: error }, 'failed', error);
     }
   };
 
@@ -423,7 +457,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
     if (r.status === 'fulfilled') return r.value;
     // Not expected: processCase and readOutcome do not throw. Still, one case never stops the others.
     const c = opened.cases[i]!;
-    return scoreOutcome(c, { kind: 'review-failed', error: failureText('The case failed', r.reason) }, scoring);
+    return scoreOutcome(c, { kind: 'not-done', doc: null, reason: failureText('The case failed', r.reason) }, scoring);
   });
   const summary = summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases);
   const details: RunDetails = Object.fromEntries(opened.cases.map((c, i) => [c.id, results[i]!.detail]));
@@ -441,12 +475,7 @@ export async function loadRun(runDir: string, cases: ReplayCase[]): Promise<{ su
   } catch {
     throw new Error(`${join(runDir, 'run.json')} cannot be read.`);
   }
-  const byId = new Map(cases.map((c) => [c.id, c]));
-  const selected = run.caseIds.map((id) => {
-    const c = byId.get(id);
-    if (!c) throw new Error(`The run in ${runDir} has case ${id}, which is not in the dataset.`);
-    return c;
-  });
+  const selected = inDatasetOrder(run.caseIds, cases, runDir);
   checkCases(selected);
   const scoring: RunInfo = { model: run.model, depth: run.depth, createdAt: run.startedAt };
   const results = await Promise.all(selected.map(async (c) => scoreOutcome(c, await readOutcome(join(runDir, c.id), c), scoring)));

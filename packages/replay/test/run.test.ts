@@ -372,8 +372,8 @@ describe('runReplay', () => {
     expect(summary.cases.map((s) => [s.caseId, s.verdict])).toEqual([['pr1', 'approve'], ['pr2', 'approve'], ['pr3', 'approve']]);
     expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ caseIds: ['pr1', 'pr2', 'pr3'] });
 
-    // An earlier case that the dataset no longer has cannot be scored, so the run folder is refused.
-    await expect(runReplay(options({ cases: [cases()[1]!] }), deps(fakeReview()))).rejects.toThrow(/pr1.*not in the dataset/);
+    // An earlier case that a given dataset no longer has cannot be scored, so the run folder is refused.
+    await expect(runReplay(options({ cases: [cases()[1]!], dataset: [cases()[1]!] }), deps(fakeReview()))).rejects.toThrow(/pr1.*not in the dataset/);
   });
 
   it('a case whose folder cannot be written is unfinished, and the other cases still finish', async () => {
@@ -383,7 +383,9 @@ describe('runReplay', () => {
     const summary = await runReplay(options(), deps(fakeReview()), onCase);
     expect(summary.cases.map((s) => [s.caseId, s.verdict])).toEqual([['pr1', 'approve'], ['pr2', 'incomplete'], ['pr3', 'approve']]);
     expect(summary.incompleteCases).toEqual(['pr2']);
-    expect(events.filter((e) => e.caseId === 'pr2').map((e) => e.status)).toEqual(['failed']);
+    expect(events.filter((e) => e.caseId === 'pr2').map((e) => e.status)).toEqual(['start', 'failed']);
+    // The review never started, so this is a problem with the case's folder, not a failed review.
+    expect(events.find((e) => e.caseId === 'pr2' && e.status === 'failed')!.message).toMatch(/^The case folder could not be prepared: /);
     expect(await exists(join(outDir, 'run-a', 'report.md'))).toBe(true);
   });
 
@@ -439,6 +441,144 @@ describe('runReplay', () => {
     expect(review.requests).toHaveLength(0);
     expect(runner.calls).toHaveLength(1);
     expect(summary.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 1 });
+  });
+
+  describe('a case is done only when it really finished', () => {
+    const incomplete = (req: ReviewRequest): ReviewDocument => ({
+      ...reviewFor(req),
+      verdict: { label: 'incomplete', sentence: 'The review did not finish.', counts: { block: 0, fix: 0, ask: 0, note: 1 } },
+      stageErrors: [
+        { stage: 'lenses', cohortId: 'c1', message: 'The lens failed.' },
+        { stage: 'sweep', cohortId: null, message: 'The sweep failed.' },
+        { stage: 'lenses', cohortId: 'c2', message: 'The lens failed.' },
+      ],
+    });
+
+    it('a review that comes back incomplete is saved but not judged, and the case is unfinished', async () => {
+      const runner = createFakeRunner(judgeAnswer);
+      const { events, onCase } = recorder();
+      const summary = await runReplay(options(), deps(fakeReview((req) => (req.number === 1 ? incomplete(req) : reviewFor(req))), runner), onCase);
+      expect(runner.calls.filter((r) => isFor(r, 'K1'))).toHaveLength(0);
+      expect((await readdir(caseDir('pr1'))).sort()).toEqual(['review.json']);
+      expect(summary.incompleteCases).toEqual(['pr1']);
+      expect(summary.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 0, raised: 0, findingsShown: 1, verdict: 'incomplete' });
+      expect(events.filter((e) => e.caseId === 'pr1').map((e) => [e.status, e.message])).toEqual([
+        ['start', undefined], ['reviewed', undefined], ['failed', 'The review did not finish (lenses, sweep).'],
+      ]);
+      expect((await loadRun(join(outDir, 'run-a'), cases())).summary).toEqual(summary);
+    });
+
+    it('a saved incomplete review is reviewed again, and the old file is replaced only when the new review is saved', async () => {
+      await runReplay(options(), deps(fakeReview((req) => (req.number === 1 ? incomplete(req) : reviewFor(req)))));
+      // An older run judged its incomplete review: that still does not make the case done.
+      await writeFile(join(caseDir('pr1'), 'matches.json'), JSON.stringify(judgeAnswer().matches.slice(0, 2).map((m) => ({ ...m, where: 'none', itemId: null }))));
+      const before = await readFile(join(caseDir('pr1'), 'review.json'), 'utf8');
+
+      const failing = fakeReview((req) => { if (req.number === 1) throw new Error('clone failed'); return reviewFor(req); });
+      const second = await runReplay(options(), deps(failing));
+      expect(failing.requests.map((r) => r.number)).toEqual([1]);
+      expect(await readFile(join(caseDir('pr1'), 'review.json'), 'utf8')).toBe(before);
+      expect(second.incompleteCases).toEqual(['pr1']);
+
+      const healthy = fakeReview();
+      const third = await runReplay(options(), deps(healthy));
+      expect(healthy.requests.map((r) => r.number)).toEqual([1]);
+      expect(ReviewDocumentSchema.parse(await readJson(join(caseDir('pr1'), 'review.json'))).verdict.label).toBe('approve');
+      expect(third.incompleteCases).toEqual([]);
+      expect(third.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 1 });
+    });
+
+    it('saved matches that cannot be scored are judged again without reviewing again', async () => {
+      await runReplay(options(), deps(fakeReview()));
+      // Valid in form and for the right known problems, but naming a dropped item the review does not have.
+      await writeFile(join(caseDir('pr1'), 'matches.json'), JSON.stringify([
+        { knownId: 'K1', where: 'dropped', itemId: 'd9', partial: false, reason: 'x' },
+        { knownId: 'K2', where: 'none', itemId: null, partial: false, reason: 'x' },
+      ]));
+      const loaded = await loadRun(join(outDir, 'run-a'), cases());
+      expect(loaded.summary.incompleteCases).toEqual(['pr1']);
+      expect(loaded.details.pr1!.doc.stageErrors.at(-1)).toMatchObject({ stage: 'judge', message: 'The review finished but was not judged.' });
+
+      const review = fakeReview(() => { throw new Error('must not review again'); });
+      const runner = createFakeRunner(judgeAnswer);
+      const summary = await runReplay(options(), deps(review, runner));
+      expect(review.requests).toHaveLength(0);
+      expect(runner.calls).toHaveLength(1);
+      expect(summary.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 1, verdict: 'approve' });
+    });
+
+    it('an error.txt that cannot be read does not discard a valid saved review', async () => {
+      await runReplay(options(), deps(fakeReview()));
+      await rm(join(caseDir('pr1'), 'matches.json'));
+      await mkdir(join(caseDir('pr1'), 'error.txt')); // reading it fails with EISDIR
+      const loaded = await loadRun(join(outDir, 'run-a'), cases());
+      expect(loaded.details.pr1!.doc.findings).toHaveLength(1);
+      expect(loaded.details.pr1!.doc.stageErrors.at(-1)).toMatchObject({ stage: 'judge', message: 'The review finished but was not judged.' });
+
+      const review = fakeReview(() => { throw new Error('must not review again'); });
+      const runner = createFakeRunner(judgeAnswer);
+      const summary = await runReplay(options({ cases: [cases()[0]!], dataset: cases() }), deps(review, runner));
+      expect(review.requests).toHaveLength(0);
+      expect(runner.calls).toHaveLength(1);
+      expect(summary.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 1, verdict: 'approve' });
+    });
+
+    it('a case that is not done and not selected is unfinished, with a reason true for its state', async () => {
+      const many = [1, 2, 3, 4, 5, 6].map((n) => replayCase({
+        id: `pr${n}`, pr: n, baseSha: String(n).repeat(40), headSha: 'e'.repeat(40), known: [problem({ id: `K${n}` })],
+      }));
+      const answer = (req: AgentRequest<unknown>) => ({
+        matches: many.map((c) => c.known[0]!.id).filter((id) => isFor(req, id)).map((knownId) => ({ knownId, itemId: 'f1', partial: false, reason: 'Same.' })),
+      });
+      const opts = { cases: many, dataset: many };
+      await runReplay(options(opts), deps(fakeReview((req) => (req.number === 4 ? incomplete(req) : reviewFor(req))), createFakeRunner(answer)));
+      await rm(caseDir('pr1'), { recursive: true });
+      // pr1 was never run. pr2's saved review is for other commits. pr3 finished but its matches are gone. pr4 did not
+      // finish. pr5's review failed. pr6 is done.
+      const pr2 = ReviewDocumentSchema.parse(await readJson(join(caseDir('pr2'), 'review.json')));
+      await writeFile(join(caseDir('pr2'), 'review.json'), JSON.stringify({ ...pr2, range: { ...pr2.range, headSha: 'f'.repeat(40) } }));
+      await rm(join(caseDir('pr3'), 'matches.json'));
+      await rm(join(caseDir('pr5'), 'matches.json'));
+      await rm(join(caseDir('pr5'), 'review.json'));
+      await writeFile(join(caseDir('pr5'), 'error.txt'), 'The review failed: no such commit\n');
+
+      const review = fakeReview();
+      const runner = createFakeRunner(answer);
+      const summary = await runReplay(options({ ...opts, cases: [many[5]!] }), deps(review, runner));
+      expect(review.requests).toHaveLength(0);
+      expect(runner.calls).toHaveLength(0);
+      expect(summary.incompleteCases).toEqual(['pr1', 'pr2', 'pr3', 'pr4', 'pr5']);
+      const { details } = await loadRun(join(outDir, 'run-a'), many);
+      const why = (id: string): string => details[id]!.doc.stageErrors.at(-1)!.message;
+      expect(why('pr1')).toBe('This case has not been run.');
+      expect(why('pr2')).toBe('The saved review is for other commits.');
+      expect(why('pr3')).toBe('The review finished but was not judged.');
+      expect(details.pr4!.doc.stageErrors.map((e) => e.stage)).toEqual(['lenses', 'sweep', 'lenses']);
+      expect(why('pr5')).toBe('The review failed: no such commit');
+      for (const id of ['pr1', 'pr2', 'pr5']) expect(details[id]!.doc.findings).toEqual([]);
+      expect(details.pr3!.doc.findings).toHaveLength(1);
+      expect(summary.cases.find((s) => s.caseId === 'pr6')).toMatchObject({ inTop: 1, verdict: 'approve' });
+    });
+
+    it('a saved review.json that cannot be read is reviewed again, and is unfinished until then', async () => {
+      await runReplay(options(), deps(fakeReview()));
+      await writeFile(join(caseDir('pr1'), 'review.json'), '{ not json');
+      const loaded = await loadRun(join(outDir, 'run-a'), cases());
+      expect(loaded.details.pr1!.doc.stageErrors).toEqual([{ stage: 'intake', cohortId: null, message: 'The saved review cannot be read.' }]);
+    });
+
+    it('a resume that passes no dataset and narrows the selection is not refused, and run.json keeps every case', async () => {
+      await runReplay(options(), deps(fakeReview()));
+      await rm(join(caseDir('pr2'), 'matches.json'));
+      const runner = createFakeRunner(judgeAnswer);
+      const summary = await runReplay(options({ cases: [cases()[1]!] }), deps(fakeReview(), runner));
+      expect(runner.calls).toHaveLength(1);
+      expect(summary.cases.map((s) => [s.caseId, s.verdict])).toEqual([['pr2', 'approve']]);
+      expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ caseIds: ['pr2', 'pr1', 'pr3'] });
+      // A later call with the whole dataset covers every case again.
+      const loaded = await loadRun(join(outDir, 'run-a'), cases());
+      expect(loaded.summary.cases.map((s) => s.caseId)).toEqual(['pr1', 'pr2', 'pr3']);
+    });
   });
 
   it('the judge runs in a fresh, empty folder made for the run and removed at the end', async () => {
