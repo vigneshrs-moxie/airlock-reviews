@@ -144,20 +144,98 @@ type Lines = { startLine: number; endLine: number };
 const overlaps = (found: Lines, own: Anchor): boolean =>
   own.startLine !== null && found.startLine <= (own.endLine ?? own.startLine) && own.startLine <= found.endLine;
 
-/** A leading list marker such as `- `, `* ` or `1. `; it is not part of the sentence after it. */
+// ---- Reading a standard as sentences ----
+
+/** A leading list marker such as `- `, `* ` or `1. `; it is not part of the entry after it. */
 const LIST_MARKER = /^\s*(?:[-*+]|\d+[.)])\s+/;
-/** Whole sentences and list entries, each without whitespace. They end at a line break or at `.`, `!` or `?` before whitespace. */
-const sentencesOf = (text: string): string[] =>
-  text.split(/\r?\n/)
-    .flatMap((line) => line.replace(LIST_MARKER, '').split(/(?<=[.!?])\s+/))
-    .map(squash)
-    .filter((s) => s !== '');
+const HEADING = /^\s*#/;
+const TABLE_ROW = /^\s*\|/;
+const BLOCK_QUOTE = /^\s*>\s?/;
+/** A sentence ends at `.`, `!` or `?`, then whitespace, then an uppercase letter, a digit, a quote, a backtick, an opening bracket or the end. */
+const SENTENCE_END = /(?<=[.!?])\s+(?=[\p{Lu}\p{N}"'`“‘([{]|$)/u;
+
+type Block = { kind: 'paragraph' | 'quote' | 'item' | 'heading' | 'row'; text: string };
+
+/**
+ * The text as paragraphs, block quotes, list entries, headings and table rows. A wrapped line continues the block above
+ * it; a block ends at a blank line, before a list item, heading, table row or block quote, and after a heading or table
+ * row. Consecutive block-quote lines form one block quote.
+ */
+function blocksOf(text: string): Block[] {
+  const blocks: Block[] = [];
+  let open: Block | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const body = line.trim();
+    if (body === '') {
+      open = null;
+      continue;
+    }
+    let block: Block;
+    if (HEADING.test(line)) block = { kind: 'heading', text: body };
+    else if (TABLE_ROW.test(line)) block = { kind: 'row', text: body };
+    else if (LIST_MARKER.test(line)) block = { kind: 'item', text: line.replace(LIST_MARKER, '').trim() };
+    else if (BLOCK_QUOTE.test(line)) {
+      const quoted = line.replace(BLOCK_QUOTE, '').trim();
+      if (open !== null && open.kind === 'quote') {
+        open.text += ` ${quoted}`;
+        continue;
+      }
+      block = { kind: 'quote', text: quoted };
+    } else if (open !== null) {
+      open.text += ` ${body}`;
+      continue;
+    } else block = { kind: 'paragraph', text: body };
+    blocks.push(block);
+    open = block.kind === 'heading' || block.kind === 'row' ? null : block;
+  }
+  return blocks;
+}
+
+const sentencesIn = (text: string): string[] => text.split(SENTENCE_END).map((s) => s.trim()).filter((s) => s !== '');
+
+/**
+ * The units a quote from the standards must match whole, each without whitespace: the sentences of each paragraph and
+ * list entry, and each table row. A list entry under a lead-in ending with a colon is one unit with that lead-in
+ * sentence. A heading is a unit no quote can equal, so a quote never runs through one. `tag` keeps the headings of two
+ * texts apart.
+ */
+function unitsOf(text: string, tag: string): string[] {
+  const blocks = blocksOf(text);
+  const units: string[] = [];
+  let leadIn: string | null = null;
+  blocks.forEach((b, i) => {
+    if (b.kind === 'item') {
+      units.push(...(leadIn === null ? sentencesIn(b.text) : [`${leadIn} ${b.text}`]).map(squash));
+      return;
+    }
+    leadIn = null;
+    if (b.kind === 'heading') units.push(`\0${tag}${i}`);
+    else if (b.kind === 'row') units.push(squash(b.text));
+    else {
+      const sentences = sentencesIn(b.text);
+      if (blocks[i + 1]?.kind === 'item' && sentences.at(-1)?.endsWith(':')) leadIn = sentences.pop()!;
+      units.push(...sentences.map(squash));
+    }
+  });
+  return units;
+}
 /** True when `needle` appears as consecutive items of `hay`. */
 const hasRun = (hay: string[], needle: string[]): boolean =>
   needle.length > 0 && hay.some((_, i) => needle.every((n, k) => hay[i + k] === n));
 
-const isAddedLine = (file: FileDiff, line: number): boolean =>
-  file.hunks.some((h) => h.lines.some((l) => l.kind === 'add' && l.newNo === line));
+/**
+ * True when any of `lines` falls inside a hunk's new-side range. A hunk with no new lines (a pure deletion) covers the
+ * two lines on either side of where the deleted lines were.
+ */
+const insideHunk = (file: FileDiff, lines: Lines): boolean =>
+  file.hunks.some((h) => {
+    const end = h.newLines === 0 ? h.newStart + 1 : h.newStart + h.newLines - 1;
+    return lines.startLine <= end && h.newStart <= lines.endLine;
+  });
+
+/** Paths compared the same way on both sides: posix-normalised, and ignoring letter case as a case-insensitive disk would. */
+const pathKey = (path: string): string => posix.normalize(path).toLowerCase();
+const samePath = (a: string, b: string): boolean => pathKey(a) === pathKey(b);
 
 /** What a refutation is checked against: files on either side, the diff, and the standards the challenger was given. */
 interface Evidence {
@@ -176,21 +254,23 @@ async function proveOnHead(item: Item, ref: Refutation, { read }: Evidence): Pro
   const path = posix.normalize(ref.path);
   const found = findQuote(await read('head', path), ref.quote);
   if (found.length === 0) return NO_PROOF;
-  if (path === item.path && found.some((f) => overlaps(f, item.anchor))) return OWN_CODE;
+  if (samePath(path, item.path) && found.some((f) => overlaps(f, item.anchor))) return OWN_CODE;
   return { place: { path, line: found[0]!.startLine, role: 'head', quote: ref.quote } };
 }
 
 /**
  * Ground 2: the base version of the finding's own file (or of its old path, when renamed) holds the finding's own quote,
- * and the finding's first line is not one this pull request added. The record cites the finding's quote on the base.
+ * and the finding's lines are outside every hunk of its file, so nothing this pull request changed sits beside them.
+ * The record cites the finding's quote on the base, under the file's real path.
  */
 async function provePreExisting(item: Item, ref: Refutation, { read, files }: Evidence): Promise<Proof> {
-  if (ref.where !== 'base' || !isSafePath(ref.path)) return NO_PROOF;
-  const file = files.get(item.path);
-  const path = posix.normalize(ref.path);
-  const own = file?.status === 'renamed' && file.oldPath ? [item.path, file.oldPath] : [item.path];
   const line = item.anchor.startLine;
-  if (!own.includes(path) || line === null || (file !== undefined && isAddedLine(file, line))) return NO_PROOF;
+  if (ref.where !== 'base' || !isSafePath(ref.path) || line === null) return NO_PROOF;
+  const file = files.get(posix.normalize(item.path));
+  const own = [posix.normalize(item.path), ...(file?.status === 'renamed' && file.oldPath ? [file.oldPath] : [])];
+  const path = own.find((p) => samePath(p, ref.path));
+  if (path === undefined) return NO_PROOF;
+  if (file !== undefined && insideHunk(file, { startLine: line, endLine: item.anchor.endLine ?? line })) return NO_PROOF;
   const found = findQuote(await read('base', path), item.quote);
   if (found.length === 0) return NO_PROOF;
   const nearest = found.reduce((a, b) => (Math.abs(b.startLine - line) < Math.abs(a.startLine - line) ? b : a));
@@ -200,8 +280,8 @@ async function provePreExisting(item: Item, ref: Refutation, { read, files }: Ev
 /** Ground 4: one or more whole consecutive sentences or entries of one standard or learned list the challenger was given. */
 function proveIntent(ref: Refutation, { documents }: Evidence): Proof {
   if (ref.where !== 'standard' || !isWholeSentence(ref.quote)) return NO_PROOF;
-  const quoted = sentencesOf(ref.quote);
-  const doc = documents.find((d) => hasRun(sentencesOf(d.text), quoted));
+  const quoted = unitsOf(ref.quote, 'quote');
+  const doc = documents.find((d) => hasRun(unitsOf(d.text, 'standard'), quoted));
   return doc ? { place: { path: doc.name, line: null, role: 'standard', quote: ref.quote } } : NO_PROOF;
 }
 
@@ -243,7 +323,9 @@ async function applyAnswer(item: Item, answer: ChallengeOutput, evidence: Eviden
         return { kept: { ...item, checked: `${asSentence(said)}${UNCONFIRMED}` } };
       }
       const { anchor: _anchor, ...candidate } = item;
-      const reason = `${answer.ground}: ${answer.explanation.trim()}`;
+      const { path, line, role } = proof.place;
+      const where = role === 'standard' ? `a sentence in ${path}` : `${path}:${line} on the ${role}`;
+      const reason = `${answer.ground}: ${answer.explanation.trim()} (proof: ${where})`;
       return { dropped: { candidate, stage: 'challenge', reason, refutation: proof.place } };
     }
     case 'downgrade':
@@ -277,7 +359,7 @@ export async function challenge(
   const instructions = instructionsFor(await loadTemplate('challenge'), ctx.packs, null);
   const evidence: Evidence = {
     read: readOnce(read),
-    files: new Map(ctx.files.map((f) => [f.path, f])),
+    files: new Map(ctx.files.map((f) => [posix.normalize(f.path), f])),
     documents: [...standardDocuments(ctx.packs), ...learnedDocuments(ctx.packs)],
   };
   const tier = tierOf(ctx.tiers);

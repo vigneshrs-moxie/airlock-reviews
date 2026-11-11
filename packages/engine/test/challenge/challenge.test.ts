@@ -34,13 +34,20 @@ const HEAD_CHARGE = [
   'function noop() {', '  return;', '}',
 ].join('\n');
 
-/** src/pause.ts with line 2 (the finding's line) unchanged and line 3 added, so the finding can be pre-existing. */
+/** src/pause.ts changed only at line 20, so the finding's line 2 is outside every hunk and can be pre-existing. */
 const PAUSE_LINE_2_UNCHANGED = diff('src/pause.ts', 0, {
   hunks: [{
-    oldStart: 3, oldLines: 1, newStart: 2, newLines: 2, header: '@@ -3,1 +2,2 @@',
+    oldStart: 20, oldLines: 0, newStart: 20, newLines: 1, header: '@@ -20,0 +20,1 @@',
+    lines: [{ kind: 'add', oldNo: null, newNo: 20, text: '  log(plan);' }],
+  }],
+});
+/** src/pause.ts with a guard deleted directly above the finding's unchanged line 2, in the same hunk. */
+const PAUSE_GUARD_DELETED_ABOVE = diff('src/pause.ts', 0, {
+  hunks: [{
+    oldStart: 2, oldLines: 2, newStart: 2, newLines: 1, header: '@@ -2,2 +2,1 @@',
     lines: [
+      { kind: 'del', oldNo: 2, newNo: null, text: '  if (plan.paused) return;' },
       { kind: 'ctx', oldNo: 3, newNo: 2, text: '  if (plan.active) charge(plan);' },
-      { kind: 'add', oldNo: null, newNo: 3, text: '  log(plan);' },
     ],
   }],
 });
@@ -86,7 +93,8 @@ describe('challenge', () => {
     const r = await challenge(runner, unchangedCtx(), [item('c1', 'fix')], read);
     expect(r.kept).toEqual([]);
     expect(r.dropped).toEqual([{
-      candidate, stage: 'challenge', reason: 'pre-existing: The base branch charges active plans the same way.',
+      candidate, stage: 'challenge',
+      reason: 'pre-existing: The base branch charges active plans the same way. (proof: src/pause.ts:3 on the base)',
       refutation: { path: 'src/pause.ts', line: 3, role: 'base', quote: 'if (plan.active) charge(plan);' },
     }]);
   });
@@ -101,7 +109,7 @@ describe('challenge', () => {
     expect(r.dropped[0]!.refutation).toEqual({
       path: 'src/charge.ts', line: 4, role: 'head', quote: 'for (const p of plans.filter((x) => !x.paused)) charge(p);',
     });
-    expect(r.dropped[0]!.reason).toBe('guarded-elsewhere: The nightly job skips paused plans.');
+    expect(r.dropped[0]!.reason).toBe('guarded-elsewhere: The nightly job skips paused plans. (proof: src/charge.ts:4 on the head)');
   });
 
   it('keeps a candidate when the refutation quote cannot be found', async () => {
@@ -370,8 +378,45 @@ describe('challenge', () => {
       expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
     });
 
+    it('recognises the finding\'s own file when the finding\'s path starts with ./', async () => {
+      const { r } = await run(drop('guarded-elsewhere', { path: 'src/pause.ts', quote: OWN, where: 'head' }), {}, 'fix', {
+        item: { path: './src/pause.ts' },
+      });
+      expect(r.dropped).toEqual([]);
+      expect(r.kept[0]!.checked).toContain('EXPLANATION_MARKER');
+    });
+
+    it('recognises the finding\'s own file when the refutation path differs only in letter case', async () => {
+      const { r } = await run(drop('guarded-elsewhere', { path: 'SRC/Pause.ts', quote: OWN, where: 'head' }), {}, 'fix', {
+        files: { 'head:SRC/Pause.ts': HEAD_PAUSE },
+      });
+      expect(r.dropped).toEqual([]);
+      expect(r.kept[0]!.checked).toContain('EXPLANATION_MARKER');
+    });
+
     describe('pre-existing', () => {
       const ALREADY = { path: 'src/pause.ts', quote: '// already charged before this change', where: 'base' };
+
+      it('does not count a context line inside a hunk, beside a deleted guard, as pre-existing', async () => {
+        const { r } = await run(drop('pre-existing', ALREADY), { files: [PAUSE_GUARD_DELETED_ABOVE] });
+        expect(r.dropped).toEqual([]);
+        expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+      });
+
+      it('honours the same code when it is outside every hunk of its file', async () => {
+        const { r } = await run(drop('pre-existing', ALREADY), { files: [PAUSE_LINE_2_UNCHANGED] });
+        expect(r.dropped[0]!.refutation).toEqual({ path: 'src/pause.ts', line: 3, role: 'base', quote: OWN });
+      });
+
+      it('honours a file that is not in the diff at all', async () => {
+        const { r } = await run(drop('pre-existing', ALREADY), { files: [diff('src/charge.ts')] });
+        expect(r.dropped).toHaveLength(1);
+      });
+
+      it('matches the finding\'s file when the refutation path differs only in letter case, and records the real path', async () => {
+        const { r } = await run(drop('pre-existing', { ...ALREADY, path: 'SRC/Pause.ts' }), { files: UNCHANGED_FILES });
+        expect(r.dropped[0]!.refutation).toEqual({ path: 'src/pause.ts', line: 3, role: 'base', quote: OWN });
+      });
 
       it('does not take a quote from another base file as proof', async () => {
         const { r } = await run(drop('pre-existing', { path: 'src/util/strings.ts', quote: 'export const trimAll = (s) => s.trim();', where: 'base' }), { files: UNCHANGED_FILES });
@@ -470,6 +515,61 @@ describe('challenge', () => {
       })];
       const intent = (quote: string) => drop('documented-intent', { path: 'x', quote, where: 'standard' });
 
+      describe('in a hard-wrapped standard', () => {
+        const NO_EVAL = 'No `eval`, `new Function`, `setTimeout("string")`, or scripts fetched from a URL.';
+        const LEAD = 'Never do the following in a billing job:';
+        const wrapped = [pack('core', [lens('boundary')], {
+          standards: [{
+            name: 'orbit.md',
+            text: [
+              '# Extensions',
+              '',
+              'Code from strings is never allowed in an extension. No',
+              '`eval`, `new Function`, `setTimeout("string")`, or scripts fetched from a URL.',
+              '',
+              'Do not let members pause twice in one year, i.e. a second pause request within twelve months is refused.',
+              '',
+              LEAD,
+              '- retry a failed charge without the original idempotency key',
+              '- charge a plan that is paused or cancelled',
+              '',
+              '## Pauses',
+              'Members on a paused plan are never charged by the nightly billing job.',
+              '',
+              '| Office | Billing day must be the first of the month |',
+            ].join('\n'),
+            dated: false,
+          }],
+        })];
+        const check = async (quote: string) => (await run(intent(quote), { packs: wrapped })).r;
+
+        it.each([
+          ['a wrapped line whose negation is on the line above', NO_EVAL.slice('No '.length)],
+          ['the tail after "i.e."', 'a second pause request within twelve months is refused.'],
+          ['a list entry without its negating lead-in', 'retry a failed charge without the original idempotency key'],
+          ['a heading joined to the sentence under it', '## Pauses\nMembers on a paused plan are never charged by the nightly billing job.'],
+          ['one cell of a table row', 'Billing day must be the first of the month'],
+        ])('does not take %s as proof', async (_what, quote) => {
+          const r = await check(quote);
+          expect(r.dropped).toEqual([]);
+          expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+        });
+
+        it.each([
+          ['the whole sentence joined across the wrap', NO_EVAL],
+          ['both sentences as wrapped in the file', `Code from strings is never allowed in an extension. No\n${NO_EVAL.slice('No '.length)}`],
+          ['the whole sentence with "i.e." in it', 'Do not let members pause twice in one year, i.e. a second pause request within twelve months is refused.'],
+          ['the lead-in with one entry', `${LEAD}\n- retry a failed charge without the original idempotency key`],
+          ['the lead-in with both entries', `${LEAD}\n- retry a failed charge without the original idempotency key\n- charge a plan that is paused or cancelled`],
+          ['the sentence under a heading, without the heading', 'Members on a paused plan are never charged by the nightly billing job.'],
+          ['a whole table row', '| Office | Billing day must be the first of the month |'],
+        ])('drops on %s', async (_what, quote) => {
+          const r = await check(quote);
+          expect(r.kept).toEqual([]);
+          expect(r.dropped[0]!.refutation).toMatchObject({ path: 'Pack core: orbit.md', role: 'standard' });
+        });
+      });
+
       it.each([
         'safe to skip the idempotency key on nightly billing runs.',
         'share a plan across two regions without written approval.',
@@ -515,7 +615,7 @@ describe('challenge', () => {
         const { r, calls } = await run(drop('documented-intent', { path: 'anything', quote, where: 'standard' }), { packs });
         expect(r.kept).toEqual([]);
         expect(r.dropped[0]).toMatchObject({
-          reason: 'documented-intent: EXPLANATION_MARKER the code shows it.',
+          reason: 'documented-intent: EXPLANATION_MARKER the code shows it. (proof: a sentence in Pack core: calibration.md)',
           refutation: { path: 'Pack core: calibration.md', line: null, role: 'standard', quote },
         });
         expect(calls).toEqual([]);
