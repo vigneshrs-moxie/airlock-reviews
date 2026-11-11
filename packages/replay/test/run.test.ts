@@ -328,7 +328,7 @@ describe('runReplay', () => {
     const retrying = withRetry(runner, 1);
     const summary = await runReplay(options({ cases: [cases()[0]!] }), { ...deps(fakeReview()), runner: retrying });
     expect(runner.calls).toHaveLength(2);
-    expect(runner.calls[1]!.instructions).toContain('not the expected form');
+    expect(runner.calls[1]!.material).toContain('not the expected form');
     expect(summary.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 1, verdict: 'approve' });
     expect(await exists(join(caseDir('pr1'), 'error.txt'))).toBe(false);
   });

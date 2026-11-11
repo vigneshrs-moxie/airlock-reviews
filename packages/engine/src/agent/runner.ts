@@ -1,5 +1,6 @@
 import type { ModelConfig } from '@airlock/shared';
 import type { z } from 'zod';
+import { asMaterial } from './prompt.js';
 
 export interface AgentRequest<T> {
   role: string;
@@ -30,6 +31,8 @@ export interface AgentRunner {
   run<T>(req: AgentRequest<T>): Promise<AgentResult<T>>;
 }
 
+const RETRY_SENTENCE = 'Your previous reply could not be used. Why is in the material block below. Reply again, following the output format exactly.';
+
 const ZERO_USAGE: AgentUsage = { ms: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, turns: 0 };
 
 function addUsage(a: AgentUsage, b: AgentUsage): AgentUsage {
@@ -50,15 +53,16 @@ async function attempt<T>(inner: AgentRunner, req: AgentRequest<T>): Promise<Age
   }
 }
 
-/** Retries once when a result has ok: false, telling the model why its last reply could not be used. */
+/** Retries once when a result has ok: false, telling the model, inside a material block, why its last reply could not be used. */
 export function withRetry(inner: AgentRunner, retries: 1): AgentRunner {
   void retries;
   return {
     async run<T>(req: AgentRequest<T>): Promise<AgentResult<T>> {
       const first = await attempt(inner, req);
       if (first.ok || req.signal?.aborted) return first;
-      const instructions = `${req.instructions}\n\nYour previous reply could not be used: ${first.error}. Reply again, following the output format exactly.`;
-      const second = await attempt(inner, { ...req, instructions });
+      // The error can quote the model's own reply, so it goes in as material; the instructions stay as they were.
+      const material = `${req.material}\n\n${RETRY_SENTENCE}\n\n${asMaterial('problems with your previous reply', first.error)}`;
+      const second = await attempt(inner, { ...req, material });
       const usage = addUsage(first.usage, second.usage);
       return second.ok ? { ok: true, output: second.output, usage } : { ok: false, error: second.error, usage };
     },

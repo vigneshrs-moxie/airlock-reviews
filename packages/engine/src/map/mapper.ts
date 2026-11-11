@@ -39,6 +39,9 @@ const MAX_NEIGHBOUR_CHARS = 8_000;
 const MAX_DESCRIPTION_CHARS = 6_000;
 const MAX_ERROR_CHARS = 300;
 
+const RETRY_SENTENCE = 'Your previous answer could not be used. The problems are listed in the material block below. Fix them and return the whole map again.';
+const PROBLEMS_LABEL = 'problems with your previous answer';
+
 const FALLBACK_SUMMARY = 'Grouped by code links because the mapper did not return a valid map.';
 
 /** Links whose two ends are both in `paths`. */
@@ -201,9 +204,10 @@ export async function buildChangeMap(runner: AgentRunner, input: MapInput): Prom
   const usage: AgentUsage[] = [];
   let problems: string[] = [];
   for (let attempt = 1; attempt <= 2; attempt++) {
+    // The problems quote file names from the pull request and ids the model wrote, so they go in as material, never instructions.
     const req = attempt === 1 ? request : {
       ...request,
-      instructions: `${instructions}\n\nYour previous answer could not be used. Fix these problems and return the whole map again:\n${problems.map((p) => `- ${p}`).join('\n')}`,
+      material: `${request.material}\n\n${RETRY_SENTENCE}\n\n${asMaterial(PROBLEMS_LABEL, problems.map((p) => `- ${p}`).join('\n'))}`,
     };
     const result = await runner.run(req);
     usage.push(result.usage);
