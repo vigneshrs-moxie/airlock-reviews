@@ -14,7 +14,16 @@ export function CopyButton({ text, label, timers = realTimers }: { text: () => s
   const [shown, setShown] = useState<string | null>(null);
   const announce = useAnnounce();
 
-  useEffect(() => () => { if (reset.current !== null) timers.clearTimeout(reset.current); }, [timers]);
+  // A copy answered after the screen is gone starts no timer.
+  const gone = useRef(false);
+  useEffect(() => {
+    gone.current = false;
+    return () => {
+      gone.current = true;
+      if (reset.current !== null) timers.clearTimeout(reset.current);
+      reset.current = null;
+    };
+  }, [timers]);
   useEffect(() => {
     const node = box.current;
     const selection = window.getSelection();
@@ -26,6 +35,7 @@ export function CopyButton({ text, label, timers = realTimers }: { text: () => s
   }, [shown]);
 
   const done = (): void => {
+    if (gone.current) return;
     setShown(null);
     setCopied(true);
     announce('Copied');

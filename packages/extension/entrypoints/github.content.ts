@@ -8,6 +8,8 @@ export default defineContentScript({
   matches: ['https://github.com/*'],
   runAt: 'document_idle',
   world: 'ISOLATED',
+  // WXT would otherwise post a "content script started" message to the page's window, which the page can read.
+  noScriptStartedPostMessage: true,
   main(ctx) {
     const page = createPage({
       doc: document,

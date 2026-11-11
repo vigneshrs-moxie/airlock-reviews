@@ -1,4 +1,5 @@
-import { prRefFromUrl } from '@airlock/shared';
+// Imported by path, not from '@airlock/shared': this module has no zod, and Chrome wakes the worker on every tab update.
+import { prRefFromUrl } from '../../../shared/src/pr-ref';
 
 export interface PanelOptions {
   tabId: number;

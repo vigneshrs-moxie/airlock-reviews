@@ -18,7 +18,7 @@ describe('panelOptionsFor', () => {
 
 type Tab = { id?: number; url?: string };
 
-function fakeChrome(opts: { open?: Tab[]; queryFails?: boolean; setOptionsFails?: boolean } = {}) {
+function fakeChrome(opts: { open?: Tab[]; queryFails?: boolean; setOptionsFails?: boolean; accessFails?: boolean } = {}) {
   const calls: string[] = [];
   const listeners: {
     updated?: (id: number, info: object, tab: Tab) => void;
@@ -26,6 +26,14 @@ function fakeChrome(opts: { open?: Tab[]; queryFails?: boolean; setOptionsFails?
   } = {};
   const tabsById: Record<number, Tab> = { 2: { url: 'https://github.com/a/b/pull/3' } };
   const chrome: PanelChrome = {
+    storage: {
+      local: {
+        setAccessLevel: vi.fn(async (o: { accessLevel: string }) => {
+          calls.push(`access ${o.accessLevel}`);
+          if (opts.accessFails) throw new Error('not supported');
+        }),
+      },
+    },
     sidePanel: {
       setPanelBehavior: vi.fn(async () => { calls.push('behavior'); }),
       setOptions: vi.fn(async (o) => {
@@ -51,7 +59,7 @@ describe('wirePanel', () => {
   it('turns the panel off for every tab before anything else', async () => {
     const { chrome, calls } = fakeChrome();
     wirePanel(chrome);
-    expect(calls[0]).toBe('global');
+    expect(calls.filter((c) => !c.startsWith('access'))[0]).toBe('global');
     expect(chrome.sidePanel.setOptions).toHaveBeenNthCalledWith(1, { enabled: false });
     await vi.waitFor(() => expect(calls).toContain('query'));
     expect(calls.indexOf('global')).toBeLessThan(calls.indexOf('query'));
@@ -88,6 +96,30 @@ describe('wirePanel', () => {
     listeners.activated?.({ tabId: 3 });
     await vi.waitFor(() =>
       expect(chrome.sidePanel.setOptions).toHaveBeenCalledWith({ tabId: 3, path: 'sidepanel.html', enabled: false }));
+  });
+
+  it('keeps its storage, and so the pairing token, from content scripts, before anything else', () => {
+    const { chrome, calls } = fakeChrome();
+    wirePanel(chrome);
+    expect(calls[0]).toBe('access TRUSTED_CONTEXTS');
+  });
+
+  it('produces no unhandled rejection when the storage access level cannot be set, and still wires the panel', async () => {
+    const unhandled: unknown[] = [];
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const record = (e: unknown): void => { unhandled.push(e); };
+    process.on('unhandledRejection', record);
+    try {
+      const { chrome, listeners } = fakeChrome({ accessFails: true });
+      wirePanel(chrome);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).toEqual([]);
+      expect(warned).toHaveBeenCalledWith(expect.stringContaining('not supported'));
+      expect(listeners.updated).toBeTypeOf('function');
+    } finally {
+      process.off('unhandledRejection', record);
+      warned.mockRestore();
+    }
   });
 
   it('produces no unhandled rejection when setOptions fails', async () => {

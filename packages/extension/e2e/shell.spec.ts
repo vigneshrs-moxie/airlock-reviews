@@ -50,6 +50,12 @@ test('the panel, beside a pull request tab, reaches the fake service and asks fo
   const page = await context.newPage();
   const dialogs: string[] = [];
   page.on('dialog', (d) => dialogs.push(d.message()));
+  // Zod's probe for eval would be refused by the extension's content security policy and recorded as an error.
+  const refused: string[] = [];
+  page.on('console', (m) => { if (/unsafe-eval|Refused to evaluate/i.test(m.text())) refused.push(m.text()); });
+  await page.addInitScript(() => {
+    document.addEventListener('securitypolicyviolation', (e) => console.error(`Refused to evaluate: ${e.violatedDirective}`));
+  });
   await page.goto(`chrome-extension://${id}/sidepanel.html`);
   await github.bringToFront();
   await worker.evaluate(async () => {
@@ -64,6 +70,8 @@ test('the panel, beside a pull request tab, reaches the fake service and asks fo
 
   expect(dialogs).toEqual([]);
   expect(service.requests.some((r) => r.method === 'GET' && r.url === '/hello')).toBe(true);
+  // The hello reply has been parsed with an object schema by now.
+  expect(refused).toEqual([]);
 });
 
 test('the manifest asks only for sidePanel, storage, github.com and 127.0.0.1', async () => {

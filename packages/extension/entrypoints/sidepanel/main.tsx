@@ -1,3 +1,5 @@
+// First, so zod is told before any schema is used.
+import '../../src/zod-jitless';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App, realServices, startRealPanel } from '../../src/panel/App';

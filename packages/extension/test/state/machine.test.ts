@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Brief, ChangeMap, Dismissal, ServiceEvent } from '@airlock/shared';
 import { NOT_UNDERSTOOD, ServiceClient } from '../../src/client/service';
-import { LOST_MESSAGE, OFFLINE_RETRY_MS, RUN_STOPPED, SHOWING_PROBLEM, TAB_UNREADABLE, WATCH_MS, startPanel } from '../../src/state/machine';
+import { LOST_MESSAGE, NOT_A_TOKEN, OFFLINE_RETRY_MS, RUN_STOPPED, SHOWING_PROBLEM, TAB_UNREADABLE, WATCH_MS, startPanel } from '../../src/state/machine';
 import type { PanelState } from '../../src/state/reduce';
 import { STAGE_WORDS } from '../../src/state/stage-words';
 import type { SettingsStore } from '../../src/state/settings';
@@ -154,6 +154,30 @@ describe('startPanel: loading', () => {
     h.panel.dispatch({ type: 'pair', token: `${TOKEN}\n` });
     await until(h, 'ready');
     expect(h.settings.token).toBe(TOKEN);
+  });
+
+  it('takes the one run of 64 hexadecimal characters out of whatever was pasted', async () => {
+    const h = harness({ token: OTHER_TOKEN });
+    await until(h, 'unpaired');
+    const npm = `\n> airlock@0.0.0 service\n> node packages/service/dist/cli.js token\n\n${TOKEN}\n`;
+    h.panel.dispatch({ type: 'pair', token: npm });
+    await until(h, 'ready');
+    expect(h.settings.token).toBe(TOKEN);
+    expect(h.svc.requests.find((r) => r.url.pathname === '/pair')?.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it.each([
+    ['two runs', `${'a'.repeat(64)} ${'b'.repeat(64)}`],
+    ['a run inside a longer one', `x${'a'.repeat(65)}`],
+    ['a run that is too short', 'a'.repeat(63)],
+    ['no run at all', 'token please'],
+  ])('refuses %s with the same sentence and sends nothing', async (_name, pasted) => {
+    const h = harness({ token: OTHER_TOKEN });
+    await until(h, 'unpaired');
+    h.panel.dispatch({ type: 'pair', token: pasted });
+    const refused = await until(h, 'unpaired', (s) => s.message !== undefined);
+    expect(refused.message).toBe(NOT_A_TOKEN);
+    expect(h.svc.calls).not.toContain('POST /pair');
   });
 
   it('is unpaired without asking for the pull request when the service has no paired extension or no token is stored', async () => {

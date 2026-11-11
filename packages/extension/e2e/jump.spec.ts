@@ -157,6 +157,31 @@ test('from the conversation page, Jump to line opens the Files changed page and 
   await panel.close();
 });
 
+test('the content script posts no message to the GitHub page', async () => {
+  const posted: string[] = [];
+  await context.exposeFunction('airlockSawMessage', (data: string) => { posted.push(data); });
+  await context.addInitScript(() => {
+    window.addEventListener('message', (e) => {
+      (window as unknown as { airlockSawMessage: (d: string) => void }).airlockSawMessage(JSON.stringify(e.data));
+    });
+  });
+  const { github, panel } = await besideReview('https://github.com/acme/widgets/pull/1/files');
+  // The jump answering shows the content script has run on this page.
+  await panel.getByRole('button', { name: 'Jump to line' }).click();
+  await expect(panel.getByText('Showing src/pause.ts:11.')).toBeVisible();
+  expect(posted.filter((m) => m.includes('content-script-started'))).toEqual([]);
+  await github.close();
+  await panel.close();
+});
+
+test('the built worker is small and carries no schema library', async () => {
+  const script = await readFile(join(BUILT, 'background.js'), 'utf8');
+  // With zod it was about 94 KB.
+  expect(Buffer.byteLength(script)).toBeLessThan(20 * 1024);
+  expect(script).not.toMatch(/zod/i);
+  expect(script).not.toContain('ReviewDocument');
+});
+
 test('the built content script is small and carries no schema library', async () => {
   const script = await readFile(join(BUILT, 'content-scripts', 'github.js'), 'utf8');
   expect(Buffer.byteLength(script)).toBeLessThan(15 * 1024);

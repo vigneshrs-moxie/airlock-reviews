@@ -12,7 +12,16 @@ export function CommandBox({ intro, command, timers = realTimers }: { intro: str
   const announce = useAnnounce();
   const labelId = useId();
 
-  useEffect(() => () => { if (reset.current !== null) timers.clearTimeout(reset.current); }, [timers]);
+  // A copy answered after the screen is gone starts no timer.
+  const gone = useRef(false);
+  useEffect(() => {
+    gone.current = false;
+    return () => {
+      gone.current = true;
+      if (reset.current !== null) timers.clearTimeout(reset.current);
+      reset.current = null;
+    };
+  }, [timers]);
 
   const select = (): void => {
     const node = box.current;
@@ -24,6 +33,7 @@ export function CommandBox({ intro, command, timers = realTimers }: { intro: str
     selection.addRange(range);
   };
   const done = (): void => {
+    if (gone.current) return;
     setCopied(true);
     announce('Copied');
     if (reset.current !== null) timers.clearTimeout(reset.current);

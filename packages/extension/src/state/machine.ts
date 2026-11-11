@@ -21,7 +21,14 @@ export const REATTACH_MS = 1_000;
 /** Re-attaches in a row that bring no new event, and re-attaches in all for one run, before giving up. */
 export const REATTACH_IN_A_ROW = 5;
 export const REATTACH_IN_ALL = 20;
-const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+/**
+ * The pairing token out of whatever was pasted (the command prints npm's own lines first): the one run of exactly 64
+ * hexadecimal characters that is not part of a longer run; null when there is none, or more than one.
+ */
+export function tokenIn(pasted: string): string | null {
+  const runs = (pasted.match(/[0-9a-fA-F]+/g) ?? []).filter((run) => run.length === 64);
+  return runs.length === 1 ? (runs[0] as string) : null;
+}
 
 export interface PanelDeps {
   client: ServiceClient;
@@ -355,8 +362,8 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
   };
 
   const pair = async (g: number, typed: string): Promise<void> => {
-    const token = typed.trim();
-    if (!TOKEN_PATTERN.test(token)) {
+    const token = tokenIn(typed);
+    if (token === null) {
       apply({ type: 'unpaired', message: NOT_A_TOKEN });
       return;
     }

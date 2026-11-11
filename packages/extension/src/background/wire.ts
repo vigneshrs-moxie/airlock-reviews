@@ -4,6 +4,9 @@ type Tab = { id?: number; url?: string };
 
 /** The few Chrome calls the worker uses, so tests can pass a fake. */
 export interface PanelChrome {
+  storage: {
+    local: { setAccessLevel(options: { accessLevel: 'TRUSTED_CONTEXTS' }): Promise<void> };
+  };
   sidePanel: {
     setPanelBehavior(behavior: { openPanelOnActionClick: boolean }): Promise<void>;
     setOptions(options: Partial<PanelOptions>): Promise<void>;
@@ -26,6 +29,15 @@ function settle(work: () => Promise<unknown>): Promise<void> {
 }
 
 export function wirePanel(chrome: PanelChrome): void {
+  // The pairing token is in local storage, which content scripts could read unless the extension says otherwise.
+  try {
+    chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch((e: unknown) => {
+      console.warn(`Airlock could not keep its storage from content scripts: ${e instanceof Error ? e.message : String(e)}`);
+    });
+  } catch (e) {
+    console.warn(`Airlock could not keep its storage from content scripts: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   const apply = (tabId: number, url: string | undefined): Promise<void> =>
     settle(() => chrome.sidePanel.setOptions(panelOptionsFor(tabId, url)));
 
