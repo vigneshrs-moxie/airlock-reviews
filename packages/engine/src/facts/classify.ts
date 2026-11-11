@@ -1,6 +1,5 @@
 import type { FileDiff, FileFact, Tier } from '@airlock/shared';
 import picomatch from 'picomatch';
-import { SYMLINK_MODE } from '../diff/parse.js';
 import type { Pack } from '../packs/types.js';
 
 /** Each built-in ignore glob with what it ignores, in words, for the reason shown under "Not reviewed". */
@@ -23,6 +22,10 @@ function firstMatch(path: string, packs: Pack[], pick: (p: Pack) => string[], bu
   return glob !== undefined ? `built-in: ${glob}` : null;
 }
 
+/**
+ * A symbolic link is classified by its path like any other file, so a pull request cannot take a source file out of the
+ * lenses by turning it into a link; the lenses see its diff and the fact saying where it points.
+ */
 function classify(file: FileDiff, packs: Pack[]): FileFact {
   const fact = (tier: Tier, reason: string): FileFact => ({ path: file.path, tier, reason });
   if (file.binary) return fact('ignored', 'binary file');
@@ -31,8 +34,6 @@ function classify(file: FileDiff, packs: Pack[]): FileFact {
     const words = ignored.startsWith('built-in: ') ? BUILT_IN_IGNORE_WORDS[ignored.slice('built-in: '.length)] : undefined;
     return fact('ignored', words === undefined ? ignored : `${words} (${ignored})`);
   }
-  // A link is a path, not code: trusted, so it is neither read as a diff nor swept; a fact says where it points.
-  if (file.mode === SYMLINK_MODE) return fact('trust', 'symbolic link');
   const read = firstMatch(file.path, packs, (p) => p.tiers.read, []);
   if (read) return fact('read', read);
   const trust = firstMatch(file.path, packs, (p) => p.tiers.trust, BUILT_IN_TRUST);

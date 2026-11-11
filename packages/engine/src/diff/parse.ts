@@ -156,7 +156,30 @@ export function parseDiff(text: string): FileDiff[] {
     else if (line.startsWith('Binary files ') || line === 'GIT binary patch') cur.binary = true;
   }
   flush();
-  return files;
+  return joinTypeChanges(files);
+}
+
+/**
+ * Git prints a file that changes type (a regular file replaced by a link, or the reverse) as a deletion followed by an
+ * addition of the same path. They are joined into one modified file: its path once, the removed and the added content in
+ * its hunks, its mode the new one.
+ */
+function joinTypeChanges(files: FileDiff[]): FileDiff[] {
+  const out: FileDiff[] = [];
+  for (const f of files) {
+    const prev = out[out.length - 1];
+    if (prev !== undefined && prev.status === 'deleted' && f.status === 'added' && prev.path === f.path) {
+      out[out.length - 1] = {
+        ...f,
+        status: 'modified',
+        binary: prev.binary || f.binary,
+        additions: prev.additions + f.additions,
+        deletions: prev.deletions + f.deletions,
+        hunks: [...prev.hunks, ...f.hunks],
+      };
+    } else out.push(f);
+  }
+  return out;
 }
 
 /**

@@ -1,5 +1,6 @@
 import type { ChangeMap, FileDiff, FileFact } from '@airlock/shared';
 import picomatch from 'picomatch';
+import { SYMLINK_MODE } from '../diff/parse.js';
 import { cohortFiles, standaloneCohort, tierOf } from '../lenses/context.js';
 import type { Pack, Rule } from '../packs/types.js';
 
@@ -41,7 +42,7 @@ const byRuleCap = (e: Entry): Entry[] => {
 };
 
 /**
- * The batches of the rule sweep. Only read and skim files that are not deleted or binary and have a matching rule are
+ * The batches of the rule sweep. Only read and skim files that are not deleted, binary or links and have a matching rule are
  * considered. Each cohort (the standalone group is cohort `standalone`) is cut greedily, in its layer order, into
  * batches of at most MAX_BATCH_FILES files, MAX_BATCH_RULES rules (the union of the rules matching its files) and
  * MAX_BATCH_LINES changed lines (a single file over that limit gets a batch of its own). A file that matches more than
@@ -56,7 +57,8 @@ export function planSweep(map: ChangeMap, tiers: FileFact[], files: FileDiff[], 
   for (const cohort of [...map.cohorts, standaloneCohort(map)]) {
     const entries = cohortFiles(cohort).flatMap((path): Entry[] => {
       const diff = byPath.get(path);
-      if (!diff || diff.binary || diff.status === 'deleted') return [];
+      // A symbolic link holds a path, not code, so no rule is checked against it.
+      if (!diff || diff.binary || diff.status === 'deleted' || diff.mode === SYMLINK_MODE) return [];
       if (tier(path) !== 'read' && tier(path) !== 'skim') return [];
       const rules = rulesForFile(path, packs);
       return rules.length === 0 ? [] : byRuleCap({ path, rules, lines: diff.additions + diff.deletions });

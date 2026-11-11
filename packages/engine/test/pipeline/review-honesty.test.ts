@@ -1,4 +1,4 @@
-import { symlink } from 'node:fs/promises';
+import { rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createFakeRunner } from '../../src/agent/fake-runner.js';
@@ -166,15 +166,43 @@ describe('the request is checked before anything runs', () => {
 });
 
 describe('a symbolic link in the pull request', () => {
-  it('is trusted, and the facts say where it points', async () => {
+  it('keeps the tier its path gives it, and the facts say where it points', async () => {
     const s = await scenario({ 'docs/rules.md': 'rules\n', 'src/a.ts': 'export const a = 1;\n' }, {});
     await symlink('../docs/rules.md', join(s.remote.dir, 'src/rules.md'));
     await s.remote.write('src/a.ts', 'export const a = 2;\n');
     const head = await s.remote.commit('add a link');
     const { doc } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: head }) });
-    expect(doc.files).toContainEqual({ path: 'src/rules.md', tier: 'trust', reason: 'symbolic link' });
+    expect(doc.files).toContainEqual({ path: 'src/rules.md', tier: 'skim', reason: 'default' });
     expect(doc.facts).toContainEqual({
       checkId: 'symbolic-link', path: 'src/rules.md', line: null, message: 'src/rules.md is a symbolic link to ../docs/rules.md',
     });
+  }, SLOW);
+
+  it('a source file turned into a link to a mock is read by the lenses, with the fact, and listed once', async () => {
+    const OPEN = 'export function canEdit(): boolean {\n  return true;\n}\n';
+    const s = await scenario({ 'src/auth.ts': AUTH_BASE, 'src/mocks/auth.ts': OPEN }, {});
+    await rm(join(s.remote.dir, 'src/auth.ts'));
+    await symlink('mocks/auth.ts', join(s.remote.dir, 'src/auth.ts'));
+    const head = await s.remote.commit('point auth at the mock');
+    const LINKED = rawCandidate({
+      severity: 'block', title: 'canEdit now comes from the mock', path: 'src/auth.ts', quote: 'mocks/auth.ts', lineHint: 1,
+    });
+    const script = scenarioScript({
+      mapper: (req: AgentRequest<unknown>) => attributesScript()(req),
+      'lens:': (req: AgentRequest<unknown>) => (req.role === 'lens:core/correctness'
+        && block(req.material, 'facts')?.includes('src/auth.ts is a symbolic link to mocks/auth.ts')
+        ? { candidates: [LINKED], questions: [] }
+        : { candidates: [], questions: [] }),
+    });
+    const { doc, calls } = await review({ s, script, exec: fakeGh({ baseSha: s.baseSha, headSha: head, changedFiles: 1 }) });
+    const lensCalls = calls.filter((c) => c.role.startsWith('lens:'));
+    expect(lensCalls.length).toBeGreaterThan(0);
+    for (const c of lensCalls) {
+      expect(block(c.material, 'facts'), c.role).toContain('src/auth.ts is a symbolic link to mocks/auth.ts');
+      expect(block(c.material, 'diff'), c.role).toContain('## File: src/auth.ts');
+    }
+    expect(doc.files).toEqual([{ path: 'src/auth.ts', tier: 'skim', reason: 'default' }]);
+    expect(doc.findings.map((f) => f.title)).toEqual(['canEdit now comes from the mock']);
+    expect(['approve', 'ready-for-pr2']).not.toContain(doc.verdict.label);
   }, SLOW);
 });

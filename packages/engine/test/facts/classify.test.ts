@@ -57,10 +57,14 @@ describe('classifyFiles', () => {
     expect(out[0]).toEqual({ path: 'a/b.ts', tier: 'read', reason: 'one: a/**' });
   });
 
-  it('a symbolic link is trusted, never read or swept as code', () => {
-    const out = classifyFiles([file('src/link.ts', { mode: '120000' }), file('dist/link.js', { mode: '120000' })], [pack('p')]);
+  it('a symbolic link keeps the tier its path gives it', () => {
+    const out = classifyFiles(
+      [file('src/link.ts', { mode: '120000' }), file('src/a.test.ts', { mode: '120000' }), file('dist/link.js', { mode: '120000' })],
+      [pack('p')],
+    );
     expect(out).toEqual([
-      { path: 'src/link.ts', tier: 'trust', reason: 'symbolic link' },
+      { path: 'src/link.ts', tier: 'skim', reason: 'default' },
+      { path: 'src/a.test.ts', tier: 'trust', reason: 'built-in: **/*.test.*' },
       { path: 'dist/link.js', tier: 'ignored', reason: 'build output (built-in: **/dist/**)' },
     ]);
   });
