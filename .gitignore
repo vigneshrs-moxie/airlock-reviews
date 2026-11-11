@@ -10,3 +10,4 @@ coverage/
 # local review data and replay working files never belong in git
 .airlock/
 replay-work/
+.superpowers/
