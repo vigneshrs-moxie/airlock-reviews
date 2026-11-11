@@ -282,12 +282,12 @@ describe('the detail of a finding', () => {
     fireEvent.click(button('Jump to line'));
     expect(await screen.findByText('Jumping is not connected yet.')).toBeTruthy();
   });
-  it('Dismiss calls onDismiss with the finding', () => {
-    const onDismiss = vi.fn();
-    show(reviewState([full]), { onDismiss });
+  it('Dismiss opens the dismiss sheet for the finding', () => {
+    show(reviewState([full]));
     fireEvent.click(within(cards()[0]!).getByRole('button'));
     fireEvent.click(button('Dismiss'));
-    expect(onDismiss).toHaveBeenCalledWith(full);
+    const dialog = screen.getByRole('dialog', { name: 'Dismiss this finding' });
+    expect(within(dialog).getByText(full.title)).toBeTruthy();
   });
   it('moves with Previous and Next through the top list then also found, skips dismissed ones and stops at the ends', () => {
     const f = [finding(1), finding(2), finding(3), also(4), also(5)];

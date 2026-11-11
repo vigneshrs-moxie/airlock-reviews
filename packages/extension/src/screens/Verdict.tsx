@@ -47,8 +47,8 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const [openId, setOpenId] = useState<string | null>(null);
   const [folds, setFolds] = useState<ReadonlySet<string>>(new Set());
   const [sheet, setSheet] = useState(false);
-  const nodes = useRef(new Map<string, HTMLButtonElement>());
   const droppedButton = useRef<HTMLButtonElement>(null);
+  const nodes = useRef(new Map<string, HTMLButtonElement>());
   const shownDetail = useRef<string | null>(null);
   const verdictHeading = useRef<HTMLHeadingElement>(null);
   const findingsHeading = useRef<HTMLHeadingElement>(null);
@@ -103,12 +103,6 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
 
   const fold = (key: Fold): void => setFolds((was) => toggled(was, key));
   const closeSheet = useCallback((): void => setSheet(false), []);
-  // Closing the sheet gives focus back to the button that opened it.
-  const sheetWasOpen = useRef(false);
-  useEffect(() => {
-    if (sheet) sheetWasOpen.current = true;
-    else if (sheetWasOpen.current) { sheetWasOpen.current = false; droppedButton.current?.focus(); }
-  }, [sheet]);
   const restore = (d: Dismissal): void => dispatch({ type: 'restore', fingerprint: d.fingerprint });
   const promptFor = (findings: Finding[]) => (): string => fixPrompt(doc, findings);
 
@@ -222,7 +216,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
         </Collapsible>
       )}
       {!stale && <ReviewAgain doc={doc} disabled={disabled} dispatch={dispatch} />}
-      {sheet && <DroppedSheet dropped={doc.dropped} onClose={closeSheet} />}
+      {sheet && <DroppedSheet dropped={doc.dropped} opener={droppedButton} onClose={closeSheet} />}
     </>
   );
 }

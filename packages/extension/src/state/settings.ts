@@ -8,13 +8,15 @@ export interface SettingsStore {
   getToken(): Promise<string | null>;
   setToken(token: string): Promise<void>;
   getDefaultDepth(): Promise<Depth | null>;
-  setDefaultDepth(depth: Depth): Promise<void>;
+  /** `null` clears the stored value, so each pull request's suggestion is used. */
+  setDefaultDepth(depth: Depth | null): Promise<void>;
 }
 
 /** The part of `chrome.storage.local` the store uses, so tests can pass a fake. */
 export interface StorageAreaLike {
   get(keys: string[]): Promise<Record<string, unknown>>;
   set(items: Record<string, unknown>): Promise<void>;
+  remove(keys: string[]): Promise<void>;
 }
 
 export function createSettingsStore(area: StorageAreaLike): SettingsStore {
@@ -32,7 +34,8 @@ export function createSettingsStore(area: StorageAreaLike): SettingsStore {
       return value.success ? value.data : null;
     },
     async setDefaultDepth(depth) {
-      await area.set({ [DEPTH_KEY]: depth });
+      if (depth === null) await area.remove([DEPTH_KEY]);
+      else await area.set({ [DEPTH_KEY]: depth });
     },
   };
 }

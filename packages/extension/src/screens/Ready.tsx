@@ -18,9 +18,16 @@ const DEPTHS: { depth: Depth; name: string; line: string }[] = [
   { depth: 'deep', name: 'Deep', line: 'Standard, plus a closer second pass over each layer.' },
 ];
 
-export function Ready({ state, dispatch }: { state: Extract<PanelState, { kind: 'ready' }>; dispatch: (a: UserAction) => void }) {
+export function Ready({ state, dispatch, defaultDepth = null }: {
+  state: Extract<PanelState, { kind: 'ready' }>;
+  dispatch: (a: UserAction) => void;
+  /** The depth stored in the Packs screen, when there is one; the pull request's suggestion otherwise. */
+  defaultDepth?: Depth | null;
+}) {
   const { pr } = state;
-  const [depth, setDepth] = useState<Depth>(pr.suggestedDepth);
+  // What the person picked here wins; then the stored default (which may arrive after the screen); then the suggestion.
+  const [picked, setDepth] = useState<Depth | null>(null);
+  const depth = picked ?? defaultDepth ?? pr.suggestedDepth;
   const [off, setOff] = useState<ReadonlySet<string>>(new Set());
   const group = useId();
   const hintId = useId();

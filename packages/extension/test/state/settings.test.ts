@@ -11,6 +11,9 @@ function fakeArea(initial: Record<string, unknown> = {}): StorageAreaLike & { da
     async set(items) {
       Object.assign(data, items);
     },
+    async remove(keys) {
+      for (const k of keys) delete data[k];
+    },
   };
 }
 
@@ -25,6 +28,15 @@ describe('settings', () => {
     expect(area.data).toEqual({ 'airlock.token': 'f'.repeat(64), 'airlock.defaultDepth': 'deep' });
     expect(await settings.getToken()).toBe('f'.repeat(64));
     expect(await settings.getDefaultDepth()).toBe('deep');
+  });
+
+  it('clears the default depth when given null', async () => {
+    const area = fakeArea();
+    const settings = createSettingsStore(area);
+    await settings.setDefaultDepth('deep');
+    await settings.setDefaultDepth(null);
+    expect(area.data).toEqual({});
+    expect(await settings.getDefaultDepth()).toBeNull();
   });
 
   it('reads a stored value of the wrong shape as nothing', async () => {

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { realTimers, type Timers } from '../client/timers';
 import type { PanelState } from '../state/reduce';
 
@@ -22,7 +22,9 @@ const Announce = createContext<(text: string) => void>(() => undefined);
 export const useAnnounce = (): ((text: string) => void) => useContext(Announce);
 
 /** The head every screen sits under: the name, the connection in one word, the Packs button and the live region. */
-export function Frame({ status, onOpenPacks, timers = realTimers, children }: { status: Connection | null; onOpenPacks: () => void; timers?: Timers; children: ReactNode }) {
+export function Frame({ status, onOpenPacks, packsRef, timers = realTimers, children }: {
+  status: Connection | null; onOpenPacks: () => void; packsRef?: Ref<HTMLButtonElement>; timers?: Timers; children: ReactNode;
+}) {
   const [said, setSaid] = useState('');
   const current = useRef('');
   const pending = useRef<unknown>(null);
@@ -41,9 +43,9 @@ export function Frame({ status, onOpenPacks, timers = realTimers, children }: { 
         <header className="head">
           <h1 className="name">Airlock</h1>
           {status !== null && <span className="status" data-status={status}>{status}</span>}
-          <button type="button" className="btn small packs" onClick={onOpenPacks}>Packs</button>
+          <button type="button" className="btn small packs" ref={packsRef} onClick={onOpenPacks}>Packs</button>
         </header>
-        <main className="body">{children}</main>
+        <main className="body" tabIndex={-1}>{children}</main>
         <div aria-live="polite" className="sr-only">{said}</div>
       </div>
     </Announce.Provider>
