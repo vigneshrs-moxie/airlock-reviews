@@ -40,6 +40,13 @@ afterEach(async () => {
   }
 });
 
+/** A file that exists and can be run, so the engine counts Claude as found (it checks the path is really there). */
+async function fakeClaude(home: string): Promise<string> {
+  const path = join(home, 'fake-claude');
+  await writeFile(path, '#!/bin/sh\n', { mode: 0o755 });
+  return path;
+}
+
 const pull = (over: Record<string, unknown> = {}): string => JSON.stringify({
   title: 'Add totals', body: 'Adds totals.', additions: 40, deletions: 10, changed_files: 3,
   html_url: `https://github.com/${REPO}/pull/7`, user: { login: 'alice' },
@@ -442,7 +449,7 @@ describe('GET /pr', () => {
 describe('GET /status', () => {
   it('status reports whether claude and gh were found', async () => {
     const s = await startService();
-    process.env.AIRLOCK_CLAUDE_PATH = '/opt/claude/bin/claude';
+    process.env.AIRLOCK_CLAUDE_PATH = await fakeClaude(s.home);
     const runId = runIdOf(await start(s));
     const found = await s.call('GET', '/status');
     expect(found.status).toBe(200);
@@ -471,7 +478,7 @@ describe('GET /status', () => {
 describe('the contract', () => {
   it('every reply parses with its shared schema', async () => {
     const s = await startService();
-    process.env.AIRLOCK_CLAUDE_PATH = '/opt/claude/bin/claude';
+    process.env.AIRLOCK_CLAUDE_PATH = await fakeClaude(s.home);
     await s.call('GET', '/status');
     await s.call('GET', `/pr?repo=${REPO}&number=7`);
     const runId = runIdOf(await start(s));
