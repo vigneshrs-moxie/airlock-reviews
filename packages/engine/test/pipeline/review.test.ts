@@ -1,10 +1,11 @@
 import { copyFile, mkdir, readdir, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { candidate, ReviewDocumentSchema, type ReviewEvent } from '@airlock/shared';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { candidate, ReviewDocumentSchema, type Candidate, type ReviewEvent } from '@airlock/shared';
 import { type AgentRequest, withRetry } from '../../src/agent/runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
 import { withUniqueIds } from '../../src/pipeline/review.js';
+import { selfReviewText } from '../../src/select/select.js';
 import { latestReview } from '../../src/store/store.js';
 import { realExec, type Exec } from '../../src/util/exec.js';
 import { block } from '../helpers/lens-context.js';
@@ -16,6 +17,49 @@ import {
 const SLOW = 20_000;
 
 const { home, scenario, review } = useReviewHarness();
+
+/** Hooks that make a stage throw, or change what it returns; by default each stage runs as it is. */
+const hooks = vi.hoisted(() => ({
+  anchor: null as null | ((cands: Candidate[]) => void),
+  challenge: null as null | ((items: Candidate[]) => void),
+  select: null as null | ((result: unknown) => unknown),
+}));
+vi.mock('../../src/anchor/anchor.js', async (importOriginal) => {
+  const m = await importOriginal<typeof import('../../src/anchor/anchor.js')>();
+  return {
+    ...m,
+    anchorCandidates: async (...args: Parameters<typeof m.anchorCandidates>) => {
+      hooks.anchor?.(args[0]);
+      return m.anchorCandidates(...args);
+    },
+  };
+});
+vi.mock('../../src/challenge/challenge.js', async (importOriginal) => {
+  const m = await importOriginal<typeof import('../../src/challenge/challenge.js')>();
+  return {
+    ...m,
+    challenge: async (...args: Parameters<typeof m.challenge>) => {
+      hooks.challenge?.(args[2]);
+      return m.challenge(...args);
+    },
+  };
+});
+vi.mock('../../src/select/select.js', async (importOriginal) => {
+  const m = await importOriginal<typeof import('../../src/select/select.js')>();
+  return {
+    ...m,
+    select: async (...args: Parameters<typeof m.select>) => {
+      const result = await m.select(...args);
+      return hooks.select ? hooks.select(result) : result;
+    },
+  };
+});
+afterEach(() => {
+  hooks.anchor = null;
+  hooks.challenge = null;
+  hooks.select = null;
+});
+const fail = (message: string) => (): never => { throw new Error(message); };
 
 const starts = (events: ReviewEvent[]): string[] =>
   events.flatMap((e) => (e.type === 'stage' && e.status === 'start' ? [e.stage] : []));
@@ -170,26 +214,37 @@ describe('runReview', () => {
     expect(doc.stageErrors.map((e) => e.stage)).toEqual(['store']);
     expect(doc.verdict.label).toBe('incomplete');
     expect(doc.selfReviewText).toMatch(/The review did not finish\.$/);
+    expect(doc.selfReviewText).toBe(selfReviewText(doc.pr, doc.depth, ['Core', 'Team standard'], doc.verdict));
     expect(doc.timings.map((t) => t.stage)).toEqual(STANDARD_STAGES);
+    expect(events.find((e) => e.type === 'stage' && e.stage === 'store' && e.status !== 'start')).toMatchObject({ status: 'error' });
     expect(events.at(-1)).toEqual({ type: 'done', document: doc });
   }, SLOW);
 
-  it('reviews a branch that only merged its target as a sync merge, with no lens or sweep requests', async () => {
+  it('never reports a sync merge as reviewed: verdict incomplete, a shape error with the count, and the map event', async () => {
     const s = await scenario({ 'a.txt': 'root\n' }, {});
-    // `feature` sits at the base; main moves on and feature merges it in
+    // `feature` sits at the base; main moves on and feature merges it in, changing one more file in the merge itself
     await s.remote.git('checkout', 'main');
     await s.remote.write('b.txt', 'main moved on\n');
     await s.remote.commit('main advances');
     await s.remote.git('checkout', 'feature');
-    await s.remote.git('merge', '--no-ff', '-m', 'Merge main into feature', 'main');
+    await s.remote.git('merge', '--no-ff', '--no-commit', 'main');
+    await s.remote.write('a.txt', 'changed inside the merge\n');
+    await s.remote.git('add', 'a.txt');
+    await s.remote.git('commit', '-m', 'Merge main into feature');
     const head = await s.remote.git('rev-parse', 'HEAD');
     const { doc, calls, events } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: head }) });
     expect(doc.range.kind).toBe('sync-merge');
     expect(calls).toEqual([]);
+    expect(doc.verdict.label).toBe('incomplete');
+    expect(doc.stageErrors).toEqual([{
+      stage: 'shape', cohortId: null,
+      message: 'This pull request only merges another branch in. Airlock did not review it: 1 changed file was not looked at.',
+    }]);
     expect(doc.brief.whatItDoes).toHaveLength(1);
     expect(doc.brief.whatItDoes[0]).toMatch(/only conflict resolutions need review/);
+    expect(events).toContainEqual({ type: 'map', map: { cohorts: [], standalone: [], links: [] } });
     expect(events).toContainEqual({ type: 'brief', brief: doc.brief });
-    expect(doc.stageErrors).toEqual([]);
+    expect(events.findIndex((e) => e.type === 'map')).toBeLessThan(events.findIndex((e) => e.type === 'brief'));
     const skipped = events.flatMap((e) => (e.type === 'stage' && e.status === 'done' && e.detail.startsWith('skipped') ? [e.stage] : []));
     expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'challenge']);
   }, SLOW);
@@ -281,6 +336,85 @@ describe('runReview', () => {
     });
     await expect(review({ s, exec, req: { remoteUrl: undefined } })).rejects.toThrow(/gh auth setup-git/);
     expect(exec.calls.find((c) => c[0] === 'git' && c[1] === 'clone')).toContain('https://github.com/acme/app.git');
+  }, SLOW);
+});
+
+describe('runReview when a stage throws', () => {
+  it('a throw inside anchor gives an incomplete document naming anchor, keeping the candidates', async () => {
+    hooks.anchor = fail('anchor exploded');
+    const { doc } = await review();
+    expect(doc.verdict.label).toBe('incomplete');
+    expect(doc.stageErrors).toEqual([{ stage: 'anchor', cohortId: null, message: 'anchor exploded' }]);
+    expect(doc.candidates.map((c) => c.title)).toEqual([GOOD.title, GHOST.title, RULED.title]);
+    expect(doc.findings).toEqual([]);
+  }, SLOW);
+
+  it('a throw inside challenge gives an incomplete document naming challenge, with the anchored findings marked unchecked', async () => {
+    hooks.challenge = fail('challenge exploded');
+    const { doc } = await review();
+    expect(doc.verdict.label).toBe('incomplete');
+    expect(doc.stageErrors).toEqual([{ stage: 'challenge', cohortId: null, message: 'challenge exploded' }]);
+    expect(doc.findings.map((f) => f.title).sort()).toEqual([GOOD.title, RULED.title].sort());
+    expect(doc.findings.every((f) => f.checked === 'challenge did not complete')).toBe(true);
+  }, SLOW);
+
+  it('a throw inside select gives an incomplete document naming select, with every kept finding and a self-review', async () => {
+    hooks.select = fail('select exploded');
+    const { doc } = await review();
+    expect(doc.verdict.label).toBe('incomplete');
+    expect(doc.stageErrors).toEqual([{ stage: 'select', cohortId: null, message: 'select exploded' }]);
+    expect(doc.findings.map((f) => f.title).sort()).toEqual([GOOD.title, RULED.title].sort());
+    expect(doc.findings.every((f) => f.bucket === 'also')).toBe(true);
+    expect(doc.selfReviewText).toBe(selfReviewText(doc.pr, doc.depth, ['Core', 'Team standard'], doc.verdict));
+    expect(doc.selfReviewText).toMatch(/^Reviewed with Airlock at .* The review did not finish\.$/);
+  }, SLOW);
+
+  it('rejects with a message of its own when it builds a document that does not match the schema', async () => {
+    hooks.select = (result) => ({ ...(result as object), verdict: { label: 'not-a-label', sentence: '', counts: { block: 0, fix: 0, ask: 0, note: 0 } } });
+    await expect(review()).rejects.toThrow(/^Airlock built a review document that does not match its own schema: /);
+  }, SLOW);
+});
+
+describe('runReview deep pass', () => {
+  it('keeps the second pass candidates in the document when its challenge throws, and names lenses-deep', async () => {
+    hooks.challenge = (items) => { if (items.some((i) => i.title === DEEP_NEW.title)) throw new Error('deep challenge exploded'); };
+    const { doc } = await review({ req: { depth: 'deep' } });
+    expect(doc.candidates.map((c) => c.title)).toContain(DEEP_NEW.title);
+    expect(doc.verdict.label).toBe('incomplete');
+    expect(doc.stageErrors).toEqual([{ stage: 'lenses-deep', cohortId: null, message: 'deep challenge exploded' }]);
+  }, SLOW);
+
+  it('keeps one item when two layers of the second pass report the same fingerprint', async () => {
+    const base = scenarioScript();
+    const script = (req: AgentRequest<unknown>): unknown =>
+      (req.role === 'lens:core/correctness' && req.instructions.includes(DEEP_SENTENCE) ? { candidates: [DEEP_NEW], questions: [] } : base(req));
+    const { doc, calls } = await review({ req: { depth: 'deep' }, script });
+    expect(calls.filter((c) => c.instructions.includes(DEEP_SENTENCE) && c.role === 'lens:core/correctness')).toHaveLength(2);
+    expect(doc.candidates.filter((c) => c.title === DEEP_NEW.title)).toHaveLength(1);
+    expect(doc.findings.filter((f) => f.title === DEEP_NEW.title)).toHaveLength(1);
+  }, SLOW);
+
+  it('names every error of the second pass lenses-deep, those of its challenge included', async () => {
+    const { doc } = await review({
+      req: { depth: 'deep' },
+      script: scenarioScript({
+        'challenge:': (req) => (req.material.includes(`Title: ${DEEP_NEW.title}`) ? new Error('deep challenger said nothing')
+          : { outcome: 'keep', ground: 'none', explanation: '', refutation: null, newSeverity: null, checked: 'Read the callers.' }),
+      }),
+    });
+    const errors = doc.stageErrors;
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.stage).toBe('lenses-deep');
+    expect(errors[0]!.message).toMatch(/deep challenger said nothing/);
+    expect(doc.findings.find((f) => f.title === DEEP_NEW.title)!.checked).toBe('challenge did not complete');
+  }, SLOW);
+});
+
+describe('runReview models', () => {
+  it('ignores a model left undefined and keeps the default', async () => {
+    const { doc, calls } = await review({ req: { depth: 'quick', models: { main: undefined, effort: 'low' } } });
+    expect(doc.models).toEqual({ main: 'claude-opus-5-5', challenger: 'claude-opus-5-5', sweep: 'claude-opus-5-5', effort: 'low' });
+    expect(calls.every((c) => c.model === 'claude-opus-5-5' && c.effort === 'low')).toBe(true);
   }, SLOW);
 });
 

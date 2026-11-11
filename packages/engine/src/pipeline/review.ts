@@ -2,8 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { ReviewDocumentSchema } from '@airlock/shared';
 import type {
-  Anchor, Brief, Candidate, ChangeMap, Cohort, Depth, Dropped, Fact, FileDiff, FileFact, Finding, Link, ModelConfig, Neighbour,
-  PrInfo, Question, ReviewDocument, ReviewEvent, ReviewRange, StageError,
+  Anchor, Brief, Candidate, ChangeMap, Depth, Dropped, Fact, FileDiff, FileFact, Finding, Link, ModelConfig, Neighbour, PrInfo,
+  Question, ReviewDocument, ReviewEvent, ReviewRange, StageError,
 } from '@airlock/shared';
 import type { AgentRequest, AgentRunner } from '../agent/runner.js';
 import { anchorCandidates } from '../anchor/anchor.js';
@@ -16,7 +16,7 @@ import { runChecks } from '../facts/checks.js';
 import { classifyFiles } from '../facts/classify.js';
 import { fetchPr } from '../intake/pr.js';
 import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
-import { runCohortLenses } from '../lenses/cohort-lens.js';
+import { runCohortLenses, runnableLenses } from '../lenses/cohort-lens.js';
 import { emptyResult, type LensContext, type LensStageResult } from '../lenses/context.js';
 import { runSeams } from '../lenses/seams.js';
 import { findLinks } from '../map/links.js';
@@ -24,14 +24,15 @@ import { fallbackMap, buildChangeMap } from '../map/mapper.js';
 import { findNeighbours } from '../map/neighbours.js';
 import type { Holdout, Pack } from '../packs/types.js';
 import { runSweep } from '../rules/sweep.js';
-import { decideVerdict, select, type SelectResult } from '../select/select.js';
+import { decideVerdict, select, selfReviewText, type SelectResult } from '../select/select.js';
 import { isSyncMerge } from '../shape/detect.js';
 import { saveReview } from '../store/store.js';
 import type { Exec } from '../util/exec.js';
 import { limiter } from '../util/limit.js';
 import { safeRead } from '../util/safe-read.js';
+import { deepPass } from './deep.js';
 import { choosePacks, ENGINE_SOURCE, preparePacks, stageRulesOf, type PreparedPacks } from './packs.js';
-import { createStageLog, messageOf, type StageLog, type StageName, type StageRecorder } from './stages.js';
+import { createStageLog, messageOf, type StageLog, type StageName } from './stages.js';
 
 export interface ReviewRequest {
   repo: string;
@@ -56,7 +57,6 @@ const DEFAULT_MODELS: ModelConfig = { main: 'claude-opus-5-5', challenger: 'clau
 const DEFAULT_PARALLEL = 4;
 const QUICK_CHECKED = 'not challenged (quick review)';
 const CHALLENGE_FAILED = 'challenge did not complete';
-const DEEP_SENTENCE = 'This is a second, closer pass over one layer: read every non-test file in it in full.';
 const SYNC_MERGE_BRIEF: Brief = {
   whatItDoes: ['This branch only merges its target branch into itself, so only conflict resolutions need review.'], claims: [],
 };
@@ -79,24 +79,13 @@ export function withUniqueIds(candidates: Candidate[], used: Set<string>): Candi
   });
 }
 
-/** Only the first lens that can run of each pack (an onlyWhenAlone lens runs only when no other pack has a lens). */
+/** Only the first lens that can run of each pack. */
 function firstLensOnly(packs: Pack[]): Pack[] {
+  const runnable = runnableLenses(packs);
   return packs.map((pack) => {
-    const others = packs.some((p) => p !== pack && p.lenses.length > 0);
-    const first = pack.lenses.find((l) => !(l.onlyWhenAlone && others));
-    return { ...pack, lenses: first ? [first] : [] };
+    const first = runnable.find((r) => r.pack === pack);
+    return { ...pack, lenses: first ? [first.lens] : [] };
   });
-}
-
-/** For the deep pass: each layer of a cohort with more than one layer as its own cohort, keyed back to the cohort. */
-function layerMap(map: ChangeMap): { map: ChangeMap; cohortOf: Map<string, string> } {
-  const cohortOf = new Map<string, string>();
-  const cohorts: Cohort[] = map.cohorts.filter((c) => c.layers.length > 1).flatMap((c) => c.layers.map((l) => {
-    const id = `${c.id}/${l.id}`;
-    cohortOf.set(id, c.id);
-    return { ...c, id, title: `${c.title}: ${l.title}`, layers: [{ ...l, dependsOn: [] }] };
-  }));
-  return { map: { cohorts, standalone: [], links: map.links }, cohortOf };
 }
 
 /** Prepares the workspace; a clone or fetch refused for lack of credentials says how to fix it. */
@@ -123,46 +112,20 @@ function lensStage(log: StageLog, stage: StageName, fn: () => Promise<LensStageR
 }
 
 /** Findings when the select stage itself threw: every kept item under also found, and a verdict from the errors. */
-function fallbackSelection(pr: PrInfo, kept: KeptCandidate[], log: StageLog): SelectResult {
+function fallbackSelection(pr: PrInfo, depth: Depth, packs: Pack[], kept: KeptCandidate[], log: StageLog): SelectResult {
   const findings: Finding[] = kept.map((k) => ({ ...k, fingerprint: fingerprint(k), bucket: 'also', rank: null, status: null }));
+  const verdict = decideVerdict(pr, findings, log.errors, false);
   return {
-    findings, dropped: [], verdict: decideVerdict(pr, findings, log.errors, false), whoseCall: [], checksAfterMerge: [],
-    selfReviewText: '', errors: [], usage: [],
+    findings, dropped: [], verdict, whoseCall: [], checksAfterMerge: [],
+    selfReviewText: selfReviewText(pr, depth, packs.map((p) => p.title), verdict), errors: [], usage: [],
   };
 }
+
+/** The stage error that keeps a sync merge from being reported as reviewed. */
+const unreviewedMerge = (changed: number): string =>
+  `This pull request only merges another branch in. Airlock did not review it: ${changed === 1 ? '1 changed file was' : `${changed} changed files were`} not looked at.`;
 
 interface Settings { depth: Depth; models: ModelConfig; parallel: number }
-
-interface DeepResult {
-  candidates: Candidate[]; questions: Question[]; schemaDropped: Dropped[]; anchorDropped: Dropped[]; challengeDropped: Dropped[];
-  kept: KeptCandidate[];
-}
-
-/**
- * The deep pass: the cohort lenses again over each layer of every cohort with more than one layer, told to read the
- * layer's files in full. Candidates whose fingerprint is in `seen` are discarded; the rest are anchored and challenged.
- * What it returns names the original cohorts.
- */
-async function deepPass(
-  rec: StageRecorder, runner: AgentRunner, ctx: LensContext, seen: Set<string>, usedIds: Set<string>,
-  readHead: (path: string) => Promise<string | null>, readBoth: ReadFile,
-): Promise<DeepResult> {
-  const { map, cohortOf } = layerMap(ctx.map);
-  const back = <T extends { cohortId: string | null }>(x: T): T =>
-    ({ ...x, cohortId: x.cohortId === null ? null : (cohortOf.get(x.cohortId) ?? x.cohortId) });
-  const lensed = await runCohortLenses(runner, { ...ctx, map, extraInstructions: DEEP_SENTENCE });
-  rec.usage(lensed.usage);
-  rec.error(...lensed.errors.map((e) => ({ ...e, stage: 'lenses-deep' })));
-  const candidates = withUniqueIds(lensed.candidates.filter((c) => !seen.has(fingerprint(c))).map(back), usedIds);
-  const anchored = await anchorCandidates(candidates, ctx.files, readHead);
-  const challenged = await challenge(runner, ctx, anchored.anchored, readBoth);
-  rec.usage(challenged.usage);
-  rec.error(...challenged.errors);
-  return {
-    candidates, questions: lensed.questions.map(back), schemaDropped: lensed.dropped.map((d) => ({ ...d, candidate: back(d.candidate) })),
-    anchorDropped: anchored.dropped, challengeDropped: challenged.dropped, kept: challenged.kept,
-  };
-}
 
 interface Reviewed {
   range: ReviewRange; packs: Pack[]; tiers: FileFact[]; facts: Fact[]; map: ChangeMap; brief: Brief; questions: Question[];
@@ -193,7 +156,11 @@ async function reviewInWorkspace(
   const { packs } = prepared;
   questions.push(...prepared.questions);
 
-  const sync = (await log.run('shape', () => isSyncMerge(exec, ws.headDir, ws.range, null))) ?? false;
+  const sync = (await log.run('shape', async (rec) => {
+    const merged = await isSyncMerge(exec, ws.headDir, ws.range, null);
+    if (merged) rec.error({ stage: 'shape', cohortId: null, message: unreviewedMerge(files.length) });
+    return merged;
+  })) ?? false;
   const range: ReviewRange = sync ? { ...ws.range, kind: 'sync-merge' } : ws.range;
 
   const gathered = (await log.run('facts', async (rec) => {
@@ -213,6 +180,7 @@ async function reviewInWorkspace(
   let brief = EMPTY_BRIEF;
   if (sync) {
     log.skip('map', skipWhy);
+    log.emit({ type: 'map', map }); // empty, so a listener waiting for the map is not left hanging
     log.skip('brief', skipWhy);
     brief = SYNC_MERGE_BRIEF;
   } else {
@@ -286,16 +254,9 @@ async function reviewInWorkspace(
 
   if (depth === 'deep' && !sync) {
     const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...challengeDropped].map((d) => d.candidate)];
-    const deep = await log.run('lenses-deep', (rec) =>
-      deepPass(rec, runner, ctx, new Set(known.map(fingerprint)), usedIds, readHead, readBoth));
-    if (deep) {
-      candidates.push(...deep.candidates);
-      questions.push(...deep.questions);
-      schemaDropped.push(...deep.schemaDropped);
-      anchorDropped.push(...deep.anchorDropped);
-      challengeDropped.push(...deep.challengeDropped);
-      kept.push(...deep.kept);
-    }
+    await log.run('lenses-deep', (rec) => deepPass(rec, {
+      runner, ctx, seen: new Set(known.map(fingerprint)), uniqueIds: (c) => withUniqueIds(c, usedIds), readHead, readBoth,
+    }, { candidates, questions, schemaDropped, anchorDropped, challengeDropped, kept }));
   }
 
   // Select always runs, so the document has a verdict; it is told every error so far.
@@ -304,15 +265,13 @@ async function reviewInWorkspace(
     rec.usage(r.usage);
     rec.error(...r.errors);
     return r;
-  })) ?? fallbackSelection(pr, kept, log);
+  })) ?? fallbackSelection(pr, depth, packs, kept, log);
 
   return {
     range, packs, tiers, facts, map, brief, questions, candidates, selection,
     dropped: [...schemaDropped, ...anchorDropped, ...challengeDropped, ...selection.dropped],
   };
 }
-
-const NOT_FINISHED = 'The review did not finish.';
 
 /**
  * Reviews one pull request: every stage in order, then the document is checked against the schema, saved and returned.
@@ -322,7 +281,8 @@ const NOT_FINISHED = 'The review did not finish.';
 export async function runReview(req: ReviewRequest, deps: EngineDeps, onEvent?: (e: ReviewEvent) => void): Promise<ReviewDocument> {
   const parallel = req.parallel ?? DEFAULT_PARALLEL;
   if (!Number.isInteger(parallel) || parallel < 1) throw new RangeError(`parallel must be a whole number of at least 1, got ${parallel}`);
-  const settings: Settings = { depth: req.depth ?? 'standard', models: { ...DEFAULT_MODELS, ...req.models }, parallel };
+  const given = Object.fromEntries(Object.entries(req.models ?? {}).filter(([, v]) => v !== undefined)) as Partial<ModelConfig>;
+  const settings: Settings = { depth: req.depth ?? 'standard', models: { ...DEFAULT_MODELS, ...given }, parallel };
   const id = hexId('r_', 5);
   const createdAt = deps.now().toISOString();
   const log = createStageLog(onEvent);
@@ -356,17 +316,27 @@ export async function runReview(req: ReviewRequest, deps: EngineDeps, onEvent?: 
     whoseCall: selection.whoseCall, checksAfterMerge: selection.checksAfterMerge, selfReviewText: selection.selfReviewText,
     stageErrors: [...log.errors], timings: log.timings(),
   });
+  // A draft that fails the schema is the engine's own fault, so it rejects rather than becoming a stage error.
+  const engineFault: { error: Error | null } = { error: null };
+  const checked = (doc: ReviewDocument): ReviewDocument => {
+    const parsed = ReviewDocumentSchema.safeParse(doc);
+    if (parsed.success) return parsed.data;
+    engineFault.error = new Error(`Airlock built a review document that does not match its own schema: ${parsed.error.message}`);
+    throw engineFault.error;
+  };
   // The store stage's own timing is its time up to the write, since the saved document carries it.
   let document = await log.run('store', async () => {
-    const doc = ReviewDocumentSchema.parse(draft());
+    const doc = checked(draft());
     await saveReview(doc);
     return doc;
   });
+  if (engineFault.error) throw engineFault.error;
   if (document === undefined) {
-    // Not saved: the review is returned, but never as a complete one.
+    // Not saved: the review is returned, but never as a complete one, and its self-review text says so.
     const doc = draft();
-    const text = doc.selfReviewText.includes(NOT_FINISHED) ? doc.selfReviewText : `${doc.selfReviewText} ${NOT_FINISHED}`.trim();
-    document = ReviewDocumentSchema.parse({ ...doc, verdict: decideVerdict(doc.pr, doc.findings, doc.stageErrors, false), selfReviewText: text });
+    const verdict = decideVerdict(doc.pr, doc.findings, doc.stageErrors, false);
+    const text = selfReviewText(doc.pr, doc.depth, reviewed.packs.map((p) => p.title), verdict);
+    document = checked({ ...doc, verdict, selfReviewText: text });
   }
   log.emit({ type: 'done', document });
   return document;

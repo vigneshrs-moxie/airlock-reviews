@@ -301,7 +301,7 @@ export function decideVerdict(pr: PrInfo, findings: Finding[], stageErrors: Stag
   return { label, sentence, counts };
 }
 
-function selfReviewText(pr: PrInfo, depth: Depth, packTitles: string[], verdict: Verdict): string {
+export function selfReviewText(pr: PrInfo, depth: Depth, packTitles: string[], verdict: Verdict): string {
   const { counts } = verdict;
   const total = counts.block + counts.fix + counts.ask + counts.note;
   const words: [number, string, string][] = [

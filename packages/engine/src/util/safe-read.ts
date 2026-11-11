@@ -1,18 +1,23 @@
+import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 
 /** The largest file read on behalf of a model's claim. */
 export const MAX_SAFE_READ_BYTES = 2 * 1024 * 1024;
 
-/** Repository-relative: no leading `/`, no backslash, `%`, `:` or NUL, and no empty or `..` segment. */
-const isRepoPath = (path: string): boolean =>
-  path !== '' && !path.startsWith('/') && !/[\\%:\0]/.test(path) && path.split('/').every((s) => s !== '' && s !== '..' && s !== '.');
+/** Repository-relative: no leading `/`, no backslash, `%`, `:` or NUL, no empty, `.` or `..` segment, and not under `.git`. */
+const isRepoPath = (path: string): boolean => {
+  const segments = path.split('/');
+  return path !== '' && !path.startsWith('/') && !/[\\%:\0]/.test(path)
+    && segments.every((s) => s !== '' && s !== '..' && s !== '.') && segments[0]!.toLowerCase() !== '.git';
+};
 
 /**
  * Reads `relPath` under `rootDir`, or returns null. Every file read on behalf of a model's claim goes through here. The
- * path must be repository-relative; its real path must lie inside the real root and be spelled exactly as asked, letter
- * case included (so no symbolic link is followed and `SRC/a.ts` does not read `src/a.ts` on a case-insensitive disk);
- * and it must be a regular file of at most 2 MB. Never throws.
+ * path must be repository-relative and not under `.git`; its real path must lie inside the real root and be spelled
+ * exactly as asked, letter case included (so no symbolic link is followed and `SRC/a.ts` does not read `src/a.ts` on a
+ * case-insensitive disk); and it must be a regular file of at most 2 MB. The file is opened without following a final link, so a link put in
+ * its place after the check is refused rather than read. Never throws.
  */
 export async function safeRead(rootDir: string, relPath: string): Promise<string | null> {
   try {
@@ -20,7 +25,7 @@ export async function safeRead(rootDir: string, relPath: string): Promise<string
     const root = await realpath(rootDir);
     const real = await realpath(join(root, relPath));
     if (relative(root, real).split(sep).join('/') !== relPath) return null;
-    const file = await open(real, 'r');
+    const file = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const info = await file.stat();
       if (!info.isFile() || info.size > MAX_SAFE_READ_BYTES) return null;

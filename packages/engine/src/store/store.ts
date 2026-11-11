@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ReviewDocumentSchema, type ReviewDocument } from '@airlock/shared';
 import { airlockHome, repoSlug } from '../util/paths.js';
@@ -31,7 +31,13 @@ export async function saveReview(doc: ReviewDocument): Promise<string> {
   const path = join(folder, `${headSha}-${checked.id}.json`);
   const temporary = join(folder, `.${headSha}-${checked.id}.${randomBytes(4).toString('hex')}.tmp`);
   try {
-    await writeFile(temporary, `${JSON.stringify(checked, null, 2)}\n`);
+    const file = await open(temporary, 'wx');
+    try {
+      await file.writeFile(`${JSON.stringify(checked, null, 2)}\n`);
+      await file.sync(); // on disk before the rename makes it visible
+    } finally {
+      await file.close();
+    }
     await rename(temporary, path);
   } catch (err) {
     await rm(temporary, { force: true }).catch(() => undefined);

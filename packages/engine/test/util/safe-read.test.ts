@@ -1,8 +1,23 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { MAX_SAFE_READ_BYTES, safeRead } from '../../src/util/safe-read.js';
+
+/** Lets a test act right after realpath resolves a path, to swap a file for a link before it is opened. */
+const race = vi.hoisted(() => ({ afterRealpath: null as null | ((resolved: string) => Promise<void>) }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...fs,
+    realpath: async (...args: Parameters<typeof fs.realpath>) => {
+      const resolved = await fs.realpath(...args);
+      if (race.afterRealpath) await race.afterRealpath(String(resolved));
+      return resolved;
+    },
+  };
+});
+afterEach(() => { race.afterRealpath = null; });
 
 let top: string;
 let root: string;
@@ -21,6 +36,11 @@ beforeAll(async () => {
   await symlink(join(root, 'src', 'a.ts'), join(root, 'src', 'alias.ts'));
   await writeFile(join(root, 'exact.bin'), Buffer.alloc(MAX_SAFE_READ_BYTES, 0x61));
   await writeFile(join(root, 'big.bin'), Buffer.alloc(MAX_SAFE_READ_BYTES + 1, 0x61));
+  await mkdir(join(root, '.git'), { recursive: true });
+  await writeFile(join(root, '.git', 'config'), '[core]\n');
+  await mkdir(join(root, 'docs', '.git'), { recursive: true });
+  await writeFile(join(root, 'docs', '.git', 'notes.md'), 'nested\n');
+  await writeFile(join(root, 'src', 'swapped.ts'), 'export const swapped = 1;\n');
 });
 
 afterAll(async () => {
@@ -59,6 +79,23 @@ describe('safeRead', () => {
   it('reads a file of exactly 2 MB and refuses one over it', async () => {
     expect((await safeRead(root, 'exact.bin'))?.length).toBe(MAX_SAFE_READ_BYTES);
     expect(await safeRead(root, 'big.bin')).toBeNull();
+  });
+
+  it('refuses anything under .git at the root, whatever the letter case', async () => {
+    expect(await safeRead(root, '.git/config')).toBeNull();
+    expect(await safeRead(root, '.GIT/config')).toBeNull();
+    expect(await safeRead(root, '.Git/config')).toBeNull();
+    expect(await safeRead(root, 'docs/.git/notes.md')).toBe('nested\n');
+  });
+
+  it('does not follow a link that replaces the file between resolving it and opening it', async () => {
+    race.afterRealpath = async (resolved) => {
+      if (!resolved.endsWith(join('src', 'swapped.ts'))) return;
+      race.afterRealpath = null;
+      await rename(resolved, `${resolved}.moved`);
+      await symlink(join(top, 'outside', 'secret.txt'), resolved);
+    };
+    expect(await safeRead(root, 'src/swapped.ts')).toBeNull();
   });
 
   it('returns null for a folder, a missing file and a missing root, never throwing', async () => {

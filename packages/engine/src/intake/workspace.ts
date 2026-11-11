@@ -70,8 +70,11 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   await rm(reviewDir, { recursive: true, force: true });
   await exec('git', ['--git-dir', mirror, 'worktree', 'prune']);
   await mkdir(reviewDir, { recursive: true });
-  must(await exec('git', ['--git-dir', mirror, 'worktree', 'add', '--detach', headDir, range.headSha]), 'git worktree add (head)');
-  must(await exec('git', ['--git-dir', mirror, 'worktree', 'add', '--detach', baseDir, range.baseSha]), 'git worktree add (base)');
+  // With core.symlinks=false a link is checked out as a small file holding its target, so no review read can leave the worktree.
+  const addWorktree = (dir: string, sha: string) =>
+    exec('git', ['-c', 'core.symlinks=false', '--git-dir', mirror, 'worktree', 'add', '--detach', dir, sha]);
+  must(await addWorktree(headDir, range.headSha), 'git worktree add (head)');
+  must(await addWorktree(baseDir, range.baseSha), 'git worktree add (base)');
 
   return {
     headDir, baseDir, range,
