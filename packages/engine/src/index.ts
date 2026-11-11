@@ -11,4 +11,6 @@ export { parsePrRef } from './intake/pr.js';
 export { loadPack } from './packs/load.js';
 export { selectPacks } from './packs/select.js';
 export type { Holdout, Pack } from './packs/types.js';
+export { syncKit } from './packs/kit-sync.js';
 export { realExec, type Exec } from './util/exec.js';
+export { limiter } from './util/limit.js';
