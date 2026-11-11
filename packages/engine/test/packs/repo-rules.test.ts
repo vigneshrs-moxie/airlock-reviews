@@ -1,8 +1,10 @@
-import { chmod, mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadRepoRules } from '../../src/packs/repo-rules.js';
+import { realExec } from '../../src/util/exec.js';
+import { makeTempRepo } from '../helpers/temp-repo.js';
 
 async function repo(files: Record<string, string>): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'airlock-rules-'));
@@ -89,5 +91,25 @@ describe('loadRepoRules', () => {
     const dir = await repo({ 'CLAUDE.md': 'secret', 'AGENTS.md': 'ok' });
     await chmod(join(dir, 'CLAUDE.md'), 0o000);
     expect((await loadRepoRules(dir, [])).rules.map((r) => r.path)).toEqual(['AGENTS.md']);
+  });
+
+  it('reads a rule file that the base checkout holds as a link (a small file naming its target) from the target inside the repository', async () => {
+    const r = await makeTempRepo();
+    try {
+      await r.write('docs/rules.md', 'THE REAL RULES');
+      await symlink('docs/rules.md', join(r.dir, 'CLAUDE.md'));
+      await symlink('../outside.md', join(r.dir, 'AGENTS.md'));
+      await r.commit('links');
+      // The base worktree is checked out with core.symlinks=false: each link is a small file holding its target.
+      for (const [link, target] of [['CLAUDE.md', 'docs/rules.md'], ['AGENTS.md', '../outside.md']] as const) {
+        await rm(join(r.dir, link));
+        await writeFile(join(r.dir, link), target);
+      }
+      const { rules, leftOut } = await loadRepoRules(r.dir, [], realExec);
+      expect(rules).toEqual([{ path: 'CLAUDE.md', text: 'THE REAL RULES' }]);
+      expect(leftOut).toEqual([]);
+    } finally {
+      await rm(r.dir, { recursive: true, force: true });
+    }
   });
 });

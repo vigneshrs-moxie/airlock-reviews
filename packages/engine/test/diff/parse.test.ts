@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FileDiff } from '@airlock/shared';
 import { afterEach, describe, expect, it } from 'vitest';
-import { lineInDiff, loadDiff, parseDiff, recheckBinary } from '../../src/diff/parse.js';
+import { lineInDiff, linkFacts, loadDiff, parseDiff, recheckBinary } from '../../src/diff/parse.js';
 import { realExec, type Exec } from '../../src/util/exec.js';
 import { safeRead } from '../../src/util/safe-read.js';
 import { commitFiles } from '../helpers/change-repo.js';
@@ -195,5 +195,25 @@ describe('recheckBinary', () => {
     const out = await recheckBinary([file('gone.ts', 'deleted'), file('huge.ts', 'modified')], async () => null);
     expect(out.files.map((f) => f.binary)).toEqual([true, true]);
     expect(out.facts).toEqual([]);
+  });
+});
+
+describe('symbolic links', () => {
+  const made: string[] = [];
+  afterEach(async () => {
+    for (const dir of made.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+
+  it('keeps each file\'s mode, and says where a link points', async () => {
+    const r = await makeTempRepo();
+    made.push(r.dir);
+    const baseSha = await commitFiles(r, { 'src/a.ts': 'export const a = 1;\n', 'docs/rules.md': 'rules\n' }, 'base');
+    await symlink('docs/rules.md', join(r.dir, 'CLAUDE.md'));
+    const headSha = await commitFiles(r, { 'src/a.ts': 'export const a = 2;\n' }, 'head');
+    const files = await loadDiff(realExec, join(r.dir, '.git'), { baseSha, headSha, kind: 'full' });
+    expect(files.map((f) => [f.path, f.mode])).toEqual([['CLAUDE.md', '120000'], ['src/a.ts', '100644']]);
+    expect(linkFacts(files)).toEqual([{
+      checkId: 'symbolic-link', path: 'CLAUDE.md', line: null, message: 'CLAUDE.md is a symbolic link to docs/rules.md',
+    }]);
   });
 });

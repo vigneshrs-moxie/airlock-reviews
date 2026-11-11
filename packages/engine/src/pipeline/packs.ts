@@ -121,7 +121,7 @@ export async function preparePacks(selected: Pack[], opts: PackOptions): Promise
   let repoRules: PreparedPacks['repoRules'] = [];
   const limits: string[] = [];
   try {
-    const loaded = await loadRepoRules(opts.baseDir, opts.changedPaths);
+    const loaded = await loadRepoRules(opts.baseDir, opts.changedPaths, opts.exec);
     repoRules = loaded.rules;
     limits.push(...loaded.leftOut.map((l) => `repository rule file ${l.path} was not shown: ${l.reason}`));
   } catch (err) {

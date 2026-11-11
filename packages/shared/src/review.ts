@@ -41,6 +41,8 @@ export const FileDiffSchema = z.object({
   path: z.string(), oldPath: z.string().nullable(),
   status: z.enum(['added', 'modified', 'deleted', 'renamed']), binary: z.boolean(),
   additions: z.number().int(), deletions: z.number().int(), hunks: z.array(HunkSchema),
+  /** The file's git mode on the head (the base for a deleted file), such as `100644` or `120000` for a symbolic link. */
+  mode: z.string().nullable().optional(),
 });
 export type FileDiff = z.infer<typeof FileDiffSchema>;
 

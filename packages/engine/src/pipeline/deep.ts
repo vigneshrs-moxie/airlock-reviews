@@ -8,6 +8,8 @@ import { runCohortLenses } from '../lenses/cohort-lens.js';
 import type { LensContext } from '../lenses/context.js';
 import type { StageRecorder } from './stages.js';
 
+const CHALLENGE_FAILED = 'challenge did not complete';
+
 /** The sentence added to every lens request of the deep pass. */
 export const DEEP_SENTENCE = 'This is a second, closer pass over one layer: read every non-test file in it in full.';
 
@@ -55,7 +57,8 @@ export async function deepPass(rec: StageRecorder, input: DeepInput, sink: DeepS
   const { map, cohortOf } = layerMap(ctx.map);
   const back = <T extends { cohortId: string | null }>(x: T): T =>
     ({ ...x, cohortId: x.cohortId === null ? null : (cohortOf.get(x.cohortId) ?? x.cohortId) });
-  const named = (errors: StageError[]): StageError[] => errors.map((e) => ({ ...e, stage: 'lenses-deep' }));
+  // Errors name the stage and the original group, since a layer's own id is not in the document's map.
+  const named = (errors: StageError[]): StageError[] => errors.map((e) => back({ ...e, stage: 'lenses-deep' }));
 
   const lensed = await runCohortLenses(runner, { ...ctx, map, extraInstructions: DEEP_SENTENCE });
   rec.usage(lensed.usage);
@@ -74,7 +77,14 @@ export async function deepPass(rec: StageRecorder, input: DeepInput, sink: DeepS
 
   const anchored = await anchorCandidates(candidates, ctx.files, input.readHead);
   sink.anchorDropped.push(...anchored.dropped);
-  const challenged = await challenge(runner, ctx, anchored.anchored, input.readBoth);
+  let challenged: Awaited<ReturnType<typeof challenge>>;
+  try {
+    challenged = await challenge(runner, ctx, anchored.anchored, input.readBoth);
+  } catch (err) {
+    // Kept as findings, marked, as the main pass keeps them when its challenge fails.
+    sink.kept.push(...anchored.anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED })));
+    throw err;
+  }
   rec.usage(challenged.usage);
   rec.error(...named(challenged.errors));
   sink.limits.push(...challenged.limits.map((l) => l.replace(/^challenge: /, 'lenses-deep challenge: ')));

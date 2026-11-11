@@ -61,6 +61,7 @@ interface Draft {
   isNew: boolean;
   isDeleted: boolean;
   binary: boolean;
+  mode: string | null;
   hunks: Hunk[];
   additions: number;
   deletions: number;
@@ -80,6 +81,7 @@ function finish(d: Draft): FileDiff {
     oldPath: status === 'renamed' ? d.renameFrom : null,
     status,
     binary: d.binary,
+    mode: d.mode,
     additions: d.additions,
     deletions: d.deletions,
     hunks: d.hunks,
@@ -129,7 +131,7 @@ export function parseDiff(text: string): FileDiff[] {
       flush();
       cur = {
         gitLine: line, oldPath: undefined, newPath: undefined, renameFrom: null, renameTo: null,
-        isNew: false, isDeleted: false, binary: false, hunks: [], additions: 0, deletions: 0,
+        isNew: false, isDeleted: false, binary: false, mode: null, hunks: [], additions: 0, deletions: 0,
       };
       continue;
     }
@@ -145,8 +147,10 @@ export function parseDiff(text: string): FileDiff[] {
       oldRemaining = oldLines; newRemaining = newLines; oldNo = oldStart; newNo = newStart;
     } else if (line.startsWith('--- ') && hunk === null) cur.oldPath = stripSide(line.slice(4));
     else if (line.startsWith('+++ ') && hunk === null) cur.newPath = stripSide(line.slice(4));
-    else if (line.startsWith('new file mode')) cur.isNew = true;
-    else if (line.startsWith('deleted file mode')) cur.isDeleted = true;
+    else if (line.startsWith('new file mode ')) { cur.isNew = true; cur.mode = line.slice('new file mode '.length).trim(); }
+    else if (line.startsWith('deleted file mode ')) { cur.isDeleted = true; cur.mode = line.slice('deleted file mode '.length).trim(); }
+    else if (line.startsWith('new mode ')) cur.mode = line.slice('new mode '.length).trim();
+    else if (line.startsWith('index ') && cur.mode === null) cur.mode = /^index \S+ (\d{6})$/.exec(line)?.[1] ?? null;
     else if (line.startsWith('rename from ')) cur.renameFrom = unquote(line.slice('rename from '.length));
     else if (line.startsWith('rename to ')) cur.renameTo = unquote(line.slice('rename to '.length));
     else if (line.startsWith('Binary files ') || line === 'GIT binary patch') cur.binary = true;
@@ -195,6 +199,23 @@ export async function recheckBinary(
   }));
   facts.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   return { files: out, facts };
+}
+
+/** Git's mode for a symbolic link. */
+export const SYMLINK_MODE = '120000';
+export const SYMBOLIC_LINK = 'symbolic-link';
+
+/**
+ * A fact for each changed file that is a symbolic link on the head: where it points. Links are checked out as small
+ * files holding their target, so without this a reviewer would take one for a one-line text file.
+ */
+export function linkFacts(files: FileDiff[]): Fact[] {
+  return files.flatMap((f) => {
+    if (f.mode !== SYMLINK_MODE || f.status === 'deleted') return [];
+    const target = f.hunks.flatMap((h) => h.lines).find((l) => l.kind === 'add')?.text;
+    const message = target === undefined ? `${f.path} is a symbolic link` : `${f.path} is a symbolic link to ${target}`;
+    return [{ checkId: SYMBOLIC_LINK, path: f.path, line: null, message }];
+  });
 }
 
 /** True when newLine is an added or context line inside one of the file's hunks. */

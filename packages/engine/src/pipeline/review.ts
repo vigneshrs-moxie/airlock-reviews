@@ -112,6 +112,9 @@ const CHALLENGE_FAILED = 'challenge did not complete';
 const SYNC_MERGE_BRIEF: Brief = {
   whatItDoes: ['This branch only merges its target branch into itself, so only conflict resolutions need review.'], claims: [],
 };
+const EMPTY_SYNC_MERGE_BRIEF: Brief = {
+  whatItDoes: ['This branch only merges its target branch into itself and changes no files.'], claims: [],
+};
 const EMPTY_BRIEF: Brief = { whatItDoes: [], claims: [] };
 const EMPTY_MAP: ChangeMap = { cohorts: [], standalone: [], links: [] };
 const NO_PACKS: PreparedPacks = { packs: [], missingHelpers: [], repoRules: [], questions: [], errors: [], limits: [] };
@@ -242,7 +245,8 @@ async function reviewInWorkspace(
 
   const sync = (await log.run('shape', async (rec) => {
     const merged = await isSyncMerge(exec, ws.headDir, ws.range, null);
-    if (merged) rec.error({ stage: 'shape', cohortId: null, message: unreviewedMerge(files.length) });
+    // A merge that changes no files leaves nothing unreviewed.
+    if (merged && files.length > 0) rec.error({ stage: 'shape', cohortId: null, message: unreviewedMerge(files.length) });
     return merged;
   })) ?? false;
   const range: ReviewRange = sync ? { ...ws.range, kind: 'sync-merge' } : ws.range;
@@ -271,7 +275,7 @@ async function reviewInWorkspace(
     log.skip('map', skipWhy);
     log.emit({ type: 'map', map }); // empty, so a listener waiting for the map is not left hanging
     log.skip('brief', skipWhy);
-    brief = SYNC_MERGE_BRIEF;
+    brief = files.length === 0 ? EMPTY_SYNC_MERGE_BRIEF : SYNC_MERGE_BRIEF;
   } else {
     map = ((await limitedOut('map')) ? undefined : await log.run('map', async (rec) => {
       const r = await buildChangeMap(capped, {
