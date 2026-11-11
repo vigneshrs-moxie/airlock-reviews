@@ -22,7 +22,8 @@ const SweepOutputSchema = z.object({
 });
 type SweepOutput = z.infer<typeof SweepOutputSchema>;
 
-const SEVERITY_RANK: Record<Severity, number> = { note: 0, ask: 1, fix: 2, block: 3 };
+/** Higher is more serious: block > fix > ask > note. */
+export const SEVERITY_RANK: Record<Severity, number> = { note: 0, ask: 1, fix: 2, block: 3 };
 const raised = (severity: Severity, floor: Severity): Severity => (SEVERITY_RANK[severity] < SEVERITY_RANK[floor] ? floor : severity);
 
 function rulesText(rules: Rule[]): string {
