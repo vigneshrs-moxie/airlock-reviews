@@ -1,6 +1,8 @@
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { failure } from '../../src/agent/fake-runner.js';
 import type { AgentRequest } from '../../src/agent/runner.js';
+import { renderReview } from '../../src/render/terminal.js';
 import { block, rawCandidate } from '../helpers/lens-context.js';
 import { scenarioScript, useReviewHarness } from '../helpers/review-scenario.js';
 
@@ -78,6 +80,35 @@ describe('runReview merge stage', () => {
     }) }) });
     expect(doc.findings).toHaveLength(6);
     expect(doc.dropped.filter((d) => d.stage === 'merge')).toEqual([]);
+  });
+
+  describe('a merge Airlock could not confirm', () => {
+    const NOTE = /^Airlock could not confirm whether 6 findings at the same place are the same problem \("boundary: the total is not rounded", .* and 1 more\), so they are listed separately\.$/;
+
+    it.each([
+      ['an answer unusable twice', () => ({ clusters: [{ id: 'd1', sets: [['nobody']], reason: 'x' }] })],
+      ['a turn limit', () => failure('error_max_turns', 'turn-limit')],
+      ['a timeout', () => failure('timed out after 300 s', 'timeout')],
+    ])('after %s, keeps every finding, adds a note and no stage error, and the review is not incomplete', async (_name, answer) => {
+      const { doc } = await h.review({ req: { packsDir: SIX_LENSES_DIR }, script: scenarioScript({ 'lens:': sameLine, merge: answer }) });
+      expect(doc.stageErrors).toEqual([]);
+      expect(doc.verdict.label).not.toBe('incomplete');
+      expect(doc.findings).toHaveLength(6);
+      expect(doc.notes).toEqual([expect.stringMatching(NOTE)]);
+      expect(doc.timings.map((t) => t.stage)).toContain('merge');
+      expect(doc.timings.find((t) => t.stage === 'merge')!.agentRuns).toBeGreaterThan(0);
+      expect(renderReview(doc)).toMatch(/\nNotes\n\n- Airlock could not confirm whether 6 findings/);
+    });
+
+    it('a usage limit stays a stage error of that kind and the review is incomplete', async () => {
+      const { doc } = await h.review({
+        req: { packsDir: SIX_LENSES_DIR },
+        script: scenarioScript({ 'lens:': sameLine, merge: () => failure("Claude's usage limit was reached", 'usage-limit') }),
+      });
+      expect(doc.stageErrors.filter((e) => e.stage === 'merge')).toEqual([expect.objectContaining({ kind: 'usage-limit' })]);
+      expect(doc.verdict.label).toBe('incomplete');
+      expect(doc.notes ?? []).not.toContainEqual(expect.stringMatching(/could not confirm/));
+    });
   });
 
   it('makes no merge request at quick depth', async () => {

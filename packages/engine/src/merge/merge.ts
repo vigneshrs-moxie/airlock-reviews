@@ -30,7 +30,10 @@ export interface MergeResult {
   items: AnchoredCandidate[];
   /** One entry per merged duplicate, at stage `merge`, naming its keeper in `mergedInto`. */
   dropped: Dropped[];
+  /** Only a usage limit: nothing is left unreviewed when a merge cannot be confirmed, so that is a note instead. */
   errors: StageError[];
+  /** For the document: the findings whose clusters got no usable answer, which are listed separately. */
+  notes: string[];
   usage: AgentUsage[];
 }
 
@@ -170,6 +173,16 @@ function readAnswer(clusters: Cluster[], answer: MergeOutput): { accepted: Accep
 
 const named = (clusters: Cluster[]): string => clusters.map((c) => `${c.id} (${c.members.map((m) => m.id).join(', ')})`).join(', ');
 const clustersWord = (clusters: Cluster[]): string => (clusters.length === 1 ? 'cluster' : 'clusters');
+/** The note names at most this many findings by title. */
+const MAX_NOTE_TITLES = 5;
+
+/** The sentence for the document when the model's answer could not confirm these clusters; it counts findings, not clusters. */
+function unconfirmedNote(clusters: Cluster[]): string {
+  const members = clusters.flatMap((c) => c.members);
+  const titles = members.slice(0, MAX_NOTE_TITLES).map((m) => `"${oneLine(m.title)}"`).join(', ');
+  const more = members.length > MAX_NOTE_TITLES ? ` and ${members.length - MAX_NOTE_TITLES} more` : '';
+  return `Airlock could not confirm whether ${members.length} findings at the same place are the same problem (${titles}${more}), so they are listed separately.`;
+}
 
 // ---- Merging ----
 
@@ -265,11 +278,12 @@ export function withMergedCount(challengeDropped: Dropped[], mergeDropped: Dropp
  * The merge stage. Code proposes clusters of candidates at the same place (proposeClusters); one request asks the model
  * to split each cluster into sets of the same problem; a set is merged only when the model's answer for its cluster is a
  * partition of exactly that cluster. Same place alone never merges two candidates. Clusters without a usable answer are
- * asked about once more, on their own; if that fails too they stay unmerged and a stage error names them. A request that
- * fails for any reason other than an unusable answer is not repeated. With no cluster no request is made.
+ * asked about once more, on their own; if that fails too they stay unmerged and a note says so: every finding is still
+ * listed, so the review is not incomplete. A request that fails for any reason other than an unusable answer is not
+ * repeated; only a usage limit is a stage error. With no cluster no request is made.
  */
 export async function mergeSameProblems(runner: AgentRunner, ctx: LensContext, items: AnchoredCandidate[]): Promise<MergeResult> {
-  const out: MergeResult = { items, dropped: [], errors: [], usage: [] };
+  const out: MergeResult = { items, dropped: [], errors: [], notes: [], usage: [] };
   const clusters = proposeClusters(items);
   if (clusters.length === 0) return out;
 
@@ -292,22 +306,21 @@ export async function mergeSameProblems(runner: AgentRunner, ctx: LensContext, i
     out.usage.push(result.usage);
     if (!result.ok) {
       if (result.kind === 'invalid-output') continue;
-      const kind: StageErrorKind = result.kind;
-      const verb = missing.length === 1 ? 'was' : 'were';
-      out.errors.push({ stage: 'merge', cohortId: null, kind, message: `${result.error}; ${clustersWord(missing)} ${named(missing)} ${verb} not merged` });
-      missing = [];
+      // A usage limit is the one failure that stops the review, so it stays a stage error; any other failure would only
+      // fail again and leaves every finding in place, so it is a note.
+      if (result.kind === 'usage-limit') {
+        const kind: StageErrorKind = result.kind;
+        const verb = missing.length === 1 ? 'was' : 'were';
+        out.errors.push({ stage: 'merge', cohortId: null, kind, message: `${result.error}; ${clustersWord(missing)} ${named(missing)} ${verb} not merged` });
+        missing = [];
+      }
       break;
     }
     const read = readAnswer(missing, result.output);
     accepted.push(...read.accepted);
     missing = read.missing;
   }
-  if (missing.length > 0) {
-    const tail = missing.length === 1 ? 'so it was not merged' : 'so they were not merged';
-    out.errors.push({
-      stage: 'merge', cohortId: null, kind: 'invalid-output', message: `no usable answer for ${clustersWord(missing)} ${named(missing)}, ${tail}`,
-    });
-  }
+  if (missing.length > 0) out.notes.push(unconfirmedNote(missing));
   const merged = applyMerges(items, accepted);
   return { ...out, items: merged.items, dropped: merged.dropped };
 }

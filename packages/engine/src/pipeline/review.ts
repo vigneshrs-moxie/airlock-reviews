@@ -213,7 +213,7 @@ interface Settings { depth: Depth; models: ModelConfig; parallel: number; combin
 
 interface Reviewed {
   range: ReviewRange; packs: Pack[]; tiers: FileFact[]; facts: Fact[]; map: ChangeMap; brief: Brief; questions: Question[];
-  candidates: Candidate[]; dropped: Dropped[]; selection: SelectResult; limits: string[];
+  candidates: Candidate[]; dropped: Dropped[]; selection: SelectResult; limits: string[]; notes: string[];
 }
 
 /** Every stage from packs to select, inside the workspace. */
@@ -357,6 +357,7 @@ async function reviewInWorkspace(
   // Code proposes clusters at the same place and the model says which are the same problem; only then are they merged,
   // before the challenge, so each problem is challenged once.
   const mergeDropped: Dropped[] = [];
+  const mergeNotes: string[] = [];
   if (sync || quick) log.skip('merge', skipWhy);
   else if (!(await limitedOut('merge'))) {
     const r = await log.run('merge', async (rec) => {
@@ -368,6 +369,7 @@ async function reviewInWorkspace(
     if (r !== undefined) {
       anchored = r.items;
       mergeDropped.push(...r.dropped);
+      mergeNotes.push(...r.notes);
     }
   }
 
@@ -410,6 +412,7 @@ async function reviewInWorkspace(
   return {
     range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
     dropped: [...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
+    notes: [...mergeNotes, ...selection.notes],
   };
 }
 
@@ -484,7 +487,7 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
     files: reviewed.tiers, facts: reviewed.facts, map: reviewed.map, brief: reviewed.brief, verdict: selection.verdict,
     findings: selection.findings, questions: reviewed.questions, dropped: reviewed.dropped, candidates: reviewed.candidates,
     whoseCall: selection.whoseCall, checksAfterMerge: selection.checksAfterMerge, selfReviewText: selection.selfReviewText,
-    stageErrors: [...log.errors], timings: log.timings(), limits: reviewed.limits, notes: selection.notes,
+    stageErrors: [...log.errors], timings: log.timings(), limits: reviewed.limits, notes: reviewed.notes,
   });
   // A draft that fails the schema is the engine's own fault, so it rejects rather than becoming a stage error.
   const engineFault: { error: Error | null } = { error: null };

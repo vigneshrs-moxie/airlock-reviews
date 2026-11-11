@@ -85,6 +85,7 @@ describe('mergeSameProblems', () => {
     expect(r.items.map((i) => i.id)).toEqual(['a', 'b']);
     expect(r.dropped).toEqual([]);
     expect(r.errors).toEqual([]);
+    expect(r.notes).toEqual([]);
   });
 
   it('sends one low-effort merge request with every cluster as material and nothing of the findings in the instructions', async () => {
@@ -172,30 +173,52 @@ describe('mergeSameProblems', () => {
     expect(r.items.map((i) => i.id)).toEqual(['a', 'b', 'c']);
   });
 
-  it('leaves a cluster unmerged and names it in a stage error when the second answer is unusable too', async () => {
+  it('leaves a cluster unmerged and says so in a note, not a stage error, when the second answer is unusable too', async () => {
     const runner = createFakeRunner(() => ({ clusters: [partition([['a', 'b', 'z']]), partition([['c', 'd']], 'd2')] }));
     const r = await mergeSameProblems(runner, ctx(), [item('a', 10), item('b', 11), item('c', 50), item('d', 51)]);
     expect(runner.calls).toHaveLength(2);
     expect(r.items.map((i) => i.id)).toEqual(['a', 'b', 'c']);
-    expect(r.errors).toEqual([{
-      stage: 'merge', cohortId: null, kind: 'invalid-output',
-      message: 'no usable answer for cluster d1 (a, b), so it was not merged',
-    }]);
+    expect(r.errors).toEqual([]);
+    expect(r.notes).toEqual([
+      'Airlock could not confirm whether 2 findings at the same place are the same problem ("Finding a", "Finding b"), so they are listed separately.',
+    ]);
   });
 
-  it('asks again after an unusable reply, and records the failure of a request that cannot succeed without asking again', async () => {
+  it('names at most five titles in the note, then how many more', async () => {
+    const seven = Array.from({ length: 7 }, (_, i) => item(`m${i}`, 10 + i));
+    const r = await mergeSameProblems(createFakeRunner(() => ({ clusters: [] })), ctx(), seven);
+    expect(r.notes).toEqual([
+      'Airlock could not confirm whether 7 findings at the same place are the same problem '
+        + '("Finding m0", "Finding m1", "Finding m2", "Finding m3", "Finding m4" and 2 more), so they are listed separately.',
+    ]);
+  });
+
+  it('asks again after an unusable reply; a turn limit or timeout is not asked again and becomes a note', async () => {
     let n = 0;
     const flaky = createFakeRunner(() => (++n === 1 ? new Error('bad json') : { clusters: [partition([['a', 'b']])] }));
     const ok = await mergeSameProblems(flaky, ctx(), [item('a', 10), item('b', 11)]);
     expect(flaky.calls).toHaveLength(2);
     expect(ok.items.map((i) => i.id)).toEqual(['a']);
+    expect(ok.notes).toEqual([]);
 
-    const timedOut = createFakeRunner(() => failure('timed out after 300 s', 'timeout'));
-    const r = await mergeSameProblems(timedOut, ctx(), [item('a', 10), item('b', 11)]);
-    expect(timedOut.calls).toHaveLength(1);
-    expect(r.items.map((i) => i.id)).toEqual(['a', 'b']);
-    expect(r.errors).toEqual([{ stage: 'merge', cohortId: null, kind: 'timeout', message: 'timed out after 300 s; cluster d1 (a, b) was not merged' }]);
-    expect(r.usage).toHaveLength(1);
+    for (const kind of ['timeout', 'turn-limit', 'other'] as const) {
+      const failed = createFakeRunner(() => failure('it stopped', kind));
+      const r = await mergeSameProblems(failed, ctx(), [item('a', 10), item('b', 11)]);
+      expect(failed.calls).toHaveLength(1);
+      expect(r.items.map((i) => i.id)).toEqual(['a', 'b']);
+      expect(r.errors).toEqual([]);
+      expect(r.notes).toHaveLength(1);
+      expect(r.usage).toHaveLength(1);
+    }
+  });
+
+  it('keeps a usage-limit failure as a stage error of that kind, with no note', async () => {
+    const limited = createFakeRunner(() => failure("Claude's usage limit was reached", 'usage-limit'));
+    const r = await mergeSameProblems(limited, ctx(), [item('a', 10), item('b', 11)]);
+    expect(r.errors).toEqual([{
+      stage: 'merge', cohortId: null, kind: 'usage-limit', message: "Claude's usage limit was reached; cluster d1 (a, b) was not merged",
+    }]);
+    expect(r.notes).toEqual([]);
   });
 
   it('merges the review\'s six lenses on one line into one item with five dropped entries pointing at it', async () => {
