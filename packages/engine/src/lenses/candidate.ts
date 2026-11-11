@@ -28,12 +28,18 @@ export type RawCandidate = z.infer<typeof RawCandidateSchema>;
 export const LensOutputSchema = z.object({ candidates: z.array(RawCandidateSchema), questions: z.array(z.string()) });
 export type LensOutput = z.infer<typeof LensOutputSchema>;
 
-/** A combined lens request returns candidates each tagged with the id (`<pack>/<lens>`) of the lens it belongs to. */
-export const CombinedOutputSchema = z.object({
-  candidates: z.array(RawCandidateSchema.extend({ lens: z.string().optional() })),
-  questions: z.array(z.string()),
-});
-export type CombinedOutput = z.infer<typeof CombinedOutputSchema>;
+/**
+ * The output schema of one combined lens request: candidates each tagged with the id (`<pack>/<lens>`) of the lens it
+ * belongs to. The lens field is an enum of exactly the ids the request carries (trimmed first), so the SDK has the model
+ * correct a wrong id itself, as it does a wrong severity; acceptCombined still drops a candidate whose id is not given.
+ */
+export function combinedOutputSchema(ids: readonly string[]) {
+  const [first, ...rest] = ids;
+  if (first === undefined) throw new Error('A combined lens request needs at least one lens.');
+  const lens = z.preprocess((v) => (typeof v === 'string' ? v.trim() : v), z.enum([first, ...rest]));
+  return z.object({ candidates: z.array(RawCandidateSchema.extend({ lens: lens.optional() })), questions: z.array(z.string()) });
+}
+export interface CombinedOutput { candidates: (RawCandidate & { lens?: string })[]; questions: string[] }
 
 /** A combined lens request may return at most this many candidates in all. */
 export const MAX_CANDIDATES_COMBINED = 10;

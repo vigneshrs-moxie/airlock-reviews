@@ -2,7 +2,7 @@ import { rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createFakeRunner } from '../../src/agent/fake-runner.js';
-import type { AgentRequest } from '../../src/agent/runner.js';
+import { withRetry, type AgentRequest } from '../../src/agent/runner.js';
 import { runReview } from '../../src/pipeline/review.js';
 import { renderReview } from '../../src/render/terminal.js';
 import type { Exec } from '../../src/util/exec.js';
@@ -204,5 +204,21 @@ describe('a symbolic link in the pull request', () => {
     expect(doc.files).toEqual([{ path: 'src/auth.ts', tier: 'skim', reason: 'default' }]);
     expect(doc.findings.map((f) => f.title)).toEqual(['canEdit now comes from the mock']);
     expect(['approve', 'ready-for-pr2']).not.toContain(doc.verdict.label);
+  }, SLOW);
+});
+
+describe('a combined lens request at quick depth', () => {
+  it('does not lose a finding whose lens id the model wrote without its pack: the schema refuses it and the corrected answer is used', async () => {
+    const s = await scenario({ 'src/auth.ts': AUTH_BASE }, { 'src/auth.ts': AUTH_HEAD });
+    const answer = (lens: string) => ({ candidates: [{ ...ALWAYS_TRUE, lens }], questions: [] });
+    const script = scenarioScript({
+      'lens:': (req: AgentRequest<unknown>) => (block(req.material, 'problems with your previous reply') === null
+        ? answer('correctness') : answer('core/correctness')),
+    });
+    const { doc, calls } = await review({ s, req: { depth: 'quick' }, script, wrap: (r) => withRetry(r, 1) });
+    expect(calls.filter((c) => c.role === 'lens:combined')).toHaveLength(2);
+    expect(doc.findings.map((f) => [f.title, f.source])).toEqual([['canEdit lets everyone edit', { pack: 'core', lens: 'correctness', ruleId: null }]]);
+    expect(doc.dropped).toEqual([]);
+    expect(doc.verdict.label).not.toBe('approve');
   }, SLOW);
 });
