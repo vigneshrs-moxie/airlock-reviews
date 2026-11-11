@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile, chmod } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig, pair, pairedOrigin, readOrCreateToken, unpair } from '../src/config.js';
@@ -39,6 +39,24 @@ describe('loadConfig', () => {
 
   it.each(['80', '1023', '65536', 'abc', '4611.5', '', ' 5000', '5000x'])('refuses AIRLOCK_PORT %j', (port) => {
     expect(() => loadConfig({ AIRLOCK_HOME: '/tmp/h', AIRLOCK_PORT: port })).toThrow(/AIRLOCK_PORT/);
+  });
+});
+
+describe('loadConfig and the environment', () => {
+  it('treats an empty AIRLOCK_HOME as unset', () => {
+    expect(loadConfig({ AIRLOCK_HOME: '' }).home).toBe(join(homedir(), '.airlock'));
+  });
+
+  it('takes the home from the env it was given, not from process.env', () => {
+    const before = process.env['AIRLOCK_HOME'];
+    process.env['AIRLOCK_HOME'] = '/tmp/from-process';
+    try {
+      expect(loadConfig({}).home).toBe(join(homedir(), '.airlock'));
+      expect(loadConfig({ AIRLOCK_HOME: '/tmp/given' }).home).toBe('/tmp/given');
+      expect(loadConfig().home).toBe('/tmp/from-process');
+    } finally {
+      if (before === undefined) delete process.env['AIRLOCK_HOME']; else process.env['AIRLOCK_HOME'] = before;
+    }
   });
 });
 

@@ -130,7 +130,10 @@ function writeJson(res: ServerResponse, status: number, json: unknown, extra: Re
   res.end(payload);
 }
 
-async function writeStream(res: ServerResponse, stream: (send: (e: unknown) => void, closed: AbortSignal) => Promise<void>): Promise<void> {
+async function writeStream(
+  res: ServerResponse, stream: (send: (e: unknown) => void, closed: AbortSignal) => Promise<void>,
+  failure: (e: unknown) => string, log: (e: unknown) => void,
+): Promise<void> {
   const gone = new AbortController();
   res.on('close', () => gone.abort());
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -141,12 +144,33 @@ async function writeStream(res: ServerResponse, stream: (send: (e: unknown) => v
   };
   try {
     await stream(send, gone.signal);
+  } catch (e) {
+    log(e);
+    send({ type: 'failed', message: failure(e) });
   } finally {
     if (!res.writableEnded) res.end();
   }
 }
 
-export function createRouter(routes: Route[], auth: Auth, log: (line: string) => void = () => undefined): RequestListener {
+/** An error message made safe to send: absolute paths under the given folders become `<path>`. */
+function plainMessage(e: unknown, hidePaths: readonly string[]): string {
+  let message = e instanceof Error ? e.message : String(e);
+  for (const folder of hidePaths) {
+    if (folder === '') continue;
+    message = message.replace(new RegExp(`${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\s'"\`]*`, 'g'), '<path>');
+  }
+  return message;
+}
+
+export interface RouterOptions {
+  /** Folders (the home folder, the Airlock home) whose paths are replaced by `<path>` in error replies. */
+  hidePaths?: readonly string[];
+}
+
+export function createRouter(
+  routes: Route[], auth: Auth, log: (line: string) => void = () => undefined, options: RouterOptions = {},
+): RequestListener {
+  const hidePaths = options.hidePaths ?? [];
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const method = req.method ?? 'GET';
     const url = req.url ?? '/';
@@ -207,12 +231,23 @@ export function createRouter(routes: Route[], auth: Auth, log: (line: string) =>
       return;
     }
 
-    const queryObject = Object.fromEntries(new URLSearchParams(rawQuery));
+    const rawParams = new URLSearchParams(rawQuery);
+    const keys = [...rawParams.keys()];
+    if (new Set(keys).size !== keys.length) {
+      writeJson(res, 400, { error: 'A query value was given twice.' });
+      return;
+    }
+    let query = rawParams;
     if (route.query !== undefined) {
-      const parsed = route.query.safeParse(queryObject);
+      const parsed = route.query.safeParse(Object.fromEntries(rawParams));
       if (!parsed.success) {
         writeJson(res, 400, { error: firstProblem(parsed.error) });
         return;
+      }
+      // The handler sees what the schema accepted, not the raw text.
+      query = new URLSearchParams();
+      for (const [key, value] of Object.entries(parsed.data as Record<string, unknown>)) {
+        if (value !== undefined && value !== null) query.set(key, String(value));
       }
     }
 
@@ -257,18 +292,17 @@ export function createRouter(routes: Route[], auth: Auth, log: (line: string) =>
 
     let reply: Res;
     try {
-      reply = await route.handler({ method, path: rawPath, query: new URLSearchParams(rawQuery), params, body, origin });
+      reply = await route.handler({ method, path: rawPath, query, params, body, origin });
     } catch (e) {
       log(`${method} ${rawPath.slice(0, MAX_LOGGED_PATH)} failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
-      writeJson(res, 500, { error: `Airlock had a problem: ${e instanceof Error ? e.message : String(e)}` });
+      writeJson(res, 500, { error: `Airlock had a problem: ${plainMessage(e, hidePaths)}` });
       return;
     }
     if ('stream' in reply) {
-      try {
-        await writeStream(res, reply.stream);
-      } catch (e) {
-        log(`${method} ${rawPath.slice(0, MAX_LOGGED_PATH)} stream failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
-      }
+      await writeStream(
+        res, reply.stream, (e) => `Airlock had a problem: ${plainMessage(e, hidePaths)}`,
+        (e) => log(`${method} ${rawPath.slice(0, MAX_LOGGED_PATH)} stream failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`),
+      );
       return;
     }
     writeJson(res, reply.status, reply.json);

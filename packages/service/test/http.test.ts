@@ -1,12 +1,12 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { EngineDeps } from '@airlock/engine';
-import { pair, readOrCreateToken } from '../src/config.js';
+import { pair, pairedOrigin, readOrCreateToken } from '../src/config.js';
 import { createRouter, type Auth, type Handler } from '../src/http.js';
 import { createServer } from '../src/server.js';
 
@@ -59,6 +59,16 @@ async function routerRig(extra: { pairedOrigin?: string | null } = {}): Promise<
     { method: 'POST', path: '/things', body: z.object({ name: z.string() }), handler: ok },
     { method: 'POST', path: '/pairing', pairing: true, handler: ok },
     { method: 'GET', path: '/boom', handler: async () => { throw new Error('secret detail'); } },
+    { method: 'GET', path: '/enoent', handler: async () => { throw new Error(`ENOENT: no such file or directory, open '${homedir()}/.airlock/service/token'`); } },
+    {
+      method: 'GET', path: '/stream-fails',
+      handler: async () => ({
+        status: 200 as const,
+        stream: async (emit: (e: unknown) => void) => { emit({ n: 1 }); throw new Error('went wrong'); },
+      }),
+    },
+    { method: 'GET', path: '/echo-query', query: z.object({ q: z.string().regex(/^[a-z]+$/) }), handler: async (req) => ({ status: 200, json: { all: req.query.getAll('q'), text: req.query.toString() } }) },
+    { method: 'GET', path: '/plain-query', handler: async (req) => ({ status: 200, json: { text: req.query.toString() } }) },
     {
       method: 'GET', path: '/stream',
       handler: async () => ({
@@ -66,7 +76,7 @@ async function routerRig(extra: { pairedOrigin?: string | null } = {}): Promise<
         stream: async (emit: (e: unknown) => void) => { emit({ n: 1 }); emit({ text: 'a\nb' }); },
       }),
     },
-  ], auth, (line) => log.push(line));
+  ], auth, (line) => log.push(line), { hidePaths: [homedir()] });
   const server = http.createServer(listener);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const port = (server.address() as net.AddressInfo).port;
@@ -240,18 +250,18 @@ describe('bodies', () => {
 
   it('stops reading a chunked body that grows past 64 KB', async () => {
     const { port } = await routerRig();
-    const r = await new Promise<number>((resolve, reject) => {
+    const status = await new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('no reply to the oversized chunked body')), 5_000);
       const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/things', agent: false, headers: { 'Content-Type': 'application/json', ...bearer } }, (res) => {
         res.resume();
+        clearTimeout(timer);
         resolve(res.statusCode ?? 0);
       });
       req.on('error', () => undefined);
       req.write('{"name":"');
       for (let i = 0; i < 4; i += 1) req.write('y'.repeat(30_000));
-      setTimeout(() => req.destroy(), 500).unref();
-      void reject;
     });
-    expect(r).toBe(413);
+    expect(status).toBe(413);
   });
 
   it('refuses a Content-Type other than application/json with 415, and accepts a charset parameter', async () => {
@@ -278,10 +288,10 @@ describe('bodies', () => {
     expect((await send(port, 'GET', '/search?q=ab', { headers: bearer })).status).toBe(200);
   });
 
-  it('does not read the body of a request that fails a check', async () => {
+  it('answers 401 to a large body without a token and does not parse it', async () => {
     const { port } = await routerRig();
-    const r = await send(port, 'POST', '/things', { headers: { 'Content-Type': 'text/plain' }, body: 'x'.repeat(70_000) }).catch(() => ({ status: 0 }));
-    expect([401, 0]).toContain(r.status);
+    const r = await send(port, 'POST', '/things', { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'x'.repeat(70_000) }) });
+    expect(r.status).toBe(401);
   });
 });
 
@@ -344,9 +354,9 @@ describe('streams', () => {
   });
 });
 
-interface Service { port: number; home: string; token: string; log: string[] }
+interface Service { port: number; address: string; family: string; home: string; token: string; log: string[] }
 
-async function startService(): Promise<Service> {
+async function startService(limits?: { requestTimeoutMs: number; headersTimeoutMs: number }): Promise<Service> {
   const home = await mkdtemp(join(tmpdir(), 'airlock-service-http-'));
   const log: string[] = [];
   const service = createServer({
@@ -354,10 +364,11 @@ async function startService(): Promise<Service> {
     engine: {} as unknown as EngineDeps,
     now: () => new Date(),
     log: (l) => log.push(l),
+    ...(limits === undefined ? {} : { limits }),
   });
-  const { port } = await service.listen();
+  const { port, address, family } = await service.listen();
   cleanups.push(async () => { await service.close(); await rm(home, { recursive: true, force: true }); });
-  return { port, home, token: await readOrCreateToken(home), log };
+  return { port, address, family, home, token: await readOrCreateToken(home), log };
 }
 
 describe('the service', () => {
@@ -425,6 +436,19 @@ describe('the service', () => {
     expect(code).not.toBe('connected');
   });
 
+  it('reports the address it really bound, and refuses a connection on a non-loopback address', async () => {
+    const s = await startService();
+    expect(s.address).toBe('127.0.0.1');
+    expect(s.family).toBe('IPv4');
+    const outside = Object.values(networkInterfaces()).flat().find((i) => i !== undefined && i.family === 'IPv4' && !i.internal);
+    if (outside === undefined) return;
+    const code = await new Promise<string>((resolve) => {
+      const c = net.connect({ host: outside.address, port: s.port }, () => { c.destroy(); resolve('connected'); });
+      c.on('error', (e: NodeJS.ErrnoException) => resolve(e.code ?? 'error'));
+    });
+    expect(code).toBe('ECONNREFUSED');
+  });
+
   it('refuses to start when 127.0.0.1 cannot be bound, and does not fall back to another address', async () => {
     const taken = http.createServer();
     await new Promise<void>((r) => taken.listen(0, '127.0.0.1', r));
@@ -446,4 +470,155 @@ describe('the service', () => {
     await new Promise((res) => setTimeout(res, 50));
     expect(s.log.join('\n')).not.toContain(s.token);
   });
+});
+
+function raw(port: number, text: string, waitMs = 3_000): Promise<string> {
+  return new Promise((resolve) => {
+    const c = net.connect({ host: '127.0.0.1', port }, () => c.write(text));
+    let got = '';
+    const done = (): void => { clearTimeout(timer); c.destroy(); resolve(got); };
+    const timer = setTimeout(done, waitMs);
+    c.on('data', (d: Buffer) => { got += d.toString('latin1'); if (got.includes('\r\n\r\n')) setTimeout(done, 50); });
+    c.on('error', done);
+    c.on('close', done);
+  });
+}
+const statusOf = (reply: string): number => Number(/^HTTP\/1\.[01] (\d{3})/.exec(reply)?.[1] ?? 0);
+
+describe('fix round 1: queries', () => {
+  it('refuses a repeated query key with 400 before the schema runs', async () => {
+    const { port } = await routerRig();
+    for (const path of ['/echo-query?q=../x&q=ok', '/echo-query?q=ok&q=ok', '/plain-query?a=1&a=2']) {
+      const r = await send(port, 'GET', path, { headers: bearer });
+      expect(r.status, path).toBe(400);
+      expect(r.json).toEqual({ error: 'A query value was given twice.' });
+    }
+  });
+
+  it('hands the handler a query built from the validated object', async () => {
+    const { port } = await routerRig();
+    const r = await send(port, 'GET', '/echo-query?q=abc&extra=1', { headers: bearer });
+    expect(r.status).toBe(200);
+    expect(r.json).toEqual({ all: ['abc'], text: 'q=abc' });
+    const plain = await send(port, 'GET', '/plain-query?x=1', { headers: bearer });
+    expect((plain.json as { text: string }).text).toBe('x=1');
+  });
+});
+
+describe('fix round 1: pairing', () => {
+  it('twenty concurrent pair() calls with two origins leave one origin and one winner', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'airlock-service-race-'));
+    cleanups.push(() => rm(home, { recursive: true, force: true }));
+    const origins = [ORIGIN, OTHER];
+    const results = await Promise.all(Array.from({ length: 20 }, (_, i) => pair(home, origins[i % 2] as string)));
+    const winner = await pairedOrigin(home);
+    expect(winner === ORIGIN || winner === OTHER).toBe(true);
+    expect(results.filter((r) => r === 'paired')).toHaveLength(1);
+    results.forEach((r, i) => {
+      if (origins[i % 2] === winner) expect(['paired', 'already']).toContain(r);
+      else expect(r).toBe('other');
+    });
+  });
+
+  it('refuses an uppercase origin, a trailing slash and a path at pairing', async () => {
+    const s = await startService();
+    for (const origin of [`chrome-extension://${'A'.repeat(32)}`, `${ORIGIN}/`, `${ORIGIN}/panel.html`]) {
+      const r = await send(s.port, 'POST', '/pair', { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}`, Origin: origin }, body: '{}' });
+      expect(r.status, origin).toBe(403);
+    }
+  });
+
+  it('does not follow a symbolic link at the token path: it writes a new token and leaves the target alone', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'airlock-service-link-'));
+    cleanups.push(() => rm(home, { recursive: true, force: true }));
+    const target = join(home, 'elsewhere');
+    await writeFile(target, `${'d'.repeat(64)}\n`);
+    await chmod(target, 0o644);
+    await mkdir(join(home, 'service'), { recursive: true });
+    await symlink(target, join(home, 'service', 'token'));
+    const token = await readOrCreateToken(home);
+    expect(token).not.toBe('d'.repeat(64));
+    expect((await stat(target)).mode & 0o777).toBe(0o644);
+    expect(await readFile(target, 'utf8')).toBe(`${'d'.repeat(64)}\n`);
+    const own = await stat(join(home, 'service', 'token'));
+    expect(own.mode & 0o777).toBe(0o600);
+    expect(own.isFile()).toBe(true);
+  });
+});
+
+describe('fix round 1: the Host header and the request line', () => {
+  it('refuses odd Host headers and request forms', async () => {
+    const { port } = await routerRig();
+    const head = (host: string | null, line = 'GET /hello HTTP/1.1', extra = ''): string =>
+      `${line}\r\n${host === null ? '' : `Host: ${host}\r\n`}${extra}Connection: close\r\n\r\n`;
+    const cases: Array<[string, string, number]> = [
+      ['case only', head(`LOCALHOST:${port}`), 403],
+      ['trailing dot', head(`localhost.:${port}`), 403],
+      ['trailing dot on the address', head(`127.0.0.1.:${port}`), 403],
+      ['HTTP/1.0 without Host', head(null, 'GET /hello HTTP/1.0'), 403],
+      ['absolute form with an evil Host', head('evil.example', `GET http://127.0.0.1:${port}/hello HTTP/1.1`), 403],
+      ['absolute form with a good Host', head(`127.0.0.1:${port}`, `GET http://evil.example/hello HTTP/1.1`), 404],
+      ['evil Host with X-Forwarded-Host', head('evil.example', 'GET /hello HTTP/1.1', `X-Forwarded-Host: 127.0.0.1:${port}\r\n`), 403],
+    ];
+    for (const [name, text, want] of cases) {
+      expect(statusOf(await raw(port, text)), name).toBe(want);
+    }
+  });
+});
+
+describe('fix round 1: body sizes', () => {
+  const json = { 'Content-Type': 'application/json', ...bearer };
+  const bodyOf = (bytes: number): string => `{"name":"${'x'.repeat(bytes - 11)}"}`;
+
+  it('accepts exactly 65,536 bytes and refuses 65,537, with Content-Length and chunked', async () => {
+    const { port } = await routerRig();
+    for (const chunked of [false, true]) {
+      for (const [bytes, want] of [[65_536, 200], [65_537, 413]] as const) {
+        const body = bodyOf(bytes);
+        expect(Buffer.byteLength(body)).toBe(bytes);
+        const headers = chunked ? json : { ...json, 'Content-Length': String(bytes) };
+        const r = await send(port, 'POST', '/things', { headers, body }).catch(() => ({ status: 0 }));
+        expect(r.status, `${bytes} chunked=${chunked}`).toBe(want);
+      }
+    }
+  });
+
+  it('accepts a small body sent with Content-Length', async () => {
+    const { port } = await routerRig();
+    const body = '{"name":"a"}';
+    const r = await send(port, 'POST', '/things', { headers: { ...json, 'Content-Length': String(body.length) }, body });
+    expect(r.status).toBe(200);
+  });
+});
+
+describe('fix round 1: errors', () => {
+  it('replaces absolute paths under the home folder with <path> in the 500 body, and keeps the full message in the log', async () => {
+    const { port, log } = await routerRig();
+    const r = await send(port, 'GET', '/enoent', { headers: bearer });
+    expect(r.status).toBe(500);
+    expect(r.json).toEqual({ error: "Airlock had a problem: ENOENT: no such file or directory, open '<path>'" });
+    expect(log.some((l) => l.includes(`${homedir()}/.airlock/service/token`))).toBe(true);
+  });
+
+  it('ends a stream whose handler throws with a failed event', async () => {
+    const { port } = await routerRig();
+    const r = await send(port, 'GET', '/stream-fails', { headers: bearer });
+    expect(r.text).toBe('data: {"n":1}\n\ndata: {"type":"failed","message":"Airlock had a problem: went wrong"}\n\n');
+  });
+});
+
+describe('fix round 1: the service', () => {
+  it('cuts off a request that stalls within the request timeout plus 10 seconds', async () => {
+    const s = await startService({ requestTimeoutMs: 1_000, headersTimeoutMs: 500 });
+    const started = Date.now();
+    await new Promise<void>((resolve) => {
+      const c = net.connect({ host: '127.0.0.1', port: s.port }, () => {
+        c.write(`POST /pair HTTP/1.1\r\nHost: 127.0.0.1:${s.port}\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nAuthorization: Bearer ${s.token}\r\nOrigin: ${ORIGIN}\r\n\r\n{"half":`);
+      });
+      c.on('error', () => resolve());
+      c.on('close', () => resolve());
+      c.resume();
+    });
+    expect(Date.now() - started).toBeLessThan(11_000);
+  }, 20_000);
 });

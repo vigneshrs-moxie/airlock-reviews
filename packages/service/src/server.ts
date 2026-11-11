@@ -1,5 +1,6 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { homedir } from 'node:os';
 import type { EngineDeps, runReview } from '@airlock/engine';
 import type { Hello, PairReply } from '@airlock/shared';
 import { pair, pairedOrigin, readOrCreateToken, type ServiceConfig } from './config.js';
@@ -11,6 +12,8 @@ export interface ServiceDeps {
   review?: typeof runReview;
   now: () => Date;
   log: (line: string) => void;
+  /** Shorter limits for tests; the defaults are 30 s and 15 s. */
+  limits?: { requestTimeoutMs: number; headersTimeoutMs: number };
 }
 
 export const LISTEN_HOST = '127.0.0.1';
@@ -40,15 +43,15 @@ function routesFor(deps: ServiceDeps): Route[] {
   ];
 }
 
-export function createServer(deps: ServiceDeps): { listen(): Promise<{ port: number }>; close(): Promise<void> } {
+export function createServer(deps: ServiceDeps): { listen(): Promise<{ port: number; address: string; family: string }>; close(): Promise<void> } {
   let server: http.Server | undefined;
   return {
     async listen() {
       const token = await readOrCreateToken(deps.config.home);
       const auth: Auth = { token, port: deps.config.port, pairedOrigin: () => pairedOrigin(deps.config.home) };
-      const created = http.createServer(createRouter(routesFor(deps), auth, deps.log));
-      created.requestTimeout = 30_000;
-      created.headersTimeout = 15_000;
+      const created = http.createServer({ connectionsCheckingInterval: 5_000 }, createRouter(routesFor(deps), auth, deps.log, { hidePaths: [deps.config.home, homedir()] }));
+      created.requestTimeout = deps.limits?.requestTimeoutMs ?? 30_000;
+      created.headersTimeout = deps.limits?.headersTimeoutMs ?? 15_000;
       created.keepAliveTimeout = 5_000;
       await new Promise<void>((resolve, reject) => {
         created.once('error', reject);
@@ -57,10 +60,11 @@ export function createServer(deps: ServiceDeps): { listen(): Promise<{ port: num
           resolve();
         });
       });
-      const port = (created.address() as AddressInfo).port;
-      auth.port = port;
+      const bound = created.address() as AddressInfo;
+      auth.port = bound.port;
       server = created;
-      return { port };
+      created.on('error', (e) => deps.log(`server error: ${e.message}`));
+      return { port: bound.port, address: bound.address, family: bound.family };
     },
     async close() {
       const running = server;

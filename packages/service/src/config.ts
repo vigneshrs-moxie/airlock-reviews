@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { airlockHome } from '@airlock/engine';
 
 export interface ServiceConfig { port: number; home: string; packsDir: string; version: string }
 
@@ -32,9 +32,10 @@ function ownVersion(): string {
 /** The packs folder sits at the repository root, three levels above both src/config.ts and dist/config.js. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
   const packs = env['AIRLOCK_PACKS_DIR'];
+  const given = env['AIRLOCK_HOME'];
   return {
     port: readPort(env['AIRLOCK_PORT']),
-    home: env['AIRLOCK_HOME'] ?? airlockHome(),
+    home: given !== undefined && given !== '' ? given : join(homedir(), '.airlock'),
     packsDir: packs !== undefined && packs !== '' ? packs : fileURLToPath(new URL('../../../packs', import.meta.url)),
     version: ownVersion(),
   };
@@ -74,7 +75,9 @@ async function readText(path: string): Promise<string | null> {
 export async function readOrCreateToken(home: string): Promise<string> {
   const dir = await ensureDir(home);
   const file = join(dir, 'token');
-  const existing = (await readText(file))?.trim();
+  // A symbolic link is never followed: it is replaced by a real file, and its target is left alone.
+  const isLink = await lstat(file).then((st) => st.isSymbolicLink(), () => false);
+  const existing = isLink ? undefined : (await readText(file))?.trim();
   if (existing !== undefined && TOKEN_PATTERN.test(existing)) {
     if (((await stat(file)).mode & 0o077) !== 0) await chmod(file, 0o600);
     return existing;
@@ -92,11 +95,30 @@ export async function pairedOrigin(home: string): Promise<string | null> {
 
 export async function pair(home: string, origin: string): Promise<'paired' | 'already' | 'other'> {
   if (!ORIGIN_PATTERN.test(origin)) throw new RangeError('The origin to pair must be a chrome-extension origin.');
-  const current = await pairedOrigin(home);
-  if (current === origin) return 'already';
-  if (current !== null) return 'other';
-  await writeAtomic(await ensureDir(home), 'paired-origin', `${origin}\n`);
-  return 'paired';
+  const dir = await ensureDir(home);
+  const file = join(dir, 'paired-origin');
+  const text = await readText(file);
+  const current = text === null ? null : await pairedOrigin(home);
+  if (current !== null) return current === origin ? 'already' : 'other';
+  if (text !== null) {
+    // A file whose content is not a valid origin is replaced.
+    await writeAtomic(dir, 'paired-origin', `${origin}\n`);
+    return 'paired';
+  }
+  // `link` fails when the file exists, so of two concurrent pairings only one can place its file.
+  const temporary = join(dir, `.paired-origin.${randomBytes(6).toString('hex')}.tmp`);
+  try {
+    await writeFile(temporary, `${origin}\n`, { mode: 0o600, flag: 'wx' });
+    try {
+      await link(temporary, file);
+      return 'paired';
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      return (await pairedOrigin(home)) === origin ? 'already' : 'other';
+    }
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 export async function unpair(home: string): Promise<void> {
