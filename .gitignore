@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.output/
+.wxt/
+coverage/
+*.log
+.DS_Store
+.env
+.env.*
+# local review data and replay working files never belong in git
+.airlock/
+replay-work/
