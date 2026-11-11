@@ -1,0 +1,16 @@
+id: core
+title: Core
+version: 1
+repos: [acme/app]
+stageRules:
+  - { base: main, stage: pr2 }
+  - { default: true, stage: pr1 }
+siblings:
+  - { id: jobs, glob: "src/jobs/*.ts" }
+checks:
+  - { id: no-todo, kind: added-line-matches, paths: ["src/**"], pattern: "TODO", message: "Leaves a TODO in the code" }
+standards:
+  - { name: log, file: standards/log.md, dated: true }
+lenses:
+  - { id: correctness, title: Correctness, file: lenses/correctness.md }
+  - { id: naming, title: Naming, file: lenses/naming.md }

@@ -94,7 +94,7 @@ function cohortMaterial(ctx: LensContext, cohort: Cohort, tier: (path: string) =
 }
 
 /** The lenses that run: every lens of every pack, except an onlyWhenAlone lens when another pack has any lens. */
-function runnableLenses(packs: Pack[]): { pack: Pack; lens: LensDef }[] {
+export function runnableLenses(packs: Pack[]): { pack: Pack; lens: LensDef }[] {
   return packs.flatMap((pack) => {
     const othersHaveLenses = packs.some((p) => p !== pack && p.lenses.length > 0);
     return pack.lenses.filter((l) => !(l.onlyWhenAlone && othersHaveLenses)).map((lens) => ({ pack, lens }));
@@ -116,10 +116,13 @@ export async function runCohortLenses(
 
   const template = await loadTemplate('lens');
   const reader = readerOf(ctx.pr);
+  const extra = ctx.extraInstructions?.trim() ?? '';
   const briefs = lenses.map(({ pack, lens }) => ({
     pack, lens, name: `${pack.id}/${lens.id}`,
     instructions: instructionsFor(
-      fill(template, { reader, lensTitle: lens.title, lensInstructions: lens.instructions.trim() }),
+      fill(template, {
+        reader, lensTitle: lens.title, lensInstructions: extra === '' ? lens.instructions.trim() : `${lens.instructions.trim()}\n\n${extra}`,
+      }),
       ctx.packs,
       ctx.missingHelpers,
     ),

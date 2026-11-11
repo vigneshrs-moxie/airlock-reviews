@@ -2,3 +2,13 @@ export type { AgentRequest, AgentResult, AgentRunner, AgentUsage } from './agent
 export { withRetry } from './agent/runner.js';
 export { createFakeRunner } from './agent/fake-runner.js';
 export { asMaterial, fill } from './agent/prompt.js';
+export { createSdkRunner } from './agent/sdk-runner.js';
+export { runReview, type EngineDeps, type ReviewRequest } from './pipeline/review.js';
+export { latestReview, saveReview } from './store/store.js';
+export { renderReview } from './render/terminal.js';
+export { parseArgs, usage } from './cli-args.js';
+export { parsePrRef } from './intake/pr.js';
+export { loadPack } from './packs/load.js';
+export { selectPacks } from './packs/select.js';
+export type { Holdout, Pack } from './packs/types.js';
+export { realExec, type Exec } from './util/exec.js';
