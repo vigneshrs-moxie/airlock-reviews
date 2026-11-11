@@ -25,6 +25,8 @@ export interface Progress {
   pr: PrSummary;
   brief: Brief | null;
   map: ChangeMap | null;
+  /** When the panel started the run, or attached to it (milliseconds since 1970); null when not known. */
+  startedAt: number | null;
 }
 
 export type PanelState =
@@ -53,9 +55,11 @@ export type UserAction =
 export type Action =
   | { type: 'loading' }
   | { type: 'no-pr' }
-  | { type: 'offline' }
+  /** `startedAt`: when the run that was showing was started or attached, kept in `progress`. */
+  | { type: 'offline'; startedAt?: number }
   | { type: 'unpaired'; message?: string }
-  | { type: 'loaded'; pr: PrSummary; latest: LatestReply | null }
+  /** `notice`: said on the screen it lands on (a running review was lost with the service). */
+  | { type: 'loaded'; pr: PrSummary; latest: LatestReply | null; notice?: string }
   | { type: 'attached'; pr: PrSummary }
   /** The stage list to show, built by the runtime from the stream's stage events. */
   | { type: 'stages'; stages: StageLine[] }
@@ -86,7 +90,7 @@ export function withStage(lines: StageLine[], event: Extract<ServiceEvent, { typ
   return at === -1 ? [...lines, line] : lines.map((l, i) => (i === at ? line : l));
 }
 
-function reviewOf(pr: PrSummary, latest: LatestReply): PanelState {
+function reviewOf(pr: PrSummary, latest: LatestReply): Extract<PanelState, { kind: 'review' }> {
   return { kind: 'review', pr, latest, stale: latest.document.pr.headSha !== pr.headSha };
 }
 
@@ -124,12 +128,16 @@ export function reduce(state: PanelState, action: Action): PanelState {
     case 'offline':
       if (state.kind === 'offline') return state;
       if (state.kind === 'review') return { kind: 'offline', review: { pr: state.pr, latest: state.latest, stale: state.stale } };
-      if (state.kind === 'running') return { kind: 'offline', progress: { pr: state.pr, brief: state.brief, map: state.map } };
+      if (state.kind === 'running') {
+        return { kind: 'offline', progress: { pr: state.pr, brief: state.brief, map: state.map, startedAt: action.startedAt ?? null } };
+      }
       return { kind: 'offline' };
     case 'unpaired':
       return action.message === undefined ? { kind: 'unpaired' } : { kind: 'unpaired', message: clip(action.message) };
-    case 'loaded':
-      return action.latest === null ? { kind: 'ready', pr: action.pr } : reviewOf(action.pr, action.latest);
+    case 'loaded': {
+      const landed = action.latest === null ? { kind: 'ready' as const, pr: action.pr } : reviewOf(action.pr, action.latest);
+      return action.notice === undefined ? landed : { ...landed, notice: clip(action.notice) };
+    }
     case 'attached':
       return { kind: 'running', pr: action.pr, stages: [], brief: null, map: null };
     case 'stages':

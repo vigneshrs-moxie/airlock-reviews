@@ -117,7 +117,8 @@ export class ServiceClient {
    * - `'offline'`: the request or the read failed at the network level.
    * - `'lost'`: the stream closed without a last event, was silent for `STREAM_IDLE_MS`, was aborted by `signal`,
    *   or carried an event that is not JSON or does not match the contract (that event is not passed on).
-   * A refused stream throws the mapped `ServiceError`.
+   * A refused stream throws the mapped `ServiceError`; an error thrown by `onEvent` itself ends the stream and is
+   * rethrown.
    */
   async events(runId: string, onEvent: (e: ServiceEvent) => void, signal: AbortSignal): Promise<'ended' | 'lost' | 'offline'> {
     if (!RunIdSchema.safeParse(runId).success) throw new ServiceError('problem', NOT_UNDERSTOOD);
@@ -166,17 +167,28 @@ export class ServiceClient {
         }),
       );
       let ended = false;
+      // A throw from the listener is the panel's own failure, not the service's: it ends the stream and is passed on.
+      const listener: { failed: boolean; error: unknown } = { failed: false, error: undefined };
       try {
         await readEventStream(watched, (data) => {
           const event = ServiceEventSchema.safeParse(data);
           if (!event.success) throw new ServiceError('problem', NOT_UNDERSTOOD);
-          onEvent(event.data);
+          try {
+            onEvent(event.data);
+          } catch (error) {
+            if (!(error instanceof ServiceError)) {
+              listener.failed = true;
+              listener.error = error;
+            }
+            throw error;
+          }
           if (event.data.type === 'done' || event.data.type === 'failed') {
             ended = true;
             throw LAST_EVENT;
           }
         });
       } catch (error) {
+        if (listener.failed) throw listener.error;
         return ended ? 'ended' : cut(error);
       }
       return ended ? 'ended' : 'lost';

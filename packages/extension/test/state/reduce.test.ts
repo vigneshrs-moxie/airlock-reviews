@@ -66,6 +66,13 @@ describe('reduce', () => {
     expect(reduce(loading, { type: 'loaded', pr, latest: old })).toEqual({ kind: 'review', pr, latest: old, stale: true });
   });
 
+  it('a reload can land with a notice', () => {
+    const loading: PanelState = { kind: 'loading' };
+    expect(reduce(loading, { type: 'loaded', pr, latest: null, notice: 'Stopped.' })).toEqual({ kind: 'ready', pr, notice: 'Stopped.' });
+    const latest = latestFor(pr);
+    expect(reduce(loading, { type: 'loaded', pr, latest, notice: 'Stopped.' })).toEqual({ kind: 'review', pr, latest, stale: false, notice: 'Stopped.' });
+  });
+
   it('marks ready and review busy while an action is in flight, and clears it', () => {
     const ready: PanelState = { kind: 'ready', pr };
     const busy = reduce(ready, { type: 'busy', busy: true });
@@ -108,9 +115,10 @@ describe('reduce', () => {
     expect(reduce({ kind: 'review', pr, latest, stale: true, notice: 'n' }, { type: 'offline' })).toEqual({
       kind: 'offline', review: { pr, latest, stale: true },
     });
-    expect(reduce({ ...running, brief, map, stages: withStage([], stage('intake', 'start')) }, { type: 'offline' })).toEqual({
-      kind: 'offline', progress: { pr, brief, map },
+    expect(reduce({ ...running, brief, map, stages: withStage([], stage('intake', 'start')) }, { type: 'offline', startedAt: 1234 })).toEqual({
+      kind: 'offline', progress: { pr, brief, map, startedAt: 1234 },
     });
+    expect(reduce(running, { type: 'offline' })).toEqual({ kind: 'offline', progress: { pr, brief: null, map: null, startedAt: null } });
     const offline: PanelState = { kind: 'offline' };
     expect(reduce(offline, { type: 'offline' })).toBe(offline);
   });

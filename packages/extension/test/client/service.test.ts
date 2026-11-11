@@ -220,6 +220,16 @@ describe('ServiceClient', () => {
       expect(await client.events('run_00000000000a', () => {}, new AbortController().signal)).toBe('offline');
     });
 
+    it('a listener that throws ends the stream, and its error is passed on rather than read as offline', async () => {
+      const { svc, client, timers } = setup();
+      const run = svc.startRun('acme/widgets', 1, 'run_00000000000a');
+      run.emit(stage('intake', 'start'));
+      const bug = new TypeError('Cannot read properties of undefined');
+      await expect(client.events('run_00000000000a', () => { throw bug; }, new AbortController().signal)).rejects.toBe(bug);
+      expect(run.listeners.size).toBe(0);
+      expect(timers.delays()).toEqual([]);
+    });
+
     it('stops when its signal is aborted', async () => {
       const { svc, client } = setup();
       svc.startRun('acme/widgets', 1, 'run_00000000000a');

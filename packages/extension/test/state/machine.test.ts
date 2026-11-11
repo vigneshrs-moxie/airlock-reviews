@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Brief, ChangeMap, Dismissal, ServiceEvent } from '@airlock/shared';
 import { NOT_UNDERSTOOD, ServiceClient } from '../../src/client/service';
-import { LOST_MESSAGE, TAB_UNREADABLE, startPanel } from '../../src/state/machine';
+import { LOST_MESSAGE, RUN_STOPPED, SHOWING_PROBLEM, TAB_UNREADABLE, startPanel } from '../../src/state/machine';
 import type { PanelState } from '../../src/state/reduce';
 import { STAGE_WORDS } from '../../src/state/stage-words';
 import type { SettingsStore } from '../../src/state/settings';
@@ -49,7 +49,13 @@ afterEach(() => {
   for (const p of panels.splice(0)) p.stop();
 });
 
-function harness(opts: { url?: string; token?: string | null; failTabReads?: number; prepare?: (svc: FakeService) => void } = {}) {
+const T0 = Date.parse('2026-11-11T10:00:00.000Z');
+
+function harness(opts: {
+  url?: string; token?: string | null; failTabReads?: number; prepare?: (svc: FakeService) => void;
+  /** Called before each state is recorded; a throw here is the panel's own listener failing. */
+  onState?: (s: PanelState) => void;
+} = {}) {
   const svc = new FakeService();
   opts.prepare?.(svc);
   const settings = memorySettings(opts.token === undefined ? TOKEN : opts.token);
@@ -58,10 +64,17 @@ function harness(opts: { url?: string; token?: string | null; failTabReads?: num
   const tab = fakeTab('url' in opts ? opts.url : prUrl('acme/widgets', 1), opts.failTabReads);
   const timers = new FakeTimers();
   const states: PanelState[] = [];
-  const panel = startPanel({ client, tab, settings, timers, onState: (s) => states.push(s) });
+  const clock = { now: T0 };
+  const panel = startPanel({
+    client, tab, settings, timers, now: () => clock.now,
+    onState: (s) => {
+      states.push(s);
+      opts.onState?.(s);
+    },
+  });
   panels.push(panel);
   const last = (): PanelState | undefined => states.at(-1);
-  return { svc, settings, tab, timers, states, panel, last };
+  return { svc, settings, tab, timers, states, panel, last, clock };
 }
 
 type Harness = ReturnType<typeof harness>;
@@ -302,7 +315,7 @@ describe('startPanel: following a review', () => {
     await until(h, 'running', (s) => s.map !== null);
     h.svc.down = true;
     run.lose();
-    expect(await until(h, 'offline')).toEqual({ kind: 'offline', progress: { pr: prSummary(), brief, map } });
+    expect(await until(h, 'offline')).toEqual({ kind: 'offline', progress: { pr: prSummary(), brief, map, startedAt: T0 } });
     expect(h.timers.delays()).toEqual([5000]);
     h.timers.fire();
     await settle();
@@ -354,6 +367,44 @@ describe('startPanel: following a review', () => {
     expect(n).toBe(21);
   });
 
+  it('the panel failing to show an event is a problem of its own, not the service going away', async () => {
+    let run!: FakeRun;
+    const h = harness({
+      prepare: (svc) => { run = svc.startRun('acme/widgets', 1); run.emit(stage('intake', 'start')); },
+      onState: (s) => {
+        if (s.kind === 'running' && s.brief !== null) throw new TypeError('Cannot read properties of undefined');
+      },
+    });
+    await until(h, 'running', (s) => s.stages.length === 1);
+    run.emit({ type: 'brief', brief });
+    expect(await until(h, 'problem')).toEqual({ kind: 'problem', pr: prSummary(), message: SHOWING_PROBLEM, brief });
+    await settle();
+    expect(h.timers.delays()).toEqual([]);
+    expect(run.attaches).toBe(1);
+    expect(run.listeners.size).toBe(0);
+    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(1);
+  });
+
+  it('network breaks where hello answers each time run to the re-attach limit and end at the lost-connection problem', async () => {
+    let run!: FakeRun;
+    const h = harness({ prepare: (svc) => { run = svc.startRun('acme/widgets', 1); run.emit(stage('intake', 'start')); } });
+    await until(h, 'running', (s) => s.stages.length === 1);
+    h.svc.on('GET /reviews/:runId/events', () => new Response(new ReadableStream<Uint8Array>({
+      start(c) { c.error(new TypeError('network error')); },
+    })));
+    run.lose();
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      await settle();
+      expect(h.timers.delays()).toEqual([1000]);
+      h.timers.fire();
+    }
+    expect(await until(h, 'problem')).toEqual({ kind: 'problem', pr: prSummary(), message: LOST_MESSAGE });
+    expect(h.svc.calls.filter((c) => c === 'GET /reviews/:runId/events')).toHaveLength(6);
+    // One hello after each of the six breaks, besides the first load's.
+    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(7);
+    expect(h.timers.delays()).toEqual([]);
+  });
+
   it('a failed event becomes a problem that keeps the brief already shown', async () => {
     let run!: FakeRun;
     const h = harness({ prepare: (svc) => { run = svc.startRun('acme/widgets', 1); } });
@@ -364,6 +415,67 @@ describe('startPanel: following a review', () => {
     expect(await until(h, 'problem')).toEqual({
       kind: 'problem', pr: prSummary(), message: 'The review stopped: gh is not signed in.', brief, map,
     });
+  });
+});
+
+describe('startPanel: the service restarting during a review', () => {
+  /** A review is running and showing its brief when the service stops; it is then started again, as set up by `restart`. */
+  async function cutOff(restart: (svc: FakeService) => void) {
+    let run!: FakeRun;
+    const h = harness({ prepare: (svc) => { run = svc.startRun('acme/widgets', 1); run.emit(stage('intake', 'start')); } });
+    await until(h, 'running', (s) => s.stages.length === 1);
+    run.emit({ type: 'brief', brief });
+    await until(h, 'running', (s) => s.brief !== null);
+    h.clock.now = T0 + 60_000;
+    h.svc.down = true;
+    run.lose();
+    const offline = await until(h, 'offline');
+    expect(offline.progress).toEqual({ pr: prSummary(), brief, map: null, startedAt: T0 });
+    h.svc.down = false;
+    restart(h.svc);
+    h.timers.fire();
+    return { h, run };
+  }
+
+  const stored = (createdAt: string) => {
+    const latest = latestFor(prSummary());
+    return { ...latest, document: { ...latest.document, createdAt } };
+  };
+
+  it('the run is gone and nothing is stored: ready, saying the review stopped', async () => {
+    const { h } = await cutOff((svc) => svc.running.clear());
+    expect(await until(h, 'ready')).toEqual({ kind: 'ready', pr: prSummary(), notice: RUN_STOPPED });
+  });
+
+  it('the run is gone and only an older review is stored: that review, saying the running one stopped', async () => {
+    const older = stored('2026-11-11T09:00:00.000Z');
+    const { h } = await cutOff((svc) => { svc.running.clear(); svc.latest.set('acme/widgets#1', older); });
+    expect(await until(h, 'review')).toEqual({ kind: 'review', pr: prSummary(), latest: older, stale: false, notice: RUN_STOPPED });
+  });
+
+  it('the run finished while the panel was cut off: its review, with no notice', async () => {
+    const result = stored('2026-11-11T10:00:30.000Z');
+    const { h } = await cutOff((svc) => { svc.running.clear(); svc.latest.set('acme/widgets#1', result); });
+    expect(await until(h, 'review')).toEqual({ kind: 'review', pr: prSummary(), latest: result, stale: false });
+  });
+
+  it('the run is still there: running again, with no notice', async () => {
+    const { h, run } = await cutOff(() => {});
+    run.emit(stage('packs', 'start'));
+    const back = await until(h, 'running', (s) => s.stages.length === 2);
+    expect(back.brief).toEqual(brief);
+    expect(h.states.some((s) => 'notice' in s)).toBe(false);
+  });
+
+  it('a run this panel started counts from just before it asked for it', async () => {
+    const h = harness();
+    await until(h, 'ready');
+    h.panel.dispatch({ type: 'start', depth: 'quick' });
+    await until(h, 'running');
+    h.clock.now = T0 + 60_000;
+    h.svc.down = true;
+    for (const run of h.svc.runs.values()) run.lose();
+    expect((await until(h, 'offline')).progress?.startedAt).toBe(T0);
   });
 });
 

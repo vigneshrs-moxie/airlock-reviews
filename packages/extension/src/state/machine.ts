@@ -10,6 +10,8 @@ export type { PanelState, StageLine, UserAction } from './reduce';
 export const LOST_MESSAGE = 'Airlock lost its connection to the review. Press Retry to look again.';
 export const NOT_A_TOKEN = 'That is not a pairing token. Run "airlock-service token" and paste the 64 characters it prints.';
 export const TAB_UNREADABLE = 'Airlock could not read the address of this tab. Press Retry to read it again.';
+export const RUN_STOPPED = 'The review that was running stopped when the Airlock service stopped. Start it again when you are ready.';
+export const SHOWING_PROBLEM = 'Airlock had a problem showing this review.';
 export const OFFLINE_RETRY_MS = 5_000;
 export const REATTACH_MS = 1_000;
 /** Re-attaches in a row that bring no new event, and re-attaches in all for one run, before giving up. */
@@ -23,6 +25,8 @@ export interface PanelDeps {
   settings: SettingsStore;
   onState: (state: PanelState) => void;
   timers?: Timers;
+  /** The clock, in milliseconds since 1970; `Date.now` unless a test passes its own. */
+  now?: () => number;
 }
 
 type PrRef = { repo: string; number: number };
@@ -35,6 +39,16 @@ function refOf(url: string | undefined): PrRef | null {
 function sameRef(a: PrRef | null, b: PrRef | null): boolean {
   if (a === null || b === null) return a === b;
   return a.repo === b.repo && a.number === b.number;
+}
+
+/**
+ * Whether the stored review is the result of a run started or attached at `startedAt`: created at or after it.
+ * Unknown start time: not known to be the result.
+ */
+function finishedSince(latest: LatestReply | null, startedAt: number | null): boolean {
+  if (latest === null || startedAt === null) return false;
+  const created = Date.parse(latest.document.createdAt);
+  return Number.isFinite(created) && created >= startedAt;
 }
 
 function prOf(state: PanelState): PrSummary | null {
@@ -55,6 +69,7 @@ function prOf(state: PanelState): PrSummary | null {
 export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): void; stop(): void } {
   const { client, tab, settings } = deps;
   const timers = deps.timers ?? realTimers;
+  const now = deps.now ?? Date.now;
   let state: PanelState = { kind: 'loading' };
   let generation = 0;
   let stopped = false;
@@ -89,9 +104,10 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     sleeping.clear();
   };
 
-  const wentOffline = (g: number): void => {
+  /** `startedAt`: when the running review on screen was started or attached, kept with what it showed. */
+  const wentOffline = (g: number, startedAt?: number): void => {
     if (!current(g)) return;
-    apply({ type: 'offline' });
+    apply(startedAt === undefined ? { type: 'offline' } : { type: 'offline', startedAt });
     if (offlineRetry !== null) return;
     const retry = {
       handle: timers.setTimeout(() => {
@@ -125,6 +141,11 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
       return;
     }
     if (!quiet) apply({ type: 'loading' });
+    // A reload after the service came back, while a running review's progress is kept on screen.
+    const cutOff = state.kind === 'offline' && state.progress !== undefined
+      && state.progress.pr.repo === target.repo && state.progress.pr.number === target.number
+      ? state.progress
+      : null;
     const signal = live.signal;
     let pr: PrSummary | undefined;
     try {
@@ -145,12 +166,14 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
       const runId = await client.running(target.repo, target.number, signal);
       if (!current(g)) return;
       if (runId !== null) {
-        await follow(g, pr, runId);
+        await follow(g, pr, runId, now());
         return;
       }
       const latest = await client.latest(target.repo, target.number, signal);
       if (!current(g)) return;
-      apply({ type: 'loaded', pr, latest });
+      // The run that was showing is gone: unless this stored review is its result, say that it stopped.
+      const lost = cutOff !== null && !finishedSince(latest, cutOff.startedAt);
+      apply(lost ? { type: 'loaded', pr, latest, notice: RUN_STOPPED } : { type: 'loaded', pr, latest });
     } catch (error) {
       fail(g, error, pr);
     }
@@ -161,7 +184,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
    * shown only once it is at least as long, so a re-attach never flickers. A stream that broke at the network level
    * is followed by one hello: no answer means offline (the retry then reloads); an answer means re-attach.
    */
-  const follow = async (g: number, pr: PrSummary, runId: string): Promise<void> => {
+  const follow = async (g: number, pr: PrSummary, runId: string, startedAt: number): Promise<void> => {
     const signal = live.signal;
     apply({ type: 'attached', pr });
     let best = 0;
@@ -184,7 +207,9 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
           apply({ type: 'event', event });
         }, signal);
       } catch (error) {
-        fail(g, error, pr);
+        if (error instanceof ServiceError) fail(g, error, pr);
+        // The panel's own failure to show an event: say so, and do not re-attach to fail the same way again.
+        else if (current(g)) apply({ type: 'problem', message: SHOWING_PROBLEM });
         return;
       }
       if (!current(g)) return;
@@ -203,7 +228,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
         }
         if (!current(g)) return;
         if (hello === 'offline') {
-          wentOffline(g);
+          wentOffline(g, startedAt);
           return;
         }
       }
@@ -297,9 +322,10 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
   };
 
   const start = async (g: number, pr: PrSummary, depth: Depth, packIds: string[] | undefined): Promise<void> => {
+    const startedAt = now();
     const reply = await client.start({ repo: pr.repo, number: pr.number, depth, ...(packIds === undefined ? {} : { packIds }) });
     if (!current(g)) return;
-    void follow(g, pr, reply.runId).catch((error: unknown) => fail(g, error, pr));
+    void follow(g, pr, reply.runId, startedAt).catch((error: unknown) => fail(g, error, pr));
   };
 
   const dispatch = (action: UserAction): void => {
