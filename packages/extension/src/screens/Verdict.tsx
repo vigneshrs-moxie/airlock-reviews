@@ -132,7 +132,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
       <FindingDetail
         key={detail.id} finding={detail} packs={pr.packs} previous={previous} next={next} canDismiss={!disabled}
         fixPrompt={promptFor([detail])} onBack={() => setOpenId(null)} onOpen={(f) => setOpenId(f.id)}
-        onJump={(place) => onJump(doc.pr, place)} changedPaths={changedPaths} onDismiss={onDismiss} {...t}
+        onJump={(place, options) => onJump(doc.pr, place, options)} changedPaths={changedPaths} onDismiss={onDismiss} {...t}
       />
       </>
     );

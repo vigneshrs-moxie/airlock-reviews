@@ -1,15 +1,15 @@
 import type { Finding, PrSummary } from '@airlock/shared';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Timers } from '../client/timers';
-import { connectedPlace, COULD_NOT_JUMP, ownPlace, type Jump, type JumpPlace } from '../state/jump';
+import { connectedPlace, COULD_NOT_JUMP, ownPlace, type Jump, type JumpOptions, type JumpPlace, type JumpResult } from '../state/jump';
 import { CopyButton } from './CopyButton';
 import { useVisible } from './visible';
 import { fromText, locationText, placeText, severityWord } from './words';
 
-/** Takes the person to a place in the reviewed pull request and says in a sentence what it did. */
-export type OnJump = (place: JumpPlace) => Promise<string>;
+/** Takes the person to a place in the reviewed pull request and says what it did. */
+export type OnJump = (place: JumpPlace, options: JumpOptions) => Promise<JumpResult>;
 
-export const notConnected: Jump = () => Promise.resolve('Jumping is not connected yet.');
+export const notConnected: Jump = () => Promise.resolve({ sentence: 'Jumping is not connected yet.', needsReload: false });
 
 function Part({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -40,7 +40,8 @@ export interface FindingDetailProps {
 /** One finding in full. Keyed by the caller on the finding's id, so each finding starts with its own focus and notes. */
 export function FindingDetail({ finding, packs, previous, next, canDismiss, fixPrompt, onBack, onOpen, onJump, changedPaths, onDismiss, timers }: FindingDetailProps) {
   const title = useRef<HTMLHeadingElement>(null);
-  const [note, setNote] = useState<{ key: string; text: string } | null>(null);
+  // `reloadFor`: the place to jump to again after reloading the GitHub tab, when the jump said a reload is needed.
+  const [note, setNote] = useState<{ key: string; text: string; reloadFor: JumpPlace | null } | null>(null);
   const visible = useVisible();
   const focused = useRef(false);
   useEffect(() => {
@@ -51,17 +52,29 @@ export function FindingDetail({ finding, packs, previous, next, canDismiss, fixP
 
   // Only the latest jump's answer is shown: an earlier one that answers later is dropped.
   const latestJump = useRef(0);
-  const jump = (key: string, place: JumpPlace): void => {
+  const jump = (key: string, place: JumpPlace, reload = false): void => {
     const mine = ++latestJump.current;
-    const said = (text: string): void => { if (mine === latestJump.current) setNote({ key, text }); };
-    const failed = (): void => said(COULD_NOT_JUMP);
+    const said = (result: JumpResult): void => {
+      if (mine === latestJump.current) setNote({ key, text: result.sentence, reloadFor: result.needsReload ? place : null });
+    };
+    const failed = (): void => said({ sentence: COULD_NOT_JUMP, needsReload: false });
     try {
-      Promise.resolve(onJump(place)).then(said, failed);
+      Promise.resolve(onJump(place, { reload })).then(said, failed);
     } catch {
       failed();
     }
   };
-  const noteFor = (key: string) => (note?.key === key ? <p className="muted" role="status">{note.text}</p> : null);
+  // The GitHub tab is reloaded only from this button: it may hold a comment the person is typing.
+  const noteFor = (key: string) => {
+    if (note?.key !== key) return null;
+    const { reloadFor } = note;
+    return (
+      <>
+        <p className="muted" role="status">{note.text}</p>
+        {reloadFor !== null && <button type="button" className="btn small" onClick={() => jump(key, reloadFor, true)}>Reload the GitHub tab</button>}
+      </>
+    );
+  };
 
   return (
     <>

@@ -38,9 +38,9 @@ describe('App', () => {
 
   it('passes the jump to the review with its pull request, and shows the last jump\'s report on the Packs screen', async () => {
     const f = fakeStart();
-    const jump = vi.fn<NonNullable<PanelServices['jump']>>(async (_pr, place, onReport) => {
+    const jump = vi.fn<NonNullable<PanelServices['jump']>>(async (_pr, place, { onReport }) => {
       onReport({ view: 'react', missing: [] });
-      return `Showing ${place.path}:${String(place.line)}.`;
+      return { sentence: `Showing ${place.path}:${String(place.line)}.`, needsReload: false };
     });
     const services: PanelServices = { settings: { getToken: async () => null, setToken: async () => undefined, getDefaultDepth: async () => null, setDefaultDepth: async () => undefined }, fetchStatus: () => new Promise(() => undefined), jump };
     render(<App start={f.start} services={services} />);
@@ -48,7 +48,10 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Jump to line' }));
     expect(await screen.findByText('Showing src/file1.ts:10.')).toBeTruthy();
-    expect(jump).toHaveBeenCalledWith(expect.objectContaining({ repo: 'acme/widgets', number: 1 }), { path: 'src/file1.ts', line: 10, kind: 'changed' }, expect.any(Function));
+    expect(jump).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'acme/widgets', number: 1 }), { path: 'src/file1.ts', line: 10, kind: 'changed' },
+      { reload: false, signal: expect.any(AbortSignal), onReport: expect.any(Function) },
+    );
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
     expect(screen.getByText('Recognised as the newer view.')).toBeTruthy();
   });
@@ -56,9 +59,11 @@ describe('App', () => {
   it('keeps the report of the latest jump when an earlier one reports later', async () => {
     const f = fakeStart();
     const pending: ((report: { view: 'react' | 'classic' | null; missing: string[] }) => void)[] = [];
-    const jump = vi.fn<NonNullable<PanelServices['jump']>>((_pr, _place, onReport) => {
+    const signals: AbortSignal[] = [];
+    const jump = vi.fn<NonNullable<PanelServices['jump']>>((_pr, _place, { onReport, signal }) => {
       pending.push(onReport);
-      return new Promise<string>(() => undefined);
+      signals.push(signal);
+      return new Promise(() => undefined);
     });
     const services: PanelServices = { settings: { getToken: async () => null, setToken: async () => undefined, getDefaultDepth: async () => null, setDefaultDepth: async () => undefined }, fetchStatus: () => new Promise(() => undefined), jump };
     render(<App start={f.start} services={services} />);
@@ -70,5 +75,7 @@ describe('App', () => {
     act(() => { pending[0]!({ view: null, missing: ['classic-file'] }); });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
     expect(screen.getByText('Recognised as the classic view.')).toBeTruthy();
+    // A newer jump cancels the older one's remaining work.
+    expect(signals.map((s) => s.aborted)).toEqual([true, false]);
   });
 });

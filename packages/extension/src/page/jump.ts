@@ -136,3 +136,9 @@ export function listen(runtime: RuntimeLike, page: Page): void {
     return true;
   });
 }
+
+/** WXT's address-change event: passes its destination on, and ignores an event that carries none. */
+export function locationChanged(page: Page, event: Event): void {
+  const to = (event as { newUrl?: { href?: unknown } | null }).newUrl?.href;
+  if (typeof to === 'string') page.softNavigated('locationchange', to);
+}

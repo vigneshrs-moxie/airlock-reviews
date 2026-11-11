@@ -4,6 +4,7 @@ import { fixPrompt, type Finding } from '@airlock/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PanelScreen, type PanelScreenProps } from '../../src/screens/PanelScreen';
 import type { PanelState } from '../../src/state/reduce';
+import type { JumpResult } from '../../src/state/jump';
 import { FakeTimers } from '../helpers/fake-timers';
 import { also, dismissal, finding, reviewState, type ReviewOptions } from './review-fixtures';
 
@@ -21,6 +22,7 @@ function show(state: PanelState, extra: Partial<PanelScreenProps> = {}) {
 const review = (findings: Finding[], opts: ReviewOptions = {}) => show(reviewState(findings, opts));
 /** The pull request a jump is for: the reviewed one, at the reviewed commit. */
 const REVIEWED = expect.objectContaining({ repo: 'acme/widgets', number: 1, headSha: 'c'.repeat(40) });
+const NO_RELOAD = { reload: false };
 const button = (name: string | RegExp) => screen.getByRole('button', { name });
 const queryButton = (name: string | RegExp) => screen.queryByRole('button', { name });
 const heading = (name: string | RegExp) => screen.getByRole('heading', { name });
@@ -260,7 +262,7 @@ describe('the detail of a finding', () => {
     for (const name of ['Would be wrong if', 'Checked', 'Suggested change', 'Also involves']) expect(screen.queryByRole('heading', { name }), name).toBeNull();
   });
   it('shows each connected place as a button that calls onJump and shows what it resolved to', async () => {
-    const onJump = vi.fn().mockResolvedValue('Jumped to src/other.ts line 7.');
+    const onJump = vi.fn().mockResolvedValue({ sentence: 'Jumped to src/other.ts line 7.', needsReload: false });
     show(reviewState([full]), { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
     const place = button(/src\/other\.ts:7/);
@@ -268,16 +270,16 @@ describe('the detail of a finding', () => {
     expect(button(/src\/lib\.ts/).textContent).not.toContain(':');
     expect(document.querySelector('a')).toBeNull();
     fireEvent.click(place);
-    expect(onJump).toHaveBeenCalledWith(REVIEWED, { path: 'src/other.ts', line: 7, kind: 'elsewhere' });
+    expect(onJump).toHaveBeenCalledWith(REVIEWED, { path: 'src/other.ts', line: 7, kind: 'elsewhere' }, NO_RELOAD);
     expect(await screen.findByText('Jumped to src/other.ts line 7.')).toBeTruthy();
     expect(place.parentElement?.textContent).toContain('Jumped to src/other.ts line 7.');
   });
   it('Jump to line calls onJump with the finding path and start line; the default says it is not connected', async () => {
-    const onJump = vi.fn().mockResolvedValue('Done.');
+    const onJump = vi.fn().mockResolvedValue({ sentence: 'Done.', needsReload: false });
     show(reviewState([full]), { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
     fireEvent.click(button('Jump to line'));
-    expect(onJump).toHaveBeenCalledWith(REVIEWED, { path: 'src/file1.ts', line: 10, kind: 'changed' });
+    expect(onJump).toHaveBeenCalledWith(REVIEWED, { path: 'src/file1.ts', line: 10, kind: 'changed' }, NO_RELOAD);
     cleanup();
     review([full]);
     fireEvent.click(within(cards()[0]!).getByRole('button'));
@@ -285,37 +287,66 @@ describe('the detail of a finding', () => {
     expect(await screen.findByText('Jumping is not connected yet.')).toBeTruthy();
   });
   it('says what kind of place each jump is: changed, outside the changed lines, or not in the pull request', () => {
-    const onJump = vi.fn().mockResolvedValue('Done.');
+    const onJump = vi.fn().mockResolvedValue({ sentence: 'Done.', needsReload: false });
     const files = [{ path: 'src/file1.ts', tier: 'read' as const, reason: '' }, { path: 'src/lib.ts', tier: 'read' as const, reason: '' }];
     const outside = { ...full, anchor: { status: 'outside-diff' as const, startLine: 40, endLine: 40 } };
     show(reviewState([outside], { doc: { files } }), { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
     fireEvent.click(button('Jump to line'));
-    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/file1.ts', line: 40, kind: 'outside' });
+    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/file1.ts', line: 40, kind: 'outside' }, NO_RELOAD);
     fireEvent.click(button(/src\/lib\.ts/));
-    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/lib.ts', line: null, kind: 'changed' });
+    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/lib.ts', line: null, kind: 'changed' }, NO_RELOAD);
     fireEvent.click(button(/src\/other\.ts:7/));
-    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/other.ts', line: 7, kind: 'elsewhere' });
+    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/other.ts', line: 7, kind: 'elsewhere' }, NO_RELOAD);
   });
   it('shows only the latest jump’s answer when an earlier one answers later', async () => {
-    const answers: ((text: string) => void)[] = [];
-    const onJump = vi.fn(() => new Promise<string>((resolve) => answers.push(resolve)));
+    const answers: ((result: JumpResult) => void)[] = [];
+    const onJump = vi.fn(() => new Promise<JumpResult>((resolve) => answers.push(resolve)));
     show(reviewState([full]), { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
     fireEvent.click(button('Jump to line'));
     fireEvent.click(button(/src\/other\.ts:7/));
-    await act(async () => { answers[1]!('Opened src/other.ts in a new tab; it is not part of this pull request.'); });
-    await act(async () => { answers[0]!('Asked GitHub to show src/file1.ts:10.'); });
+    await act(async () => { answers[1]!({ sentence: 'Opened src/other.ts in a new tab; it is not part of this pull request.', needsReload: false }); });
+    await act(async () => { answers[0]!({ sentence: 'Asked GitHub to show src/file1.ts:10.', needsReload: false }); });
     expect(screen.getByText('Opened src/other.ts in a new tab; it is not part of this pull request.')).toBeTruthy();
     expect(screen.queryByText('Asked GitHub to show src/file1.ts:10.')).toBeNull();
   });
+  it('offers to reload the GitHub tab when a jump needs it, and reloads nothing without the click', async () => {
+    const stuck = { sentence: 'Airlock could not reach the GitHub page. Reload it, then try again.', needsReload: true };
+    const onJump = vi.fn().mockResolvedValueOnce(stuck).mockResolvedValueOnce({ sentence: 'Showing src/file1.ts:10.', needsReload: false });
+    show(reviewState([full]), { onJump });
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    fireEvent.click(button('Jump to line'));
+    const reload = await screen.findByRole('button', { name: 'Reload the GitHub tab' });
+    expect(screen.getByText(stuck.sentence)).toBeTruthy();
+    expect(reload.parentElement?.textContent).toContain(stuck.sentence);
+    expect(onJump).toHaveBeenCalledTimes(1);
+    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/file1.ts', line: 10, kind: 'changed' }, NO_RELOAD);
+    fireEvent.click(reload);
+    expect(onJump).toHaveBeenCalledTimes(2);
+    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/file1.ts', line: 10, kind: 'changed' }, { reload: true });
+    expect(await screen.findByText('Showing src/file1.ts:10.')).toBeTruthy();
+    expect(queryButton('Reload the GitHub tab')).toBeNull();
+  });
+  it('offers the reload beside a connected place too, and reloads for that place', async () => {
+    const stuck = { sentence: 'Airlock could not reach the GitHub page. Reload it, then try again.', needsReload: true };
+    const onJump = vi.fn().mockResolvedValue(stuck);
+    show(reviewState([full], { doc: { files: [{ path: 'src/other.ts', tier: 'read', reason: '' }] } }), { onJump });
+    fireEvent.click(within(cards()[0]!).getByRole('button'));
+    const place = button(/src\/other\.ts:7/);
+    fireEvent.click(place);
+    const reload = await screen.findByRole('button', { name: 'Reload the GitHub tab' });
+    expect(place.parentElement?.contains(reload)).toBe(true);
+    fireEvent.click(reload);
+    expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/other.ts', line: 7, kind: 'changed' }, { reload: true });
+  });
   it('jumps from a review shown read-only while the service is away', async () => {
-    const onJump = vi.fn().mockResolvedValue('Showing src/file1.ts:10.');
+    const onJump = vi.fn().mockResolvedValue({ sentence: 'Showing src/file1.ts:10.', needsReload: false });
     const kept = reviewState([full]);
     show({ kind: 'offline', review: { pr: kept.pr, latest: kept.latest, stale: false } }, { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
     fireEvent.click(button('Jump to line'));
-    expect(onJump).toHaveBeenCalledWith(REVIEWED, { path: 'src/file1.ts', line: 10, kind: 'changed' });
+    expect(onJump).toHaveBeenCalledWith(REVIEWED, { path: 'src/file1.ts', line: 10, kind: 'changed' }, NO_RELOAD);
     expect(await screen.findByText('Showing src/file1.ts:10.')).toBeTruthy();
   });
   it('Dismiss opens the dismiss sheet for the finding', () => {

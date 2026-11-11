@@ -12,8 +12,15 @@ import { clippedPath, placeText } from '../place-text';
 export interface JumpPlace { path: string; line: number | null; kind: 'changed' | 'outside' | 'elsewhere' }
 /** The reviewed pull request, at the reviewed commit. */
 export interface JumpPr { repo: string; number: number; headSha: string }
-/** Takes the person to a place on GitHub and says in a sentence what it did. Never rejects. */
-export type Jump = (pr: JumpPr, place: JumpPlace) => Promise<string>;
+/**
+ * What a jump did, as a sentence to show. `needsReload`: no content script answered in the tab (as after the extension
+ * is reloaded); the person may ask for the tab to be reloaded, and Airlock never reloads it without that.
+ */
+export interface JumpResult { sentence: string; needsReload: boolean }
+/** `reload`: the person asked to reload the GitHub tab first. */
+export interface JumpOptions { reload: boolean }
+/** Takes the person to a place on GitHub and says what it did. Never rejects. */
+export type Jump = (pr: JumpPr, place: JumpPlace, options: JumpOptions) => Promise<JumpResult>;
 /** What the last jump found on the page: the view it recognised, and the selectors that found nothing. */
 export type PageReport = Pick<JumpReply, 'view' | 'missing'>;
 
@@ -38,8 +45,8 @@ export type Loaded = 'complete' | 'timeout' | 'closed';
 export interface JumpChrome {
   /** Rejects when no content script is listening in the tab. */
   sendMessage(tabId: number, message: JumpRequest): Promise<unknown>;
-  /** The tab's address, when Chrome shows it. */
-  tabUrl(tabId: number): Promise<string | undefined>;
+  /** The tab's address (undefined when Chrome does not show it); null when the tab no longer exists. Never rejects. */
+  tabUrl(tabId: number): Promise<string | undefined | null>;
   updateTab(tabId: number, props: { url: string }): Promise<unknown>;
   reloadTab(tabId: number): Promise<unknown>;
   createTab(props: { url: string }): Promise<unknown>;
@@ -53,12 +60,45 @@ export interface JumpChrome {
 export const COULD_NOT_JUMP = 'Airlock could not jump to that place.';
 const COULD_NOT_REACH = 'Airlock could not reach the GitHub page. Reload it, then try again.';
 const TAB_CLOSED = 'Airlock could not jump: the GitHub tab was closed.';
+/** Never shown: the panel shows only the latest jump's result. */
+const REPLACED = 'Airlock stopped this jump for a newer one.';
 const NOT_RECOGNISED = ' Airlock does not recognise this version of the page.';
 
 const usableLine = (line: number | null): number | null =>
   line !== null && Number.isSafeInteger(line) && line > 0 ? line : null;
 
-const sleep = (timers: Timers, ms: number): Promise<void> => new Promise((resolve) => { timers.setTimeout(resolve, ms); });
+/** Waits `ms`, or less when `signal` aborts. */
+function sleep(timers: Timers, ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    let handle: unknown;
+    const done = (): void => {
+      timers.clearTimeout(handle);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    if (signal?.aborted === true) { resolve(); return; }
+    handle = timers.setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+/** Thrown inside a jump that a newer jump has replaced; caught at its top. */
+const CANCELLED = new Error('replaced by a newer jump');
+
+/** `chrome` with every call refused once `signal` has aborted, so a replaced jump sends, opens and navigates nothing more. */
+function guarded(chrome: JumpChrome, signal: AbortSignal | undefined): JumpChrome {
+  const check = (): void => { if (signal?.aborted === true) throw CANCELLED; };
+  return {
+    sendMessage: (tabId, message) => { check(); return chrome.sendMessage(tabId, message); },
+    tabUrl: (tabId) => { check(); return chrome.tabUrl(tabId); },
+    updateTab: (tabId, props) => { check(); return chrome.updateTab(tabId, props); },
+    reloadTab: (tabId) => { check(); return chrome.reloadTab(tabId); },
+    createTab: (props) => { check(); return chrome.createTab(props); },
+    loaded: (tabId) => { check(); return chrome.loaded(tabId); },
+    timers: chrome.timers,
+    onReport: (report) => { check(); chrome.onReport?.(report); },
+  };
+}
 
 /** The page's reply; null when nothing is listening, nothing answers within `ANSWER_MS`, or the answer is not understood. */
 async function ask(chrome: JumpChrome, tabId: number, request: JumpRequest): Promise<JumpReply | null> {
@@ -68,7 +108,8 @@ async function ask(chrome: JumpChrome, tabId: number, request: JumpRequest): Pro
     const answer = await Promise.race([chrome.sendMessage(tabId, request), silence]);
     const reply = JumpReplySchema.safeParse(answer);
     return reply.success ? reply.data : null;
-  } catch {
+  } catch (error) {
+    if (error === CANCELLED) throw error;
     return null;
   } finally {
     chrome.timers.clearTimeout(timer);
@@ -94,23 +135,31 @@ function sentence(reply: JumpReply, place: JumpPlace, line: number | null): stri
 }
 
 /**
- * Takes the tab `tabId` to `place` and resolves to the sentence to show; never rejects. A place outside the pull request
- * opens in a new tab. Otherwise the tab's content script is asked. When it is not on this pull request's Files changed
- * page (or nothing answers and the tab is elsewhere), the tab is sent there and asked again once it has loaded. A tab
- * with no live script (the extension was reloaded) is asked again after each of `RETRY_MS`, then reloaded once and asked
- * a last time.
+ * Takes the tab `tabId` to `place` and resolves to what it did; never rejects. A place outside the pull request opens in
+ * a new tab. Otherwise the tab's content script is asked. When it is not on this pull request's Files changed page (or
+ * nothing answers and the tab is elsewhere), the tab is sent there and asked again once it has loaded. A tab with no live
+ * script is asked again after each of `RETRY_MS`; then the result says a reload is needed, and the tab is reloaded only
+ * when `options.reload` says the person asked for it. Once `options.signal` aborts (a newer jump started), it makes no
+ * further Chrome call.
  */
-export async function jumpTo(chrome: JumpChrome, tabId: number, pr: JumpPr, place: JumpPlace): Promise<string> {
+export async function jumpTo(
+  unguarded: JumpChrome, tabId: number, pr: JumpPr, place: JumpPlace,
+  options: { reload?: boolean; signal?: AbortSignal } = {},
+): Promise<JumpResult> {
+  const { signal } = options;
+  const chrome = guarded(unguarded, signal);
+  const said = (sentence: string, needsReload = false): JumpResult => ({ sentence, needsReload });
   const { path } = place;
-  const cannotLink = `Airlock cannot build a link to ${path}.`;
+  const cannotLink = said(`Airlock cannot build a link to ${path}.`);
   try {
+    if (signal?.aborted === true) throw CANCELLED;
     // Longer than the content script accepts: refused here, shown cut so the sentence stays readable.
-    if (path.length > PATH_MAX) return `Airlock cannot build a link to ${clippedPath(path)}.`;
+    if (path.length > PATH_MAX) return said(`Airlock cannot build a link to ${clippedPath(path)}.`);
     if (place.kind === 'elsewhere') {
       const url = blobUrl(pr.repo, pr.headSha, path, place.line);
       if (url === null) return cannotLink;
       await chrome.createTab({ url });
-      return `Opened ${path} in a new tab; it is not part of this pull request.`;
+      return said(`Opened ${path} in a new tab; it is not part of this pull request.`);
     }
     // A line outside the changed lines is not on the page: the file is asked for alone.
     const line = place.kind === 'outside' ? null : usableLine(place.line);
@@ -126,29 +175,28 @@ export async function jumpTo(chrome: JumpChrome, tabId: number, pr: JumpPr, plac
       return (await loaded) !== 'closed';
     };
 
+    if (options.reload === true && !(await andLoad(() => chrome.reloadTab(tabId)))) return said(TAB_CLOSED);
     let reply = await ask(chrome, tabId, request);
     if (unreached(reply)) {
       // Moving to the same document with a new fragment would not load a script, so that tab is not navigated.
-      const address = await chrome.tabUrl(tabId).catch(() => undefined);
+      const address = await chrome.tabUrl(tabId);
+      if (address === null) return said(TAB_CLOSED);
       if (!onFilesPage(address, pr)) {
-        if (!(await andLoad(() => chrome.updateTab(tabId, { url })))) return TAB_CLOSED;
+        if (!(await andLoad(() => chrome.updateTab(tabId, { url })))) return said(TAB_CLOSED);
         reply = await ask(chrome, tabId, request);
       }
       for (const ms of RETRY_MS) {
         if (reply !== null) break;
-        await sleep(chrome.timers, ms);
+        await sleep(chrome.timers, ms, signal);
         reply = await ask(chrome, tabId, request);
       }
-      if (reply === null) {
-        if (!(await andLoad(() => chrome.reloadTab(tabId)))) return TAB_CLOSED;
-        reply = await ask(chrome, tabId, request);
-      }
+      if (reply === null) return (await chrome.tabUrl(tabId)) === null ? said(TAB_CLOSED) : said(COULD_NOT_REACH, true);
     }
-    if (reply === null || unreached(reply)) return COULD_NOT_REACH;
+    if (reply === null || unreached(reply)) return said(COULD_NOT_REACH);
     chrome.onReport?.({ view: reply.view, missing: reply.missing });
-    return sentence(reply, place, line);
-  } catch {
-    return COULD_NOT_JUMP;
+    return said(sentence(reply, place, line));
+  } catch (error) {
+    return said(error === CANCELLED ? REPLACED : COULD_NOT_JUMP);
   }
 }
 
@@ -185,7 +233,7 @@ export function tabLoaded(tabs: TabsEvents, tabId: number, timers: Timers = real
 export function browserJumpChrome(onReport: (report: PageReport) => void): JumpChrome {
   return {
     sendMessage: (tabId, message) => browser.tabs.sendMessage(tabId, message),
-    tabUrl: async (tabId) => (await browser.tabs.get(tabId)).url,
+    tabUrl: (tabId) => browser.tabs.get(tabId).then((tab) => tab.url, () => null),
     updateTab: (tabId, props) => browser.tabs.update(tabId, props),
     reloadTab: (tabId) => browser.tabs.reload(tabId),
     createTab: (props) => browser.tabs.create(props),

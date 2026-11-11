@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { LOOK_MS, STEP_MS, createPage, listen, type Page, type PageEnv, type RuntimeLike } from '../../src/page/jump';
+import { LOOK_MS, STEP_MS, createPage, listen, locationChanged, type Page, type PageEnv, type RuntimeLike } from '../../src/page/jump';
 import { parseJumpRequest, type JumpRequest } from '../../src/page/protocol';
 import { CLASSIC, REACT } from '../../src/page/selectors';
 import { onSoftNavigation } from '../../src/page/soft-nav';
@@ -353,6 +353,17 @@ describe('onSoftNavigation', () => {
     stop();
     document.dispatchEvent(new Event('turbo:render'));
     expect(seen).toHaveLength(3);
+  });
+});
+
+describe('locationChanged', () => {
+  it('passes the destination of an address change on, and ignores an event without one instead of throwing', () => {
+    const page: Page = { answer: () => Promise.reject(new Error('unused')), softNavigated: vi.fn() };
+    expect(() => locationChanged(page, new Event('wxt:locationchange'))).not.toThrow();
+    expect(() => locationChanged(page, Object.assign(new Event('x'), { newUrl: null }))).not.toThrow();
+    expect(page.softNavigated).not.toHaveBeenCalled();
+    locationChanged(page, Object.assign(new Event('x'), { newUrl: new URL(`${FILES}?w=1`) }));
+    expect(page.softNavigated).toHaveBeenCalledWith('locationchange', `${FILES}?w=1`);
   });
 });
 

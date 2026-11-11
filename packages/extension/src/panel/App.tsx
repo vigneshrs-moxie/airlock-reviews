@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ServiceStatus } from '@airlock/shared';
 import { ServiceClient } from '../client/service';
 import { realTimers } from '../client/timers';
@@ -6,7 +6,7 @@ import { SERVICE_URL } from '../config';
 import { PanelScreen } from '../screens/PanelScreen';
 import { startPanel, type PanelState } from '../state/machine';
 import { browserSettings, type SettingsStore } from '../state/settings';
-import { browserJumpChrome, COULD_NOT_JUMP, jumpTo, type Jump, type JumpPlace, type JumpPr, type PageReport } from '../state/jump';
+import { browserJumpChrome, COULD_NOT_JUMP, jumpTo, type Jump, type JumpPlace, type JumpPr, type JumpResult, type PageReport } from '../state/jump';
 import { browserTab, type TabWatcher } from '../state/tab';
 import { useDefaultDepth, usePanel, type StartPanel } from './usePanel';
 
@@ -31,16 +31,19 @@ export function startRealPanel(
 export interface PanelServices {
   settings: SettingsStore;
   fetchStatus: () => Promise<ServiceStatus>;
-  jump?: (pr: JumpPr, place: JumpPlace, onReport: (report: PageReport) => void) => Promise<string>;
+  jump?: (pr: JumpPr, place: JumpPlace, options: JumpServiceOptions) => Promise<JumpResult>;
 }
 
+/** `reload`: the person asked to reload the GitHub tab first. `signal`: aborted when a newer jump starts. */
+export interface JumpServiceOptions { reload: boolean; signal: AbortSignal; onReport: (report: PageReport) => void }
+
 /** Jumps in the tab the panel sits beside. Needs no service, so it works while the service is away. Never rejects. */
-async function jumpBeside(tab: TabWatcher, pr: JumpPr, place: JumpPlace, onReport: (report: PageReport) => void): Promise<string> {
+async function jumpBeside(tab: TabWatcher, pr: JumpPr, place: JumpPlace, { reload, signal, onReport }: JumpServiceOptions): Promise<JumpResult> {
   try {
     const { tabId } = await tab.current();
-    return await jumpTo(browserJumpChrome(onReport), tabId, pr, place);
+    return await jumpTo(browserJumpChrome(onReport), tabId, pr, place, { reload, signal });
   } catch {
-    return COULD_NOT_JUMP;
+    return { sentence: COULD_NOT_JUMP, needsReload: false };
   }
 }
 
@@ -53,7 +56,7 @@ export function realServices(settings: SettingsStore = browserSettings(), tab: T
   return {
     settings,
     fetchStatus: () => client.status(),
-    jump: (pr, place, onReport) => jumpBeside(tab, pr, place, onReport),
+    jump: (pr, place, options) => jumpBeside(tab, pr, place, options),
   };
 }
 
@@ -62,13 +65,19 @@ export function App({ start = (onState) => startRealPanel(onState), services }: 
   const { depth, failed, setDepth } = useDefaultDepth(services?.settings);
   const [pageReport, setPageReport] = useState<PageReport | null>(null);
   const jump = services?.jump;
-  // Only the latest jump's report is kept: an earlier jump that reports later is dropped.
+  // Only the latest jump runs and reports: starting one aborts the one before, and a late report is dropped.
   const latestJump = useRef(0);
+  const running = useRef<AbortController | null>(null);
+  useEffect(() => () => running.current?.abort(), []);
   const onJump = useMemo((): Jump | undefined => {
     if (!jump) return undefined;
-    return (pr, place) => {
+    return (pr, place, { reload }) => {
       const mine = ++latestJump.current;
-      return jump(pr, place, (report) => { if (mine === latestJump.current) setPageReport(report); });
+      running.current?.abort();
+      const controller = new AbortController();
+      running.current = controller;
+      const onReport = (report: PageReport): void => { if (mine === latestJump.current) setPageReport(report); };
+      return jump(pr, place, { reload, signal: controller.signal, onReport });
     };
   }, [jump]);
   return (

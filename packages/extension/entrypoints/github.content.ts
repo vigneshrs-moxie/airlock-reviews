@@ -1,4 +1,4 @@
-import { createPage, listen } from '../src/page/jump';
+import { createPage, listen, locationChanged } from '../src/page/jump';
 import { onSoftNavigation } from '../src/page/soft-nav';
 
 // The one part of Airlock that runs inside a page it does not control, so it does as little as possible: it answers the
@@ -18,6 +18,6 @@ export default defineContentScript({
     listen(browser.runtime, page);
     ctx.onInvalidated(onSoftNavigation(document, window, (event) => page.softNavigated(event)));
     // Every change of address, including history.pushState, which fires none of the events above.
-    ctx.addEventListener(window, 'wxt:locationchange', (event) => page.softNavigated('locationchange', event.newUrl.href));
+    ctx.addEventListener(window, 'wxt:locationchange', (event) => locationChanged(page, event));
   },
 });
