@@ -89,8 +89,20 @@ describe('scoreCase', () => {
       ],
     });
     const s = scoreCase(replayCase({ kind: 'negative', known: [] }), d, []);
-    expect(s).toMatchObject({ kind: 'negative', known: 0, findingsShown: 3, blockOrFixShown: 2, ms: 3500,
+    expect(s).toMatchObject({ kind: 'negative', known: 0, findingsShown: 3, blockOrFixShown: 2, ms: 3500, msSummed: true,
       inputTokens: 1000, outputTokens: 100, agentRuns: 5, verdict: 'request-changes' });
+  });
+
+  it('a review that records its start takes its time as it passed, not the sum of stages that overlap', () => {
+    const timings = [
+      { stage: 'lenses', ms: 600_000, agentRuns: 6, inputTokens: 1, outputTokens: 1, costUsd: null },
+      { stage: 'sweep', ms: 500_000, agentRuns: 3, inputTokens: 1, outputTokens: 1, costUsd: null },
+    ];
+    const elapsed = scoreCase(replayCase({ known: [] }), doc({ startedAt: '2026-11-10T09:00:00.000Z', createdAt: '2026-11-10T09:12:30.000Z', timings }), []);
+    expect(elapsed).toMatchObject({ ms: 750_000, msSummed: false });
+    // Without a start, or with times that cannot be read, the sum of stages is all there is.
+    expect(scoreCase(replayCase({ known: [] }), doc({ timings }), [])).toMatchObject({ ms: 1_100_000, msSummed: true });
+    expect(scoreCase(replayCase({ known: [] }), doc({ startedAt: 'not a time', timings }), [])).toMatchObject({ ms: 1_100_000, msSummed: true });
   });
 });
 
@@ -98,7 +110,7 @@ function score(over: Partial<CaseScore>): CaseScore {
   return {
     caseId: 'pr1', kind: 'positive', known: 0, knownDefects: 0, inTop: 0, shown: 0, raised: 0, defectsInTop: 0,
     defectsShown: 0, partialInTop: 0, asQuestion: 0, sharedMatches: 0, lostAt: { ...ZERO_LOST }, crossFileKnown: 0, crossFileInTop: 0,
-    findingsShown: 0, blockOrFixShown: 0, ms: 0, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: 'approve',
+    findingsShown: 0, blockOrFixShown: 0, ms: 0, msSummed: false, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: 'approve',
     ...over,
   };
 }
@@ -225,7 +237,18 @@ describe('summarise', () => {
     const cases = [replayCase({ id: 'a' }), replayCase({ id: 'b', kind: 'negative' }), replayCase({ id: 'c', kind: 'negative' })];
     const s = summarise('r', 'm', 'standard', scores, cases);
     expect(s.incompleteCases).toEqual(['a', 'c']);
-    expect(s.totals).toEqual({ ms: 150, inputTokens: 15, outputTokens: 3, agentRuns: 3 });
+    // With no wall clock for the run, the total time is the sum of cases, and says so.
+    expect(s.totals).toEqual({ ms: 150, msSummed: true, inputTokens: 15, outputTokens: 3, agentRuns: 3 });
+    expect(s.wallClock).toBeNull();
+  });
+
+  it('the total time is the run\'s wall clock from its first case start to its last case end', () => {
+    const scores = [score({ caseId: 'a', ms: 600_000 }), score({ caseId: 'b', ms: 600_000 })];
+    const cases = [replayCase({ id: 'a' }), replayCase({ id: 'b' })];
+    const wallClock = { startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:15:00.000Z' };
+    const s = summarise('r', 'm', 'standard', scores, cases, cases, wallClock);
+    expect(s.totals).toMatchObject({ ms: 900_000, msSummed: false });
+    expect(s.wallClock).toEqual(wallClock);
   });
 
   describe('how much of the dataset the run covers', () => {

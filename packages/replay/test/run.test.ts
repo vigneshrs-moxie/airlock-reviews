@@ -154,6 +154,7 @@ describe('runReplay', () => {
     expect(await readJson(join(runDir, 'run.json'))).toEqual({
       runId, model: MODEL, depth: 'standard', judgeModel: 'claude-opus-5-5', kitSha: KIT_SHA,
       caseIds: ['pr1', 'pr2', 'pr3'], startedAt: NOW.toISOString(),
+      casesStartedAt: NOW.toISOString(), casesFinishedAt: NOW.toISOString(),
     });
   });
 
@@ -321,17 +322,20 @@ describe('runReplay', () => {
     expect(loaded.details.pr2!.doc.stageErrors).toEqual([{ stage: 'intake', cohortId: null, message: 'This case has not been run.' }]);
   });
 
-  it('nothing from the known problems appears in any review request', async () => {
-    const review = fakeReview();
+  it('nothing from the known problems appears in any review request or in the environment a review runs in', async () => {
+    const environments: string[] = [];
+    const review = fakeReview((req) => { environments.push(JSON.stringify(process.env)); return reviewFor(req); });
     await runReplay(options(), deps(review));
     expect(review.requests).toHaveLength(3);
+    expect(review.requests.every((r) => r.prText !== undefined)).toBe(true);
     const secrets = cases().flatMap((c) => c.known.flatMap((k) => [k.summary, k.comment]));
     expect(secrets).toHaveLength(6);
-    for (const req of review.requests) {
-      const text = JSON.stringify(req);
+    for (const text of [...review.requests.map((r) => JSON.stringify(r)), ...environments]) {
       for (const secret of secrets) expect(text).not.toContain(secret);
       for (const word of ['Zebra', 'aardvark', 'quokka', 'narwhal']) expect(text).not.toContain(word);
     }
+    const ids = cases().flatMap((c) => c.known.map((k) => k.id));
+    for (const req of review.requests) for (const id of ids) expect(JSON.stringify(req)).not.toContain(`"${id}"`);
   });
 
   it('the judge runs through a retry: one failed attempt followed by a success is a success', async () => {
@@ -696,6 +700,29 @@ describe('runReplay', () => {
     const { events, onCase } = recorder();
     await runReplay(options({ cases: [cases()[0]!] }), deps(review), onCase);
     expect(events.at(-1)!.message).toBe('The review did not finish (merged into another finding).');
+  });
+
+  it('the run\'s total time is its wall clock from the first case start to the last case end, kept across a resume', async () => {
+    let t = Date.parse('2026-11-10T09:00:00.000Z');
+    const clock = (): Date => new Date(t);
+    const review = fakeReview(async (req) => { t += 60_000; return reviewFor(req); });
+    const first = await runReplay(options({ parallelCases: 3 }), { ...deps(review), now: clock });
+    // The clock moves a minute in each review: the total is the clock from the first case start to the last case end.
+    expect(first.wallClock).toEqual({ startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:03:00.000Z' });
+    expect(first.totals).toMatchObject({ ms: 180_000, msSummed: false });
+    expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({
+      casesStartedAt: '2026-11-10T09:00:00.000Z', casesFinishedAt: '2026-11-10T09:03:00.000Z',
+    });
+
+    // A resume that works on one case later moves the end, not the start; a call that only skips cases moves neither.
+    await rm(join(caseDir('pr2'), 'matches.json'));
+    t = Date.parse('2026-11-10T10:00:00.000Z');
+    const second = await runReplay(options(), { ...deps(fakeReview()), now: clock });
+    expect(second.wallClock).toEqual({ startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T10:00:00.000Z' });
+    t = Date.parse('2026-11-11T10:00:00.000Z');
+    const third = await runReplay(options(), { ...deps(fakeReview()), now: clock });
+    expect(third.wallClock).toEqual(second.wallClock);
+    expect((await loadRun(join(outDir, 'run-a'), cases())).summary).toEqual(third);
   });
 
   it('the judge runs in a fresh, empty folder made for the run and removed at the end', async () => {

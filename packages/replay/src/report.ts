@@ -355,13 +355,20 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
   }
 
   out.push('## Time and tokens', '');
+  const time = (ms: number, summed: boolean): string => `${summed ? 'about ' : ''}${duration(ms)}`;
   out.push(...table(
     ['Pull request', 'Time', 'Tokens in', 'Tokens out', 'Agent runs'],
     [
-      ...summary.cases.map((s) => [prName(caseById.get(s.caseId), s.caseId), duration(s.ms), count(s.inputTokens), count(s.outputTokens), count(s.agentRuns)]),
-      ['Total', duration(summary.totals.ms), count(summary.totals.inputTokens), count(summary.totals.outputTokens), count(summary.totals.agentRuns)],
+      ...summary.cases.map((s) => [prName(caseById.get(s.caseId), s.caseId), time(s.ms, s.msSummed), count(s.inputTokens), count(s.outputTokens), count(s.agentRuns)]),
+      ['Total', time(summary.totals.ms, summary.totals.msSummed), count(summary.totals.inputTokens), count(summary.totals.outputTokens), count(summary.totals.agentRuns)],
     ],
   ), '');
+  const timeNotes: string[] = [];
+  if (summary.wallClock !== null) timeNotes.push("The total is the time from the first case's start to the last case's end, not the sum of the cases.");
+  if (summary.totals.msSummed || summary.cases.some((s) => s.msSummed)) {
+    timeNotes.push('A time marked about adds up steps that can run side by side, so it can be more than the time that passed.');
+  }
+  if (timeNotes.length > 0) out.push(timeNotes.join(' '), '');
 
   out.push('## How to read this', '');
   out.push(

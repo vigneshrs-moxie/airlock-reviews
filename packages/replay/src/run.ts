@@ -99,6 +99,9 @@ const RunFileSchema = z.object({
   kitSha: z.string(),
   caseIds: z.array(z.string()),
   startedAt: z.string(),
+  /** When the first case the run worked on started, and when the last one ended, over every call. */
+  casesStartedAt: z.string().optional(),
+  casesFinishedAt: z.string().optional(),
 });
 type RunFile = z.infer<typeof RunFileSchema>;
 
@@ -331,9 +334,27 @@ async function openRunFolder(runDir: string, run: RunFile, dataset: ReplayCase[]
   const unknown = dataset === undefined ? (previous?.caseIds ?? []).filter((id) => !known.has(id)) : [];
   const cases = inDatasetOrder([...(previous?.caseIds ?? []).filter((id) => !unknown.includes(id)), ...run.caseIds], dataset ?? selected, runDir);
   checkCases(cases);
-  const merged: RunFile = { ...run, caseIds: [...cases.map((c) => c.id), ...unknown], startedAt: previous?.startedAt ?? run.startedAt };
+  const merged: RunFile = {
+    ...run, caseIds: [...cases.map((c) => c.id), ...unknown], startedAt: previous?.startedAt ?? run.startedAt,
+    ...(previous?.casesStartedAt === undefined ? {} : { casesStartedAt: previous.casesStartedAt }),
+    ...(previous?.casesFinishedAt === undefined ? {} : { casesFinishedAt: previous.casesFinishedAt }),
+  };
   await writeAtomic(path, json(merged));
   return { run: merged, cases };
+}
+
+/** The run's wall clock from run.json, when it has both ends. */
+const wallClockOf = (run: RunFile): RunSummary['wallClock'] =>
+  run.casesStartedAt !== undefined && run.casesFinishedAt !== undefined ? { startedAt: run.casesStartedAt, finishedAt: run.casesFinishedAt } : null;
+
+/** The earlier or later of two ISO times, either of which may be missing. */
+function earlier(a: string | undefined, b: string | undefined): string | undefined {
+  if (a === undefined || b === undefined) return a ?? b;
+  return Date.parse(b) < Date.parse(a) ? b : a;
+}
+function later(a: string | undefined, b: string | undefined): string | undefined {
+  if (a === undefined || b === undefined) return a ?? b;
+  return Date.parse(b) > Date.parse(a) ? b : a;
 }
 
 /** Writes summary.json and report.md into the run folder and returns the report's path. */
@@ -391,7 +412,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
     runId, model: opts.model, depth: opts.depth, judgeModel, kitSha: opts.kitSha,
     caseIds: opts.cases.map((c) => c.id), startedAt: now.toISOString(),
   }, opts.dataset, opts.cases);
-  const { run } = opened;
+  let { run } = opened;
   const scoring: RunInfo = { model: run.model, depth: run.depth, createdAt: run.startedAt };
 
   const review = deps.review ?? runReview;
@@ -412,6 +433,11 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   let limitReachedIn: string | null = null;
   const notStarted = new Set<string>();
 
+  // The run's own wall clock: from the first case this call works on to the last one's end.
+  let firstStart: string | undefined;
+  let lastEnd: string | undefined;
+  const stamp = (): string => deps.now().toISOString();
+
   /**
    * Works on one case until it is done: reviews it unless a finished review of it is saved, then judges it. A review
    * that comes back incomplete is saved, in place of the old one, and not judged. Never throws.
@@ -420,6 +446,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
     const dir = join(runDir, c.id);
     let kept: ReviewDocument | null = null;
     let lead = 'The case folder could not be prepared';
+    let started = false;
     try {
       const saved = await readOutcome(dir, c);
       if (saved.kind === 'done') return finish(c, saved, 'skipped');
@@ -428,6 +455,8 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
         return scoreOutcome(c, saved, scoring);
       }
 
+      firstStart = earlier(firstStart, stamp());
+      started = true;
       emit({ caseId: c.id, status: 'start', ...(saved.kind === 'not-judged' ? { message: 'judging the saved review again' } : {}) });
       await mkdir(dir, { recursive: true });
       await rm(join(dir, 'error.txt'), { recursive: true, force: true });
@@ -459,6 +488,8 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
       const error = failureText(lead, err);
       await writeAtomic(join(dir, 'error.txt'), `${error}\n`).catch(() => undefined);
       return finish(c, kept ? { kind: 'not-judged', doc: kept, reason: error } : { kind: 'not-done', doc: null, reason: error }, 'failed', error);
+    } finally {
+      if (started) lastEnd = later(lastEnd, stamp());
     }
   };
 
@@ -478,8 +509,18 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
     const c = opened.cases[i]!;
     return scoreOutcome(c, { kind: 'not-done', doc: null, reason: failureText('The case failed', r.reason) }, scoring);
   });
+  const casesStartedAt = earlier(run.casesStartedAt, firstStart);
+  const casesFinishedAt = later(run.casesFinishedAt, lastEnd);
+  if (casesStartedAt !== run.casesStartedAt || casesFinishedAt !== run.casesFinishedAt) {
+    run = {
+      ...run,
+      ...(casesStartedAt === undefined ? {} : { casesStartedAt }),
+      ...(casesFinishedAt === undefined ? {} : { casesFinishedAt }),
+    };
+    await writeAtomic(join(runDir, 'run.json'), json(run));
+  }
   const summary: RunSummary = {
-    ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases, opts.dataset ?? opts.cases),
+    ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases, opts.dataset ?? opts.cases, wallClockOf(run)),
     ...(limitReachedIn === null ? {} : {
       stopped: { reason: 'usage-limit', caseId: limitReachedIn, notStarted: opened.cases.filter((c) => notStarted.has(c.id)).map((c) => c.id) },
     }),
@@ -503,7 +544,7 @@ export async function loadRun(runDir: string, cases: ReplayCase[]): Promise<{ su
   checkCases(selected);
   const scoring: RunInfo = { model: run.model, depth: run.depth, createdAt: run.startedAt };
   const results = await Promise.all(selected.map(async (c) => scoreOutcome(c, await readOutcome(join(runDir, c.id), c), scoring)));
-  const summary = summarise(run.runId, run.model, run.depth, results.map((r) => r.score), selected, cases);
+  const summary = summarise(run.runId, run.model, run.depth, results.map((r) => r.score), selected, cases, wallClockOf(run));
   const details: RunDetails = Object.fromEntries(selected.map((c, i) => [c.id, results[i]!.detail]));
   return { summary, details };
 }

@@ -27,7 +27,10 @@ export interface CaseScore {
   crossFileInTop: number;
   findingsShown: number;
   blockOrFixShown: number;
+  /** The review's elapsed time: from its start to its end when it records both, else the sum of its stages' times. */
   ms: number;
+  /** True when `ms` is the sum of stage times, which can overlap, so it is only about the time that passed. */
+  msSummed: boolean;
   inputTokens: number;
   outputTokens: number;
   agentRuns: number;
@@ -61,7 +64,10 @@ export interface RunSummary {
   /** Positive cases whose review did not finish; their known problems stay in the recall denominator. */
   positivesIncomplete: number;
   negativesIncomplete: number;
-  totals: { ms: number; inputTokens: number; outputTokens: number; agentRuns: number };
+  /** From the first case start to the last case end of the run, over every call that worked on it; null when not known. */
+  wallClock: { startedAt: string; finishedAt: string } | null;
+  /** `ms` is the wall clock when there is one, else the sum of the cases' times (`msSummed`). */
+  totals: { ms: number; msSummed: boolean; inputTokens: number; outputTokens: number; agentRuns: number };
   /**
    * Present when the run stopped early because Claude's usage limit was reached during `caseId`: the cases in
    * `notStarted` were left untouched. Only the run itself knows this; a summary rebuilt from the folder does not have it.
@@ -114,6 +120,13 @@ export function sharedMatchItems(c: ReplayCase, matches: Match[]): Map<string, s
   return byItem;
 }
 
+/** Milliseconds from `startedAt` to `finishedAt`; null when either cannot be read or the end comes first. */
+function between(startedAt: string | undefined, finishedAt: string): number | null {
+  if (startedAt === undefined) return null;
+  const ms = Date.parse(finishedAt) - Date.parse(startedAt);
+  return Number.isFinite(ms) && ms >= 0 ? ms : null;
+}
+
 /** Scores one case from its review document and the judge's matches. */
 export function scoreCase(c: ReplayCase, doc: ReviewDocument, matches: Match[]): CaseScore {
   const byKnown = new Map(matches.map((m) => [m.knownId, m]));
@@ -124,10 +137,13 @@ export function scoreCase(c: ReplayCase, doc: ReviewDocument, matches: Match[]):
     lostAt: { lenses: 0, schema: 0, anchor: 0, merge: 0, challenge: 0, select: 0 },
     crossFileKnown: 0, crossFileInTop: 0, findingsShown: doc.findings.length,
     blockOrFixShown: doc.findings.filter((f) => f.severity === 'block' || f.severity === 'fix').length,
-    ms: 0, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: doc.verdict.label,
+    ms: 0, msSummed: false, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: doc.verdict.label,
   };
+  // `createdAt` is when the document was assembled, at the review's end, once the review records its start.
+  const elapsed = between(doc.startedAt, doc.createdAt);
+  s.ms = elapsed ?? sum(doc.timings, (t) => t.ms);
+  s.msSummed = elapsed === null;
   for (const t of doc.timings) {
-    s.ms += t.ms;
     s.inputTokens += t.inputTokens;
     s.outputTokens += t.outputTokens;
     s.agentRuns += t.agentRuns;
@@ -170,6 +186,7 @@ function sum<T>(items: T[], pick: (item: T) => number): number {
  */
 export function summarise(
   runId: string, model: string, depth: Depth, scores: CaseScore[], cases: ReplayCase[], dataset: ReplayCase[] = cases,
+  wallClock: RunSummary['wallClock'] = null,
 ): RunSummary {
   const kindOf = new Map(cases.map((c) => [c.id, c.kind]));
   const kind = (s: CaseScore): ReplayCase['kind'] => {
@@ -191,6 +208,7 @@ export function summarise(
   const positivesNotRun = datasetPositives.filter((c) => !run.has(c.id)).map((c) => c.id);
   const wholeDataset = positivesNotRun.length === 0 && !positive.some(incomplete);
   const half = recallTop >= 0.5;
+  const wallMs = wallClock === null ? null : between(wallClock.startedAt, wallClock.finishedAt);
   return {
     runId, model, depth, cases: scores, secondary: scores.filter((s) => kind(s) === 'secondary'),
     datasetKnownTotal: sum(datasetPositives, (c) => c.known.length), datasetPositives: datasetPositives.length, positivesNotRun,
@@ -203,8 +221,9 @@ export function summarise(
     incompleteCases: scores.filter(incomplete).map((s) => s.caseId),
     positivesIncomplete: positive.filter(incomplete).length,
     negativesIncomplete,
+    wallClock,
     totals: {
-      ms: sum(scores, (s) => s.ms), inputTokens: sum(scores, (s) => s.inputTokens),
+      ms: wallMs ?? sum(scores, (s) => s.ms), msSummed: wallMs === null, inputTokens: sum(scores, (s) => s.inputTokens),
       outputTokens: sum(scores, (s) => s.outputTokens), agentRuns: sum(scores, (s) => s.agentRuns),
     },
     meets: {
