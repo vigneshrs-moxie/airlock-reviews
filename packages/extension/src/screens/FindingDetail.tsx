@@ -4,7 +4,7 @@ import type { Timers } from '../client/timers';
 import { connectedPlace, COULD_NOT_JUMP, ownPlace, type Jump, type JumpOptions, type JumpPlace, type JumpResult } from '../state/jump';
 import { CopyButton } from './CopyButton';
 import { useVisible } from './visible';
-import { fromText, locationText, placeText, severityWord } from './words';
+import { fromText, locationText, placeText, severityWord, sourceText } from './words';
 
 /** Takes the person to a place in the reviewed pull request and says what it did. */
 export type OnJump = (place: JumpPlace, options: JumpOptions) => Promise<JumpResult>;
@@ -105,6 +105,11 @@ export function FindingDetail({ finding, packs, previous, next, canDismiss, fixP
         {finding.checked.trim() !== '' && <Part title="Checked"><p>{finding.checked}</p></Part>}
         {finding.wouldBeWrongIf.trim() !== '' && <Part title="Would be wrong if"><p>{finding.wouldBeWrongIf}</p></Part>}
         <Part title="From"><p>{fromText(finding, packs)}</p></Part>
+        {finding.alsoRaisedBy !== undefined && finding.alsoRaisedBy.length > 0 && (
+          <Part title="Also raised by">
+            <ul className="plain">{finding.alsoRaisedBy.map((source, i) => <li key={i}>{sourceText(source, packs)}</li>)}</ul>
+          </Part>
+        )}
       </section>
       <div className="actions">
         <div className="action">

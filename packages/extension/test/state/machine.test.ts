@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Brief, ChangeMap, Dismissal, ServiceEvent } from '@airlock/shared';
 import { NOT_UNDERSTOOD, ServiceClient } from '../../src/client/service';
-import { LOST_MESSAGE, RUN_STOPPED, SHOWING_PROBLEM, TAB_UNREADABLE, startPanel } from '../../src/state/machine';
+import { LOST_MESSAGE, OFFLINE_RETRY_MS, RUN_STOPPED, SHOWING_PROBLEM, TAB_UNREADABLE, WATCH_MS, startPanel } from '../../src/state/machine';
 import type { PanelState } from '../../src/state/reduce';
 import { STAGE_WORDS } from '../../src/state/stage-words';
 import type { SettingsStore } from '../../src/state/settings';
@@ -120,7 +120,8 @@ describe('startPanel: loading', () => {
     h.svc.down = false;
     h.timers.fire();
     expect(await until(h, 'ready')).toEqual({ kind: 'ready', pr: prSummary() });
-    expect(h.timers.delays()).toEqual([]);
+    // The offline retry is done; what is left is the check that the service still answers.
+    expect(h.timers.delays()).toEqual([WATCH_MS]);
     // The automatic checks never flash a loading state between two offline ones.
     expect(h.states.map((s) => s.kind)).toEqual(['loading', 'offline', 'ready']);
   });
@@ -204,6 +205,74 @@ describe('startPanel: loading', () => {
     const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary())) });
     await until(h, 'review');
     for (const req of h.svc.requests) expect(req.url.origin).toBe(BASE);
+  });
+});
+
+describe('startPanel: noticing the service stop while nothing is running (Task 13a)', () => {
+  it('checks every few seconds while a review is on screen; when the service stops it goes offline with the review kept, and comes back by itself', async () => {
+    const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary())) });
+    const shown = await until(h, 'review');
+    expect(WATCH_MS).toBe(OFFLINE_RETRY_MS);
+    expect(h.timers.delays()).toEqual([WATCH_MS]);
+    // While the service answers, each check is one hello and nothing on screen changes.
+    h.timers.fire();
+    await settle();
+    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(2);
+    expect(h.last()).toBe(shown);
+    expect(h.timers.delays()).toEqual([WATCH_MS]);
+
+    h.svc.down = true;
+    h.timers.fire();
+    expect(await until(h, 'offline')).toEqual({ kind: 'offline', review: { pr: shown.pr, latest: shown.latest, stale: false } });
+    expect(h.timers.delays()).toEqual([OFFLINE_RETRY_MS]);
+
+    h.svc.down = false;
+    h.timers.fire();
+    expect(await until(h, 'review')).toEqual(shown);
+    expect(h.timers.delays()).toEqual([WATCH_MS]);
+    expect(h.states.map((s) => s.kind)).toEqual(['loading', 'review', 'offline', 'review']);
+  });
+
+  it('checks on Ready too', async () => {
+    const h = harness();
+    await until(h, 'ready');
+    h.svc.down = true;
+    h.timers.fire();
+    expect(await until(h, 'offline')).toEqual({ kind: 'offline' });
+  });
+
+  it('checks once at a time, after a review that was started finishes too', async () => {
+    const h = harness();
+    await until(h, 'ready');
+    h.panel.dispatch({ type: 'start', depth: 'quick' });
+    await until(h, 'running');
+    const run = [...h.svc.runs.values()][0]!;
+    run.emit({ type: 'done', document: latestFor(prSummary()).document });
+    await until(h, 'review');
+    // The check set while Ready, and the one set when the review finished, make one check, not two.
+    h.timers.fire();
+    await settle();
+    expect(h.timers.delays()).toEqual([WATCH_MS]);
+    const hellos = h.svc.calls.filter((c) => c === 'GET /hello').length;
+    h.timers.fire();
+    await settle();
+    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(hellos + 1);
+  });
+
+  it('does not check while running, unpaired or with no pull request, and stops checking when the panel stops', async () => {
+    const running = harness({ prepare: (svc) => { const run = svc.startRun('acme/widgets', 1); run.emit(stage('intake', 'start')); } });
+    await until(running, 'running');
+    expect(running.timers.delays()).toEqual([]);
+    const unpaired = harness({ token: null });
+    await until(unpaired, 'unpaired');
+    expect(unpaired.timers.delays()).toEqual([]);
+    const none = harness({ url: 'https://example.com/' });
+    await until(none, 'no-pr');
+    expect(none.timers.delays()).toEqual([]);
+    const ready = harness();
+    await until(ready, 'ready');
+    ready.panel.stop();
+    expect(ready.timers.delays()).toEqual([]);
   });
 });
 

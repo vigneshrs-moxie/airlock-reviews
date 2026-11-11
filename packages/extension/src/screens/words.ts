@@ -1,4 +1,4 @@
-import type { Depth, DismissReason, Finding, PrSummary, Severity } from '@airlock/shared';
+import type { Depth, DismissReason, Dropped, Finding, PrSummary, Severity, Source } from '@airlock/shared';
 import { placeText } from '../place-text';
 
 export const CODE_QUOTE_LIMIT = 160;
@@ -31,13 +31,17 @@ export function locationText(finding: Finding): string {
   return placeText(finding.path, startLine);
 }
 
-/** The pack's title (its id when it has none here) and the lens or rule that raised the finding. */
-export function fromText(finding: Finding, packs: readonly Pick<PrSummary['packs'][number], 'id' | 'title'>[]): string {
-  const { pack, lens, ruleId } = finding.source;
+type PackTitles = readonly Pick<PrSummary['packs'][number], 'id' | 'title'>[];
+
+/** The pack's title (its id when it has none here) and the lens or rule. */
+export function sourceText({ pack, lens, ruleId }: Source, packs: PackTitles): string {
   const title = packs.find((p) => p.id === pack)?.title ?? pack;
   const how = lens ?? ruleId;
   return how === null ? title : `${title} · ${how}`;
 }
+
+/** The pack and the lens or rule that raised the finding. */
+export const fromText = (finding: Finding, packs: PackTitles): string => sourceText(finding.source, packs);
 
 const WHERE: Record<string, string> = {
   schema: 'when checking its format',
@@ -59,3 +63,6 @@ const WHERE: Record<string, string> = {
 
 /** Where something was dropped or failed, in words; a stage not listed is shown as written. */
 export const stageWhere = (stage: string): string => (Object.hasOwn(WHERE, stage) ? (WHERE[stage] as string) : stage);
+
+/** How a candidate was dropped, in words: a duplicate merged into another finding is dropped "as a duplicate". */
+export const droppedHow = (stage: Dropped['stage']): string => (stage === 'merge' ? 'as a duplicate' : stageWhere(stage));

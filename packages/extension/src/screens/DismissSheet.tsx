@@ -1,7 +1,7 @@
 import { checkLearnedText, LEARNED_TEXT_MAX, type DismissReason, type Finding, type LatestReply, type PrSummary } from '@airlock/shared';
 import { useEffect, useId, useRef, useState } from 'react';
 import type { UserAction } from '../state/reduce';
-import { listFindings } from '../state/selection';
+import { dismissalOf, listFindings } from '../state/selection';
 import { CopyButton } from './CopyButton';
 import { useAnnounce } from './Frame';
 import { Sheet } from './Sheet';
@@ -94,7 +94,7 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
   const undo = useRequest(view.notice, busy);
 
   const current = doc.id === draft.reviewId && doc.findings.some((f) => f.id === finding.id);
-  const dismissal = current ? latest.dismissals.find((d) => d.fingerprint === finding.fingerprint) : undefined;
+  const dismissal = current ? dismissalOf(finding, latest.dismissals) : undefined;
   // A dismissal is this sheet's own only when the sheet submitted and it then appeared.
   const saved = draft.submitted ? dismissal : undefined;
   const foreign = dismissal !== undefined && !draft.submitted;
@@ -153,7 +153,8 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
   const restore = (): void => {
     save.reset();
     undo.begin();
-    dispatch({ type: 'restore', fingerprint: finding.fingerprint });
+    // The fingerprint the dismissal was recorded under, which can be one of the finding's aliases.
+    dispatch({ type: 'restore', fingerprint: saved?.fingerprint ?? finding.fingerprint });
   };
 
   const header = (
@@ -253,7 +254,8 @@ export function focusAfterClose(finding: Finding, view: Pick<SheetView, 'latest'
       const own = card(finding.id);
       if (own !== null) return own;
     } else {
-      const all = listFindings(doc.findings, dismissals.filter((d) => d.fingerprint !== finding.fingerprint)).order;
+      const own = dismissalOf(finding, dismissals);
+      const all = listFindings(doc.findings, dismissals.filter((d) => d !== own)).order;
       const at = all.findIndex((f) => f.id === finding.id);
       for (const f of at === -1 ? [] : [all[at + 1], all[at - 1]]) { const found = card(f?.id); if (found !== null) return found; }
     }

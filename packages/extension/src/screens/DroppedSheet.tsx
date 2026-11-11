@@ -1,7 +1,7 @@
 import type { Dropped } from '@airlock/shared';
 import { useEffect, useId, useRef, useState, type RefObject } from 'react';
 import { Sheet } from './Sheet';
-import { clipQuote, placeText, proofSide, stageWhere } from './words';
+import { clipQuote, droppedHow, placeText, proofSide } from './words';
 
 function Proof({ refutation }: { refutation: NonNullable<Dropped['refutation']> }) {
   // A recorded decision is shown in full; a quote of code is cut.
@@ -23,8 +23,18 @@ function Proof({ refutation }: { refutation: NonNullable<Dropped['refutation']> 
   );
 }
 
-/** What the review raised and then dropped, with the reason and the proof. An overlay inside the panel. */
-export function DroppedSheet({ dropped, opener, onClose }: { dropped: readonly Dropped[]; opener: RefObject<HTMLElement | null>; onClose: () => void }) {
+/**
+ * What the review raised and then dropped, with the reason and the proof. An overlay inside the panel. A duplicate merged
+ * into a finding that is on screen (`shown`) has a button that shows that finding (`onShow`, which closes the sheet).
+ */
+export function DroppedSheet({ dropped, opener, onClose, shown = new Set(), onShow }: {
+  dropped: readonly Dropped[];
+  opener: RefObject<HTMLElement | null>;
+  onClose: () => void;
+  /** The ids of the findings on screen. */
+  shown?: ReadonlySet<string>;
+  onShow?: (findingId: string) => void;
+}) {
   const titleId = useId();
   const heading = useRef<HTMLHeadingElement>(null);
   return (
@@ -38,8 +48,11 @@ export function DroppedSheet({ dropped, opener, onClose }: { dropped: readonly D
         {dropped.map((d, i) => (
           <li key={i}>
             <div className="title">{d.candidate.title}</div>
-            <div className="muted">{`Dropped ${stageWhere(d.stage)}: ${d.reason}`}</div>
+            <div className="muted">{`Dropped ${droppedHow(d.stage)}: ${d.reason}`}</div>
             {d.refutation !== null && <Proof refutation={d.refutation} />}
+            {onShow !== undefined && typeof d.mergedInto === 'string' && shown.has(d.mergedInto) && (
+              <button type="button" className="btn small" onClick={() => onShow(d.mergedInto as string)}>Show the finding it was merged into</button>
+            )}
           </li>
         ))}
       </ul>

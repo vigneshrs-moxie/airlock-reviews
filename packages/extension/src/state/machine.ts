@@ -13,6 +13,8 @@ export const TAB_UNREADABLE = 'Airlock could not read the address of this tab. P
 export const RUN_STOPPED = 'The review that was running stopped when the Airlock service stopped. Start it again when you are ready.';
 export const SHOWING_PROBLEM = 'Airlock had a problem showing this review.';
 export const OFFLINE_RETRY_MS = 5_000;
+/** While Ready or a review is on screen, how often the panel checks that the service still answers. */
+export const WATCH_MS = OFFLINE_RETRY_MS;
 export const REATTACH_MS = 1_000;
 /** Re-attaches in a row that bring no new event, and re-attaches in all for one run, before giving up. */
 export const REATTACH_IN_A_ROW = 5;
@@ -78,6 +80,8 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
   let live = new AbortController();
   let busy: number | null = null;
   let offlineRetry: { handle: unknown } | null = null;
+  /** The latest check of the service: a check that is not the latest stops, so there is one at a time. */
+  let watching = 0;
   const sleeping = new Set<unknown>();
 
   const emit = (next: PanelState): void => {
@@ -116,6 +120,34 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
       }, OFFLINE_RETRY_MS),
     };
     offlineRetry = retry;
+  };
+
+  /**
+   * While Ready or a review is on screen nothing else asks the service anything, so this checks every few seconds that
+   * it still answers; no answer goes offline (keeping the review), and the offline retry brings it back. It skips a
+   * check while an action is in flight, and stops when the screen is neither, or a newer check or load replaces it.
+   */
+  const watch = (g: number): void => {
+    const mine = ++watching;
+    const settled = (): boolean => current(g) && mine === watching && (state.kind === 'ready' || state.kind === 'review');
+    void sleep(WATCH_MS).then(async () => {
+      if (!settled()) return;
+      if (busy !== g) {
+        let hello: Awaited<ReturnType<ServiceClient['hello']>> | null;
+        try {
+          hello = await client.hello(live.signal);
+        } catch {
+          // An answer that is not a hello is still an answer; the next action says what is wrong.
+          hello = null;
+        }
+        if (!settled()) return;
+        if (hello === 'offline') {
+          wentOffline(g);
+          return;
+        }
+      }
+      watch(g);
+    });
   };
 
   /** The one place a failed call becomes a state. */
@@ -174,6 +206,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
       // The run that was showing is gone: unless this stored review is its result, say that it stopped.
       const lost = cutOff !== null && !finishedSince(latest, cutOff.startedAt);
       apply(lost ? { type: 'loaded', pr, latest, notice: RUN_STOPPED } : { type: 'loaded', pr, latest });
+      watch(g);
     } catch (error) {
       fail(g, error, pr);
     }
@@ -258,6 +291,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     if (!current(g)) return;
     const same = latest !== null && latest.document.id === document.id;
     apply({ type: 'finished', latest: same && latest !== null ? latest : { document, dismissals: [] } });
+    watch(g);
   };
 
   /** A fresh load for the tab's current address; whatever was live before is aborted and dropped. */

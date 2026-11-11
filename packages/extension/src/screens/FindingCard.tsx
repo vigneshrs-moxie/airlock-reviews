@@ -11,6 +11,7 @@ export function FindingCard({ finding, rank, packs, selected, onToggle, onOpen, 
   onOpen: () => void;
   register: (id: string, node: HTMLButtonElement | null) => void;
 }) {
+  const raisedBy = finding.alsoRaisedBy?.length ?? 0;
   return (
     <li className="card finding-card" data-severity={finding.severity}>
       <input
@@ -25,6 +26,7 @@ export function FindingCard({ finding, rank, packs, selected, onToggle, onOpen, 
         <span className="title block">{finding.title}</span>
         <code className="path block">{locationText(finding)}</code>
         <span className="muted block">{`From: ${fromText(finding, packs)}`}</span>
+        {raisedBy > 0 && <span className="muted block">{`Also raised by ${raisedBy} more`}</span>}
       </button>
     </li>
   );

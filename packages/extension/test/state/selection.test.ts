@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { listFindings, neighbours, selectedInOrder, toggled } from '../../src/state/selection';
+import { dismissalOf, listFindings, neighbours, selectedInOrder, toggled } from '../../src/state/selection';
 import { also, dismissal, finding } from '../screens/review-fixtures';
 
 describe('listFindings', () => {
@@ -30,6 +30,30 @@ describe('listFindings', () => {
   it('sorts findings with no rank after the ranked ones', () => {
     const lists = listFindings([finding(1, { rank: null }), finding(2, { rank: 1 })], []);
     expect(lists.top.map((f) => f.title)).toEqual(['Problem 2', 'Problem 1']);
+  });
+});
+
+describe('dismissalOf', () => {
+  const merged = finding(1, { aliases: ['00000000000000aa', '00000000000000bb'] });
+
+  it('matches a dismissal by the finding\'s fingerprint or any of its aliases', () => {
+    const own = dismissal(merged);
+    const alias = dismissal(merged, { fingerprint: '00000000000000bb' });
+    expect(dismissalOf(merged, [own])).toBe(own);
+    expect(dismissalOf(merged, [alias])).toBe(alias);
+    expect(dismissalOf(finding(1), [alias])).toBeUndefined();
+    expect(dismissalOf(merged, [dismissal(finding(2))])).toBeUndefined();
+  });
+  it('prefers the dismissal under the finding\'s own fingerprint when there are both', () => {
+    const own = dismissal(merged, { reason: 'intended' });
+    const alias = dismissal(merged, { fingerprint: '00000000000000aa' });
+    expect(dismissalOf(merged, [alias, own])).toBe(own);
+  });
+  it('is used by listFindings, so a finding dismissed under an alias is dismissed', () => {
+    const alias = dismissal(merged, { fingerprint: '00000000000000aa' });
+    const lists = listFindings([merged, finding(2)], [alias]);
+    expect(lists.order.map((f) => f.id)).toEqual([finding(2).id]);
+    expect(lists.dismissed).toEqual([{ finding: merged, dismissal: alias }]);
   });
 });
 

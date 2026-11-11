@@ -31,7 +31,7 @@ export interface VerdictProps {
   timers?: Timers;
 }
 
-type Fold = 'also' | 'dismissed' | 'timing';
+type Fold = 'limits' | 'also' | 'dismissed' | 'timing';
 
 const noDismiss = (): void => undefined;
 
@@ -109,6 +109,8 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
 
   const fold = (key: Fold): void => setFolds((was) => toggled(was, key));
   const closeSheet = useCallback((): void => setSheet(false), []);
+  const shownIds = useMemo(() => new Set(lists.order.map((f) => f.id)), [lists.order]);
+  const showMerged = useCallback((id: string): void => { setSheet(false); setOpenId(id); }, []);
   const restore = (d: Dismissal): void => dispatch({ type: 'restore', fingerprint: d.fingerprint });
   const promptFor = (findings: Finding[]) => (): string => fixPrompt(doc, findings);
 
@@ -157,6 +159,11 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
       </section>
       {banners}
       <StageErrors errors={doc.stageErrors} map={doc.map} />
+      {doc.limits !== undefined && doc.limits.length > 0 && (
+        <Collapsible title="Not shown to the reviewer" open={folds.has('limits')} onToggle={() => fold('limits')}>
+          <ul className="plain">{doc.limits.map((line, i) => <li key={i}>{line}</li>)}</ul>
+        </Collapsible>
+      )}
       {lists.top.length > 0 && (
         <section>
           <h2 className="label" tabIndex={-1} data-focus="findings" ref={findingsHeading}>Findings</h2>
@@ -222,7 +229,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
         </Collapsible>
       )}
       {!stale && <ReviewAgain doc={doc} disabled={disabled} dispatch={dispatch} />}
-      {sheet && <DroppedSheet dropped={doc.dropped} opener={droppedButton} onClose={closeSheet} />}
+      {sheet && <DroppedSheet dropped={doc.dropped} opener={droppedButton} onClose={closeSheet} shown={shownIds} onShow={showMerged} />}
     </>
   );
 }

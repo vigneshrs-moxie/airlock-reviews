@@ -13,14 +13,24 @@ export interface FindingLists {
   order: Finding[];
 }
 
+/**
+ * The dismissal that applies to a finding: one recorded under its fingerprint, else one under any of its aliases (the
+ * fingerprints of duplicates merged into it). The one place this is decided.
+ */
+export function dismissalOf(finding: Pick<Finding, 'fingerprint' | 'aliases'>, dismissals: readonly Dismissal[]): Dismissal | undefined {
+  const own = dismissals.find((d) => d.fingerprint === finding.fingerprint);
+  if (own !== undefined || finding.aliases === undefined || finding.aliases.length === 0) return own;
+  const aliases = new Set(finding.aliases);
+  return dismissals.find((d) => aliases.has(d.fingerprint));
+}
+
 /** Splits a document's findings into what is shown and what is dismissed. A dismissal for a finding not in the document is ignored. */
 export function listFindings(findings: readonly Finding[], dismissals: readonly Dismissal[]): FindingLists {
-  const byFingerprint = new Map(dismissals.map((d) => [d.fingerprint, d]));
   const top: Finding[] = [];
   const also: Finding[] = [];
   const dismissed: DismissedFinding[] = [];
   for (const finding of findings) {
-    const dismissal = byFingerprint.get(finding.fingerprint);
+    const dismissal = dismissalOf(finding, dismissals);
     if (dismissal !== undefined) dismissed.push({ finding, dismissal });
     else if (finding.bucket === 'top') top.push(finding);
     else also.push(finding);
