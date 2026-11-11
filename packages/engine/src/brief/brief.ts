@@ -1,8 +1,9 @@
 import { ClaimSchema } from '@airlock/shared';
-import type { Brief, ChangeMap, FileDiff, ModelConfig, PrInfo } from '@airlock/shared';
+import type { Brief, ChangeMap, FileDiff, ModelConfig, PrInfo, StageErrorKind } from '@airlock/shared';
 import { z } from 'zod';
 import { asMaterial, fill, loadTemplate } from '../agent/prompt.js';
 import type { AgentRequest, AgentRunner, AgentUsage } from '../agent/runner.js';
+import { descriptionCutSentence } from '../lenses/context.js';
 
 export interface BriefInput {
   pr: PrInfo;
@@ -18,6 +19,10 @@ export interface BriefResult {
   brief: Brief;
   usage: AgentUsage[];
   error: string | null;
+  /** Why the request failed, when it did. */
+  errorKind?: StageErrorKind;
+  /** Plain sentences saying what the brief was not shown because of a size limit. */
+  limits: string[];
 }
 
 const BriefAnswerSchema = z.object({ whatItDoes: z.array(z.string()), claims: z.array(ClaimSchema) });
@@ -79,9 +84,12 @@ export async function buildBrief(runner: AgentRunner, input: BriefInput): Promis
     effort: input.effort,
   };
 
+  const limits = [descriptionCutSentence('brief', input.pr.body, MAX_DESCRIPTION_CHARS)].flatMap((l) => l ?? []);
   const result = await runner.run(request);
-  if (!result.ok) return { brief: { whatItDoes: [], claims: [] }, usage: [result.usage], error: result.error };
+  if (!result.ok) {
+    return { brief: { whatItDoes: [], claims: [] }, usage: [result.usage], error: result.error, errorKind: result.kind, limits };
+  }
 
   const whatItDoes = result.output.whatItDoes.map((l) => l.trim()).filter((l) => l !== '').slice(0, MAX_LINES);
-  return { brief: { whatItDoes, claims: result.output.claims.slice(0, MAX_CLAIMS) }, usage: [result.usage], error: null };
+  return { brief: { whatItDoes, claims: result.output.claims.slice(0, MAX_CLAIMS) }, usage: [result.usage], error: null, limits };
 }

@@ -1,7 +1,8 @@
 import { constants } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import { delimiter, isAbsolute, join } from 'node:path';
-import type { ModelUsage, Options, SDKResultMessage, query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import type { StageErrorKind } from '@airlock/shared';
+import type { ModelUsage, Options, SDKRateLimitInfo, SDKResultMessage, query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { loadTemplate } from './prompt.js';
 import type { AgentRequest, AgentResult, AgentRunner, AgentUsage } from './runner.js';
@@ -13,7 +14,35 @@ export interface SdkRunnerDeps {
 }
 
 const READ_TOOLS = ['Read', 'Grep', 'Glob'];
-const DEFAULT_MAX_TURNS = 40;
+const MINUTE = 60_000;
+
+/**
+ * How long a run of each role may take and how many turns it may use, by the role's name or the part before `:`. A
+ * selection or a judgement needs no reading, a challenge reads around one finding, the brief and the mapper read widely.
+ */
+const ROLE_LIMITS: Record<string, { timeoutMs: number; maxTurns: number }> = {
+  lens: { timeoutMs: 10 * MINUTE, maxTurns: 40 },
+  sweep: { timeoutMs: 10 * MINUTE, maxTurns: 40 },
+  challenge: { timeoutMs: 10 * MINUTE, maxTurns: 20 },
+  mapper: { timeoutMs: 15 * MINUTE, maxTurns: 25 },
+  seams: { timeoutMs: 15 * MINUTE, maxTurns: 40 },
+  brief: { timeoutMs: 5 * MINUTE, maxTurns: 25 },
+  select: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
+  judge: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
+};
+const OTHER_LIMITS = { timeoutMs: 10 * MINUTE, maxTurns: 40 };
+
+/** The time and turn limits for a role such as `lens:core/boundary` or `select`. */
+export function roleLimits(role: string): { timeoutMs: number; maxTurns: number } {
+  return ROLE_LIMITS[role.split(':')[0]!] ?? OTHER_LIMITS;
+}
+
+const USAGE_LIMIT = "Claude's usage limit was reached";
+const API_KEY_FOUND = 'Airlock runs on your Claude login, but an API key was found in the environment. Unset it and try again.';
+/** The init message's apiKeySource values that mean no API key is used: the login (and a legacy name for it). */
+const NO_API_KEY = new Set(['none', 'oauth']);
+/** What the CLI says in a result when the plan's limit stops a run. */
+const USAGE_LIMIT_TEXT = /usage limit|hit your (?:[a-z]+ )?limit/i;
 const PLAIN_JSON = 'Reply with one JSON object and nothing else.';
 const MAX_ERROR_DETAIL = 300;
 
@@ -43,7 +72,7 @@ function reviewOptions(
     cwd: req.cwd,
     model: req.model,
     effort: req.effort,
-    maxTurns: req.maxTurns ?? DEFAULT_MAX_TURNS,
+    maxTurns: req.maxTurns ?? roleLimits(req.role).maxTurns,
     tools: [...READ_TOOLS],
     permissionMode: 'dontAsk',
     settingSources: [],
@@ -60,13 +89,18 @@ function reviewOptions(
 }
 
 /**
- * AIRLOCK_CLAUDE_PATH when set, else the first executable `claude` on PATH, else null (the SDK's bundled CLI).
+ * AIRLOCK_CLAUDE_PATH when set (it must name a file; otherwise this throws), else the first executable `claude` on PATH,
+ * else null (the SDK's bundled CLI).
  * Relative paths are ignored: the CLI starts in the repository under review, so a relative path could pick
  * up an executable from the pull request.
  */
 export async function findClaude(env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   const configured = env.AIRLOCK_CLAUDE_PATH;
-  if (configured !== undefined && isAbsolute(configured)) return configured;
+  if (configured !== undefined && isAbsolute(configured)) {
+    const found = await stat(configured).then((s) => s.isFile(), () => false);
+    if (!found) throw new Error(`AIRLOCK_CLAUDE_PATH is ${configured}, which does not exist.`);
+    return configured;
+  }
   for (const dir of (env.PATH ?? '').split(delimiter)) {
     if (!isAbsolute(dir)) continue;
     const candidate = join(dir, 'claude');
@@ -96,9 +130,11 @@ export function createSdkRunner(deps: SdkRunnerDeps = {}): AgentRunner {
       const onAbort = (): void => controller.abort();
       if (req.signal?.aborted) controller.abort();
       else req.signal?.addEventListener('abort', onAbort, { once: true });
+      const timeoutMs = req.timeoutMs ?? roleLimits(req.role).timeoutMs;
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
 
-      let result: SDKResultMessage | undefined;
-      let thrown: unknown;
+      const run: RunState = { result: undefined, thrown: undefined, rateLimit: undefined, apiKey: false };
       let schemaSent = false;
       try {
         const [shared, path, query] = await Promise.all([loadTemplate('_shared'), resolveClaude(), loadQuery()]);
@@ -111,23 +147,51 @@ export function createSdkRunner(deps: SdkRunnerDeps = {}): AgentRunner {
         const prompt = req.material.trim() === '' ? 'Begin.' : req.material;
         // The loop throws after yielding an error result, so the result is kept outside it.
         for await (const msg of query({ prompt, options })) {
-          if (msg.type === 'result') result = msg;
+          if (msg.type === 'result') run.result = msg;
+          else if (msg.type === 'rate_limit_event') run.rateLimit = msg.rate_limit_info;
+          else if (msg.type === 'system' && msg.subtype === 'init' && usesApiKey(msg.apiKeySource)) {
+            // Stop before the first model call is paid for with a key.
+            run.apiKey = true;
+            controller.abort();
+            break;
+          }
         }
       } catch (err) {
-        thrown = err;
+        run.thrown = err;
       } finally {
+        clearTimeout(timer);
         req.signal?.removeEventListener('abort', onAbort);
       }
 
-      const usage = usageOf(result, performance.now() - started);
+      const usage = usageOf(run.result, performance.now() - started);
       try {
-        return settle(req.schema, result, thrown, schemaSent, usage);
+        return settle(req.schema, run, { timedOut, timeoutMs }, schemaSent, usage);
       } catch (err) {
         // A zod refine or transform can throw out of safeParse, and a message can break the SDK's types.
-        return { ok: false, error: messageOf(err), usage };
+        return { ok: false, error: messageOf(err), kind: 'invalid-output', usage };
       }
     },
   };
+}
+
+/** What a run left behind: its last result message, what the loop threw, and the last rate-limit report. */
+interface RunState {
+  result: SDKResultMessage | undefined;
+  thrown: unknown;
+  rateLimit: SDKRateLimitInfo | undefined;
+  /** The init message said an API key is being used. */
+  apiKey: boolean;
+}
+
+/** True when the init message names an API key as the credential; a missing value is not taken as one. */
+const usesApiKey = (source: unknown): boolean => typeof source === 'string' && !NO_API_KEY.has(source);
+
+/** `Claude's usage limit was reached`, with `; it resets at <local time>` when the report gives a reset time. */
+function usageLimitMessage(info: SDKRateLimitInfo | undefined): string {
+  const at = info?.resetsAt;
+  if (typeof at !== 'number' || !Number.isFinite(at)) return USAGE_LIMIT;
+  const ms = at < 1e12 ? at * 1000 : at; // seconds since 1970, or milliseconds
+  return `${USAGE_LIMIT}; it resets at ${new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
 }
 
 function toJsonSchema(schema: z.ZodType): object | null {
@@ -139,29 +203,47 @@ function toJsonSchema(schema: z.ZodType): object | null {
 }
 
 /**
- * Turns the last result message into an AgentResult. With a JSON schema sent, only structured_output counts:
- * the CLI has already rejected any object that did not match. A success result followed by a throw (an abort
- * landing as the run finishes) still counts as a success.
+ * Turns what the run left into an AgentResult. With a JSON schema sent, only structured_output counts: the CLI has
+ * already rejected any object that did not match. A success result that arrived before an abort or a timeout still
+ * counts. A failure says its kind: a rejected rate-limit report or a result that says so is the usage limit; a run with
+ * no result after its timer fired is a timeout; the turn limit, an unusable answer, and anything else.
  */
 function settle<T>(
   schema: z.ZodType<T>,
-  result: SDKResultMessage | undefined,
-  thrown: unknown,
+  run: RunState,
+  clock: { timedOut: boolean; timeoutMs: number },
   schemaSent: boolean,
   usage: AgentUsage,
 ): AgentResult<T> {
-  const fail = (error: string): AgentResult<T> => ({ ok: false, error, usage });
-  if (result === undefined) return fail(thrown === undefined ? 'no result' : messageOf(thrown));
+  const fail = (error: string, kind: StageErrorKind): AgentResult<T> => ({ ok: false, error, kind, usage });
+  const { result, thrown, rateLimit } = run;
+  if (run.apiKey) return fail(API_KEY_FOUND, 'other');
+  // A message can break the SDK's types, so its text is read loosely.
+  const loose = result as { result?: unknown; errors?: unknown } | undefined;
+  const said = [
+    typeof loose?.result === 'string' ? loose.result : '',
+    ...(Array.isArray(loose?.errors) ? loose.errors.filter((e): e is string => typeof e === 'string') : []),
+  ].join(' ');
+  const succeeded = result?.subtype === 'success' && !result.is_error;
+  if (!succeeded && (rateLimit?.status === 'rejected' || USAGE_LIMIT_TEXT.test(said))) {
+    return fail(usageLimitMessage(rateLimit?.status === 'rejected' ? rateLimit : undefined), 'usage-limit');
+  }
+  if (result === undefined) {
+    if (clock.timedOut) return fail(`timed out after ${clock.timeoutMs / 1000} s`, 'timeout');
+    return fail(thrown === undefined ? 'no result' : messageOf(thrown), 'other');
+  }
   if (result.subtype !== 'success') {
     const detail = Array.isArray(result.errors) ? result.errors.join('; ') : '';
-    return fail(detail === '' ? String(result.subtype) : `${result.subtype}: ${clip(detail)}`);
+    const kind: StageErrorKind = result.subtype === 'error_max_turns' ? 'turn-limit'
+      : result.subtype === 'error_max_structured_output_retries' ? 'invalid-output' : 'other';
+    return fail(detail === '' ? String(result.subtype) : `${result.subtype}: ${clip(detail)}`, kind);
   }
   const text = typeof result.result === 'string' ? result.result : '';
-  if (result.is_error) return fail(`error result: ${clip(text)}`);
+  if (result.is_error) return fail(`error result: ${clip(text)}`, 'other');
   const output = result.structured_output !== undefined || schemaSent ? result.structured_output : lastJsonObject(text);
-  if (output === undefined) return fail('no output');
+  if (output === undefined) return fail('no output', 'invalid-output');
   const parsed = schema.safeParse(output);
-  return parsed.success ? { ok: true, output: parsed.data, usage } : fail(parsed.error.message);
+  return parsed.success ? { ok: true, output: parsed.data, usage } : fail(parsed.error.message, 'invalid-output');
 }
 
 /** modelUsage counts every model call; input includes cache reads and writes. Missing or odd fields count as 0. */

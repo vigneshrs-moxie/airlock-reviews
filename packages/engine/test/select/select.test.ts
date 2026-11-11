@@ -1,6 +1,6 @@
 import type { Anchor, Finding, PrInfo, Question, Severity, StageError } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
-import { createFakeRunner } from '../../src/agent/fake-runner.js';
+import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
 import type { KeptCandidate } from '../../src/challenge/challenge.js';
 import { MAX_TOP, decideVerdict, mergeDuplicates, select } from '../../src/select/select.js';
@@ -373,7 +373,7 @@ describe('select', () => {
     expect(asked.questions).toEqual([questions[0], questions[1]]);
 
     const failed = await select(createFakeRunner(() => new Error('down')), ctx(), [item('a', 'fix')], questions, []);
-    expect(failed.errors).toEqual([{ stage: 'select', cohortId: null, message: 'down' }]);
+    expect(failed.errors).toEqual([{ stage: 'select', cohortId: null, message: 'down', kind: 'invalid-output' }]);
     expect(failed.questions).toEqual([questions[0], questions[1]]);
   });
 
@@ -436,11 +436,11 @@ describe('select', () => {
 
   it('ranks by severity when the agent fails, and records the error', async () => {
     const kept = [item('n', 'note'), item('a', 'ask'), item('f', 'fix'), item('b', 'block'), item('f2', 'fix'), item('n2', 'note')];
-    const runner = createFakeRunner(() => new Error('model unavailable'));
+    const runner = createFakeRunner(() => failure('model unavailable', 'other'));
     const r = await select(runner, ctx({ pr: own }), kept, [], []);
     expect(topIds(r.findings)).toEqual(['b', 'f', 'f2', 'a', 'n']);
     expect(alsoIds(r.findings)).toEqual(['n2']);
-    expect(r.errors).toEqual([{ stage: 'select', cohortId: null, message: 'model unavailable' }]);
+    expect(r.errors).toEqual([{ stage: 'select', cohortId: null, message: 'model unavailable', kind: 'other' }]);
     expect(r.whoseCall).toEqual([]);
     expect(r.checksAfterMerge).toEqual([]);
     expect(r.verdict.label).toBe('incomplete');
@@ -479,6 +479,13 @@ describe('select', () => {
     const runner = createFakeRunner(() => answer());
     const r = await select(runner, ctx({ pr: { ...own, headSha: 'abcdef0123', stage: 'pr1' } }), [], [], []);
     expect(r.selfReviewText).toBe('Reviewed with Airlock at abcdef0 (standard, Pack core). No findings. No checks ran at PR #1.');
+  });
+
+  it('never says no findings for a review that did not finish', async () => {
+    const runner = createFakeRunner(() => answer());
+    const r = await select(runner, ctx({ pr: { ...own, headSha: 'abcdef0123', stage: 'pr2' } }), [], [], [stageError('facts')]);
+    expect(r.verdict.label).toBe('incomplete');
+    expect(r.selfReviewText).toBe('Reviewed with Airlock at abcdef0 (standard, Pack core). Airlock could not finish reviewing this pull request.');
   });
 });
 

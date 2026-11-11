@@ -10,6 +10,8 @@ It holds three kinds of case:
 
 Source: `research_notes/AI code review extension research/past_review_comment_mining.md`, checked against GitHub. Load it with `loadCases()`, which validates every record, and select cases with `pickCases()`.
 
+`descriptions.json` holds, for each case id, the pull request's title and description as they stood at the case's `reviewedAt`; the replay gives the review this text instead of today's, so nothing written after the human review reaches it, and `loadCases()` refuses a case that has no entry. Refresh it with `node packages/replay/scripts/capture-descriptions.mjs` (it only reads from GitHub) whenever a case is added or its `reviewedAt` changes.
+
 ## Case fields
 
 | Field | Meaning |

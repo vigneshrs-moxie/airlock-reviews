@@ -187,4 +187,11 @@ describe('runChecks', () => {
     const check: CheckDef = { id: 'bad', kind: 'added-line-matches', paths: ['**'], pattern: '(', message: 'm' };
     await expect(runChecks([], [pack('mypack', [check])], noHead)).rejects.toThrow(/mypack.*bad/);
   });
+
+  it('never lints a symbolic link as code', async () => {
+    const check: CheckDef = { id: 'todo', kind: 'added-line-matches', paths: ['src/**'], pattern: 'TODO', message: 'a TODO' };
+    const files = [file('src/link.ts', { mode: '120000' }, [[1, 'TODO.md']]), file('src/a.ts', {}, [[2, '// TODO']])];
+    const facts = await runChecks(files, [pack('p', [check])], noHead);
+    expect(facts.map((f) => f.path)).toEqual(['src/a.ts']);
+  });
 });

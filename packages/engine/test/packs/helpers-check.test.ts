@@ -51,6 +51,10 @@ describe('missingHelpers', () => {
     const exec: Exec = async () => ({ stdout: '', stderr: 'fatal: not a git repository', code: 128 });
     await expect(missingHelpers(exec, '/x', ['abcD'])).rejects.toThrow(/not a git repository/);
   });
+  it('treats a timed-out grep as a failure, never as a missing helper', async () => {
+    const exec: Exec = async () => ({ stdout: '', stderr: 'timed out after 60 s', code: 124 });
+    await expect(missingHelpers(exec, '/x', ['abcD'])).rejects.toThrow(/timed out after 60 s/);
+  });
   it('runs at most 8 at a time', async () => {
     let active = 0; let peak = 0;
     const exec: Exec = async () => {

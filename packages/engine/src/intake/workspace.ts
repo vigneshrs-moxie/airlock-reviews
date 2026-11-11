@@ -1,10 +1,17 @@
-import { mkdir, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ReviewRange } from '@airlock/shared';
-import { must, type Exec } from '../util/exec.js';
+import { must, SLOW_EXEC_TIMEOUT_MS, TIMED_OUT, type Exec } from '../util/exec.js';
 import { airlockHome, repoSlug } from '../util/paths.js';
 
-export interface Workspace { headDir: string; baseDir: string; range: ReviewRange; dispose(): Promise<void> }
+export interface Workspace {
+  headDir: string;
+  baseDir: string;
+  /** The bare mirror's git folder: the diff is computed here, where no file of the pull request can change how git reads it. */
+  gitDir: string;
+  range: ReviewRange;
+  dispose(): Promise<void>;
+}
 
 export interface WorkspaceRequest {
   repo: string;
@@ -24,21 +31,45 @@ function serialised<T>(key: string, job: () => Promise<T>): Promise<T> {
 
 const exists = (p: string) => stat(p).then(() => true, () => false);
 
+/** A review folder older than this was left by a review that crashed or was killed. */
+const STALE_WORK_MS = 24 * 60 * 60 * 1000;
+
+/** Removes folders under `work` not changed for STALE_WORK_MS; the caller then prunes the mirror's worktree list. */
+async function removeStaleWork(work: string): Promise<void> {
+  const names = await readdir(work).catch(() => [] as string[]);
+  const cutoff = Date.now() - STALE_WORK_MS;
+  await Promise.all(names.map(async (name) => {
+    const dir = join(work, name);
+    const info = await stat(dir).catch(() => null);
+    if (info?.isDirectory() && info.mtimeMs < cutoff) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }));
+}
+
 async function ensureMirror(exec: Exec, mirror: string, remoteUrl: string): Promise<void> {
   if (await exists(mirror)) {
-    must(await exec('git', ['--git-dir', mirror, 'fetch', '--prune', 'origin', '+refs/heads/*:refs/heads/*']), 'git fetch');
+    const fetchArgs = ['--git-dir', mirror, 'fetch', '--prune', 'origin', '+refs/heads/*:refs/heads/*'];
+    must(await exec('git', fetchArgs, { timeoutMs: SLOW_EXEC_TIMEOUT_MS }), 'git fetch');
     return;
   }
   await mkdir(join(mirror, '..'), { recursive: true });
-  must(await exec('git', ['clone', '--bare', remoteUrl, mirror]), 'git clone --bare');
+  must(await exec('git', ['clone', '--bare', remoteUrl, mirror], { timeoutMs: SLOW_EXEC_TIMEOUT_MS }), 'git clone --bare');
 }
 
 async function requireCommit(exec: Exec, mirror: string, sha: string): Promise<void> {
   const r = await exec('git', ['--git-dir', mirror, 'rev-parse', '--verify', '--quiet', `${sha}^{commit}`]);
+  // A lookup that timed out says nothing about the commit.
+  if (r.code === TIMED_OUT) throw new Error(`git rev-parse ${sha}: ${r.stderr}`);
   if (r.code !== 0) throw new Error(`Commit ${sha} was not found in the mirror of this repository`);
 }
 
-export function prepareWorkspace(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
+/** A branch name git cannot read as an option or as anything but a branch: letters, digits, `.`, `_`, `/`, `-`. */
+const BRANCH_NAME = /^[A-Za-z0-9._/-]+$/;
+
+export async function prepareWorkspace(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
+  const baseRef = req.pr?.baseRef;
+  if (baseRef !== undefined && (!BRANCH_NAME.test(baseRef) || baseRef.startsWith('-'))) {
+    throw new Error(`The base branch ${JSON.stringify(baseRef)} is not a branch name Airlock can use.`);
+  }
   return serialised(join(airlockHome(), 'repos', `${repoSlug(req.repo)}.git`), () => prepare(exec, req));
 }
 
@@ -53,9 +84,11 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   } else if (req.pr) {
     const { number, baseRef, headSha } = req.pr;
     // The head lands in FETCH_HEAD; a remote without pull refs is fine when the commit is already here.
-    await exec('git', ['--git-dir', mirror, 'fetch', 'origin', `pull/${number}/head`]);
+    const fetched = await exec('git', ['--git-dir', mirror, 'fetch', 'origin', `pull/${number}/head`], { timeoutMs: SLOW_EXEC_TIMEOUT_MS });
+    if (fetched.code === TIMED_OUT) throw new Error(`git fetch pull/${number}/head: ${fetched.stderr}`);
     await requireCommit(exec, mirror, headSha);
-    const baseSha = must(await exec('git', ['--git-dir', mirror, 'merge-base', baseRef, headSha]), `git merge-base ${baseRef} ${headSha}`).trim();
+    // The full ref, so a tag of the same name cannot stand in for the branch.
+    const baseSha = must(await exec('git', ['--git-dir', mirror, 'merge-base', `refs/heads/${baseRef}`, headSha]), `git merge-base ${baseRef} ${headSha}`).trim();
     range = { baseSha, headSha, kind: 'full' };
   } else {
     throw new Error('prepareWorkspace needs either pr or explicit');
@@ -66,7 +99,9 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   const reviewDir = join(home, 'work', req.reviewId);
   const headDir = join(reviewDir, 'head');
   const baseDir = join(reviewDir, 'base');
-  // A leftover folder from an earlier run would block the name; clear it and any stale registration.
+  // Folders left by a review that crashed or was killed more than a day ago go; so does a leftover folder with this
+  // review's name. The prune below then clears their registrations in this mirror.
+  await removeStaleWork(join(home, 'work'));
   await rm(reviewDir, { recursive: true, force: true });
   await exec('git', ['--git-dir', mirror, 'worktree', 'prune']);
   await mkdir(reviewDir, { recursive: true });
@@ -77,10 +112,11 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   must(await addWorktree(baseDir, range.baseSha), 'git worktree add (base)');
 
   return {
-    headDir, baseDir, range,
+    headDir, baseDir, gitDir: mirror, range,
     async dispose() {
       await rm(reviewDir, { recursive: true, force: true });
-      await exec('git', ['--git-dir', mirror, 'worktree', 'prune']);
+      // Cleanup runs even after the review was stopped, so it never carries the review's signal.
+      await exec('git', ['--git-dir', mirror, 'worktree', 'prune'], { signal: undefined });
     },
   };
 }

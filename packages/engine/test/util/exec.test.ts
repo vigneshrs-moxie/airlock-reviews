@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { must, realExec } from '../../src/util/exec.js';
+import { DEFAULT_EXEC_TIMEOUT_MS, must, realExec } from '../../src/util/exec.js';
 import { airlockHome, repoSlug } from '../../src/util/paths.js';
 
 describe('must', () => {
@@ -29,6 +29,23 @@ describe('realExec', () => {
   it('rejects when the command cannot start', async () => {
     await expect(realExec('definitely-not-a-command-xyz', [])).rejects.toThrow();
   });
+  it('kills a command at its timeout and reports exit 124, never an answer like exit 1', async () => {
+    const started = Date.now();
+    const r = await realExec('sleep', ['5'], { timeoutMs: 200 });
+    expect(r).toEqual({ stdout: '', stderr: 'timed out after 0.2 s', code: 124 });
+    expect(Date.now() - started).toBeLessThan(4000);
+  });
+  it('has a default timeout of 60 s and gives the child GIT_TERMINAL_PROMPT=0', async () => {
+    expect(DEFAULT_EXEC_TIMEOUT_MS).toBe(60_000);
+    const r = await realExec('node', ['-e', 'process.stdout.write(String(process.env.GIT_TERMINAL_PROMPT))']);
+    expect(r.stdout).toBe('0');
+  });
+  it('rejects with The command was stopped. when its signal aborts', async () => {
+    const ac = new AbortController();
+    const running = realExec('sleep', ['5'], { signal: ac.signal });
+    setTimeout(() => ac.abort(), 50);
+    await expect(running).rejects.toThrow('The command was stopped.');
+  });
 });
 
 describe('paths', () => {
@@ -41,6 +58,10 @@ describe('paths', () => {
     process.env.AIRLOCK_HOME = '/tmp/al';
     expect(airlockHome()).toBe('/tmp/al');
     delete process.env.AIRLOCK_HOME;
+    expect(airlockHome()).toMatch(/\.airlock$/);
+  });
+  it('treats an empty AIRLOCK_HOME as unset', () => {
+    process.env.AIRLOCK_HOME = '';
     expect(airlockHome()).toMatch(/\.airlock$/);
   });
   it('slugs a repo', () => expect(repoSlug('acme/app')).toBe('acme__app'));

@@ -34,7 +34,7 @@ describe('classifyFiles', () => {
       [p],
     );
     expect(out.map((f) => f.reason)).toEqual([
-      'built-in: **/package-lock.json', 'web: vendor/**', 'web: prisma/migrations/**', 'web: docs/**',
+      'lock file (built-in: **/package-lock.json)', 'web: vendor/**', 'web: prisma/migrations/**', 'web: docs/**',
       'built-in: **/*.spec.*', 'binary file', 'default',
     ]);
   });
@@ -55,5 +55,13 @@ describe('classifyFiles', () => {
   it('the first pack that matches supplies the reason', () => {
     const out = classifyFiles([file('a/b.ts')], [pack('one', { read: ['a/**'] }), pack('two', { read: ['**/*.ts'] })]);
     expect(out[0]).toEqual({ path: 'a/b.ts', tier: 'read', reason: 'one: a/**' });
+  });
+
+  it('a symbolic link is trusted, never read or swept as code', () => {
+    const out = classifyFiles([file('src/link.ts', { mode: '120000' }), file('dist/link.js', { mode: '120000' })], [pack('p')]);
+    expect(out).toEqual([
+      { path: 'src/link.ts', tier: 'trust', reason: 'symbolic link' },
+      { path: 'dist/link.js', tier: 'ignored', reason: 'build output (built-in: **/dist/**)' },
+    ]);
   });
 });

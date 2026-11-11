@@ -1,9 +1,9 @@
-import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { prepareWorkspace, type WorkspaceRequest } from '../../src/intake/workspace.js';
-import { realExec } from '../../src/util/exec.js';
+import { realExec, type Exec } from '../../src/util/exec.js';
 import { makeTempRepo, type TempRepo } from '../helpers/temp-repo.js';
 
 let home: string;
@@ -152,5 +152,80 @@ describe('prepareWorkspace', () => {
         repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: 'deadbeef', headSha: 'deadbeef' }, reviewId: 'r6',
       }),
     ).rejects.toThrow(/deadbeef/);
+  });
+
+  it('treats a timed-out commit lookup as a failure, not as a commit that is missing', async () => {
+    const r = await remote();
+    await r.write('a.txt', '1');
+    const sha = await r.commit('one');
+    const exec: Exec = async (cmd, args, opts) =>
+      (args.includes('rev-parse') ? { stdout: '', stderr: 'timed out after 60 s', code: 124 } : realExec(cmd, args, opts));
+    const req: WorkspaceRequest = { repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: sha, headSha: sha }, reviewId: 't1' };
+    const err = await prepareWorkspace(exec, req).then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toMatch(/timed out after 60 s/);
+    expect(err?.message).not.toMatch(/was not found/);
+  });
+
+  it('gives clone and fetch ten minutes and other git commands the default', async () => {
+    const r = await remote();
+    await r.write('a.txt', '1');
+    const sha = await r.commit('one');
+    const seen: { args: string[]; timeoutMs: number | undefined }[] = [];
+    const exec: Exec = async (cmd, args, opts) => {
+      seen.push({ args, timeoutMs: opts?.timeoutMs });
+      return realExec(cmd, args, opts);
+    };
+    const req = (id: string): WorkspaceRequest => ({ repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: sha, headSha: sha }, reviewId: id });
+    await (await prepareWorkspace(exec, req('t2'))).dispose();
+    await (await prepareWorkspace(exec, req('t3'))).dispose();
+    const slow = seen.filter((s) => s.args.includes('clone') || s.args.includes('fetch'));
+    expect(slow.map((s) => s.args.find((a) => a === 'clone' || a === 'fetch'))).toEqual(['clone', 'fetch']);
+    expect(slow.every((s) => s.timeoutMs === 600_000)).toBe(true);
+    expect(seen.filter((s) => !slow.includes(s)).every((s) => s.timeoutMs === undefined)).toBe(true);
+  });
+
+  it('refuses a base branch name that is not a plain branch name before any git call', async () => {
+    const calls: string[][] = [];
+    const exec: Exec = async (cmd, args) => { calls.push(args); return { stdout: '', stderr: '', code: 0 }; };
+    for (const baseRef of ['-main', 'main;rm', 'main branch', '']) {
+      const req: WorkspaceRequest = { repo: 'acme/app', remoteUrl: '/x', pr: { number: 7, baseRef, headSha: 'a'.repeat(40) }, reviewId: 'b1' };
+      await expect(prepareWorkspace(exec, req)).rejects.toThrow(/is not a branch name Airlock can use/);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('gives merge-base the full branch ref, so a tag of the same name cannot stand in for it', async () => {
+    const r = await remote();
+    await r.write('a.txt', '1');
+    const root = await r.commit('root');
+    await r.git('checkout', '-b', 'feature');
+    await r.write('b.txt', '2');
+    const head = await r.commit('feature work');
+    await r.git('checkout', 'main');
+    await r.write('c.txt', '3');
+    await r.commit('main advances');
+    await r.git('tag', 'main', head); // a tag named like the base branch, pointing at the head
+    const seen: string[][] = [];
+    const exec: Exec = async (cmd, args, opts) => { seen.push(args); return realExec(cmd, args, opts); };
+    const ws = await prepareWorkspace(exec, { repo: 'acme/app', remoteUrl: r.dir, pr: { number: 7, baseRef: 'main', headSha: head }, reviewId: 'b2' });
+    expect(seen.find((a) => a.includes('merge-base'))).toContain('refs/heads/main');
+    expect(ws.range.baseSha).toBe(root);
+    await ws.dispose();
+  });
+
+  it('removes review folders left under work for more than a day, and keeps newer ones', async () => {
+    const r = await remote();
+    await r.write('a.txt', '1');
+    const sha = await r.commit('one');
+    const old = join(home, 'work', 'r_old');
+    const fresh = join(home, 'work', 'r_fresh');
+    await mkdir(join(old, 'head'), { recursive: true });
+    await mkdir(fresh, { recursive: true });
+    const twoDaysAgo = new Date(Date.now() - 48 * 3600 * 1000);
+    await utimes(old, twoDaysAgo, twoDaysAgo);
+    const ws = await prepareWorkspace(realExec, { repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: sha, headSha: sha }, reviewId: 'r_now' });
+    expect(await exists(old)).toBe(false);
+    expect(await exists(fresh)).toBe(true);
+    await ws.dispose();
   });
 });

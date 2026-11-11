@@ -22,6 +22,8 @@ export function replayCase(over: Partial<ReplayCase> = {}): ReplayCase {
     repo: 'acme/widgets',
     pr: 1,
     title: 'Add totals',
+    titleAtReview: 'Add totals (as reviewed)',
+    bodyAtReview: 'Adds the totals row, as the description read when it was reviewed.',
     kind: 'positive',
     reviewedAt: '2026-10-30T00:00:00Z',
     baseSha: 'a'.repeat(40),

@@ -260,6 +260,21 @@ describe('runReview', () => {
     expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'challenge']);
   }, SLOW);
 
+  it('a sync merge that changes no files has no stage error and its brief says it changes no files', async () => {
+    const s = await scenario({ 'a.txt': 'root\n' }, {});
+    await s.remote.git('checkout', 'main');
+    await s.remote.write('b.txt', 'main moved on\n');
+    await s.remote.commit('main advances');
+    await s.remote.git('checkout', 'feature');
+    await s.remote.git('merge', '--no-ff', '-m', 'Merge main into feature', 'main');
+    const head = await s.remote.git('rev-parse', 'HEAD');
+    const { doc, calls } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: head }) });
+    expect(doc.range.kind).toBe('sync-merge');
+    expect(calls).toEqual([]);
+    expect(doc.stageErrors).toEqual([]);
+    expect(doc.brief.whatItDoes).toEqual(['This branch only merges its target branch into itself and changes no files.']);
+  }, SLOW);
+
   it('a kit that cannot be fetched gives a packs stage error and verdict incomplete', async () => {
     const { doc, calls } = await review({ req: { kitDir: undefined } });
     const packErrors = doc.stageErrors.filter((e) => e.stage === 'packs');
@@ -416,6 +431,7 @@ describe('runReview deep pass', () => {
     hooks.challenge = (items) => { if (items.some((i) => i.title === DEEP_NEW.title)) throw new Error('deep challenge exploded'); };
     const { doc } = await review({ req: { depth: 'deep' } });
     expect(doc.candidates.map((c) => c.title)).toContain(DEEP_NEW.title);
+    expect(doc.findings.find((f) => f.title === DEEP_NEW.title)?.checked).toBe('challenge did not complete');
     expect(doc.verdict.label).toBe('incomplete');
     expect(doc.stageErrors).toEqual([{ stage: 'lenses-deep', cohortId: null, message: 'deep challenge exploded' }]);
   }, SLOW);
@@ -428,6 +444,19 @@ describe('runReview deep pass', () => {
     expect(calls.filter((c) => c.instructions.includes(DEEP_SENTENCE) && c.role === 'lens:core/correctness')).toHaveLength(2);
     expect(doc.candidates.filter((c) => c.title === DEEP_NEW.title)).toHaveLength(1);
     expect(doc.findings.filter((f) => f.title === DEEP_NEW.title)).toHaveLength(1);
+  }, SLOW);
+
+  it('names the original group, not the layer, in an error of the second pass lenses', async () => {
+    const { doc } = await review({
+      req: { depth: 'deep' },
+      script: scenarioScript({
+        'lens:core/correctness': (req) => (req.instructions.includes(DEEP_SENTENCE) && block(req.material, 'cohort')!.startsWith('Cohort: Money: Rules')
+          ? new Error('deep lens failed') : scenarioScript()(req)),
+      }),
+    });
+    const deep = doc.stageErrors.filter((e) => e.stage === 'lenses-deep');
+    expect(deep.map((e) => e.cohortId)).toEqual(['k1']);
+    expect(doc.map.cohorts.map((c) => c.id)).toContain(deep[0]!.cohortId);
   }, SLOW);
 
   it('names every error of the second pass lenses-deep, those of its challenge included', async () => {

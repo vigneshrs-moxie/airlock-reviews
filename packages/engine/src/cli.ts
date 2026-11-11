@@ -10,6 +10,7 @@ import { parsePrRef } from './intake/pr.js';
 import { runReview, type EngineDeps, type ReviewRequest } from './pipeline/review.js';
 import { cleanForTerminal, renderReview } from './render/terminal.js';
 import { realExec } from './util/exec.js';
+import { abortOnExitSignals } from './util/stop.js';
 
 export interface CliIo { out: (text: string) => void; err: (text: string) => void; color: boolean }
 export interface CliOverrides {
@@ -53,8 +54,9 @@ function lazySdkRunner(): AgentRunner {
   };
 }
 
+/** The real dependencies; Ctrl-C or SIGTERM stops the review, which then disposes its workspace. */
 function defaultDeps(): EngineDeps {
-  return { exec: realExec, runner: withRetry(lazySdkRunner(), 1), now: () => new Date() };
+  return { exec: realExec, runner: withRetry(lazySdkRunner(), 1), now: () => new Date(), signal: abortOnExitSignals() };
 }
 
 function progressLine(e: ReviewEvent): string | null {

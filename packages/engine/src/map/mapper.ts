@@ -1,10 +1,11 @@
 import { stat } from 'node:fs/promises';
 import { isAbsolute, posix, relative, resolve, sep } from 'node:path';
 import { CohortSchema } from '@airlock/shared';
-import type { ChangeMap, Cohort, FileDiff, FileFact, Link, ModelConfig, Neighbour, PrInfo } from '@airlock/shared';
+import type { ChangeMap, Cohort, FileDiff, FileFact, Link, ModelConfig, Neighbour, PrInfo, StageErrorKind } from '@airlock/shared';
 import { z } from 'zod';
 import { asMaterial, fill, loadTemplate } from '../agent/prompt.js';
 import type { AgentRequest, AgentRunner, AgentUsage } from '../agent/runner.js';
+import { descriptionCutSentence } from '../lenses/context.js';
 import { checkChangeMap, placeablePaths } from './check.js';
 
 export interface MapInput {
@@ -22,6 +23,10 @@ export interface MapResult {
   map: ChangeMap;
   usage: AgentUsage[];
   error: string | null;
+  /** Why the map failed, when it did. */
+  errorKind?: StageErrorKind;
+  /** Plain sentences saying what the mapper was not shown because of a size limit. */
+  limits: string[];
 }
 
 const MapperAnswerSchema = z.object({ cohorts: z.array(CohortSchema), standalone: z.array(z.string()) });
@@ -39,6 +44,9 @@ const MAX_NEIGHBOUR_CHARS = 8_000;
 const MAX_DESCRIPTION_CHARS = 6_000;
 const MAX_ERROR_CHARS = 300;
 
+const RETRY_SENTENCE = 'Your previous answer could not be used. The problems are listed in the material block below. Fix them and return the whole map again.';
+const PROBLEMS_LABEL = 'problems with your previous answer';
+
 const FALLBACK_SUMMARY = 'Grouped by code links because the mapper did not return a valid map.';
 
 /** Links whose two ends are both in `paths`. */
@@ -47,6 +55,7 @@ function linksBetween(links: Link[], paths: Set<string>): Link[] {
 }
 
 const byPath = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+const clip = (text: string): string => (text.length > MAX_ERROR_CHARS ? `${text.slice(0, MAX_ERROR_CHARS)}…` : text);
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
 /** Takes lines in order until either limit is reached, then adds one line saying how many were left out. */
@@ -166,7 +175,8 @@ export function fallbackMap(files: FileDiff[], facts: FileFact[], links: Link[])
 
 /**
  * Asks the mapper agent to group the changed files into cohorts and layers, checks the answer, and retries once with the
- * problems. When the second answer also fails, returns the link-based fallback and records why in `error`.
+ * problems when the check fails. When a request fails, or the second answer also fails the check, returns the link-based
+ * fallback and records why in `error` and `errorKind`.
  */
 export async function buildChangeMap(runner: AgentRunner, input: MapInput): Promise<MapResult> {
   const placeable = [...new Set(placeablePaths(input.files, input.facts))];
@@ -174,7 +184,7 @@ export async function buildChangeMap(runner: AgentRunner, input: MapInput): Prom
   const diffPaths = new Set(input.files.map((f) => f.path));
   const mapLinks = linksBetween(input.links, changed);
 
-  if (placeable.length === 0) return { map: { cohorts: [], standalone: [], links: [] }, usage: [], error: null };
+  if (placeable.length === 0) return { map: { cohorts: [], standalone: [], links: [] }, usage: [], error: null, limits: [] };
 
   if (placeable.length === 1) {
     const path = placeable[0]!;
@@ -184,7 +194,7 @@ export async function buildChangeMap(runner: AgentRunner, input: MapInput): Prom
       neighbours: input.neighbours.filter((n) => !diffPaths.has(n.path)),
       inferredLinks: [],
     };
-    return { map: { cohorts: [cohort], standalone: [], links: mapLinks }, usage: [], error: null };
+    return { map: { cohorts: [cohort], standalone: [], links: mapLinks }, usage: [], error: null, limits: [] };
   }
 
   const instructions = fill(await loadTemplate('mapper'), {}).trimEnd();
@@ -199,27 +209,32 @@ export async function buildChangeMap(runner: AgentRunner, input: MapInput): Prom
   };
 
   const usage: AgentUsage[] = [];
+  const limits = [descriptionCutSentence('mapper', input.pr.body, MAX_DESCRIPTION_CHARS)].flatMap((l) => l ?? []);
+  const fallback = (error: string, errorKind: StageErrorKind): MapResult =>
+    ({ map: fallbackMap(input.files, input.facts, input.links), usage, error, errorKind, limits });
   let problems: string[] = [];
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const req = attempt === 1 ? request : {
+    // The problems quote file names from the pull request and ids the model wrote, so they go in as material, never
+    // instructions. The retry is this stage's own, so the runner must not retry it again.
+    const req: AgentRequest<MapperAnswer> = attempt === 1 ? request : {
       ...request,
-      instructions: `${instructions}\n\nYour previous answer could not be used. Fix these problems and return the whole map again:\n${problems.map((p) => `- ${p}`).join('\n')}`,
+      material: `${request.material}\n\n${RETRY_SENTENCE}\n\n${asMaterial(PROBLEMS_LABEL, problems.map((p) => `- ${p}`).join('\n'))}`,
+      noRetry: true,
     };
     const result = await runner.run(req);
     usage.push(result.usage);
     if (!result.ok) {
-      problems = [oneLine(result.error)];
-      continue;
+      // A failed request is not retried here: an unusable answer is the runner's to retry (withRetry), and a turn limit,
+      // usage limit or timeout would only fail again.
+      return fallback(`mapper failed${attempt === 1 ? '' : ' twice'}: ${clip(oneLine(result.error))}`, result.kind);
     }
     const answer = await repairNeighbours(result.output, diffPaths, input.headDir);
     const map: ChangeMap = { ...answer, links: mapLinks };
     problems = checkChangeMap(map, input.files, input.facts);
-    if (problems.length === 0) return { map, usage, error: null };
+    if (problems.length === 0) return { map, usage, error: null, limits };
   }
 
-  const last = problems[0] ?? 'no reason given';
-  const reason = last.length > MAX_ERROR_CHARS ? `${last.slice(0, MAX_ERROR_CHARS)}…` : last;
   const extra = problems.length - 1;
   const more = extra > 0 ? ` (and ${extra} more problem${extra === 1 ? '' : 's'})` : '';
-  return { map: fallbackMap(input.files, input.facts, input.links), usage, error: `mapper failed twice: ${reason}${more}` };
+  return fallback(`mapper failed twice: ${clip(problems[0] ?? 'no reason given')}${more}`, 'invalid-output');
 }

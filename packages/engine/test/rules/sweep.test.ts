@@ -89,10 +89,19 @@ describe('runSweep', () => {
     expect(new Set(r.candidates.map((c) => c.id)).size).toBe(6);
   });
 
+  it('keeps a sweep candidate that fails the schema as a dropped entry with its reason', async () => {
+    const runner = createFakeRunner((req) => (req.role.endsWith('#1')
+      ? { candidates: [sweepCandidate({ why: ' ' })], questions: [] } : { candidates: [], questions: [] }));
+    const r = await runSweep(runner, sweepCtx());
+    expect(r.candidates).toEqual([]);
+    expect(r.questions).toEqual([]);
+    expect(r.dropped.map((d) => [d.stage, d.reason])).toEqual([['schema', 'it does not say why']]);
+  });
+
   it('a failed batch becomes a stage error naming the batch and the others carry on', async () => {
     const runner = createFakeRunner((req) => (req.role.endsWith('#1') ? new Error('boom') : { candidates: [sweepCandidate({ ruleId: 'mem-1', path: 'src/members/m.ts' })], questions: [] }));
     const r = await runSweep(runner, sweepCtx());
-    expect(r.errors).toEqual([{ stage: 'sweep', cohortId: 'k1', message: 'batch 1: boom' }]);
+    expect(r.errors).toEqual([{ stage: 'sweep', cohortId: 'k1', message: 'batch 1: boom', kind: 'invalid-output' }]);
     expect(r.candidates).toHaveLength(1);
     expect(r.usage).toHaveLength(2);
   });
@@ -109,6 +118,15 @@ describe('runSweep', () => {
     const runner = createFakeRunner(() => ({ candidates: [], questions: [] }));
     const r = await runSweep(runner, sweepCtx({ packs: [pack('core', [lens('boundary')])] }));
     expect(runner.calls).toEqual([]);
-    expect(r).toEqual({ candidates: [], questions: [], dropped: [], errors: [], usage: [] });
+    expect(r).toEqual({ candidates: [], questions: [], dropped: [], errors: [], usage: [], limits: [] });
+  });
+
+  it('says how much of a batch diff was shown when the sweep budget cut it', async () => {
+    const big = files.map((f) => diff(f, f === 'src/billing/a.ts' ? 1500 : 3));
+    const runner = createFakeRunner(() => ({ candidates: [], questions: [] }));
+    const r = await runSweep(runner, sweepCtx({ files: big }));
+    const shown = block(runner.calls[0]!.material, 'diff')!.split('\n').filter((l) => /^\s*\d* [+-] /.test(l)).length;
+    expect(shown).toBeLessThan(1500);
+    expect(r.limits).toEqual([`sweep: Billing, batch 1: ${shown.toLocaleString('en-US')} of 1,500 changed lines were shown (1 file cut)`]);
   });
 });

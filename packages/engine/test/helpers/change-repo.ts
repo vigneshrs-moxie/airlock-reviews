@@ -25,7 +25,7 @@ export async function commitFiles(repo: TempRepo, files: Record<string, string |
 
 /** The parsed diff between two commits of the repository. */
 export function diffOf(repo: TempRepo, baseSha: string, headSha: string): Promise<FileDiff[]> {
-  return loadDiff(realExec, repo.dir, { baseSha, headSha, kind: 'full' });
+  return loadDiff(realExec, join(repo.dir, '.git'), { baseSha, headSha, kind: 'full' });
 }
 
 /** Commits `base`, then applies `head` on top; the working tree is left at the head commit. */

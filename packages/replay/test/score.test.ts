@@ -89,8 +89,20 @@ describe('scoreCase', () => {
       ],
     });
     const s = scoreCase(replayCase({ kind: 'negative', known: [] }), d, []);
-    expect(s).toMatchObject({ kind: 'negative', known: 0, findingsShown: 3, blockOrFixShown: 2, ms: 3500,
+    expect(s).toMatchObject({ kind: 'negative', known: 0, findingsShown: 3, blockOrFixShown: 2, ms: 3500, msSummed: true,
       inputTokens: 1000, outputTokens: 100, agentRuns: 5, verdict: 'request-changes' });
+  });
+
+  it('a review that records its start takes its time as it passed, not the sum of stages that overlap', () => {
+    const timings = [
+      { stage: 'lenses', ms: 600_000, agentRuns: 6, inputTokens: 1, outputTokens: 1, costUsd: null },
+      { stage: 'sweep', ms: 500_000, agentRuns: 3, inputTokens: 1, outputTokens: 1, costUsd: null },
+    ];
+    const elapsed = scoreCase(replayCase({ known: [] }), doc({ startedAt: '2026-11-10T09:00:00.000Z', createdAt: '2026-11-10T09:12:30.000Z', timings }), []);
+    expect(elapsed).toMatchObject({ ms: 750_000, msSummed: false });
+    // Without a start, or with times that cannot be read, the sum of stages is all there is.
+    expect(scoreCase(replayCase({ known: [] }), doc({ timings }), [])).toMatchObject({ ms: 1_100_000, msSummed: true });
+    expect(scoreCase(replayCase({ known: [] }), doc({ startedAt: 'not a time', timings }), [])).toMatchObject({ ms: 1_100_000, msSummed: true });
   });
 });
 
@@ -98,7 +110,7 @@ function score(over: Partial<CaseScore>): CaseScore {
   return {
     caseId: 'pr1', kind: 'positive', known: 0, knownDefects: 0, inTop: 0, shown: 0, raised: 0, defectsInTop: 0,
     defectsShown: 0, partialInTop: 0, asQuestion: 0, sharedMatches: 0, lostAt: { ...ZERO_LOST }, crossFileKnown: 0, crossFileInTop: 0,
-    findingsShown: 0, blockOrFixShown: 0, ms: 0, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: 'approve',
+    findingsShown: 0, blockOrFixShown: 0, ms: 0, msSummed: false, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: 'approve',
     ...over,
   };
 }
@@ -225,7 +237,72 @@ describe('summarise', () => {
     const cases = [replayCase({ id: 'a' }), replayCase({ id: 'b', kind: 'negative' }), replayCase({ id: 'c', kind: 'negative' })];
     const s = summarise('r', 'm', 'standard', scores, cases);
     expect(s.incompleteCases).toEqual(['a', 'c']);
-    expect(s.totals).toEqual({ ms: 150, inputTokens: 15, outputTokens: 3, agentRuns: 3 });
+    // With no wall clock for the run, the total time is the sum of cases, and says so.
+    expect(s.totals).toEqual({ ms: 150, msSummed: true, inputTokens: 15, outputTokens: 3, agentRuns: 3 });
+    expect(s.wallClock).toBeNull();
+  });
+
+  it('the total time is the run\'s wall clock from its first case start to its last case end', () => {
+    const scores = [score({ caseId: 'a', ms: 600_000 }), score({ caseId: 'b', ms: 600_000 })];
+    const cases = [replayCase({ id: 'a' }), replayCase({ id: 'b' })];
+    const wallClock = { startedAt: '2026-11-10T09:00:00.000Z', finishedAt: '2026-11-10T09:15:00.000Z' };
+    const s = summarise('r', 'm', 'standard', scores, cases, cases, wallClock);
+    expect(s.totals).toMatchObject({ ms: 900_000, msSummed: false });
+    expect(s.wallClock).toEqual(wallClock);
+  });
+
+  describe('how much of the dataset the run covers', () => {
+    const dataset = [
+      replayCase({ id: 'a', known: ['A1', 'A2'].map((id) => problem({ id })) }),
+      replayCase({ id: 'b', known: ['B1', 'B2', 'B3'].map((id) => problem({ id })) }),
+      replayCase({ id: 'c', known: ['C1'].map((id) => problem({ id })) }),
+      replayCase({ id: 's', kind: 'secondary', known: ['S1', 'S2'].map((id) => problem({ id })) }),
+      replayCase({ id: 'n', kind: 'negative', known: [] }),
+    ];
+    const pick = (...ids: string[]) => dataset.filter((c) => ids.includes(c.id));
+
+    it('a run with every positive case, all finished, answers yes or no', () => {
+      const yes = summarise('r', 'm', 'standard', [score({ caseId: 'a', known: 2, inTop: 2 }), score({ caseId: 'b', known: 3, inTop: 1 }), score({ caseId: 'c', known: 1 })], pick('a', 'b', 'c'), dataset);
+      expect(yes).toMatchObject({ datasetKnownTotal: 6, datasetPositives: 3, positivesNotRun: [], knownTotal: 6, inTopTotal: 3 });
+      expect(yes.meets.halfInTop).toBe(true);
+      const no = summarise('r', 'm', 'standard', [score({ caseId: 'a', known: 2, inTop: 1 }), score({ caseId: 'b', known: 3, inTop: 1 }), score({ caseId: 'c', known: 1 })], pick('a', 'b', 'c'), dataset);
+      expect(no.meets.halfInTop).toBe(false);
+    });
+
+    it('a partial run says so far and names the positive cases it did not run', () => {
+      const s = summarise('r', 'm', 'standard', [score({ caseId: 'a', known: 2, inTop: 2 }), score({ caseId: 'n', kind: 'negative' })], pick('a', 'n'), dataset);
+      expect(s).toMatchObject({ datasetKnownTotal: 6, datasetPositives: 3, positivesNotRun: ['b', 'c'], knownTotal: 2 });
+      expect(s.meets.halfInTop).toBe('yes so far');
+      const low = summarise('r', 'm', 'standard', [score({ caseId: 'b', known: 3, inTop: 1 })], pick('b'), dataset);
+      expect(low.meets.halfInTop).toBe('no so far');
+    });
+
+    it('a run with every positive case, one of which did not finish, still says so far', () => {
+      const s = summarise('r', 'm', 'standard', [
+        score({ caseId: 'a', known: 2, inTop: 2 }), score({ caseId: 'b', known: 3, inTop: 3 }), score({ caseId: 'c', known: 1, verdict: 'incomplete' }),
+      ], pick('a', 'b', 'c'), dataset);
+      expect(s.positivesNotRun).toEqual([]);
+      expect(s.meets.halfInTop).toBe('yes so far');
+    });
+
+    it('secondary cases are kept apart and change no headline number', () => {
+      const positives = [score({ caseId: 'a', known: 2, inTop: 1, shown: 1, sharedMatches: 0 })];
+      const secondary = score({ caseId: 's', kind: 'secondary', known: 2, knownDefects: 2, inTop: 2, shown: 2, defectsInTop: 2, crossFileKnown: 1, crossFileInTop: 1, sharedMatches: 2 });
+      const without = summarise('r', 'm', 'standard', positives, pick('a'), dataset);
+      const withSecondary = summarise('r', 'm', 'standard', [...positives, secondary], pick('a', 's'), dataset);
+      expect(withSecondary.secondary).toEqual([secondary]);
+      expect(without.secondary).toEqual([]);
+      for (const key of ['knownTotal', 'inTopTotal', 'recallTop', 'recallShown', 'recallTopDefects', 'crossFileRecallTop', 'sharedMatches',
+        'negativesWithBlockOrFix', 'positivesIncomplete', 'negativesIncomplete', 'datasetKnownTotal', 'datasetPositives', 'positivesNotRun', 'meets'] as const) {
+        expect(withSecondary[key], key).toEqual(without[key]);
+      }
+    });
+
+    it('without a dataset the cases in the run are the dataset', () => {
+      const s = summarise('r', 'm', 'standard', [score({ caseId: 'a', known: 2, inTop: 1 })], pick('a'));
+      expect(s).toMatchObject({ datasetKnownTotal: 2, datasetPositives: 1, positivesNotRun: [] });
+      expect(s.meets.halfInTop).toBe(true);
+    });
   });
 
   it('takes the kind of each case from the dataset and refuses a score with no case', () => {

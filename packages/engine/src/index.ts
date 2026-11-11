@@ -17,3 +17,4 @@ export { syncKit } from './packs/kit-sync.js';
 export { realExec, type Exec } from './util/exec.js';
 export { limiter } from './util/limit.js';
 export { airlockHome, repoSlug } from './util/paths.js';
+export { abortOnExitSignals } from './util/stop.js';

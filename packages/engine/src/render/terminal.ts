@@ -147,7 +147,16 @@ function timingTable(doc: ReviewDocument): string[] {
   rows.push(['total', (sum((t) => t.ms) / 1000).toFixed(1), String(sum((t) => t.agentRuns)), number(sum((t) => t.inputTokens)),
     number(sum((t) => t.outputTokens)), ...(showCost ? [sum((t) => t.costUsd ?? 0).toFixed(2)] : [])]);
   const widths = rows[0]!.map((_, c) => Math.max(...rows.map((r) => r[c]!.length)));
-  return rows.map((r) => r.map((cell, c) => (c === 0 ? cell.padEnd(widths[c]!) : cell.padStart(widths[c]!))).join('  ').trimEnd());
+  const table = rows.map((r) => r.map((cell, c) => (c === 0 ? cell.padEnd(widths[c]!) : cell.padStart(widths[c]!))).join('  ').trimEnd());
+  return [...table, ...elapsed(doc)];
+}
+
+/** `Elapsed: <m> min <s> s` from the review's start to its end. Stages overlap, so this is not the sum of their seconds. */
+function elapsed(doc: ReviewDocument): string[] {
+  const ms = doc.startedAt === undefined ? Number.NaN : Date.parse(doc.createdAt) - Date.parse(doc.startedAt);
+  if (!Number.isFinite(ms) || ms < 0) return [];
+  const seconds = Math.round(ms / 1000);
+  return [`Elapsed: ${Math.floor(seconds / 60)} min ${seconds % 60} s`];
 }
 
 export function renderReview(input: ReviewDocument, opts: { color?: boolean } = {}): string {
@@ -184,6 +193,8 @@ export function renderReview(input: ReviewDocument, opts: { color?: boolean } = 
     section('Whose call', bullets(doc.whoseCall)),
     section('Check after merge', doc.checksAfterMerge.flatMap((t, i) => wrap(t, `${i + 1}. `))),
     section('Change map', changeMap(doc)),
+    section('Not reviewed', doc.files.filter((f) => f.tier === 'ignored').map((f) => `- ${f.path}: ${f.reason}`)),
+    section('Not shown to the reviewer', bullets(doc.limits ?? [])),
     section(`Dropped: ${doc.dropped.length}`, doc.dropped.flatMap(droppedItem)),
     section('Stage errors', doc.stageErrors.map((e) => `- ${e.stage}${e.cohortId === null ? '' : `, cohort ${e.cohortId}`}: ${e.message}`)),
     section('Timing', timingTable(doc)),

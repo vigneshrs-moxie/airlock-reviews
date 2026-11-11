@@ -1,7 +1,7 @@
 import { candidate } from '@airlock/shared';
 import type { ChangeMap } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
-import { createFakeRunner } from '../../src/agent/fake-runner.js';
+import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import { runSeams } from '../../src/lenses/seams.js';
 import { block, ctx, diff, labels, lens, pack, pr, rawCandidate, tier, twoCohorts } from '../helpers/lens-context.js';
 
@@ -80,7 +80,7 @@ describe('runSeams', () => {
     const runner = createFakeRunner(empty);
     const r = await runSeams(runner, ctx({ map }), soFar);
     expect(runner.calls).toEqual([]);
-    expect(r).toEqual({ candidates: [], questions: [], dropped: [], errors: [], usage: [] });
+    expect(r).toEqual({ candidates: [], questions: [], dropped: [], errors: [], usage: [], limits: [] });
   });
 
   it('counts the standalone group as a cohort when it has files to read', async () => {
@@ -95,9 +95,9 @@ describe('runSeams', () => {
   });
 
   it('a failed seams pass becomes a stage error', async () => {
-    const runner = createFakeRunner(() => new Error('model timed out'));
+    const runner = createFakeRunner(() => failure('model timed out', 'timeout'));
     const r = await runSeams(runner, ctx(), []);
-    expect(r.errors).toEqual([{ stage: 'seams', cohortId: null, message: 'airlock/seams: model timed out' }]);
+    expect(r.errors).toEqual([{ stage: 'seams', cohortId: null, message: 'airlock/seams: model timed out', kind: 'timeout' }]);
     expect(r.candidates).toEqual([]);
     expect(r.usage).toHaveLength(1);
   });

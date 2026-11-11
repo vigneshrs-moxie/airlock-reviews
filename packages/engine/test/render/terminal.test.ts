@@ -209,6 +209,39 @@ describe('renderReview', () => {
     expect(out).toContain('Also found\n\n');
   });
 
+  it('prints every ignored file under Not reviewed with its reason', () => {
+    const doc = fullDocument();
+    doc.files = [
+      { path: 'src/total.ts', tier: 'read', reason: 'logic' },
+      { path: 'yarn.lock', tier: 'ignored', reason: 'lock file (built-in: **/yarn.lock)' },
+      { path: 'img/a.png', tier: 'ignored', reason: 'binary file' },
+    ];
+    const out = renderReview(doc);
+    expect(out).toContain('\nNot reviewed\n\n- yarn.lock: lock file (built-in: **/yarn.lock)\n- img/a.png: binary file\n');
+    expect(out.indexOf('\nChange map\n')).toBeLessThan(out.indexOf('\nNot reviewed\n'));
+    expect(renderReview(minimalDocument())).not.toContain('Not reviewed');
+  });
+
+  it('prints the limits under Not shown to the reviewer, after Not reviewed', () => {
+    const doc = fullDocument();
+    doc.files.push({ path: 'yarn.lock', tier: 'ignored', reason: 'lock file (built-in: **/yarn.lock)' });
+    doc.limits = ['lenses: Totals: 1,500 of 4,556 changed lines were shown (2 files cut)'];
+    const out = renderReview(doc);
+    expect(out).toContain('\nNot shown to the reviewer\n\n- lenses: Totals: 1,500 of 4,556 changed lines were shown (2 files cut)\n');
+    expect(out.indexOf('\nNot reviewed\n')).toBeLessThan(out.indexOf('\nNot shown to the reviewer\n'));
+  });
+
+  it('ends the timing table with the time that passed from the start of the review to its end', () => {
+    const doc = fullDocument();
+    doc.startedAt = '2026-11-11T09:00:00.000Z';
+    doc.createdAt = '2026-11-11T09:17:05.400Z';
+    const out = renderReview(doc);
+    expect(out.trimEnd().split('\n').at(-1)).toBe('Elapsed: 17 min 5 s');
+    expect(out).toMatch(/\nStage\s+Seconds\s+Runs/);
+    delete doc.startedAt;
+    expect(renderReview(doc)).not.toContain('Elapsed');
+  });
+
   it('shows 5 files per layer and a count of the rest past 40 files', () => {
     const doc = minimalDocument();
     const files = Array.from({ length: 41 }, (_, i) => `src/f${i}.ts`);

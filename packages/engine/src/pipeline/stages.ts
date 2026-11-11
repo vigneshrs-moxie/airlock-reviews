@@ -35,18 +35,29 @@ export interface StageLog {
 
 export const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-/** The timing of a stage from its wall-clock time and the usage of its model calls. */
-function timingOf(stage: StageName, ms: number, usage: AgentUsage[]): StageTiming {
+/** The timing of a stage from its wall-clock time, when it started and finished, and the usage of its model calls. */
+function timingOf(stage: StageName, ms: number, usage: AgentUsage[], startedAt: Date, finishedAt: Date): StageTiming {
   return {
     stage, ms: Math.round(ms), agentRuns: usage.length,
     inputTokens: usage.reduce((n, u) => n + u.inputTokens, 0),
     outputTokens: usage.reduce((n, u) => n + u.outputTokens, 0),
     costUsd: usage.every((u) => u.costUsd !== null) ? usage.reduce((n, u) => n + (u.costUsd ?? 0), 0) : null,
+    startedAt: startedAt.toISOString(), finishedAt: finishedAt.toISOString(),
+    turns: usage.reduce((n, u) => n + u.turns, 0),
   };
 }
 
-/** Records the stages of one review and reports them to `onEvent`; a listener that throws is ignored. */
-export function createStageLog(onEvent?: (e: ReviewEvent) => void): StageLog {
+/** What a stage throws, and runReview rejects with, once the review's signal is aborted. */
+const stopped = (): Error => new Error('The review was stopped.');
+
+/**
+ * Records the stages of one review and reports them to `onEvent`; a listener that throws is ignored. Once `signal` is
+ * aborted no stage starts, and the stage that was running throws instead of returning, so the review ends. `now` stamps
+ * when each stage started and finished; stages can overlap, so the review's elapsed time is not the sum of their times.
+ */
+export function createStageLog(
+  onEvent?: (e: ReviewEvent) => void, signal?: AbortSignal, now: () => Date = () => new Date(),
+): StageLog {
   const errors: StageError[] = [];
   const done = new Map<StageName, StageTiming>();
   const open = new Map<StageName, () => StageTiming>();
@@ -61,8 +72,10 @@ export function createStageLog(onEvent?: (e: ReviewEvent) => void): StageLog {
   async function run<T>(
     stage: StageName, fn: (rec: StageRecorder) => Promise<T>, opts: { extraMs?: number; rethrow?: boolean } = {},
   ): Promise<T | undefined> {
+    if (signal?.aborted) throw stopped();
     emit({ type: 'stage', stage, status: 'start', detail: '' });
     const started = performance.now() - (opts.extraMs ?? 0);
+    const startedAt = new Date(now().getTime() - (opts.extraMs ?? 0));
     const usage: AgentUsage[] = [];
     const mine: StageError[] = [];
     const rec: StageRecorder = {
@@ -77,7 +90,7 @@ export function createStageLog(onEvent?: (e: ReviewEvent) => void): StageLog {
         }
       },
     };
-    open.set(stage, () => timingOf(stage, performance.now() - started, usage));
+    open.set(stage, () => timingOf(stage, performance.now() - started, usage, startedAt, now()));
     let thrown: { err: unknown } | null = null;
     let value: T | undefined;
     try {
@@ -92,6 +105,7 @@ export function createStageLog(onEvent?: (e: ReviewEvent) => void): StageLog {
     emit(mine.length === 0
       ? { type: 'stage', stage, status: 'done', detail: '' }
       : { type: 'stage', stage, status: 'error', detail: `${mine[0]!.message}${more}` });
+    if (signal?.aborted) throw stopped();
     if (thrown && opts.rethrow) throw thrown.err;
     return value;
   }
@@ -102,7 +116,8 @@ export function createStageLog(onEvent?: (e: ReviewEvent) => void): StageLog {
     run,
     skip(stage, why) {
       emit({ type: 'stage', stage, status: 'start', detail: '' });
-      done.set(stage, timingOf(stage, 0, []));
+      const at = now();
+      done.set(stage, timingOf(stage, 0, [], at, at));
       emit({ type: 'stage', stage, status: 'done', detail: `skipped: ${why}` });
     },
     timings() {

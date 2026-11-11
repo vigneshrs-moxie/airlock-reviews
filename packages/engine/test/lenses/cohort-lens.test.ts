@@ -1,6 +1,6 @@
 import type { ChangeMap } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
-import { createFakeRunner } from '../../src/agent/fake-runner.js';
+import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import { runCohortLenses } from '../../src/lenses/cohort-lens.js';
 import { applyHoldout } from '../../src/packs/holdout.js';
 import {
@@ -260,9 +260,9 @@ describe('runCohortLenses', () => {
   it('a failed lens becomes a stage error naming the cohort and the lens', async () => {
     const packs = [pack('core', [lens('boundary'), lens('money')])];
     const runner = createFakeRunner((req) => (req.role === 'lens:core/money' && req.material.includes('Invoice totals')
-      ? new Error('model timed out') : { candidates: [rawCandidate()], questions: [] }));
+      ? failure('model timed out', 'timeout') : { candidates: [rawCandidate()], questions: [] }));
     const r = await runCohortLenses(runner, ctx({ packs }));
-    expect(r.errors).toEqual([{ stage: 'lenses', cohortId: 'k2', message: 'core/money: model timed out' }]);
+    expect(r.errors).toEqual([{ stage: 'lenses', cohortId: 'k2', message: 'core/money: model timed out', kind: 'timeout' }]);
     expect(r.candidates).toHaveLength(3);
     expect(r.usage).toHaveLength(4);
   });
@@ -348,7 +348,7 @@ describe('runCohortLenses', () => {
     const runner = createFakeRunner(empty);
     const r = await runCohortLenses(runner, ctx({ map: { cohorts: [], standalone: [], links: [] } }));
     expect(runner.calls).toEqual([]);
-    expect(r).toEqual({ candidates: [], questions: [], dropped: [], errors: [], usage: [] });
+    expect(r).toEqual({ candidates: [], questions: [], dropped: [], errors: [], usage: [], limits: [] });
   });
 
   it('tells the reviewer how to work and what to return', async () => {
@@ -373,5 +373,19 @@ describe('runCohortLenses', () => {
       expect(call.instructions).toContain(`Instructions for the boundary lens.\n\n${extra}`);
     }
     expect(withExtra.calls.map((c) => c.material)).toEqual(plain.calls.map((c) => c.material));
+  });
+
+  it('says once per cohort how much of its diff the lenses were shown when the budget cut it', async () => {
+    const runner = createFakeRunner(empty);
+    const files = [diff('db/0042.sql'), diff('src/pause.ts', 2000), diff('test/pause.test.ts'), diff('src/totals.ts')];
+    const r = await runCohortLenses(runner, ctx({ files, packs: [pack('core', [lens('a'), lens('b')])] }));
+    const shown = diffLines(runner.calls[0]!.material).filter((l) => /^\s*\d* [+-] /.test(l)).length;
+    expect(shown).toBeLessThan(2003);
+    expect(r.limits).toEqual([`lenses: Pausing a plan: ${shown.toLocaleString('en-US')} of 2,003 changed lines were shown (1 file cut)`]);
+  });
+
+  it('records no limit when every diff fits', async () => {
+    const r = await runCohortLenses(createFakeRunner(empty), ctx());
+    expect(r.limits).toEqual([]);
   });
 });

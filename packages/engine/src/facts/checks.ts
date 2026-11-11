@@ -1,6 +1,7 @@
 import { posix } from 'node:path';
 import type { Fact, FileDiff } from '@airlock/shared';
 import picomatch from 'picomatch';
+import { SYMLINK_MODE } from '../diff/parse.js';
 import type { CheckDef, Pack } from '../packs/types.js';
 
 type ReadHead = (path: string) => Promise<string | null>;
@@ -44,7 +45,8 @@ export async function runChecks(files: FileDiff[], packs: Pack[], readHead: Read
 async function runOne(pack: Pack, check: CheckDef, files: FileDiff[], read: ReadHead): Promise<Fact[]> {
   const fact = (path: string, line: number | null, message = check.message): Fact => ({ checkId: check.id, path, line, message });
   const pattern = check.pattern !== undefined ? compile(pack, check, check.pattern) : null;
-  const live = files.filter((f) => f.status !== 'deleted');
+  // A symbolic link holds a path, not code, so no check reads it.
+  const live = files.filter((f) => f.status !== 'deleted' && f.mode !== SYMLINK_MODE);
   const facts: Fact[] = [];
 
   switch (check.kind) {
@@ -65,7 +67,7 @@ async function runOne(pack: Pack, check: CheckDef, files: FileDiff[], read: Read
       break;
     }
     case 'new-file-requires':
-      for (const f of files.filter((x) => x.status === 'added' && matches(check.paths, x.path))) {
+      for (const f of live.filter((x) => x.status === 'added' && matches(check.paths, x.path))) {
         const folder = posix.dirname(f.path);
         const dir = posix.basename(folder);
         const above = posix.dirname(folder);

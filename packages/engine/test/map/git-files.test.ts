@@ -34,4 +34,9 @@ describe('gitGrep', () => {
     const exec: Exec = async () => ({ stdout: '', stderr: 'stdout maxBuffer length exceeded', code: 1 });
     await expect(gitGrep(exec, '/x', 'needle')).rejects.toThrow(/"needle"/);
   });
+
+  it('treats a timed-out grep as a failure, never as no match', async () => {
+    const exec: Exec = async () => ({ stdout: '', stderr: 'timed out after 60 s', code: 124 });
+    await expect(gitGrep(exec, '/x', 'needle')).rejects.toThrow(/timed out after 60 s/);
+  });
 });
