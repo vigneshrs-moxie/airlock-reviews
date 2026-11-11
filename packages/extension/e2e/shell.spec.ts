@@ -62,4 +62,13 @@ test('the manifest asks only for sidePanel, storage, github.com and 127.0.0.1', 
     expect(text).not.toMatch(/https?:|\*|unsafe-eval|unsafe-inline/);
   }
   expect(manifest.minimum_chrome_version).toBe('116');
+  expect(typeof manifest.key).toBe('string');
+  expect(manifest).not.toHaveProperty('web_accessible_resources');
+  expect(manifest.side_panel).toEqual({ default_path: 'sidepanel.html' });
+  expect(manifest.action).not.toHaveProperty('default_popup');
+  const scripts = manifest.content_scripts as { matches: string[]; run_at: string; world?: string }[];
+  expect(scripts).toHaveLength(1);
+  expect(scripts[0]?.matches).toEqual(['https://github.com/*']);
+  expect(scripts[0]?.run_at).toBe('document_idle');
+  expect(['ISOLATED', undefined]).toContain(scripts[0]?.world);
 });

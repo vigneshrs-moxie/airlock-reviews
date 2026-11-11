@@ -16,31 +16,93 @@ describe('panelOptionsFor', () => {
   });
 });
 
-function fakeChrome() {
-  const listeners: { updated?: (id: number, info: object, tab: { url?: string }) => void; activated?: (info: { tabId: number }) => void } = {};
+type Tab = { id?: number; url?: string };
+
+function fakeChrome(opts: { open?: Tab[]; queryFails?: boolean; setOptionsFails?: boolean } = {}) {
+  const calls: string[] = [];
+  const listeners: {
+    updated?: (id: number, info: object, tab: Tab) => void;
+    activated?: (info: { tabId: number }) => void;
+  } = {};
+  const tabsById: Record<number, Tab> = { 2: { url: 'https://github.com/a/b/pull/3' } };
   const chrome: PanelChrome = {
-    sidePanel: { setPanelBehavior: vi.fn(async () => {}), setOptions: vi.fn(async () => {}) },
+    sidePanel: {
+      setPanelBehavior: vi.fn(async () => { calls.push('behavior'); }),
+      setOptions: vi.fn(async (o) => {
+        calls.push(o.tabId === undefined ? 'global' : `tab${o.tabId}`);
+        if (opts.setOptionsFails) throw new Error('No tab with id');
+      }),
+    },
     tabs: {
-      get: vi.fn(async (id: number) => ({ url: id === 2 ? 'https://github.com/a/b/pull/3' : undefined })),
-      onUpdated: { addListener: (fn) => { listeners.updated = fn; } },
-      onActivated: { addListener: (fn) => { listeners.activated = fn; } },
+      get: vi.fn(async (id: number) => tabsById[id] ?? {}),
+      query: vi.fn(async () => {
+        calls.push('query');
+        if (opts.queryFails) throw new Error('query failed');
+        return opts.open ?? [];
+      }),
+      onUpdated: { addListener: (fn) => { calls.push('onUpdated'); listeners.updated = fn; } },
+      onActivated: { addListener: (fn) => { calls.push('onActivated'); listeners.activated = fn; } },
     },
   };
-  return { chrome, listeners };
+  return { chrome, listeners, calls };
 }
 
 describe('wirePanel', () => {
+  it('turns the panel off for every tab before anything else', async () => {
+    const { chrome, calls } = fakeChrome();
+    wirePanel(chrome);
+    expect(calls[0]).toBe('global');
+    expect(chrome.sidePanel.setOptions).toHaveBeenNthCalledWith(1, { enabled: false });
+    await vi.waitFor(() => expect(calls).toContain('query'));
+    expect(calls.indexOf('global')).toBeLessThan(calls.indexOf('query'));
+    expect(chrome.tabs.query).toHaveBeenCalledWith({ url: 'https://github.com/*' });
+  });
+
+  it('enables an already-open pull request tab at start and not another GitHub tab', async () => {
+    const { chrome } = fakeChrome({
+      open: [{ id: 4, url: 'https://github.com/a/b/pull/9' }, { id: 5, url: 'https://github.com/a/b' }, { url: 'https://github.com/a/b/pull/1' }],
+    });
+    wirePanel(chrome);
+    await vi.waitFor(() => expect(chrome.sidePanel.setOptions).toHaveBeenCalledTimes(3));
+    expect(chrome.sidePanel.setOptions).toHaveBeenCalledWith({ tabId: 4, path: 'sidepanel.html', enabled: true });
+    expect(chrome.sidePanel.setOptions).toHaveBeenCalledWith({ tabId: 5, path: 'sidepanel.html', enabled: false });
+  });
+
+  it('registers the listeners even when the tab query rejects', async () => {
+    const { chrome, listeners } = fakeChrome({ queryFails: true });
+    wirePanel(chrome);
+    expect(listeners.updated).toBeTypeOf('function');
+    expect(listeners.activated).toBeTypeOf('function');
+    await vi.waitFor(() => expect(chrome.tabs.query).toHaveBeenCalled());
+  });
+
   it('opens the panel on action click and sets options on tab update and activation', async () => {
     const { chrome, listeners } = fakeChrome();
     wirePanel(chrome);
     expect(chrome.sidePanel.setPanelBehavior).toHaveBeenCalledWith({ openPanelOnActionClick: true });
     listeners.updated?.(1, {}, { url: 'https://github.com/a/b/pull/3' });
-    expect(chrome.sidePanel.setOptions).toHaveBeenLastCalledWith({ tabId: 1, path: 'sidepanel.html', enabled: true });
-    await listeners.activated?.({ tabId: 2 });
-    await Promise.resolve();
-    expect(chrome.sidePanel.setOptions).toHaveBeenLastCalledWith({ tabId: 2, path: 'sidepanel.html', enabled: true });
-    await listeners.activated?.({ tabId: 3 });
-    await Promise.resolve();
-    expect(chrome.sidePanel.setOptions).toHaveBeenLastCalledWith({ tabId: 3, path: 'sidepanel.html', enabled: false });
+    expect(chrome.sidePanel.setOptions).toHaveBeenCalledWith({ tabId: 1, path: 'sidepanel.html', enabled: true });
+    listeners.activated?.({ tabId: 2 });
+    await vi.waitFor(() =>
+      expect(chrome.sidePanel.setOptions).toHaveBeenCalledWith({ tabId: 2, path: 'sidepanel.html', enabled: true }));
+    listeners.activated?.({ tabId: 3 });
+    await vi.waitFor(() =>
+      expect(chrome.sidePanel.setOptions).toHaveBeenCalledWith({ tabId: 3, path: 'sidepanel.html', enabled: false }));
+  });
+
+  it('produces no unhandled rejection when setOptions fails', async () => {
+    const unhandled: unknown[] = [];
+    const record = (e: unknown): void => { unhandled.push(e); };
+    process.on('unhandledRejection', record);
+    try {
+      const { chrome, listeners } = fakeChrome({ setOptionsFails: true });
+      wirePanel(chrome);
+      listeners.updated?.(1, {}, { url: 'https://github.com/a/b/pull/3' });
+      listeners.activated?.({ tabId: 2 });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', record);
+    }
   });
 });

@@ -1,6 +1,6 @@
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
+import { E2E_PORT } from './port';
 
-export const FAKE_PORT = 4699;
 
 export interface RecordedRequest {
   method: string;
@@ -14,7 +14,7 @@ export interface FakeService {
 }
 
 /** A stand-in for the Airlock service: answers GET /hello, 404 for everything else, remembers what it was asked. */
-export async function startFakeService(port: number = FAKE_PORT): Promise<FakeService> {
+export async function startFakeService(port: number = E2E_PORT): Promise<FakeService> {
   const requests: RecordedRequest[] = [];
   const server: Server = createServer((req, res) => {
     requests.push({ method: req.method ?? '', url: req.url ?? '', headers: req.headers });
@@ -27,7 +27,13 @@ export async function startFakeService(port: number = FAKE_PORT): Promise<FakeSe
     res.end('{}');
   });
   await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      reject(
+        err.code === 'EADDRINUSE'
+          ? new Error(`Port ${port} is already in use: another end-to-end run is going, or a stale process was left behind.`)
+          : err,
+      );
+    });
     server.listen(port, '127.0.0.1', resolve);
   });
   return {

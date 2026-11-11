@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "wxt build",
-    "build:e2e": "WXT_AIRLOCK_PORT=4699 wxt build",
+    "build:e2e": "AIRLOCK_E2E=1 wxt build",
     "dev": "wxt",
     "typecheck": "wxt prepare && tsc --noEmit"
   },
