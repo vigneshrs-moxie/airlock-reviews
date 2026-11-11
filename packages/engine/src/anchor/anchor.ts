@@ -15,28 +15,35 @@ function findRuns(hay: string[], needle: string[]): number[] {
   return starts;
 }
 
+/** The quote's lines without whitespace, with blank lines at either end removed. */
+function quoteLinesOf(quote: string): string[] {
+  const lines = quote.split('\n').map(squash);
+  while (lines.length > 0 && lines[0] === '') lines.shift();
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
+/** Every place the whole quote occurs, in file order, ignoring whitespace. There is no fallback to part of the quote. */
+export function findQuote(text: string | null, quote: string): { startLine: number; endLine: number }[] {
+  const lines = quoteLinesOf(quote);
+  if (text === null || lines.length === 0) return [];
+  return findRuns(text.split('\n').map(squash), lines).map((s) => ({ startLine: s, endLine: s + lines.length - 1 }));
+}
+
 /**
  * Turn a quotation into line numbers in the head file. Whitespace is ignored. Prefers a match inside the
  * diff, then the one nearest `lineHint`. With `file` undefined any match is `outside-diff`. When the whole quote is
- * not found, the longest line of 12 or more characters is tried alone, unless `exact` is set.
+ * not found, the longest line of 12 or more characters is tried alone.
  */
-export function anchorQuote(
-  headText: string | null,
-  quote: string,
-  lineHint: number | null,
-  file: FileDiff | undefined,
-  { exact = false }: { exact?: boolean } = {},
-): Anchor {
+export function anchorQuote(headText: string | null, quote: string, lineHint: number | null, file: FileDiff | undefined): Anchor {
   if (headText === null) return NOT_FOUND;
-  const quoteLines = quote.split('\n').map(squash);
-  while (quoteLines.length > 0 && quoteLines[0] === '') quoteLines.shift();
-  while (quoteLines.length > 0 && quoteLines[quoteLines.length - 1] === '') quoteLines.pop();
+  const quoteLines = quoteLinesOf(quote);
   if (quoteLines.length === 0) return NOT_FOUND;
 
   const hay = headText.split('\n').map(squash);
   let span = quoteLines.length;
   let starts = findRuns(hay, quoteLines);
-  if (starts.length === 0 && !exact) {
+  if (starts.length === 0) {
     const longest = quoteLines.reduce((a, b) => (b.length > a.length ? b : a), '');
     if (longest.length < MIN_FALLBACK_CHARS) return NOT_FOUND;
     span = 1;

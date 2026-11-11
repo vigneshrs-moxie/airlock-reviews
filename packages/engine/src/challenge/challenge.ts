@@ -1,10 +1,10 @@
-import type { Anchor, Candidate, Dropped, Place, Severity, StageError, Tier } from '@airlock/shared';
+import type { Anchor, Candidate, Dropped, FileDiff, Place, Severity, StageError, Tier } from '@airlock/shared';
 import { SeveritySchema } from '@airlock/shared';
-import { isAbsolute, posix } from 'node:path';
+import { posix } from 'node:path';
 import { z } from 'zod';
 import { asMaterial, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner, AgentUsage } from '../agent/runner.js';
-import { anchorQuote } from '../anchor/anchor.js';
+import { findQuote } from '../anchor/anchor.js';
 import { budgetedDiff } from '../lenses/cohort-lens.js';
 import {
   cohortOutline, factsBlock, instructionsFor, learnedDocuments, prBlock, sendRequest, standaloneCohort, standardDocuments,
@@ -52,9 +52,13 @@ const isChallenged = (c: Item): boolean => c.severity === 'block' || c.severity 
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 const orNotGiven = (text: string): string => (text.trim() === '' ? '(not given)' : text);
 
-/** A path inside the repository: not empty, not absolute and with no `..` segment. */
-const isRepoRelative = (path: string): boolean =>
-  path.trim() !== '' && !isAbsolute(path) && !path.split(/[\\/]/).includes('..');
+/**
+ * A repository-relative path safe to read: no backslash, `%`, `:` or NUL, not starting with `/`, and no empty or `..`
+ * segment. Encoded and Windows-style paths are refused rather than decoded.
+ */
+const isSafePath = (path: string): boolean =>
+  path.trim() !== '' && !path.startsWith('/') && !/[\\%:\0]/.test(path)
+  && path.split('/').every((s) => s !== '' && s !== '..');
 
 /** `read` with each side and path asked for once; a read that fails counts as a missing file. */
 function readOnce(read: ReadFile): ReadFile {
@@ -136,37 +140,86 @@ const isWholeSentence = (quote: string): boolean =>
 /** Text that ends a sentence, with a full stop added when it has none. */
 const asSentence = (text: string): string => (/[.!?]["')\]]*$/.test(text) ? text : `${text}.`);
 
-const overlaps = (found: Anchor, own: Anchor): boolean =>
-  found.startLine !== null && own.startLine !== null
-  && found.startLine <= (own.endLine ?? own.startLine) && own.startLine <= (found.endLine ?? found.startLine);
+type Lines = { startLine: number; endLine: number };
+const overlaps = (found: Lines, own: Anchor): boolean =>
+  own.startLine !== null && found.startLine <= (own.endLine ?? own.startLine) && own.startLine <= found.endLine;
 
+/** A leading list marker such as `- `, `* ` or `1. `; it is not part of the sentence after it. */
+const LIST_MARKER = /^\s*(?:[-*+]|\d+[.)])\s+/;
+/** Whole sentences and list entries, each without whitespace. They end at a line break or at `.`, `!` or `?` before whitespace. */
+const sentencesOf = (text: string): string[] =>
+  text.split(/\r?\n/)
+    .flatMap((line) => line.replace(LIST_MARKER, '').split(/(?<=[.!?])\s+/))
+    .map(squash)
+    .filter((s) => s !== '');
+/** True when `needle` appears as consecutive items of `hay`. */
+const hasRun = (hay: string[], needle: string[]): boolean =>
+  needle.length > 0 && hay.some((_, i) => needle.every((n, k) => hay[i + k] === n));
+
+const isAddedLine = (file: FileDiff, line: number): boolean =>
+  file.hunks.some((h) => h.lines.some((l) => l.kind === 'add' && l.newNo === line));
+
+/** What a refutation is checked against: files on either side, the diff, and the standards the challenger was given. */
+interface Evidence {
+  read: ReadFile;
+  files: Map<string, FileDiff>;
+  documents: StandardDocument[];
+}
+type Refutation = NonNullable<ChallengeOutput['refutation']>;
 type Proof = { place: Place } | { place: null; ownCode: boolean };
 const NO_PROOF: Proof = { place: null, ownCode: false };
+const OWN_CODE: Proof = { place: null, ownCode: true };
+
+/** Grounds 1 and 3: code on the head, other than the finding's own lines, quoted in full. */
+async function proveOnHead(item: Item, ref: Refutation, { read }: Evidence): Promise<Proof> {
+  if (ref.where !== 'head' || !isSafePath(ref.path) || !hasSubstance(ref.quote)) return NO_PROOF;
+  const path = posix.normalize(ref.path);
+  const found = findQuote(await read('head', path), ref.quote);
+  if (found.length === 0) return NO_PROOF;
+  if (path === item.path && found.some((f) => overlaps(f, item.anchor))) return OWN_CODE;
+  return { place: { path, line: found[0]!.startLine, role: 'head', quote: ref.quote } };
+}
 
 /**
- * The place a drop's refutation proves, if it does. Documented intent must quote a whole sentence of the standards or
- * learned entries the challenger was given; every other ground must quote code, on the base side for a pre-existing
- * fault. The whole quote
- * must be found, it must have substance, and on the head it must not be the finding's own lines.
+ * Ground 2: the base version of the finding's own file (or of its old path, when renamed) holds the finding's own quote,
+ * and the finding's first line is not one this pull request added. The record cites the finding's quote on the base.
  */
-async function proveDrop(item: Item, answer: ChallengeOutput, read: ReadFile, documents: StandardDocument[]): Promise<Proof> {
+async function provePreExisting(item: Item, ref: Refutation, { read, files }: Evidence): Promise<Proof> {
+  if (ref.where !== 'base' || !isSafePath(ref.path)) return NO_PROOF;
+  const file = files.get(item.path);
+  const path = posix.normalize(ref.path);
+  const own = file?.status === 'renamed' && file.oldPath ? [item.path, file.oldPath] : [item.path];
+  const line = item.anchor.startLine;
+  if (!own.includes(path) || line === null || (file !== undefined && isAddedLine(file, line))) return NO_PROOF;
+  const found = findQuote(await read('base', path), item.quote);
+  if (found.length === 0) return NO_PROOF;
+  const nearest = found.reduce((a, b) => (Math.abs(b.startLine - line) < Math.abs(a.startLine - line) ? b : a));
+  return { place: { path, line: nearest.startLine, role: 'base', quote: item.quote } };
+}
+
+/** Ground 4: one or more whole consecutive sentences or entries of one standard or learned list the challenger was given. */
+function proveIntent(ref: Refutation, { documents }: Evidence): Proof {
+  if (ref.where !== 'standard' || !isWholeSentence(ref.quote)) return NO_PROOF;
+  const quoted = sentencesOf(ref.quote);
+  const doc = documents.find((d) => hasRun(sentencesOf(d.text), quoted));
+  return doc ? { place: { path: doc.name, line: null, role: 'standard', quote: ref.quote } } : NO_PROOF;
+}
+
+/** The place a drop's refutation proves, if it does; each ground is tied to the side and place that can prove it. */
+async function proveDrop(item: Item, answer: ChallengeOutput, evidence: Evidence): Promise<Proof> {
   const ref = answer.refutation;
-  if (ref === null || !hasSubstance(ref.quote)) return NO_PROOF;
-  if (answer.ground === 'documented-intent') {
-    if (ref.where !== 'standard' || !isWholeSentence(ref.quote)) return NO_PROOF;
-    const needle = squash(ref.quote);
-    const doc = documents.find((d) => squash(d.text).includes(needle));
-    return doc ? { place: { path: doc.name, line: null, role: 'standard', quote: ref.quote } } : NO_PROOF;
+  if (ref === null) return NO_PROOF;
+  switch (answer.ground) {
+    case 'unreachable':
+    case 'guarded-elsewhere':
+      return proveOnHead(item, ref, evidence);
+    case 'pre-existing':
+      return provePreExisting(item, ref, evidence);
+    case 'documented-intent':
+      return proveIntent(ref, evidence);
+    default:
+      return NO_PROOF;
   }
-  if (ref.where === 'standard' || (answer.ground === 'pre-existing' && ref.where !== 'base') || !isRepoRelative(ref.path)) {
-    return NO_PROOF;
-  }
-  const found = anchorQuote(await read(ref.where, ref.path), ref.quote, null, undefined, { exact: true });
-  if (found.status === 'not-found') return NO_PROOF;
-  if (ref.where === 'head' && posix.normalize(ref.path) === posix.normalize(item.path) && overlaps(found, item.anchor)) {
-    return { place: null, ownCode: true };
-  }
-  return { place: { path: ref.path, line: found.startLine, role: ref.where, quote: ref.quote } };
 }
 
 const lowered = (current: Severity, proposed: Severity | null): Severity =>
@@ -176,13 +229,13 @@ const lowered = (current: Severity, proposed: Severity | null): Severity =>
  * Applies the answer. A drop is honoured only on grounds 1 to 4 with a proved refutation; a drop on the ground
  * `smaller` is a downgrade. A downgrade only lowers, and an ask becomes ask.
  */
-async function applyAnswer(item: Item, answer: ChallengeOutput, read: ReadFile, documents: StandardDocument[]): Promise<Outcome> {
+async function applyAnswer(item: Item, answer: ChallengeOutput, evidence: Evidence): Promise<Outcome> {
   const checked = answer.checked.trim() === '' ? NOTHING_SAID : answer.checked.trim();
   const downgraded: Outcome = { kept: { ...item, severity: lowered(item.severity, answer.newSeverity), checked } };
   switch (answer.outcome) {
     case 'drop': {
       if (answer.ground === 'smaller') return downgraded;
-      const proof = answer.ground === 'none' ? NO_PROOF : await proveDrop(item, answer, read, documents);
+      const proof = await proveDrop(item, answer, evidence);
       if (proof.place === null) {
         // On the finding's own lines the challenger reads the code differently; the reader should see its argument.
         const explanation = answer.explanation.trim();
@@ -222,9 +275,12 @@ export async function challenge(
   }
 
   const instructions = instructionsFor(await loadTemplate('challenge'), ctx.packs, null);
-  const documents = [...standardDocuments(ctx.packs), ...learnedDocuments(ctx.packs)];
+  const evidence: Evidence = {
+    read: readOnce(read),
+    files: new Map(ctx.files.map((f) => [f.path, f])),
+    documents: [...standardDocuments(ctx.packs), ...learnedDocuments(ctx.packs)],
+  };
   const tier = tierOf(ctx.tiers);
-  const readFile = readOnce(read);
   type ItemResult = Outcome & { usage?: AgentUsage; error?: StageError };
   const failed = (item: Item, message: string, usage: AgentUsage | undefined): ItemResult => ({
     kept: { ...item, checked: DID_NOT_COMPLETE }, ...(usage ? { usage } : {}),
@@ -246,7 +302,7 @@ export async function challenge(
       });
       usage = result.usage;
       if (!result.ok) return failed(item, result.error, usage);
-      return { ...(await applyAnswer(item, result.output, readFile, documents)), usage };
+      return { ...(await applyAnswer(item, result.output, evidence)), usage };
     } catch (err) {
       return failed(item, err instanceof Error ? err.message : String(err), usage);
     }

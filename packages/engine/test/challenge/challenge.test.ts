@@ -26,9 +26,26 @@ const answer = (over: Record<string, unknown> = {}): Record<string, unknown> => 
 const BASE_PAUSE = [
   'export function pause(plan) {', '  // already charged before this change', '  if (plan.active) charge(plan);', '}',
   'function noop() {', '  return;', '}',
+  'function guard(plan) {', '  if (plan.paused) return false;', '}',
 ].join('\n');
 const HEAD_PAUSE = ['export function pause(plan) {', '  if (plan.active) charge(plan);', '}'].join('\n');
-const HEAD_CHARGE = ['import { pause } from "./pause";', '', 'export function nightly(plans) {', '  for (const p of plans.filter((x) => !x.paused)) charge(p);', '}'].join('\n');
+const HEAD_CHARGE = [
+  'import { pause } from "./pause";', '', 'export function nightly(plans) {', '  for (const p of plans.filter((x) => !x.paused)) charge(p);', '}',
+  'function noop() {', '  return;', '}',
+].join('\n');
+
+/** src/pause.ts with line 2 (the finding's line) unchanged and line 3 added, so the finding can be pre-existing. */
+const PAUSE_LINE_2_UNCHANGED = diff('src/pause.ts', 0, {
+  hunks: [{
+    oldStart: 3, oldLines: 1, newStart: 2, newLines: 2, header: '@@ -3,1 +2,2 @@',
+    lines: [
+      { kind: 'ctx', oldNo: 3, newNo: 2, text: '  if (plan.active) charge(plan);' },
+      { kind: 'add', oldNo: null, newNo: 3, text: '  log(plan);' },
+    ],
+  }],
+});
+const UNCHANGED_FILES = [PAUSE_LINE_2_UNCHANGED, diff('src/charge.ts')];
+const unchangedCtx = () => ctx({ files: UNCHANGED_FILES });
 
 /** An in-memory `read` that records every call. */
 function memoryRead(files: Record<string, string> = { 'base:src/pause.ts': BASE_PAUSE, 'head:src/charge.ts': HEAD_CHARGE }) {
@@ -66,7 +83,7 @@ describe('challenge', () => {
     }));
     const { read } = memoryRead();
     const { anchor: _anchor, ...candidate } = item('c1', 'fix');
-    const r = await challenge(runner, ctx(), [item('c1', 'fix')], read);
+    const r = await challenge(runner, unchangedCtx(), [item('c1', 'fix')], read);
     expect(r.kept).toEqual([]);
     expect(r.dropped).toEqual([{
       candidate, stage: 'challenge', reason: 'pre-existing: The base branch charges active plans the same way.',
@@ -102,8 +119,8 @@ describe('challenge', () => {
 
   it('keeps a candidate when the refutation names a file that does not exist on that side', async () => {
     const runner = createFakeRunner(() => answer({
-      outcome: 'drop', ground: 'pre-existing', explanation: 'Already there.',
-      refutation: { path: 'src/charge.ts', quote: 'for (const p of plans.filter((x) => !x.paused)) charge(p);', where: 'base' },
+      outcome: 'drop', ground: 'guarded-elsewhere', explanation: 'Guarded.',
+      refutation: { path: 'src/missing.ts', quote: 'for (const p of plans.filter((x) => !x.paused)) charge(p);', where: 'head' },
     }));
     const { read } = memoryRead();
     const r = await challenge(runner, ctx(), [item('c1', 'fix')], read);
@@ -121,10 +138,13 @@ describe('challenge', () => {
     expect(calls).toEqual([]);
   });
 
-  it.each(['/etc/passwd', '../outside/pause.ts', 'src/../../pause.ts', '  '])('does not honour a drop whose refutation path is %j', async (path) => {
+  it.each([
+    '/etc/passwd', '../outside/pause.ts', 'src/../../pause.ts', '  ', '', '%2e%2e/x.ts', 'C:\\x\\y.ts', 'src\\pause.ts',
+    'src/a:b.ts', 'src/\u0000x.ts', 'src//pause.ts', 'src/',
+  ])('does not honour a drop whose refutation path is %j, and never reads it', async (path) => {
     const runner = createFakeRunner(() => answer({
-      outcome: 'drop', ground: 'pre-existing', explanation: 'Already there.',
-      refutation: { path, quote: 'if (plan.active) charge(plan);', where: 'base' },
+      outcome: 'drop', ground: 'guarded-elsewhere', explanation: 'Guarded.',
+      refutation: { path, quote: 'if (plan.active) charge(plan);', where: 'head' },
     }));
     const { read, calls } = memoryRead(new Proxy({}, { get: () => BASE_PAUSE }) as Record<string, string>);
     const r = await challenge(runner, ctx(), [item('c1', 'fix')], read);
@@ -180,7 +200,7 @@ describe('challenge', () => {
       })
       : answer()));
     const { read } = memoryRead();
-    const r = await challenge(runner, ctx(), [item('c1', 'note'), item('c2', 'fix'), item('c3', 'block'), item('c4', 'ask'), item('c5', 'fix')], read);
+    const r = await challenge(runner, unchangedCtx(), [item('c1', 'note'), item('c2', 'fix'), item('c3', 'block'), item('c4', 'ask'), item('c5', 'fix')], read);
     expect(r.kept.map((k) => k.id)).toEqual(['c1', 'c3', 'c4', 'c5']);
     expect(r.dropped.map((d) => d.candidate.id)).toEqual(['c2']);
   });
@@ -277,7 +297,7 @@ describe('challenge', () => {
       refutation: { ...refute, where: idOf(req) === 'c3' ? 'head' : 'base' },
     }));
     const { read, calls } = memoryRead();
-    const r = await challenge(runner, ctx(), [item('c1', 'fix'), item('c2', 'block'), item('c3', 'fix')], read);
+    const r = await challenge(runner, unchangedCtx(), [item('c1', 'fix'), item('c2', 'block'), item('c3', 'fix')], read);
     expect(calls.sort()).toEqual(['base:src/pause.ts', 'head:src/pause.ts']);
     expect(r.dropped.map((d) => d.candidate.id)).toEqual(['c1', 'c2']);
   });
@@ -312,11 +332,76 @@ describe('challenge', () => {
     const GUARD = 'for (const p of plans.filter((x) => !x.paused)) charge(p);';
     const drop = (ground: string, refutation: Record<string, unknown> | null, over: Record<string, unknown> = {}) =>
       answer({ outcome: 'drop', ground, explanation: 'EXPLANATION_MARKER the code shows it.', refutation, ...over });
-    const run = async (reply: Record<string, unknown>, over: Partial<Parameters<typeof ctx>[0]> = {}, severity: Severity = 'fix') => {
-      const { read, calls } = memoryRead({ 'base:src/pause.ts': BASE_PAUSE, 'head:src/charge.ts': HEAD_CHARGE, 'head:src/pause.ts': HEAD_PAUSE });
-      const r = await challenge(createFakeRunner(() => reply), ctx(over), [item('c1', severity)], read);
+    const FILES: Record<string, string> = {
+      'base:src/pause.ts': BASE_PAUSE, 'head:src/charge.ts': HEAD_CHARGE, 'head:src/pause.ts': HEAD_PAUSE,
+      'base:src/util/strings.ts': 'export const trimAll = (s) => s.trim();', 'base:src/old-pause.ts': BASE_PAUSE,
+    };
+    const run = async (
+      reply: Record<string, unknown>,
+      over: Partial<Parameters<typeof ctx>[0]> = {},
+      severity: Severity = 'fix',
+      opts: { item?: Partial<Candidate & { anchor: Anchor }>; files?: Record<string, string> } = {},
+    ) => {
+      const { read, calls } = memoryRead({ ...FILES, ...opts.files });
+      const r = await challenge(createFakeRunner(() => reply), ctx(over), [item('c1', severity, opts.item)], read);
       return { r, calls };
     };
+    const OWN = 'if (plan.active) charge(plan);';
+
+    it('does not take base code as proof that the head is guarded', async () => {
+      const { r } = await run(drop('guarded-elsewhere', { path: 'src/pause.ts', quote: 'if (plan.paused) return false;', where: 'base' }));
+      expect(r.dropped).toEqual([]);
+      expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+    });
+
+    it('does not take the finding\'s own line on the base as proof it is unreachable', async () => {
+      const { r } = await run(drop('unreachable', { path: 'src/pause.ts', quote: OWN, where: 'base' }));
+      expect(r.dropped).toEqual([]);
+      expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+    });
+
+    it('treats the finding\'s own code as its own when any copy of the quote overlaps it', async () => {
+      const twice = ['function a(plan) {', `  ${OWN}`, '}', 'export function pause(plan) {', `  ${OWN}`, '}'].join('\n');
+      const { r } = await run(drop('guarded-elsewhere', { path: 'src/pause.ts', quote: OWN, where: 'head' }), {}, 'fix', {
+        item: { anchor: { status: 'in-diff', startLine: 5, endLine: 5 }, lineHint: 5 }, files: { 'head:src/pause.ts': twice },
+      });
+      expect(r.dropped).toEqual([]);
+      expect(r.kept[0]!.checked).toContain('EXPLANATION_MARKER');
+      expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+    });
+
+    describe('pre-existing', () => {
+      const ALREADY = { path: 'src/pause.ts', quote: '// already charged before this change', where: 'base' };
+
+      it('does not take a quote from another base file as proof', async () => {
+        const { r } = await run(drop('pre-existing', { path: 'src/util/strings.ts', quote: 'export const trimAll = (s) => s.trim();', where: 'base' }), { files: UNCHANGED_FILES });
+        expect(r.dropped).toEqual([]);
+        expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+      });
+
+      it('records the finding\'s own quote where it is found in the base version of its file', async () => {
+        const { r } = await run(drop('pre-existing', ALREADY), { files: UNCHANGED_FILES });
+        expect(r.kept).toEqual([]);
+        expect(r.dropped[0]!.refutation).toEqual({ path: 'src/pause.ts', line: 3, role: 'base', quote: OWN });
+      });
+
+      it('does not count a line this pull request added as pre-existing', async () => {
+        const { r } = await run(drop('pre-existing', ALREADY));
+        expect(r.dropped).toEqual([]);
+        expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+      });
+
+      it('keeps the finding when its own quote is not in the base file', async () => {
+        const { r } = await run(drop('pre-existing', ALREADY), { files: UNCHANGED_FILES }, 'fix', { files: { 'base:src/pause.ts': 'export function pause(plan) {\n  // already charged before this change\n}' } });
+        expect(r.dropped).toEqual([]);
+      });
+
+      it('matches a renamed file by its old path', async () => {
+        const renamed = { ...PAUSE_LINE_2_UNCHANGED, status: 'renamed' as const, oldPath: 'src/old-pause.ts' };
+        const { r } = await run(drop('pre-existing', { ...ALREADY, path: 'src/old-pause.ts' }), { files: [renamed] });
+        expect(r.dropped[0]!.refutation).toEqual({ path: 'src/old-pause.ts', line: 3, role: 'base', quote: OWN });
+      });
+    });
 
     it('does not confirm a quote with one real line and one invented line', async () => {
       const { r } = await run(drop('guarded-elsewhere', { path: 'src/charge.ts', quote: `if (plan.paused) return;\n${GUARD}`, where: 'head' }));
@@ -354,7 +439,7 @@ describe('challenge', () => {
     });
 
     it.each(['}', 'return;'])('does not confirm the trivial quote %j', async (quote) => {
-      const { r } = await run(drop('pre-existing', { path: 'src/pause.ts', quote, where: 'base' }));
+      const { r } = await run(drop('guarded-elsewhere', { path: 'src/charge.ts', quote, where: 'head' }));
       expect(r.dropped).toEqual([]);
       expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
     });
@@ -368,14 +453,42 @@ describe('challenge', () => {
 
     describe('documented intent', () => {
       const SENTENCE = 'Offices may share a single plan when the account owner agrees in writing.';
+      const MID_LINE = 'Members keep their original renewal date during any pause.';
       const packs = [pack('core', [lens('boundary')], {
         standards: [{
           name: 'calibration.md',
-          text: `Pauses may run 90 days.\n${SENTENCE}\nAlways use chargeIdempotencyKeyForEveryNightlyBillingRun.`,
+          text: [
+            `Pauses may run 90 days. ${MID_LINE}`,
+            SENTENCE,
+            'Always use chargeIdempotencyKeyForEveryNightlyBillingRun.',
+            '1. It is unsafe to skip the idempotency key on nightly billing runs.',
+            'Offices may never share a plan across two regions without written approval.',
+          ].join('\n'),
           dated: true,
         }],
         learned: [{ date: '2026-11-01', repo: 'o/r', kind: 'intended', text: 'A paused plan keeps its original renewal date when it resumes.' }],
       })];
+      const intent = (quote: string) => drop('documented-intent', { path: 'x', quote, where: 'standard' });
+
+      it.each([
+        'safe to skip the idempotency key on nightly billing runs.',
+        'share a plan across two regions without written approval.',
+      ])('does not take the fragment %j, which drops a negation, as proof', async (quote) => {
+        const { r } = await run(intent(quote), { packs });
+        expect(r.dropped).toEqual([]);
+        expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+      });
+
+      it.each([
+        ['a sentence that starts mid-line', MID_LINE],
+        ['a sentence after a numbered list marker', 'It is unsafe to skip the idempotency key on nightly billing runs.'],
+        ['two whole consecutive sentences across a line break', `${MID_LINE}\n${SENTENCE}`],
+        ['a learned entry copied with its list marker', '- A paused plan keeps its original renewal date when it resumes.'],
+      ])('drops on %s', async (_what, quote) => {
+        const { r } = await run(intent(quote), { packs });
+        expect(r.kept).toEqual([]);
+        expect(r.dropped).toHaveLength(1);
+      });
 
       it('drops on the whole sentence that states the intent', async () => {
         const { r } = await run(drop('documented-intent', { path: 'x', quote: SENTENCE, where: 'standard' }), { packs });
@@ -448,7 +561,7 @@ describe('challenge', () => {
         refutation: { path: 'src/pause.ts', quote: 'if (plan.active) charge(plan);', where: 'base' },
       }));
       const read = async (): Promise<string | null> => { throw new Error('disk gone'); };
-      const r = await challenge(runner, ctx(), [item('c1', 'fix')], read);
+      const r = await challenge(runner, unchangedCtx(), [item('c1', 'fix')], read);
       expect(r.dropped).toEqual([]);
       expect(r.errors).toEqual([]);
       expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
@@ -480,7 +593,7 @@ describe('challenge', () => {
         refutation: { path: 'src/pause.ts', quote: 'if (plan.active) charge(plan);', where: 'base' },
       })));
       const { read } = memoryRead();
-      const r = await challenge(runner, ctx(), [item('c1', 'fix'), item('c2', 'fix'), item('c3', 'note'), item('c4', 'block')], read);
+      const r = await challenge(runner, unchangedCtx(), [item('c1', 'fix'), item('c2', 'fix'), item('c3', 'note'), item('c4', 'block')], read);
       expect(r.kept.map((k) => [k.id, k.checked])).toEqual([['c1', 'challenge did not complete'], ['c3', 'not challenged']]);
       expect(r.dropped.map((d) => d.candidate.id)).toEqual(['c2', 'c4']);
       expect(r.errors).toHaveLength(1);

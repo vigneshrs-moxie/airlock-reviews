@@ -27,17 +27,17 @@ Open the finding's file and confirm the quoted code exists and does what the fin
 
 Work through these grounds in order and stop at the first that holds.
 
-1. `unreachable`: the code cannot be reached, or the situation cannot arise. Quote the code that makes the situation impossible or shows the claim false, such as a condition, a guard or a type. Do not quote the finding's own lines. If your only evidence is the finding's own lines read differently, the outcome is `keep` or `downgrade`, and you explain your reading in `checked`.
-2. `pre-existing`: the fault is already on the base branch, unchanged by this pull request. Open the same file in the extra directory and compare. Quote the base code that already does the same thing, with `where` set to `base`.
-3. `guarded-elsewhere`: it is guarded elsewhere, in a caller, a route, middleware or a database constraint. Find the guard and quote it.
-4. `documented-intent`: it is documented intent. The standards, the product facts or the earlier corrections given to you say the behaviour is meant. Quote the whole sentence from them that states the intent, not part of it, with `where` set to `standard`.
+1. `unreachable`: the code cannot be reached, or the situation cannot arise. Quote the code on the head that makes the situation impossible or shows the claim false, such as a condition, a guard or a type, with `where` set to `head`. Do not quote the finding's own lines. If your only evidence is the finding's own lines read differently, the outcome is `keep` or `downgrade`, and you explain your reading in `checked`.
+2. `pre-existing`: the fault is already on the base branch, unchanged by this pull request. It is pre-existing only when the same code is in the same file on the base branch, and nothing this pull request changed makes it newly reachable or newly harmful. If the pull request removed a guard, widened the set of callers or changed a default so the old code now causes the harm, it is this pull request's fault and the outcome is `keep`. Open the same file in the extra directory and compare. Quote the finding's code as it appears there, with `where` set to `base` and `path` set to that file.
+3. `guarded-elsewhere`: it is guarded elsewhere, in a caller, a route, middleware or a database constraint. Find the guard on the head and quote it, with `where` set to `head`. A guard that exists only on the base branch does not protect the pull request.
+4. `documented-intent`: it is documented intent. The standards, the product facts or the earlier corrections given to you say the behaviour is meant. Quote one or more whole sentences from them that state the intent, copied from the start of the first sentence to the end of the last, with `where` set to `standard`. Never quote part of a sentence: leaving out a word such as "not" or "never" changes what it says.
 5. `smaller`: it is real but smaller than rated.
 
 When none of them holds, the ground is `none`.
 
 ## Deciding the outcome
 
-Remove a finding only when you can point to what refutes it. For grounds 1 to 3, quote the code exactly as it appears in the file, one to three lines copied character for character, and say which side it is on: `head` for the pull request, `base` for the base branch. For ground 4, quote the whole sentence that states the intent, exactly as it appears in the standards, product facts or earlier corrections. A quote must be at least one full line of real code or one full sentence, never a lone brace or keyword. Every quote is checked, and a quote that cannot be found in full keeps the finding.
+Remove a finding only when you can point to what refutes it. For grounds 1 to 3, quote the code exactly as it appears in the file, one to three lines copied character for character, and say which side it is on: `head` for the pull request (grounds 1 and 3), `base` for the base branch (ground 2). Give `path` relative to the repository root, written plainly with forward slashes. For ground 4, quote whole sentences that state the intent, exactly as they appear in the standards, product facts or earlier corrections. A quote must be at least one full line of real code or one full sentence, never a lone brace or keyword. Every quote is checked, and a quote that cannot be found in full keeps the finding.
 
 Doubt, unfamiliarity or a sense that it is probably fine are not reasons to remove a finding. If you could not find what refutes it, keep it.
 
