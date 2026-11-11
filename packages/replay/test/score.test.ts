@@ -1,0 +1,182 @@
+import { describe, expect, it } from 'vitest';
+import { scoreCase, summarise } from '../src/index.js';
+import type { CaseScore, Match } from '../src/index.js';
+import { doc, dropped, finding, problem, raw, replayCase } from './fixtures.js';
+
+const match = (knownId: string, where: Match['where'], itemId: string | null, partial = false): Match =>
+  ({ knownId, where, itemId, partial, reason: 'r' });
+
+const ZERO_LOST = { lenses: 0, schema: 0, anchor: 0, challenge: 0, select: 0 };
+
+describe('scoreCase', () => {
+  it('counts a known problem matched in the top list as inTop, shown and raised', () => {
+    const s = scoreCase(replayCase(), doc({ findings: [finding('f1', 'top')] }), [match('K1', 'top', 'f1')]);
+    expect(s).toMatchObject({ caseId: 'pr1', kind: 'positive', known: 1, knownDefects: 1, inTop: 1, shown: 1, raised: 1,
+      defectsInTop: 1, defectsShown: 1, partialInTop: 0, asQuestion: 0, lostAt: ZERO_LOST });
+  });
+
+  it('counts an also-found match as shown and raised but not in top', () => {
+    const s = scoreCase(replayCase(), doc({ findings: [finding('f2', 'also')] }), [match('K1', 'also', 'f2')]);
+    expect(s).toMatchObject({ inTop: 0, shown: 1, raised: 1, lostAt: ZERO_LOST });
+  });
+
+  it('a problem matched only by a candidate dropped at challenge counts under lostAt.challenge', () => {
+    const s = scoreCase(replayCase(), doc({ dropped: [dropped('d1', 'challenge')] }), [match('K1', 'dropped', 'd1')]);
+    expect(s).toMatchObject({ inTop: 0, shown: 0, raised: 1, lostAt: { ...ZERO_LOST, challenge: 1 } });
+  });
+
+  it('a dropped match counts under its own stage, including schema', () => {
+    const c = replayCase({ known: ['A', 'B', 'C'].map((id) => problem({ id })) });
+    const d = doc({ dropped: [dropped('d1', 'schema'), dropped('d2', 'anchor'), dropped('d3', 'select')] });
+    const s = scoreCase(c, d, [match('A', 'dropped', 'd1'), match('B', 'dropped', 'd2'), match('C', 'dropped', 'd3')]);
+    expect(s.lostAt).toEqual({ ...ZERO_LOST, schema: 1, anchor: 1, select: 1 });
+  });
+
+  it('a raw candidate match counts under lostAt.select', () => {
+    const s = scoreCase(replayCase(), doc({ candidates: [raw('c1')] }), [match('K1', 'candidate', 'c1')]);
+    expect(s).toMatchObject({ raised: 1, lostAt: { ...ZERO_LOST, select: 1 } });
+  });
+
+  it('a problem with no match counts under lostAt.lenses', () => {
+    const s = scoreCase(replayCase(), doc(), [match('K1', 'none', null)]);
+    expect(s).toMatchObject({ inTop: 0, shown: 0, raised: 0, lostAt: { ...ZERO_LOST, lenses: 1 } });
+  });
+
+  it('a problem with no match entry at all counts under lostAt.lenses', () => {
+    const s = scoreCase(replayCase(), doc(), []);
+    expect(s).toMatchObject({ raised: 0, lostAt: { ...ZERO_LOST, lenses: 1 } });
+  });
+
+  it('a question match counts in asQuestion and not in lostAt', () => {
+    const d = doc({ questions: [{ text: 'Why?', cohortId: null, source: { pack: 'core', lens: null, ruleId: null } }] });
+    const s = scoreCase(replayCase(), d, [match('K1', 'question', 'q1')]);
+    expect(s).toMatchObject({ raised: 1, shown: 0, asQuestion: 1, lostAt: ZERO_LOST });
+  });
+
+  it('counts partial top matches', () => {
+    const c = replayCase({ known: ['A', 'B', 'C'].map((id) => problem({ id })) });
+    const d = doc({ findings: [finding('f1', 'top'), finding('f2', 'also')] });
+    const s = scoreCase(c, d, [match('A', 'top', 'f1', true), match('B', 'top', 'f1'), match('C', 'also', 'f2', true)]);
+    expect(s.partialInTop).toBe(1);
+  });
+
+  it('counts defects and cross-file problems separately', () => {
+    const c = replayCase({ known: [
+      problem({ id: 'A', crossFile: true }),
+      problem({ id: 'B', defect: false }),
+      problem({ id: 'C', crossFile: true }),
+      problem({ id: 'D' }),
+    ] });
+    const d = doc({ findings: [finding('f1', 'top'), finding('f2', 'also')] });
+    const s = scoreCase(c, d, [match('A', 'top', 'f1'), match('B', 'top', 'f1'), match('C', 'also', 'f2'), match('D', 'none', null)]);
+    expect(s).toMatchObject({ known: 4, knownDefects: 3, inTop: 2, defectsInTop: 1, shown: 3, defectsShown: 2, crossFileKnown: 2, crossFileInTop: 1 });
+  });
+
+  it('counts shown findings, block or fix among them, time, tokens and the verdict', () => {
+    const d = doc({
+      findings: [finding('f1', 'top', { severity: 'block' }), finding('f2', 'top', { severity: 'ask' }), finding('f3', 'also', { severity: 'fix' })],
+      verdict: { label: 'request-changes', sentence: 's', counts: { block: 1, fix: 1, ask: 1, note: 0 } },
+      timings: [
+        { stage: 'map', ms: 1000, agentRuns: 1, inputTokens: 100, outputTokens: 10, costUsd: null },
+        { stage: 'lenses', ms: 2500, agentRuns: 4, inputTokens: 900, outputTokens: 90, costUsd: 0.5 },
+      ],
+    });
+    const s = scoreCase(replayCase({ kind: 'negative', known: [] }), d, []);
+    expect(s).toMatchObject({ kind: 'negative', known: 0, findingsShown: 3, blockOrFixShown: 2, ms: 3500,
+      inputTokens: 1000, outputTokens: 100, agentRuns: 5, verdict: 'request-changes' });
+  });
+});
+
+function score(over: Partial<CaseScore>): CaseScore {
+  return {
+    caseId: 'pr1', kind: 'positive', known: 0, knownDefects: 0, inTop: 0, shown: 0, raised: 0, defectsInTop: 0,
+    defectsShown: 0, partialInTop: 0, asQuestion: 0, lostAt: { ...ZERO_LOST }, crossFileKnown: 0, crossFileInTop: 0,
+    findingsShown: 0, blockOrFixShown: 0, ms: 0, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: 'approve',
+    ...over,
+  };
+}
+
+describe('summarise', () => {
+  it('recallTop is 13/26 when half are in the top list, and halfInTop is true', () => {
+    const scores = [
+      score({ caseId: 'a', known: 10, inTop: 5, shown: 7 }),
+      score({ caseId: 'b', known: 16, inTop: 8, shown: 9 }),
+    ];
+    const cases = [replayCase({ id: 'a' }), replayCase({ id: 'b' })];
+    const s = summarise('run-1', 'claude-opus-5-5', 'standard', scores, cases);
+    expect(s).toMatchObject({ runId: 'run-1', model: 'claude-opus-5-5', depth: 'standard', knownTotal: 26, inTopTotal: 13 });
+    expect(s.recallTop).toBe(0.5);
+    expect(s.recallShown).toBeCloseTo(16 / 26);
+    expect(s.meets.halfInTop).toBe(true);
+    expect(s.cases).toEqual(scores);
+  });
+
+  it('halfInTop is false just under half', () => {
+    const s = summarise('r', 'm', 'standard', [score({ known: 26, inTop: 12 })], [replayCase()]);
+    expect(s.meets.halfInTop).toBe(false);
+  });
+
+  it('recalls count positive cases only', () => {
+    const scores = [
+      score({ caseId: 'p', known: 4, inTop: 2 }),
+      score({ caseId: 's', kind: 'secondary', known: 4, inTop: 0 }),
+    ];
+    const s = summarise('r', 'm', 'standard', scores, [replayCase({ id: 'p' }), replayCase({ id: 's', kind: 'secondary' })]);
+    expect(s).toMatchObject({ knownTotal: 4, inTopTotal: 2, recallTop: 0.5 });
+  });
+
+  it('defect-only recall leaves out a question problem', () => {
+    // 4 known, one of them a pure question that was missed; the 3 defects are all in the top list.
+    const s = summarise('r', 'm', 'standard', [score({ known: 4, knownDefects: 3, inTop: 3, defectsInTop: 3 })], [replayCase()]);
+    expect(s.recallTop).toBe(0.75);
+    expect(s.recallTopDefects).toBe(1);
+  });
+
+  it('cross-file recall is computed over cross-file problems only', () => {
+    const scores = [
+      score({ caseId: 'a', known: 10, inTop: 9, crossFileKnown: 4, crossFileInTop: 1 }),
+      score({ caseId: 'b', known: 10, inTop: 1, crossFileKnown: 0, crossFileInTop: 0 }),
+    ];
+    const s = summarise('r', 'm', 'standard', scores, [replayCase({ id: 'a' }), replayCase({ id: 'b' })]);
+    expect(s.crossFileRecallTop).toBe(0.25);
+  });
+
+  it('recalls are 0 with no positive cases', () => {
+    const s = summarise('r', 'm', 'quick', [score({ caseId: 'n', kind: 'negative' })], [replayCase({ id: 'n', kind: 'negative', known: [] })]);
+    expect(s).toMatchObject({ knownTotal: 0, recallTop: 0, recallShown: 0, recallTopDefects: 0, crossFileRecallTop: 0 });
+    expect(s.meets.halfInTop).toBe(false);
+  });
+
+  it('a block on a negative case makes cleanControls need a human look', () => {
+    const scores = [
+      score({ caseId: 'n1', kind: 'negative', blockOrFixShown: 1 }),
+      score({ caseId: 'n2', kind: 'negative', blockOrFixShown: 0, findingsShown: 2 }),
+      score({ caseId: 'p', blockOrFixShown: 3 }),
+    ];
+    const cases = [replayCase({ id: 'n1', kind: 'negative' }), replayCase({ id: 'n2', kind: 'negative' }), replayCase({ id: 'p' })];
+    const s = summarise('r', 'm', 'standard', scores, cases);
+    expect(s.negativesWithBlockOrFix).toBe(1);
+    expect(s.meets.cleanControls).toBe('needs a human look');
+  });
+
+  it('cleanControls is true when no negative case shows a block or fix', () => {
+    const s = summarise('r', 'm', 'standard', [score({ caseId: 'n', kind: 'negative', findingsShown: 2 })], [replayCase({ id: 'n', kind: 'negative' })]);
+    expect(s.meets.cleanControls).toBe(true);
+  });
+
+  it('lists incomplete cases and totals time and tokens over every case', () => {
+    const scores = [
+      score({ caseId: 'a', verdict: 'incomplete', ms: 100, inputTokens: 10, outputTokens: 1, agentRuns: 2 }),
+      score({ caseId: 'b', kind: 'negative', ms: 50, inputTokens: 5, outputTokens: 2, agentRuns: 1 }),
+      score({ caseId: 'c', kind: 'negative', verdict: 'incomplete' }),
+    ];
+    const cases = [replayCase({ id: 'a' }), replayCase({ id: 'b', kind: 'negative' }), replayCase({ id: 'c', kind: 'negative' })];
+    const s = summarise('r', 'm', 'standard', scores, cases);
+    expect(s.incompleteCases).toEqual(['a', 'c']);
+    expect(s.totals).toEqual({ ms: 150, inputTokens: 15, outputTokens: 3, agentRuns: 3 });
+  });
+
+  it('takes the kind of each case from the dataset and refuses a score with no case', () => {
+    expect(() => summarise('r', 'm', 'standard', [score({ caseId: 'ghost' })], [replayCase()])).toThrow(/ghost/);
+  });
+});
