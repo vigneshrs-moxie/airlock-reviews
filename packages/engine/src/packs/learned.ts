@@ -28,14 +28,19 @@ export function parseLearned(text: string, kind: LearnedEntry['kind'], file: str
 }
 
 export async function appendLearned(packDir: string, e: LearnedEntry): Promise<void> {
-  await mkdir(join(packDir, 'learned'), { recursive: true });
   const file = learnedPath(packDir, e.kind);
+  const line = formatLine(e);
+  const [parsed] = parseLearned(line, e.kind, `learned entry for ${file}`);
+  if (!parsed || parsed.date !== e.date || parsed.repo !== e.repo) {
+    throw new Error(`Invalid learned entry for ${file}: date must be YYYY-MM-DD, repo and text non-empty, repo free of line breaks and "${SEP.trim()}"`);
+  }
+  await mkdir(join(packDir, 'learned'), { recursive: true });
   let existing = '';
   try { existing = await readFile(file, 'utf8'); } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
   const lead = existing !== '' && !existing.endsWith('\n') ? '\n' : '';
-  await appendFile(file, `${lead}${formatLine(e)}\n`);
+  await appendFile(file, `${lead}${line}\n`);
 }
 
 export async function removeLearned(packDir: string, e: LearnedEntry): Promise<boolean> {
@@ -46,7 +51,7 @@ export async function removeLearned(packDir: string, e: LearnedEntry): Promise<b
     throw err;
   }
   const lines = text.split('\n');
-  const at = lines.indexOf(formatLine(e));
+  const at = lines.findIndex((l) => l.replace(/\r$/, '') === formatLine(e));
   if (at < 0) return false;
   lines.splice(at, 1);
   await writeFile(file, lines.join('\n'));

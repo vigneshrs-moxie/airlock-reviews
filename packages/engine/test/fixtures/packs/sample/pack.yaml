@@ -4,7 +4,7 @@ version: v3
 repos: [acme/web]
 appRoot: app
 stageRules:
-  - { base: main, stage: production }
+  - { base: main, stage: pr3 }
   - { default: true, stage: other }
 tiers:
   read: ["app/**"]

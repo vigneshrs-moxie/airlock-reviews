@@ -1,7 +1,8 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { SeveritySchema } from '@airlock/shared';
+import { SeveritySchema, StageSchema } from '@airlock/shared';
 import { parse } from 'yaml';
+import { z } from 'zod';
 import type { StageRule } from '../intake/pr.js';
 import { learnedFileName, parseLearned } from './learned.js';
 import type { CheckDef, LearnedEntry, LensDef, LinkRule, Pack, Rule } from './types.js';
@@ -34,6 +35,36 @@ function objList(o: Obj, key: string, file: string, required = false): Obj[] {
   }
   if (!Array.isArray(v) || v.some((x) => !isObj(x))) throw new Error(`${file}: "${key}" must be a list of entries`);
   return v as Obj[];
+}
+
+const text = z.string().min(1);
+const list = z.array(z.string());
+const CheckSchema = z.object({
+  id: text, kind: z.enum(['added-line-matches', 'file-pair', 'new-file-requires', 'file-touched']),
+  paths: list, pattern: z.string().optional(), exceptPaths: list.optional(),
+  requires: z.array(z.object({ path: text, pattern: z.string().optional() })).optional(), message: text,
+});
+const LinkRuleSchema = z.object({
+  id: text, from: text, capture: text, transform: z.enum(['none', 'camel', 'pascal']).default('none'),
+  searchIn: list, detail: text,
+});
+const SiblingSchema = z.object({ id: text, glob: text });
+const StageRuleSchema = z.object({ base: text.optional(), default: z.literal(true).optional(), stage: StageSchema })
+  .refine((r) => r.base !== undefined || r.default === true, { message: 'needs "base" or "default: true"' });
+const TiersSchema = z.object({ read: list.default([]), trust: list.default([]), ignore: list.default([]) });
+
+function section<T extends z.ZodType>(doc: Obj, key: string, schema: T, file: string, fallback: unknown): z.output<T> {
+  const parsed = schema.safeParse(doc[key] ?? fallback);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0]!;
+    throw new Error(`${file}: invalid "${key}" at ${[key, ...issue.path].join('.')}: ${issue.message}`);
+  }
+  return parsed.data;
+}
+
+function dated(s: Obj, file: string): boolean {
+  if (typeof s.dated !== 'boolean') throw new Error(`${file}: "dated" must be true or false (standard "${String(s.name)}")`);
+  return s.dated;
 }
 
 async function readText(path: string): Promise<string> {
@@ -104,7 +135,7 @@ export async function loadPack(dir: string): Promise<Pack> {
   const standards: Pack['standards'] = [];
   for (const s of objList(doc, 'standards', yamlPath)) {
     standards.push({
-      name: str(s, 'name', yamlPath), dated: s.dated === true,
+      name: str(s, 'name', yamlPath), dated: dated(s, yamlPath),
       text: await readText(join(root, str(s, 'file', yamlPath))),
     });
   }
@@ -131,7 +162,6 @@ export async function loadPack(dir: string): Promise<Pack> {
     learned.push(...parseLearned(text, kind, path));
   }
 
-  const tiers = isObj(doc.tiers) ? doc.tiers : {};
   const appRoot = doc.appRoot ?? null;
   if (appRoot !== null && typeof appRoot !== 'string') throw new Error(`${yamlPath}: "appRoot" must be text`);
   const version = doc.version;
@@ -140,14 +170,11 @@ export async function loadPack(dir: string): Promise<Pack> {
     id, title: str(doc, 'title', yamlPath),
     version: version === undefined || version === null ? 'local' : String(version),
     dir: root, repos: strList(doc, 'repos', yamlPath), appRoot,
-    stageRules: objList(doc, 'stageRules', yamlPath) as unknown as StageRule[],
-    tiers: {
-      read: strList(tiers, 'read', yamlPath), trust: strList(tiers, 'trust', yamlPath),
-      ignore: strList(tiers, 'ignore', yamlPath),
-    },
-    siblings: objList(doc, 'siblings', yamlPath).map((s) => ({ id: str(s, 'id', yamlPath), glob: str(s, 'glob', yamlPath) })),
-    linkRules: objList(doc, 'linkRules', yamlPath) as unknown as LinkRule[],
-    checks: objList(doc, 'checks', yamlPath) as unknown as CheckDef[],
+    stageRules: section(doc, 'stageRules', z.array(StageRuleSchema), yamlPath, []) as StageRule[],
+    tiers: section(doc, 'tiers', TiersSchema, yamlPath, {}),
+    siblings: section(doc, 'siblings', z.array(SiblingSchema), yamlPath, []),
+    linkRules: section(doc, 'linkRules', z.array(LinkRuleSchema), yamlPath, []) as LinkRule[],
+    checks: section(doc, 'checks', z.array(CheckSchema), yamlPath, []) as CheckDef[],
     standards, lenses, rules, learned,
   };
 }

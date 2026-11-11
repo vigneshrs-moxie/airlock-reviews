@@ -91,6 +91,40 @@ describe('loadPack', () => {
   });
 });
 
+describe('loadPack validation', () => {
+  async function withYaml(extra: string): Promise<string> {
+    const dir = await tmp();
+    await mkdir(join(dir, 'lenses'));
+    await writeFile(join(dir, 'pack.yaml'), `id: v\ntitle: V\nlenses: []\n${extra}`);
+    return dir;
+  }
+  const std = (dated: string) => `standards:\n  - { name: S, file: s.md${dated} }\n`;
+
+  it.each([['missing', ''], ['yes', ', dated: yes'], ['a string', ', dated: "true"']])(
+    'rejects a standard whose dated is %s', async (_n, dated) => {
+      const dir = await withYaml(std(dated));
+      await writeFile(join(dir, 's.md'), 'x');
+      await expect(loadPack(dir)).rejects.toThrow(/pack\.yaml.*"dated" must be true or false/);
+    });
+
+  it.each([
+    ['tiers', 'tiers: [a]\n'],
+    ['tiers', 'tiers: { read: "a" }\n'],
+    ['checks', 'checks:\n  - { id: c, kind: bogus, paths: [a], message: m }\n'],
+    ['linkRules', 'linkRules:\n  - { id: l, from: f, capture: c, searchIn: [a], detail: d, transform: upper }\n'],
+    ['siblings', 'siblings:\n  - { id: s }\n'],
+    ['stageRules', 'stageRules:\n  - { stage: pr1 }\n'],
+  ])('rejects a malformed %s section', async (section, extra) => {
+    const dir = await withYaml(extra);
+    await expect(loadPack(dir)).rejects.toThrow(new RegExp(`pack\\.yaml.*${section}`));
+  });
+
+  it('defaults a link rule transform to none', async () => {
+    const dir = await withYaml('linkRules:\n  - { id: l, from: f, capture: c, searchIn: [a], detail: d }\n');
+    expect((await loadPack(dir)).linkRules[0]!.transform).toBe('none');
+  });
+});
+
 describe('selectPacks', () => {
   const all = [stub('generic', []), stub('a', ['acme/web']), stub('b', ['acme/web', 'acme/api']), stub('c', ['other/x'])];
 
@@ -133,6 +167,15 @@ describe('applyHoldout', () => {
   });
 });
 
+describe('applyHoldout multi-line entries', () => {
+  it('drops continuation lines with the entry and keeps content after the blank line', () => {
+    const text = '# H\n2026-10-29 · Dropped\nstill dropped\n\nKept after blank\n2026-10-19 · Early\n';
+    const pack = { ...stub('p', []), standards: [{ name: 'S', text, dated: true }] };
+    const out = applyHoldout(pack, { pr: 1, reviewedAt: '2026-10-29' });
+    expect(out.standards[0]!.text).toBe('# H\n\nKept after blank\n2026-10-19 · Early\n');
+  });
+});
+
 describe('learned entries', () => {
   const entry = { date: '2026-11-02', repo: 'acme/web', kind: 'wrong' as const, text: 'line one\nline two' };
 
@@ -153,6 +196,29 @@ describe('learned entries', () => {
     const dir = await tmp();
     await appendLearned(dir, { ...entry, kind: 'intended', text: 'x' });
     expect(await readFile(join(dir, 'learned', 'product-knowledge.md'), 'utf8')).toBe('2026-11-02 · acme/web · x\n');
+  });
+
+  it.each([
+    ['empty text', { text: '  ' }],
+    ['a bad date', { date: '2026-1-2' }],
+    ['a newline in the repo', { repo: 'a\nb' }],
+    ['a separator in the repo', { repo: 'a · b' }],
+  ])('appendLearned rejects %s without touching the file', async (_n, bad) => {
+    const dir = await tmp();
+    await cp(sampleDir, dir, { recursive: true });
+    const file = join(dir, 'learned', 'wrong.md');
+    const before = await readFile(file, 'utf8');
+    await expect(appendLearned(dir, { ...entry, ...bad })).rejects.toThrow(/learned/i);
+    expect(await readFile(file, 'utf8')).toBe(before);
+  });
+
+  it('removeLearned finds a line in a CRLF file', async () => {
+    const dir = await tmp();
+    await mkdir(join(dir, 'learned'));
+    const file = join(dir, 'learned', 'wrong.md');
+    await writeFile(file, '2026-01-01 · r/r · a\r\n2026-01-02 · r/r · b\r\n');
+    expect(await removeLearned(dir, { date: '2026-01-01', repo: 'r/r', kind: 'wrong', text: 'a' })).toBe(true);
+    expect(await readFile(file, 'utf8')).toBe('2026-01-02 · r/r · b\r\n');
   });
 
   it('parseLearned skips comments and blanks', () => {
