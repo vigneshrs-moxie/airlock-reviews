@@ -301,7 +301,10 @@ function checkCases(cases: ReplayCase[]): void {
   }
 }
 
-/** The request for one case. Only the case's pull request, commits and hold-out: never its known problems, never packIds. */
+/**
+ * The request for one case. Only the case's pull request, commits, its title and description at review time and the
+ * hold-out: never its known problems, never packIds.
+ */
 function reviewRequest(c: ReplayCase, opts: ReplayOptions): ReviewRequest {
   return {
     repo: c.repo,
@@ -309,6 +312,7 @@ function reviewRequest(c: ReplayCase, opts: ReplayOptions): ReviewRequest {
     depth: opts.depth,
     models: { main: opts.model, challenger: opts.model, sweep: opts.model },
     explicit: { baseSha: c.baseSha, headSha: c.headSha },
+    prText: { title: c.titleAtReview, body: c.bodyAtReview },
     holdout: { pr: c.pr, reviewedAt: c.reviewedAt },
     packsDir: opts.packsDir,
     kitDir: opts.kitDir,

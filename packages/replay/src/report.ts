@@ -271,6 +271,7 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
   out.push('## How to read this', '');
   out.push(
     'When a pull request was replayed, the rules written from that pull request were withheld, so the review could not simply remember the answer. ' +
+      'Each pull request was reviewed with its title and description as they stood when the senior reviewer reviewed it, not as they read today. ' +
       "The team's rule sheet was written after these reviews and could not be withheld, so these numbers may be better than real use. " +
       'The true test is the next pull requests the senior reviewer comments on.',
   );

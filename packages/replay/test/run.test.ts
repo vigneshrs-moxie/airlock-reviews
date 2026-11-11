@@ -20,6 +20,7 @@ function cases(): ReplayCase[] {
   return [
     replayCase({
       id: 'pr1', pr: 1, reviewedAt: '2026-10-01T10:00:00Z', baseSha: '1'.repeat(40), headSha: '2'.repeat(40),
+      titleAtReview: 'Totals, first title', bodyAtReview: 'The description of pr1 at review time.',
       known: [
         problem({ id: 'K1', summary: 'Zebra counters overflow, so the invoice total wraps negative.', comment: 'aardvark: please clamp this' }),
         problem({ id: 'K2', summary: 'The quokka cache is never cleared, so stale prices show.', comment: 'what clears the quokka cache?' }),
@@ -103,11 +104,22 @@ describe('runReplay', () => {
         repo: c.repo, number: c.pr, depth: 'deep',
         models: { main: 'claude-fable-5-2', challenger: 'claude-fable-5-2', sweep: 'claude-fable-5-2' },
         explicit: { baseSha: c.baseSha, headSha: c.headSha },
+        prText: { title: c.titleAtReview, body: c.bodyAtReview },
         holdout: { pr: c.pr, reviewedAt: c.reviewedAt },
         packsDir: '/packs/here', kitDir: '/kit/here', kitSha: KIT_SHA,
       });
       expect('packIds' in req).toBe(false);
     });
+  });
+
+  it('every request carries the pull request\'s title and description as they stood at review time', async () => {
+    const review = fakeReview();
+    await runReplay(options(), deps(review));
+    expect(review.requests.find((r) => r.number === 1)!.prText).toEqual({ title: 'Totals, first title', body: 'The description of pr1 at review time.' });
+    for (const req of review.requests) {
+      const c = cases().find((x) => x.pr === req.number)!;
+      expect(req.prText).toEqual({ title: c.titleAtReview, body: c.bodyAtReview });
+    }
   });
 
   it('saves review.json and matches.json per case and summary.json, report.md and run.json for the run', async () => {

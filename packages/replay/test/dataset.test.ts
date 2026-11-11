@@ -1,17 +1,31 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { loadCases, pickCases, type KnownProblem, type ReplayCase } from '../src/index.js';
 
 const SHA = /^[0-9a-f]{40}$/;
 
-async function tempFile(content: unknown): Promise<string> {
+/** A description entry as capture-descriptions.mjs writes it. */
+const description = (id: string) => ({ title: `Title of ${id} then`, body: `Body of ${id} then.`, editedAfterReview: 0, renamedAfterReview: 0 });
+
+/**
+ * Writes cases.json into a new folder, with a descriptions.json beside it holding an entry for every case id in
+ * `content` (or the given `descriptions`).
+ */
+async function tempFile(content: unknown, descriptions?: unknown): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'airlock-replay-'));
   const file = join(dir, 'cases.json');
   await writeFile(file, typeof content === 'string' ? content : JSON.stringify(content));
+  const ids = Array.isArray(content) ? content.map((c: { id?: unknown }) => c.id).filter((id): id is string => typeof id === 'string') : [];
+  await writeFile(join(dir, 'descriptions.json'), JSON.stringify(descriptions ?? Object.fromEntries(ids.map((id) => [id, description(id)]))));
   return file;
 }
+
+/** What loadCases returns for a case record: the record plus its description at review time. */
+const loaded = (c: Omit<ReplayCase, 'titleAtReview' | 'bodyAtReview'>): ReplayCase =>
+  ({ ...c, titleAtReview: description(c.id).title, bodyAtReview: description(c.id).body });
 
 function sampleProblem(over: Partial<KnownProblem> = {}): KnownProblem {
   return {
@@ -26,7 +40,7 @@ function sampleProblem(over: Partial<KnownProblem> = {}): KnownProblem {
   };
 }
 
-function sampleCase(over: Partial<ReplayCase> = {}): ReplayCase {
+function sampleCase(over: Partial<ReplayCase> = {}): Omit<ReplayCase, 'titleAtReview' | 'bodyAtReview'> {
   return {
     id: 'pr1',
     repo: 'owner/repo',
@@ -86,6 +100,18 @@ describe('the bundled replay dataset', () => {
     for (const k of problems) expect(typeof k.defect, k.id).toBe('boolean');
   });
 
+  it('every case has its title and description as they stood at review time', async () => {
+    const all = await loadCases();
+    const descriptions = JSON.parse(await readFile(fileURLToPath(new URL('../dataset/descriptions.json', import.meta.url)), 'utf8')) as
+      Record<string, { title: string; body: string }>;
+    for (const c of all) {
+      expect(descriptions[c.id], c.id).toBeDefined();
+      expect(c.titleAtReview, c.id).toBe(descriptions[c.id]!.title);
+      expect(c.bodyAtReview, c.id).toBe(descriptions[c.id]!.body);
+      expect(c.titleAtReview.length, c.id).toBeGreaterThan(0);
+    }
+  });
+
   it('ids are unique across cases and across known problems', async () => {
     const all = await loadCases();
     const caseIds = all.map((c) => c.id);
@@ -96,9 +122,20 @@ describe('the bundled replay dataset', () => {
 });
 
 describe('loadCases', () => {
-  it('reads a given file', async () => {
+  it('reads a given file and the descriptions beside it', async () => {
     const file = await tempFile([sampleCase()]);
-    expect(await loadCases(file)).toEqual([sampleCase()]);
+    expect(await loadCases(file)).toEqual([loaded(sampleCase())]);
+  });
+
+  it('fails when a case has no description entry, naming the case and the script to run', async () => {
+    const file = await tempFile([sampleCase(), sampleCase({ id: 'pr2', pr: 2 })], { pr1: description('pr1') });
+    await expect(loadCases(file)).rejects.toThrow(/pr2.*descriptions\.json.*capture-descriptions\.mjs/);
+  });
+
+  it('fails when there is no descriptions.json, naming the script to run', async () => {
+    const file = await tempFile([sampleCase()]);
+    await rm(join(file, '..', 'descriptions.json'));
+    await expect(loadCases(file)).rejects.toThrow(/pr1.*capture-descriptions\.mjs/);
   });
 
   it('fails on a bad SHA, naming the case and the field', async () => {
@@ -108,8 +145,8 @@ describe('loadCases', () => {
 
   it('defaults defect to true and keeps an explicit false', async () => {
     const file = await tempFile([sampleCase({ known: [sampleProblem(), sampleProblem({ id: 'C2', defect: false })] })]);
-    const [loaded] = await loadCases(file);
-    expect(loaded?.known.map((k) => k.defect)).toEqual([true, false]);
+    const [first] = await loadCases(file);
+    expect(first?.known.map((k) => k.defect)).toEqual([true, false]);
   });
 
   it('fails on malformed JSON, naming the file', async () => {
@@ -144,7 +181,7 @@ describe('pickCases', () => {
     sampleCase({ id: 'pr4', kind: 'secondary', lines: 10 }),
     sampleCase({ id: 'pr5', kind: 'positive', lines: null }),
     sampleCase({ id: 'pr6', kind: 'positive', lines: 5 }),
-  ];
+  ].map(loaded);
   const ids = (cs: ReplayCase[]): string[] => cs.map((c) => c.id);
 
   it('selects all, positive and negative', () => {

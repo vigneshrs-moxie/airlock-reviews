@@ -352,5 +352,6 @@ describe('renderReport', () => {
     expect(how).toContain('withheld');
     expect(how).toContain('rule sheet');
     expect(how).toContain('next pull requests');
+    expect(how).toContain('title and description as they stood when the senior reviewer reviewed it');
   });
 });
