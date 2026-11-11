@@ -89,6 +89,15 @@ describe('runSweep', () => {
     expect(new Set(r.candidates.map((c) => c.id)).size).toBe(6);
   });
 
+  it('keeps a sweep candidate that fails the schema as a dropped entry with its reason', async () => {
+    const runner = createFakeRunner((req) => (req.role.endsWith('#1')
+      ? { candidates: [sweepCandidate({ why: ' ' })], questions: [] } : { candidates: [], questions: [] }));
+    const r = await runSweep(runner, sweepCtx());
+    expect(r.candidates).toEqual([]);
+    expect(r.questions).toEqual([]);
+    expect(r.dropped.map((d) => [d.stage, d.reason])).toEqual([['schema', 'it does not say why']]);
+  });
+
   it('a failed batch becomes a stage error naming the batch and the others carry on', async () => {
     const runner = createFakeRunner((req) => (req.role.endsWith('#1') ? new Error('boom') : { candidates: [sweepCandidate({ ruleId: 'mem-1', path: 'src/members/m.ts' })], questions: [] }));
     const r = await runSweep(runner, sweepCtx());

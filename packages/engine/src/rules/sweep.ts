@@ -58,6 +58,7 @@ function acceptSweep(output: SweepOutput, batch: SweepBatch, taken: Set<string>)
     const source = { pack: (rule ?? batch.rules[0]!).packId, lens: null, ruleId: rule ? rule.id : null };
     const accepted = acceptCandidates([raw], source, batch.cohortId, taken);
     out.questions.push(...accepted.questions);
+    out.dropped.push(...accepted.dropped);
     const candidate = accepted.candidates[0];
     if (candidate) valid.push({ candidate, rule, named });
   }
