@@ -14,6 +14,11 @@ export interface KnownProblem {
   reviewerSeverity: 'change' | 'question' | 'note';
   /** True when seeing the problem needs a second file besides `path`. */
   crossFile: boolean;
+  /**
+   * False for a pure question with no underlying code defect. Absent means true;
+   * `loadCases` always fills it in.
+   */
+  defect?: boolean;
 }
 
 /** One past pull request, pinned to the commits the reviewer saw. */
@@ -40,6 +45,7 @@ const knownProblemSchema = z.strictObject({
   comment: z.string().min(1),
   reviewerSeverity: z.enum(['change', 'question', 'note']),
   crossFile: z.boolean(),
+  defect: z.boolean().default(true),
 });
 
 const replayCaseSchema = z.strictObject({
@@ -59,9 +65,9 @@ const BUNDLED = fileURLToPath(new URL('../dataset/cases.json', import.meta.url))
 
 /** Reads and validates the replay cases from `file`, or the bundled dataset. */
 export async function loadCases(file: string = BUNDLED): Promise<ReplayCase[]> {
-  const raw: unknown = JSON.parse(await readFile(file, 'utf8'));
+  const raw = parseJson(file, await readFile(file, 'utf8'));
   if (!Array.isArray(raw)) throw new Error(`${file}: expected an array of replay cases`);
-  return raw.map((record: unknown, index) => {
+  const cases = raw.map((record: unknown, index): ReplayCase => {
     const parsed = replayCaseSchema.safeParse(record);
     if (parsed.success) return parsed.data;
     const id = caseId(record) ?? `#${index}`;
@@ -69,6 +75,28 @@ export async function loadCases(file: string = BUNDLED): Promise<ReplayCase[]> {
     const field = issue?.path.join('.') || '(record)';
     throw new Error(`${file}: replay case ${id}: field ${field}: ${issue?.message ?? 'invalid'}`);
   });
+  const duplicateCase = firstDuplicate(cases.map((c) => c.id));
+  if (duplicateCase) throw new Error(`${file}: duplicate replay case id ${duplicateCase}`);
+  const duplicateProblem = firstDuplicate(cases.flatMap((c) => c.known.map((k) => k.id)));
+  if (duplicateProblem) throw new Error(`${file}: duplicate known-problem id ${duplicateProblem}`);
+  return cases;
+}
+
+function parseJson(file: string, text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error(`${file}: not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function firstDuplicate(ids: string[]): string | undefined {
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id)) return id;
+    seen.add(id);
+  }
+  return undefined;
 }
 
 function caseId(record: unknown): string | undefined {

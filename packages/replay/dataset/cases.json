@@ -14,7 +14,7 @@
         "id": "C2",
         "path": "app/src/lib/announcements/email.ts",
         "line": 31,
-        "summary": "Recipient rows left in the `claimed` email state by an interrupted send are never re-queued by the drain and still count as pending, so those people silently never get the email, and the PATCH route that runs the same notify drain has no `maxDuration` (the confirm route has 300), so its drain can be cut off mid-send.",
+        "summary": "Recipient rows left in the `claimed` email state by an interrupted send are never re-queued by the drain and still count as pending, so those people silently never get the email; and the PATCH route that runs the same notify drain has no `maxDuration` (the confirm route has 300), so its drain can be cut off mid-send.",
         "comment": "a row left `claimed` is never picked up again and the record page counts it as pending, so if a send gets cut off that person just never gets it and nobody knows. how does it get retried? the idempotency key makes re-queuing claims older than 15 min safe. also the PATCH route runs the same 50s notify drain but has no maxDuration, confirm has 300",
         "reviewerSeverity": "change",
         "crossFile": true
@@ -23,7 +23,7 @@
         "id": "C3",
         "path": "app/src/lib/announcements/admin.ts",
         "line": 513,
-        "summary": "The notify path resets every recipient with a separate update inside one transaction on the default 5-second timeout (publish was given 30 seconds), so at a large office the notify rolls back and nobody is notified, and it locks the announcement before the recipient rows, the opposite order to `stamp()`, so recipients opening the announcement during a notify can deadlock.",
+        "summary": "The notify path resets every recipient with a separate update inside one transaction on the default 5-second timeout (publish was given 30 seconds), so at a large office the notify rolls back and nobody is notified; and it locks the announcement before the recipient rows, the opposite order to `stamp()`, so recipients opening the announcement during a notify can deadlock.",
         "comment": "notify updates every recipient one by one inside a transaction on the default 5s timeout. publish got 30s for a few thousand rows, this didn't. at DFW size the notify rolls back and nobody's notified. can this be one set-based update? it also locks announcement then recipient, opposite to stamp(), so opens during a notify can deadlock",
         "reviewerSeverity": "change",
         "crossFile": true
@@ -32,7 +32,7 @@
         "id": "C4",
         "path": "app/prisma/migrations/0137_announcements/migration.sql",
         "line": 203,
-        "summary": "The announcements seeding migration enables the feature for every entity and `V1_DEFAULTS.announcements` is true, so the feature launches in every office and in every entity created later rather than in Arizona Operations alone as the migration 0121 seeding pattern does.",
+        "summary": "The announcements seeding migration enables the feature for every entity and `V1_DEFAULTS.announcements` is true, so the feature switches on for every existing entity and every future one, unlike the staged per-entity rollout the earlier seeding migration used.",
         "comment": "this should be on for Arizona only for now, off for every other entity. same shape as 0121 (`e.name = 'Arizona Operations'`) so every entity still gets a row. and V1_DEFAULTS.announcements should be false so new entities start off",
         "reviewerSeverity": "change",
         "crossFile": true
@@ -90,7 +90,7 @@
         "id": "C18",
         "path": "app/src/lib/integrations/clickup/comments.ts",
         "line": 76,
-        "summary": "With ClickUp writes on, internal comments and the reporter's attachments are copied into ClickUp where they persist after deletion in Orbit, and the global sync run lock acknowledges and drops webhooks that arrive during a sync while Sync now bypasses it, so a link can sync twice and post comments twice.",
+        "summary": "With ClickUp writes on, internal comments and the reporter's attachments are copied into ClickUp, where they persist after deletion in Orbit; and the global sync run lock acknowledges and drops webhooks that arrive during a sync while Sync now bypasses it, so a link can sync twice and post comments twice.",
         "comment": "with writes on, internal notes and the reporter's screenshots (customer names, phones) get copied into ClickUp and stay there even if deleted here. let's only send shared comments and no attachments unless we decide otherwise. also before webhooks go on: the global run lock drops webhooks that arrive during any sync (answers 200 so ClickUp won't resend) and Sync now skips it, so a link can sync twice and double-post. per-link lock?",
         "reviewerSeverity": "change",
         "crossFile": true
@@ -117,7 +117,7 @@
         "id": "C21",
         "path": "app/src/lib/integrations/clickup/planner.ts",
         "line": 250,
-        "summary": "The ClickUp sync plan treats a link with no baseline as a first sync that pushes Orbit's values outward, so the first unattended run on a manually linked task overwrites its name and description and clears its assignees, and the sent-comment ledgers are keyed on the link id so unlinking and relinking reposts every comment and file.",
+        "summary": "The ClickUp sync plan treats a link with no baseline as a first sync that pushes Orbit's values outward, so the first unattended run on a manually linked task overwrites its name and description, and clears its assignees when the ticket is unassigned; and the sent-comment ledgers are keyed on the link id, so unlinking and relinking reposts every comment and file.",
         "comment": "a manually linked task has no baseline, so the first sync (overnight, nobody watching) overwrites its name and description with the reporter's text and clears assignees if the ticket is unassigned. a spec someone wrote in ClickUp is just gone. can the first sync of a manual link only run from Sync now after the preview? also unlink + relink re-posts every comment and file because the sent-ledgers are per link id, can they key on ticket + task?",
         "reviewerSeverity": "change",
         "crossFile": true
@@ -197,7 +197,7 @@
         "id": "C10",
         "path": "app/src/lib/actions/field-dashboard.ts",
         "line": 952,
-        "summary": "The team collection rate is a simple mean of each person's rate while the Power BI report pools numerators and denominators across people, so the Orbit tile shows a different figure (about 9.75% against 12.73%) from the report managers already use.",
+        "summary": "The team collection rate is a simple mean of each person's rate while the Power BI report pools numerators and denominators across people, so the Orbit tile shows a different figure from the report managers already use.",
         "comment": "1. [ASK] The top Collection tile will say 9.75% while the Power BI report says 12.73% for roughly the same team, and nobody in ops chose the method behind the gap.\n- Orbit takes a simple average of each person's rate. Power BI recalculates the rate over everyone's combined numbers.\n- The averaging method alone accounts for about 1 point of the gap (11.82 vs 12.73 for the same 28 people).\n- Managers will compare this tile with the report on day one. This is a metric definition, so it's field ops' call, not the engineer's.\n- Fix: if field ops want it to match the report, have the query return the measure's numerator and denominator per person and add them up for the team.\n\nCan we review this.",
         "reviewerSeverity": "change",
         "crossFile": false
@@ -271,7 +271,8 @@
         "summary": "The overview page moved the field or office choice from the `team` URL query parameter to in-page state, unlike the summaries and ratings-history pages, so the choice is lost from the URL and the sibling pages behave differently.",
         "comment": "summaries and ratings history keep the header switch and ?team=. this page now does it differently and the choice isn't in the url. also, does field stay selected when you change the month?",
         "reviewerSeverity": "question",
-        "crossFile": true
+        "crossFile": true,
+        "defect": false
       }
     ]
   },
@@ -293,7 +294,8 @@
         "summary": "The damage status badge compares the incident status with one closed-status string, but the status comes from a spreadsheet-fed lakehouse field that may not be a fixed set of values, so a closed case recorded with another spelling would be shown as open.",
         "comment": "Can we confirm this incident response comes in from a fixed set of responses available? I think this is linked to a spreadsheet input which feeds into the central lakehouse.",
         "reviewerSeverity": "question",
-        "crossFile": true
+        "crossFile": true,
+        "defect": false
       }
     ]
   },
@@ -315,7 +317,8 @@
         "summary": "The five-outcome limit check was rewritten from `nextPosition > 5` to `outcomes.length >= 5`, which reads as refusing at five outcomes, so the intended boundary of the limit is not evident from the change, although the behaviour is unchanged.",
         "comment": "Why does it give the error out at length = 5 as well?",
         "reviewerSeverity": "question",
-        "crossFile": false
+        "crossFile": false,
+        "defect": false
       }
     ]
   },
@@ -346,7 +349,8 @@
         "summary": "The change alters who may sign in (approved Mission and Joshua's domains, a matching Workspace domain and an existing active profile) and which addresses Add Team Member accepts, so the path from inviting a person to their first sign-in depends on both and was not shown to work for the new domains.",
         "comment": "Please add joshuas instead of joshua, and double check the invite flow",
         "reviewerSeverity": "question",
-        "crossFile": true
+        "crossFile": true,
+        "defect": false
       }
     ]
   },
@@ -387,7 +391,7 @@
         "id": "pr170-1",
         "path": "app/src/lib/talents/draft.ts",
         "line": null,
-        "summary": "Restoring a browser draft adds cards for people who are no longer on the rater's list, which the page does not render, so the hidden entries are still submitted and either fail the whole submit or rate someone the rater cannot see.",
+        "summary": "Restoring a browser draft adds cards for people who are no longer on the rater's list, which the page does not render, so the hidden entries are still submitted, failing the whole submit when the person is outside the rater's scope or saving a rating for a deactivated person the page no longer shows.",
         "comment": "a restored draft for someone no longer on the rater's list is dropped instead of becoming a hidden card that blocks Submit",
         "reviewerSeverity": "change",
         "crossFile": true
@@ -476,7 +480,7 @@
         "id": "pr220-3",
         "path": "app/src/lib/calls/validate-call.ts",
         "line": null,
-        "summary": "The internal-contact check matches the fragment office anywhere in the contact name, so recruiting candidates labelled as office candidates are dropped as internal calls.",
+        "summary": "The internal-contact check matches the `office` fragment anywhere in the contact name, so recruiting candidates labelled `(office candidate)` are dropped as internal calls.",
         "comment": "Contacts labelled as candidates are not dropped as internal.",
         "reviewerSeverity": "change",
         "crossFile": false

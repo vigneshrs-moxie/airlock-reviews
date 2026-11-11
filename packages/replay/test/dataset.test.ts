@@ -2,15 +2,28 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadCases, pickCases, type ReplayCase } from '../src/index.js';
+import { loadCases, pickCases, type KnownProblem, type ReplayCase } from '../src/index.js';
 
 const SHA = /^[0-9a-f]{40}$/;
 
 async function tempFile(content: unknown): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'airlock-replay-'));
   const file = join(dir, 'cases.json');
-  await writeFile(file, JSON.stringify(content));
+  await writeFile(file, typeof content === 'string' ? content : JSON.stringify(content));
   return file;
+}
+
+function sampleProblem(over: Partial<KnownProblem> = {}): KnownProblem {
+  return {
+    id: 'C1',
+    path: 'src/a.ts',
+    line: 10,
+    summary: 'A guard keys on one field while the store keys on another, so the guard never fires.',
+    comment: 'why does this key on the other field',
+    reviewerSeverity: 'change',
+    crossFile: true,
+    ...over,
+  };
 }
 
 function sampleCase(over: Partial<ReplayCase> = {}): ReplayCase {
@@ -65,6 +78,14 @@ describe('the bundled replay dataset', () => {
     }
   });
 
+  it('marks only the answered questions with no underlying defect as defect: false', async () => {
+    const problems = (await loadCases()).flatMap((c) => c.known);
+    const notDefects = problems.filter((k) => k.defect === false);
+    expect(notDefects.map((k) => k.id).sort()).toEqual(['C1', 'C15', 'C9', 'pr59-2']);
+    for (const k of notDefects) expect(k.reviewerSeverity, k.id).toBe('question');
+    for (const k of problems) expect(typeof k.defect, k.id).toBe('boolean');
+  });
+
   it('ids are unique across cases and across known problems', async () => {
     const all = await loadCases();
     const caseIds = all.map((c) => c.id);
@@ -83,6 +104,30 @@ describe('loadCases', () => {
   it('fails on a bad SHA, naming the case and the field', async () => {
     const file = await tempFile([sampleCase(), sampleCase({ id: 'pr2', pr: 2, headSha: 'abc123' })]);
     await expect(loadCases(file)).rejects.toThrow(/pr2.*headSha/);
+  });
+
+  it('defaults defect to true and keeps an explicit false', async () => {
+    const file = await tempFile([sampleCase({ known: [sampleProblem(), sampleProblem({ id: 'C2', defect: false })] })]);
+    const [loaded] = await loadCases(file);
+    expect(loaded?.known.map((k) => k.defect)).toEqual([true, false]);
+  });
+
+  it('fails on malformed JSON, naming the file', async () => {
+    const file = await tempFile('[{"id": "pr1",');
+    await expect(loadCases(file)).rejects.toThrow(file);
+  });
+
+  it('rejects a duplicate case id, naming it', async () => {
+    const file = await tempFile([sampleCase({ id: 'pr7' }), sampleCase({ id: 'pr7' })]);
+    await expect(loadCases(file)).rejects.toThrow(/duplicate replay case id pr7/);
+  });
+
+  it('rejects a duplicate known-problem id across cases, naming it', async () => {
+    const file = await tempFile([
+      sampleCase({ id: 'pr1', known: [sampleProblem({ id: 'C5' })] }),
+      sampleCase({ id: 'pr2', known: [sampleProblem({ id: 'C5' })] }),
+    ]);
+    await expect(loadCases(file)).rejects.toThrow(/duplicate known-problem id C5/);
   });
 
   it('fails on a date that is not ISO, naming the case and the field', async () => {
