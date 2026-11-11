@@ -532,8 +532,34 @@ describe('select', () => {
     const runner = createFakeRunner(() => answer({ top: ['b', 'f1', 'f2', 'q', 'n'] }));
     const r = await select(runner, ctx({ packs, pr: { ...own, headSha: '0123456789abcdef', stage: 'pr1' } }), kept, [], [], 'deep');
     expect(r.selfReviewText).toBe(
-      'Reviewed with Airlock at 0123456 (deep, Core, Orbit). 5 findings: 1 block, 2 fixes, 1 question, 1 note. No checks ran at PR #1.',
+      'Reviewed with Airlock at 0123456 (deep, Core, Orbit). 5 findings: 1 block, 2 fixes, 1 ask, 1 note. No checks ran at PR #1.',
     );
+  });
+
+  it('tallies ask findings as asks, so a question always means a question for the author', async () => {
+    const runner = createFakeRunner(() => answer({ top: ['q1', 'q2'] }));
+    const r = await select(runner, ctx({ pr: { ...own, headSha: 'abcdef0123', stage: 'pr2' } }), [item('q1', 'ask'), item('q2', 'ask')], [], []);
+    expect(r.selfReviewText).toBe('Reviewed with Airlock at abcdef0 (standard, Pack core). 2 findings: 2 asks.');
+  });
+
+  it('a failed selection request on a review with no findings gives incomplete', async () => {
+    const r = await select(createFakeRunner(() => failure('timed out after 300 s', 'timeout')), ctx({ pr: theirs }), [], [], []);
+    expect(r.findings).toEqual([]);
+    expect(r.verdict.label).toBe('incomplete');
+    expect(r.errors).toEqual([{ stage: 'select', cohortId: null, message: 'timed out after 300 s', kind: 'timeout' }]);
+  });
+
+  it('a question chain that ends at a finding removes every question of the chain into that finding', async () => {
+    const questions = [ask('Is a on purpose?'), ask('Was a meant?'), ask('Who owns the report?')];
+    const runner = createFakeRunner(() => answer({
+      top: ['a'], questionSameAs: [{ question: 2, sameAs: 'q1' }, { question: 1, sameAs: 'a' }],
+    }));
+    const r = await select(runner, ctx(), [item('a', 'fix', { title: 'The a total is wrong' })], questions, []);
+    expect(r.questions).toEqual([questions[2]]);
+    expect(r.notes).toEqual([
+      'A question was merged into the finding "The a total is wrong": "Is a on purpose?"',
+      'A question was merged into the finding "The a total is wrong": "Was a meant?"',
+    ]);
   });
 
   it('leaves out the PR #1 sentence after PR #1 and zero counts', async () => {

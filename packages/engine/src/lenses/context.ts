@@ -64,7 +64,8 @@ export const diffCutSentence = (stage: string, title: string, cut: DiffCut): str
 export const descriptionCutSentence = (who: string, body: string, max: number): string | null =>
   (body.length > max ? `${who}: the description was cut at ${count(max)} of ${count(body.length)} characters` : null);
 
-const orNone = (lines: string[]): string => (lines.length === 0 ? '(none)' : lines.join('\n'));
+/** The lines joined, or `(none)` for a block with nothing in it. */
+export const orNone = (lines: string[]): string => (lines.length === 0 ? '(none)' : lines.join('\n'));
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
 /** A file with no recorded tier is read, so nothing is skipped by accident. */
@@ -195,11 +196,35 @@ export function cohortOutline(cohort: Cohort, tier?: (path: string) => Tier): st
   return lines;
 }
 
-/** Every cohort of the map with its layers and files, then the standalone files. */
+/** The change map block lists at most this many files; the rest are counted on its last line. */
+export const MAX_MAP_FILES = 200;
+
+const mapFileCount = (map: ChangeMap): number =>
+  map.cohorts.reduce((n, c) => n + c.layers.reduce((m, l) => m + l.files.length, 0), 0) + map.standalone.length;
+
+/**
+ * Every cohort of the map with its layers and files, then the standalone files. After MAX_MAP_FILES files the rest are
+ * left out (the cohort and layer lines stay) and the last line says `… and <n> more`.
+ */
 export function mapBlock(map: ChangeMap): string {
-  const lines = map.cohorts.flatMap((c) => cohortOutline(c));
-  if (map.standalone.length > 0) lines.push('Standalone files:', ...map.standalone.map((f) => `  ${f}`));
+  let room = MAX_MAP_FILES;
+  const files = (paths: string[]): string[] => {
+    const shown = paths.slice(0, Math.max(0, room));
+    room -= shown.length;
+    return shown;
+  };
+  const lines = map.cohorts.flatMap((c) => cohortOutline({ ...c, layers: c.layers.map((l) => ({ ...l, files: files(l.files) })) }));
+  const standalone = files(map.standalone);
+  if (map.standalone.length > 0) lines.push('Standalone files:', ...standalone.map((f) => `  ${f}`));
+  const left = mapFileCount(map) - MAX_MAP_FILES;
+  if (left > 0) lines.push(`… and ${left} more`);
   return asMaterial('change map', orNone(lines));
+}
+
+/** `<stage>: the change map listed <max> of <n> files`, or null when mapBlock listed every file. */
+export function mapCutSentence(stage: string, map: ChangeMap): string | null {
+  const total = mapFileCount(map);
+  return total > MAX_MAP_FILES ? `${stage}: the change map listed ${count(MAX_MAP_FILES)} of ${count(total)} files` : null;
 }
 
 /** One line per fact: `path:line check: message`, or `path check: message` when there is no line. */

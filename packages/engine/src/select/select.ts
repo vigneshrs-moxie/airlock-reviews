@@ -6,7 +6,7 @@ import { asMaterial, fill, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner, AgentUsage } from '../agent/runner.js';
 import { fingerprint } from '../anchor/fingerprint.js';
 import type { KeptCandidate } from '../challenge/challenge.js';
-import { briefBlock, instructionsFor, mapBlock, prBlock, readerOf, sendRequest } from '../lenses/context.js';
+import { briefBlock, instructionsFor, mapBlock, mapCutSentence, orNone, prBlock, readerOf, sendRequest } from '../lenses/context.js';
 import type { LensContext } from '../lenses/context.js';
 import { absorb, nearInFile, plainCandidate } from '../merge/merge.js';
 import { SEVERITY_RANK } from '../rules/sweep.js';
@@ -46,6 +46,8 @@ export interface SelectResult {
   selfReviewText: string;
   /** Groups the model named that were not merged, and the questions that were merged, in words for the document. */
   notes: string[];
+  /** Plain sentences saying what the request was not shown because of a size limit. */
+  limits: string[];
   errors: StageError[];
   usage: AgentUsage[];
 }
@@ -187,7 +189,6 @@ function byPlace(items: KeptCandidate[]): KeptCandidate[] {
 
 /** The questions are numbered `q1`, `q2`, … so the model can name them in `questionSameAs`. */
 function selectMaterial(ctx: LensContext, items: KeptCandidate[], questions: Question[]): string {
-  const orNone = (lines: string[]): string => (lines.length === 0 ? '(none)' : lines.join('\n'));
   return [
     prBlock(ctx.pr),
     briefBlock(ctx.brief),
@@ -421,7 +422,7 @@ export function selfReviewText(pr: PrInfo, depth: Depth, packTitles: string[], v
   const { counts } = verdict;
   const total = counts.block + counts.fix + counts.ask + counts.note;
   const words: [number, string, string][] = [
-    [counts.block, 'block', 'blocks'], [counts.fix, 'fix', 'fixes'], [counts.ask, 'question', 'questions'], [counts.note, 'note', 'notes'],
+    [counts.block, 'block', 'blocks'], [counts.fix, 'fix', 'fixes'], [counts.ask, 'ask', 'asks'], [counts.note, 'note', 'notes'],
   ];
   const tally = words.filter(([n]) => n > 0).map(([n, one, many]) => plural(n, one, many)).join(', ');
   const incomplete = verdict.label === 'incomplete';
@@ -461,6 +462,7 @@ export async function select(
   const distinct = mergeDuplicates(kept);
   const shown = sameTextOnce(questions);
   let answer: SelectOutput | null = null;
+  const limits: string[] = [];
 
   if (!(skipModel && distinct.merged.length === 0 && shown.length === 0)) {
     const template = await loadTemplate('select');
@@ -475,6 +477,8 @@ export async function select(
       effort: ctx.models.effort,
     });
     usage.push(result.usage);
+    const cut = mapCutSentence('select', ctx.map);
+    if (cut !== null) limits.push(cut);
     if (result.ok) answer = result.output;
     else errors.push({ stage: 'select', cohortId: null, message: result.error, kind: result.kind });
   }
@@ -499,6 +503,7 @@ export async function select(
     checksAfterMerge: cleanLines(answer?.checksAfterMerge ?? []),
     selfReviewText: selfReviewText(ctx.pr, depth, ctx.packs.map((p) => p.title), verdict),
     notes,
+    limits,
     errors,
     usage,
   };

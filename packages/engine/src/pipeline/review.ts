@@ -175,7 +175,7 @@ function fallbackSelection(
   const verdict = decideVerdict(pr, findings, log.errors, false, left.length);
   return {
     findings, dropped: [], questions: left, verdict, whoseCall: [], checksAfterMerge: [],
-    selfReviewText: selfReviewText(pr, depth, packs.map((p) => p.title), verdict), notes: [], errors: [], usage: [],
+    selfReviewText: selfReviewText(pr, depth, packs.map((p) => p.title), verdict), notes: [], limits: [], errors: [], usage: [],
   };
 }
 
@@ -392,6 +392,7 @@ async function reviewInWorkspace(
     return r;
   })) ?? fallbackSelection(pr, depth, packs, kept, questions, log);
 
+  limits.push(...selection.limits);
   return {
     range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
     dropped: [...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,

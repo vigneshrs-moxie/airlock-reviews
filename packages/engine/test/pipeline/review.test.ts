@@ -449,6 +449,17 @@ describe('runReview when a stage throws', () => {
     expect(doc.selfReviewText).toMatch(/^Reviewed with Airlock at .* The review did not finish\.$/);
   }, SLOW);
 
+  it('when select throws, the fallback keeps one of each repeated question and counts them in the verdict', async () => {
+    hooks.select = fail('select exploded');
+    const { doc } = await review({
+      script: scenarioScript({ seams: () => ({ candidates: [], questions: ['  is ROUNDING half up\nintended? ', 'Does a refund need a ledger entry?'] }) }),
+    });
+    const texts = doc.questions.map((q) => q.text);
+    expect(texts.filter((t) => /rounding half up/i.test(t))).toEqual(['Is rounding half up intended?']);
+    expect(texts.filter((t) => t === 'Does a refund need a ledger entry?')).toHaveLength(1);
+    expect(doc.verdict.label).toBe('incomplete');
+  }, SLOW);
+
   it('rejects with a message of its own when it builds a document that does not match the schema', async () => {
     hooks.select = (result) => ({ ...(result as object), verdict: { label: 'not-a-label', sentence: '', counts: { block: 0, fix: 0, ask: 0, note: 0 } } });
     await expect(review()).rejects.toThrow(/^Airlock built a review document that does not match its own schema: /);
