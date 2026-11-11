@@ -231,6 +231,17 @@ describe('renderReview', () => {
     expect(out.indexOf('\nNot reviewed\n')).toBeLessThan(out.indexOf('\nNot shown to the reviewer\n'));
   });
 
+  it('ends the timing table with the time that passed from the start of the review to its end', () => {
+    const doc = fullDocument();
+    doc.startedAt = '2026-11-11T09:00:00.000Z';
+    doc.createdAt = '2026-11-11T09:17:05.400Z';
+    const out = renderReview(doc);
+    expect(out.trimEnd().split('\n').at(-1)).toBe('Elapsed: 17 min 5 s');
+    expect(out).toMatch(/\nStage\s+Seconds\s+Runs/);
+    delete doc.startedAt;
+    expect(renderReview(doc)).not.toContain('Elapsed');
+  });
+
   it('shows 5 files per layer and a count of the rest past 40 files', () => {
     const doc = minimalDocument();
     const files = Array.from({ length: 41 }, (_, i) => `src/f${i}.ts`);

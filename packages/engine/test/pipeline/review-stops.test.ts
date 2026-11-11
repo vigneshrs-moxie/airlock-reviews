@@ -100,3 +100,28 @@ describe('one signal stops a review', () => {
     expect(fake.calls).toEqual([]);
   }, SLOW);
 });
+
+describe('time is reported as it passed', () => {
+  it('stamps the start and the end of the review and of each stage, and keeps the turns', async () => {
+    const s = await scenario();
+    let tick = 0;
+    const start = Date.parse('2026-11-11T09:00:00.000Z');
+    const now = (): Date => new Date(start + 1000 * tick++);
+    const fake = createFakeRunner(scenarioScript());
+    const doc = await runReview(
+      { repo: REPO, number: NUMBER, packsDir: PACKS_DIR, kitDir: KIT_DIR, remoteUrl: s.remote.dir },
+      { exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha }), runner: fake, now },
+    );
+    expect(doc.startedAt).toBe(new Date(start).toISOString());
+    expect(Date.parse(doc.createdAt)).toBeGreaterThan(Date.parse(doc.startedAt!));
+    for (const t of doc.timings) {
+      expect(t.startedAt, t.stage).toBeDefined();
+      expect(Date.parse(t.finishedAt!), t.stage).toBeGreaterThanOrEqual(Date.parse(t.startedAt!));
+      expect(Date.parse(t.startedAt!), t.stage).toBeGreaterThanOrEqual(Date.parse(doc.startedAt!));
+      expect(t.turns, t.stage).toBe(t.agentRuns); // the fake runner reports one turn per request
+    }
+    const lenses = doc.timings.find((t) => t.stage === 'lenses')!;
+    const sweep = doc.timings.find((t) => t.stage === 'sweep')!;
+    expect(Date.parse(sweep.startedAt!)).toBeLessThan(Date.parse(lenses.finishedAt!)); // they overlap
+  }, SLOW);
+});

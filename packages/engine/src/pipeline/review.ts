@@ -385,9 +385,9 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
   const models = Object.fromEntries(Object.entries(req.models ?? {}).filter(([, v]) => v !== undefined)) as Partial<ModelConfig>;
   const settings: Settings = { depth: req.depth ?? 'standard', models: { ...DEFAULT_MODELS, ...models }, parallel };
   const id = hexId('r_', 5);
-  const createdAt = given.now().toISOString();
+  const startedAt = given.now().toISOString();
   const { signal } = given;
-  const log = createStageLog(onEvent, signal);
+  const log = createStageLog(onEvent, signal, given.now);
   // Every command and every request carries the review's signal; every request goes through the usage gate.
   const exec: Exec = signal === undefined ? given.exec : (cmd, args, opts) => given.exec(cmd, args, { signal, ...opts });
   const gate = usageGate(given.runner, signal);
@@ -422,8 +422,9 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
   }
 
   const { selection } = reviewed;
+  // `createdAt` is when the document is assembled, at the end; `startedAt` is when the review began.
   const draft = (): ReviewDocument => ({
-    schemaVersion: 1, id, createdAt, pr: intake.pr, range: reviewed.range, depth: settings.depth,
+    schemaVersion: 1, id, createdAt: given.now().toISOString(), startedAt, pr: intake.pr, range: reviewed.range, depth: settings.depth,
     packs: reviewed.packs.map((p) => ({ id: p.id, version: p.version })), models: settings.models,
     files: reviewed.tiers, facts: reviewed.facts, map: reviewed.map, brief: reviewed.brief, verdict: selection.verdict,
     findings: selection.findings, questions: reviewed.questions, dropped: reviewed.dropped, candidates: reviewed.candidates,
