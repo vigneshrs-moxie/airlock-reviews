@@ -17,7 +17,9 @@ import { classifyFiles } from '../facts/classify.js';
 import { fetchPr } from '../intake/pr.js';
 import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
 import { runCohortLenses, runnableLenses } from '../lenses/cohort-lens.js';
-import { emptyResult, type LensContext, type LensStageResult } from '../lenses/context.js';
+import {
+  descriptionCutSentence, emptyResult, MAX_DESCRIPTION_CHARS, type LensContext, type LensStageResult,
+} from '../lenses/context.js';
 import { runSeams } from '../lenses/seams.js';
 import { placeablePaths } from '../map/check.js';
 import { findLinks } from '../map/links.js';
@@ -65,7 +67,7 @@ const SYNC_MERGE_BRIEF: Brief = {
 };
 const EMPTY_BRIEF: Brief = { whatItDoes: [], claims: [] };
 const EMPTY_MAP: ChangeMap = { cohorts: [], standalone: [], links: [] };
-const NO_PACKS: PreparedPacks = { packs: [], missingHelpers: [], repoRules: [], questions: [], errors: [] };
+const NO_PACKS: PreparedPacks = { packs: [], missingHelpers: [], repoRules: [], questions: [], errors: [], limits: [] };
 const CREDENTIAL_TROUBLE = /could not read (Username|Password)|Authentication failed|terminal prompts disabled|Permission denied \(publickey\)|Repository not found|returned error: 40[13]/i;
 
 const hexId = (prefix: string, bytes: number): string => `${prefix}${randomBytes(bytes).toString('hex')}`;
@@ -152,7 +154,7 @@ interface Settings { depth: Depth; models: ModelConfig; parallel: number }
 
 interface Reviewed {
   range: ReviewRange; packs: Pack[]; tiers: FileFact[]; facts: Fact[]; map: ChangeMap; brief: Brief; questions: Question[];
-  candidates: Candidate[]; dropped: Dropped[]; selection: SelectResult;
+  candidates: Candidate[]; dropped: Dropped[]; selection: SelectResult; limits: string[];
 }
 
 /** Every stage from packs to select, inside the workspace. */
@@ -169,6 +171,8 @@ async function reviewInWorkspace(
   // The stages' questions go through selection, which merges repeats; the engine's own are added after it, unmerged.
   const questions: Question[] = [];
   const engineQuestions: Question[] = [];
+  // What a model was not shown because of a size limit, as plain sentences, in the order the stages ran.
+  const limits: string[] = [];
 
   const prepared = (await log.run('packs', async (rec) => {
     rec.error(...chosen.errors);
@@ -180,6 +184,7 @@ async function reviewInWorkspace(
   }, { extraMs: chosen.ms })) ?? NO_PACKS;
   const { packs } = prepared;
   engineQuestions.push(...prepared.questions);
+  limits.push(...prepared.limits);
 
   const sync = (await log.run('shape', async (rec) => {
     const merged = await isSyncMerge(exec, ws.headDir, ws.range, null);
@@ -193,11 +198,14 @@ async function reviewInWorkspace(
     const unreviewed = notReviewed(files, tiers);
     if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
     const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead), [] as Fact[])];
-    const found = await rec.attempt(() => findLinks(exec, ws.headDir, files, packs), { links: [] as Link[], skippedNames: 0 });
+    const found = await rec.attempt(
+      () => findLinks(exec, ws.headDir, files, packs), { links: [] as Link[], skippedNames: 0, limits: [] as string[] },
+    );
     const neighbours = await rec.attempt(() => findNeighbours(exec, ws.headDir, files, found.links, packs), [] as Neighbour[]);
-    return { tiers, facts, links: found.links, neighbours, skippedNames: found.skippedNames };
-  })) ?? { tiers: [], facts: [], links: [], neighbours: [], skippedNames: 0 };
+    return { tiers, facts, links: found.links, neighbours, skippedNames: found.skippedNames, limits: found.limits };
+  })) ?? { tiers: [], facts: [], links: [], neighbours: [], skippedNames: 0, limits: [] };
   const { tiers, facts } = gathered;
+  limits.push(...gathered.limits);
   if (gathered.skippedNames > 0) {
     engineQuestions.push(question(`${gathered.skippedNames} changed names were not searched for callers because the pull request is very large.`));
   }
@@ -217,6 +225,7 @@ async function reviewInWorkspace(
         model: models.main, effort: models.effort,
       });
       rec.usage(r.usage);
+      limits.push(...r.limits);
       if (r.error !== null) rec.error({ stage: 'map', cohortId: null, message: r.error });
       return r.map;
     })) ?? fallbackMap(files, tiers, gathered.links);
@@ -224,6 +233,7 @@ async function reviewInWorkspace(
     brief = (await log.run('brief', async (rec) => {
       const r = await buildBrief(capped, { pr, map, files, headDir: ws.headDir, baseDir: ws.baseDir, model: models.main, effort: models.effort });
       rec.usage(r.usage);
+      limits.push(...r.limits);
       if (r.error !== null) rec.error({ stage: 'brief', cohortId: null, message: r.error });
       return r.brief;
     })) ?? EMPTY_BRIEF;
@@ -248,7 +258,11 @@ async function reviewInWorkspace(
     ]);
     if (quick) log.skip('seams', skipWhy);
     else seamsR = await lensStage(log, 'seams', () => runSeams(runner, ctx, [...lensR.candidates, ...sweepR.candidates]));
+    // Every request from the lenses on carries the description through prBlock, cut at the same length.
+    const cut = descriptionCutSentence('lenses and the stages after them', pr.body, MAX_DESCRIPTION_CHARS);
+    if (cut !== null) limits.push(cut);
   }
+  limits.push(...lensR.limits, ...sweepR.limits, ...seamsR.limits);
   questions.push(...lensR.questions, ...sweepR.questions, ...seamsR.questions);
   const usedIds = new Set<string>();
   const candidates = withUniqueIds([...lensR.candidates, ...sweepR.candidates, ...seamsR.candidates], usedIds);
@@ -273,6 +287,7 @@ async function reviewInWorkspace(
       const out = await challenge(runner, ctx, anchored, readBoth);
       rec.usage(out.usage);
       rec.error(...out.errors);
+      limits.push(...out.limits);
       return out;
     });
     kept = r?.kept ?? anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED }));
@@ -283,7 +298,7 @@ async function reviewInWorkspace(
     const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...challengeDropped].map((d) => d.candidate)];
     await log.run('lenses-deep', (rec) => deepPass(rec, {
       runner, ctx, seen: new Set(known.map(fingerprint)), uniqueIds: (c) => withUniqueIds(c, usedIds), readHead, readBoth,
-    }, { candidates, questions, schemaDropped, anchorDropped, challengeDropped, kept }));
+    }, { candidates, questions, schemaDropped, anchorDropped, challengeDropped, kept, limits }));
   }
 
   // Select always runs, so the document has a verdict; it is told every error so far. On a sync merge it asks no model.
@@ -296,7 +311,7 @@ async function reviewInWorkspace(
 
   return {
     range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
-    dropped: [...schemaDropped, ...anchorDropped, ...challengeDropped, ...selection.dropped],
+    dropped: [...schemaDropped, ...anchorDropped, ...challengeDropped, ...selection.dropped], limits,
   };
 }
 
@@ -346,7 +361,7 @@ export async function runReview(req: ReviewRequest, deps: EngineDeps, onEvent?: 
     files: reviewed.tiers, facts: reviewed.facts, map: reviewed.map, brief: reviewed.brief, verdict: selection.verdict,
     findings: selection.findings, questions: reviewed.questions, dropped: reviewed.dropped, candidates: reviewed.candidates,
     whoseCall: selection.whoseCall, checksAfterMerge: selection.checksAfterMerge, selfReviewText: selection.selfReviewText,
-    stageErrors: [...log.errors], timings: log.timings(),
+    stageErrors: [...log.errors], timings: log.timings(), limits: reviewed.limits,
   });
   // A draft that fails the schema is the engine's own fault, so it rejects rather than becoming a stage error.
   const engineFault: { error: Error | null } = { error: null };

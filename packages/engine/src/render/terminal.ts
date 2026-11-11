@@ -185,6 +185,7 @@ export function renderReview(input: ReviewDocument, opts: { color?: boolean } = 
     section('Check after merge', doc.checksAfterMerge.flatMap((t, i) => wrap(t, `${i + 1}. `))),
     section('Change map', changeMap(doc)),
     section('Not reviewed', doc.files.filter((f) => f.tier === 'ignored').map((f) => `- ${f.path}: ${f.reason}`)),
+    section('Not shown to the reviewer', bullets(doc.limits ?? [])),
     section(`Dropped: ${doc.dropped.length}`, doc.dropped.flatMap(droppedItem)),
     section('Stage errors', doc.stageErrors.map((e) => `- ${e.stage}${e.cohortId === null ? '' : `, cohort ${e.cohortId}`}: ${e.message}`)),
     section('Timing', timingTable(doc)),

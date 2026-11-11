@@ -113,9 +113,12 @@ function symbolReader(headDir: string, resolve: Resolve): (path: string) => Prom
 
 /**
  * Code-only links between the changed files and the rest of the head: imports, uses, tests and pack conventions.
- * `skippedNames` counts changed names left unsearched once 600 distinct names were reached.
+ * `skippedNames` counts changed names left unsearched once 600 distinct names were reached; `limits` names each searched
+ * token with more than HITS_PER_NAME places, of which only the first were linked.
  */
-export async function findLinks(exec: Exec, headDir: string, files: FileDiff[], packs: Pack[]): Promise<{ links: Link[]; skippedNames: number }> {
+export async function findLinks(
+  exec: Exec, headDir: string, files: FileDiff[], packs: Pack[],
+): Promise<{ links: Link[]; skippedNames: number; limits: string[] }> {
   const rules = compileRules(packs);
   const limit = limiter(8);
   const greps = new Map<string, Promise<GrepHit[]>>();
@@ -141,12 +144,19 @@ export async function findLinks(exec: Exec, headDir: string, files: FileDiff[], 
   const links: Link[] = [];
   const searches: Promise<Link[]>[] = [];
   const named: FileNames[] = [];
+  const limits = new Set<string>();
+  const capped = (token: string, lines: number): void => {
+    limits.add(`links: "${token}" was found on ${lines.toLocaleString('en-US')} lines; only the first ${HITS_PER_NAME} places in path order were linked`);
+  };
 
   const uses = async (name: string, defining: string): Promise<Link[]> => {
     const out: Link[] = [];
-    for (const h of await grep(name)) {
-      if (out.length >= HITS_PER_NAME) break;
-      if (h.path === defining) continue;
+    const hits = (await grep(name)).filter((h) => h.path !== defining);
+    for (const h of hits) {
+      if (out.length >= HITS_PER_NAME) {
+        capped(name, hits.length);
+        break;
+      }
       if (isScript(h.path) && !(await symbols(h.path)).imports.some((i) => i.resolved === defining)) continue;
       out.push({ from: h.path, to: defining, kind: 'uses', detail: name, line: h.line });
     }
@@ -154,8 +164,9 @@ export async function findLinks(exec: Exec, headDir: string, files: FileDiff[], 
   };
 
   const convention = async (c: CompiledRule, f: FileDiff, token: string): Promise<Link[]> => {
-    const hits = (await grep(token, c.rule.searchIn.map((g) => `:(glob)${g}`)))
-      .filter((h) => h.path !== f.path).slice(0, HITS_PER_NAME);
+    const all = (await grep(token, c.rule.searchIn.map((g) => `:(glob)${g}`))).filter((h) => h.path !== f.path);
+    if (all.length > HITS_PER_NAME) capped(token, all.length);
+    const hits = all.slice(0, HITS_PER_NAME);
     return hits.map((h) => ({ from: f.path, to: h.path, kind: 'convention', detail: `${c.rule.detail}: ${token}`, line: h.line }));
   };
 
@@ -198,5 +209,5 @@ export async function findLinks(exec: Exec, headDir: string, files: FileDiff[], 
   const unique = new Map(links.map((l) => [JSON.stringify([l.from, l.to, l.kind, l.detail, l.line]), l]));
   const sorted = [...unique.values()].sort((a, b) =>
     cmp(a.from, b.from) || cmp(a.to, b.to) || cmp(a.kind, b.kind) || (a.line ?? 0) - (b.line ?? 0) || cmp(a.detail, b.detail));
-  return { links: sorted, skippedNames };
+  return { links: sorted, skippedNames, limits: [...limits].sort() };
 }

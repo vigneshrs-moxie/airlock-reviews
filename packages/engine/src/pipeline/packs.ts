@@ -71,6 +71,8 @@ export interface PreparedPacks {
   repoRules: { path: string; text: string }[];
   questions: Question[];
   errors: StageError[];
+  /** Plain sentences naming the repository rule files left out by the count or size limit. */
+  limits: string[];
 }
 
 /** The kit from `kitDir` when given (no network), otherwise synced from GitHub with the cache as a fallback. */
@@ -117,11 +119,14 @@ export async function preparePacks(selected: Pack[], opts: PackOptions): Promise
   }
 
   let repoRules: PreparedPacks['repoRules'] = [];
+  const limits: string[] = [];
   try {
-    repoRules = await loadRepoRules(opts.baseDir, opts.changedPaths);
+    const loaded = await loadRepoRules(opts.baseDir, opts.changedPaths);
+    repoRules = loaded.rules;
+    limits.push(...loaded.leftOut.map((l) => `repository rule file ${l.path} was not shown: ${l.reason}`));
   } catch (err) {
     errors.push(packsError(`The repository's rule files could not be read: ${messageOf(err)}`));
   }
 
-  return { packs, missingHelpers: missing, repoRules, questions, errors };
+  return { packs, missingHelpers: missing, repoRules, questions, errors, limits };
 }

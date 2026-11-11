@@ -89,6 +89,13 @@ describe('buildBrief', () => {
     expect(material).toContain('(description cut at 6000 characters)');
   });
 
+  it('writes down that it cut the description, and nothing when it did not', async () => {
+    const runner = createFakeRunner(() => answer(['x']));
+    const cut = await buildBrief(runner, input({ pr: { ...pr, body: 'a'.repeat(6_500) } }));
+    expect(cut.limits).toEqual(['brief: the description was cut at 6,000 of 6,500 characters']);
+    expect((await buildBrief(runner, input())).limits).toEqual([]);
+  });
+
   it('caps the changed file list at 300 lines and says so', async () => {
     const files = Array.from({ length: 305 }, (_, i) => diff(`src/f${String(i).padStart(3, '0')}.ts`));
     const runner = createFakeRunner(() => answer(['x']));

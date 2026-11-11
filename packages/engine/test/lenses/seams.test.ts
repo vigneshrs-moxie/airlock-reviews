@@ -80,7 +80,7 @@ describe('runSeams', () => {
     const runner = createFakeRunner(empty);
     const r = await runSeams(runner, ctx({ map }), soFar);
     expect(runner.calls).toEqual([]);
-    expect(r).toEqual({ candidates: [], questions: [], dropped: [], errors: [], usage: [] });
+    expect(r).toEqual({ candidates: [], questions: [], dropped: [], errors: [], usage: [], limits: [] });
   });
 
   it('counts the standalone group as a cohort when it has files to read', async () => {

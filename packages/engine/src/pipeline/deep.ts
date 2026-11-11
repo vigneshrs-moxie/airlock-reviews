@@ -30,6 +30,7 @@ export interface DeepSink {
   anchorDropped: Dropped[];
   challengeDropped: Dropped[];
   kept: KeptCandidate[];
+  limits: string[];
 }
 
 export interface DeepInput {
@@ -59,6 +60,7 @@ export async function deepPass(rec: StageRecorder, input: DeepInput, sink: DeepS
   const lensed = await runCohortLenses(runner, { ...ctx, map, extraInstructions: DEEP_SENTENCE });
   rec.usage(lensed.usage);
   rec.error(...named(lensed.errors));
+  sink.limits.push(...lensed.limits.map((l) => l.replace(/^lenses: /, 'lenses-deep: ')));
   sink.questions.push(...lensed.questions.map(back));
   sink.schemaDropped.push(...lensed.dropped.map((d) => ({ ...d, candidate: back(d.candidate) })));
   const fresh = lensed.candidates.filter((c) => {
@@ -75,6 +77,7 @@ export async function deepPass(rec: StageRecorder, input: DeepInput, sink: DeepS
   const challenged = await challenge(runner, ctx, anchored.anchored, input.readBoth);
   rec.usage(challenged.usage);
   rec.error(...named(challenged.errors));
+  sink.limits.push(...challenged.limits.map((l) => l.replace(/^challenge: /, 'lenses-deep challenge: ')));
   sink.challengeDropped.push(...challenged.dropped);
   sink.kept.push(...challenged.kept);
 }

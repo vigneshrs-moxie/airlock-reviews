@@ -33,13 +33,30 @@ export interface LensStageResult {
   dropped: Dropped[];
   errors: StageError[];
   usage: AgentUsage[];
+  /** Plain sentences saying what a request was not shown because of a size limit. */
+  limits: string[];
 }
 
-export const emptyResult = (): LensStageResult => ({ candidates: [], questions: [], dropped: [], errors: [], usage: [] });
+export const emptyResult = (): LensStageResult => ({ candidates: [], questions: [], dropped: [], errors: [], usage: [], limits: [] });
 
 export const STANDALONE_ID = 'standalone';
 /** Lenses cannot fetch the description with their tools, so it is cut late. */
-const MAX_DESCRIPTION_CHARS = 20_000;
+export const MAX_DESCRIPTION_CHARS = 20_000;
+
+// ---- What a model was not shown ----
+
+/** How much of a diff a budget let through: changed lines shown and in all, and how many files were cut. */
+export interface DiffCut { shown: number; total: number; files: number }
+
+const count = (n: number): string => n.toLocaleString('en-US');
+
+/** `<stage>: <title>: <n> of <m> changed lines were shown (<k> files cut)`. */
+export const diffCutSentence = (stage: string, title: string, cut: DiffCut): string =>
+  `${stage}: ${oneLine(title)}: ${count(cut.shown)} of ${count(cut.total)} changed lines were shown (${cut.files === 1 ? '1 file' : `${count(cut.files)} files`} cut)`;
+
+/** `<who>: the description was cut at <max> of <n> characters`, or null when it was not cut. */
+export const descriptionCutSentence = (who: string, body: string, max: number): string | null =>
+  (body.length > max ? `${who}: the description was cut at ${count(max)} of ${count(body.length)} characters` : null);
 
 const orNone = (lines: string[]): string => (lines.length === 0 ? '(none)' : lines.join('\n'));
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
@@ -245,6 +262,7 @@ export function mergeResults(results: LensStageResult[]): LensStageResult {
     out.dropped.push(...r.dropped);
     out.errors.push(...r.errors);
     out.usage.push(...r.usage);
+    out.limits.push(...r.limits);
   }
   return out;
 }

@@ -5,10 +5,10 @@ import type { AgentRunner } from '../agent/runner.js';
 import { budgetedDiff } from '../lenses/cohort-lens.js';
 import { MAX_CANDIDATES_PER_LENS, RawCandidateSchema, acceptCandidates } from '../lenses/candidate.js';
 import {
-  briefBlock, cohortOutline, emptyResult, factsBlock, instructionsFor, mergeResults, prBlock, readerOf, sendRequest,
-  standaloneCohort, tierOf,
+  briefBlock, cohortOutline, diffCutSentence, emptyResult, factsBlock, instructionsFor, mergeResults, prBlock, readerOf,
+  sendRequest, standaloneCohort, tierOf,
 } from '../lenses/context.js';
-import type { LensContext, LensStageResult } from '../lenses/context.js';
+import type { DiffCut, LensContext, LensStageResult } from '../lenses/context.js';
 import type { Rule } from '../packs/types.js';
 import { planSweep } from './match.js';
 import type { SweepBatch } from './match.js';
@@ -31,20 +31,22 @@ function rulesText(rules: Rule[]): string {
   return `# The rules to check\n\n${parts.join('\n\n')}`;
 }
 
-function batchMaterial(ctx: LensContext, batch: SweepBatch): string {
+function batchMaterial(ctx: LensContext, batch: SweepBatch): { material: string; cut: DiffCut | null; title: string } {
   const tier = tierOf(ctx.tiers);
   const cohort = [...ctx.map.cohorts, standaloneCohort(ctx.map)].find((c) => c.id === batch.cohortId)!;
   const inBatch = new Set(batch.files);
   const byPath = new Map(ctx.files.map((f) => [f.path, f]));
   const diffs = batch.files.flatMap((p) => byPath.get(p) ?? []);
   const neighbours = cohort.neighbours.map((n) => `${n.path} [${n.role}] for: ${n.forFiles.join(', ')} — ${n.why.replace(/\s+/g, ' ').trim()}`);
-  return [
+  const diff = budgetedDiff(diffs, SWEEP_DIFF_LINE_BUDGET);
+  const material = [
     prBlock(ctx.pr),
     asMaterial('cohort', cohortOutline(cohort, tier).join('\n')),
-    asMaterial('diff', budgetedDiff(diffs, SWEEP_DIFF_LINE_BUDGET)),
+    asMaterial('diff', diff.text),
     factsBlock(ctx.facts.filter((f) => inBatch.has(f.path))),
     asMaterial('neighbours', neighbours.length === 0 ? '(none)' : neighbours.join('\n')),
   ].join('\n\n');
+  return { material, cut: diff.cut, title: cohort.title };
 }
 
 /** Checks one batch's raw candidates against its rules: unknown rule ids are dropped, severity is raised to the rule's floor. */
@@ -100,10 +102,12 @@ export async function runSweep(runner: AgentRunner, ctx: LensContext): Promise<L
 
   const taken = new Set<string>();
   const results = await Promise.all(numbered.map(async ({ batch, n }) => {
+    const { material, cut, title } = batchMaterial(ctx, batch);
+    const limits = cut === null ? [] : [diffCutSentence('sweep', `${title}, batch ${n}`, cut)];
     const result = await sendRequest<SweepOutput>(runner, ctx, {
       role: `sweep:${batch.cohortId}#${n}`,
       instructions: instructionsFor(`${template.trimEnd()}\n\n${rulesText(batch.rules)}`, withoutStandards, null),
-      material: batchMaterial(ctx, batch),
+      material,
       schema: SweepOutputSchema,
       cwd: ctx.headDir,
       extraDirs: [ctx.baseDir],
@@ -114,10 +118,12 @@ export async function runSweep(runner: AgentRunner, ctx: LensContext): Promise<L
       const failed = emptyResult();
       failed.usage.push(result.usage);
       failed.errors.push({ stage: 'sweep', cohortId: batch.cohortId, message: `batch ${n}: ${result.error}` });
+      failed.limits.push(...limits);
       return failed;
     }
     const accepted = acceptSweep(result.output, batch, taken);
     accepted.usage.push(result.usage);
+    accepted.limits.push(...limits);
     return accepted;
   }));
   return mergeResults(results);

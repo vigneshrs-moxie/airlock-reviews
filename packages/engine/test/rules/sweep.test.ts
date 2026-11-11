@@ -118,6 +118,15 @@ describe('runSweep', () => {
     const runner = createFakeRunner(() => ({ candidates: [], questions: [] }));
     const r = await runSweep(runner, sweepCtx({ packs: [pack('core', [lens('boundary')])] }));
     expect(runner.calls).toEqual([]);
-    expect(r).toEqual({ candidates: [], questions: [], dropped: [], errors: [], usage: [] });
+    expect(r).toEqual({ candidates: [], questions: [], dropped: [], errors: [], usage: [], limits: [] });
+  });
+
+  it('says how much of a batch diff was shown when the sweep budget cut it', async () => {
+    const big = files.map((f) => diff(f, f === 'src/billing/a.ts' ? 1500 : 3));
+    const runner = createFakeRunner(() => ({ candidates: [], questions: [] }));
+    const r = await runSweep(runner, sweepCtx({ files: big }));
+    const shown = block(runner.calls[0]!.material, 'diff')!.split('\n').filter((l) => /^\s*\d* [+-] /.test(l)).length;
+    expect(shown).toBeLessThan(1500);
+    expect(r.limits).toEqual([`sweep: Billing, batch 1: ${shown.toLocaleString('en-US')} of 1,500 changed lines were shown (1 file cut)`]);
   });
 });

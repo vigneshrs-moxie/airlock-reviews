@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentRequest } from '../../src/agent/runner.js';
 import { renderReview } from '../../src/render/terminal.js';
+import type { Exec } from '../../src/util/exec.js';
 import { block, rawCandidate } from '../helpers/lens-context.js';
-import { scenarioScript, useReviewHarness } from '../helpers/review-scenario.js';
+import { BASE_FILES, fakeGh, HEAD_FILES, scenarioScript, useReviewHarness } from '../helpers/review-scenario.js';
 
 const SLOW = 20_000;
 const { scenario, review } = useReviewHarness();
@@ -64,5 +65,40 @@ describe('a pull request cannot hide its own files', () => {
     expect(doc.selfReviewText).not.toContain('No findings.');
     const out = renderReview(doc);
     expect(out).toContain('\nNot reviewed\n\n- img/logo.png: binary file\n- package-lock.json: lock file (built-in: **/package-lock.json)\n');
+  }, SLOW);
+});
+
+/** fakeGh, with the pull request's description replaced by `body`. */
+function withBody(inner: Exec, body: string): Exec {
+  return async (cmd, args, opts) => {
+    const res = await inner(cmd, args, opts);
+    if (cmd !== 'gh' || !args[1]?.startsWith('repos/') || res.code !== 0) return res;
+    return { ...res, stdout: JSON.stringify({ ...JSON.parse(res.stdout), body }) };
+  };
+}
+
+describe('what a model was not shown is written down', () => {
+  it('collects every limit in the document and prints them under Not shown to the reviewer', async () => {
+    const longMoney = `${HEAD_FILES['src/money.ts']}${Array.from({ length: 1600 }, (_, i) => `// note ${i}`).join('\n')}\n`;
+    const s = await scenario({ ...BASE_FILES, 'CLAUDE.md': 'r'.repeat(65_000) }, { ...HEAD_FILES, 'src/money.ts': longMoney });
+    const exec = withBody(fakeGh({ baseSha: s.baseSha, headSha: s.headSha }), 'b'.repeat(25_000));
+    const { doc } = await review({ s, exec });
+    const limits = doc.limits ?? [];
+    expect(limits).toEqual(expect.arrayContaining([
+      'repository rule file CLAUDE.md was not shown: it would take the rule files past 64,000 bytes',
+      'mapper: the description was cut at 6,000 of 25,000 characters',
+      'brief: the description was cut at 6,000 of 25,000 characters',
+      'lenses and the stages after them: the description was cut at 20,000 of 25,000 characters',
+    ]));
+    expect(limits.some((l) => /^lenses: Money: [\d,]+ of [\d,]+ changed lines were shown \(1 file cut\)$/.test(l))).toBe(true);
+    expect(limits.some((l) => /^challenge: A TODO is left in formatMoney: [\d,]+ of [\d,]+ changed lines were shown \(1 file cut\)$/.test(l))).toBe(true);
+    const out = renderReview(doc);
+    expect(out).toContain('\nNot shown to the reviewer\n\n- repository rule file CLAUDE.md was not shown');
+  }, SLOW);
+
+  it('a review that cut nothing has no limits and no such section', async () => {
+    const { doc } = await review();
+    expect(doc.limits).toEqual([]);
+    expect(renderReview(doc)).not.toContain('Not shown to the reviewer');
   }, SLOW);
 });

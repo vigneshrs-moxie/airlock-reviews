@@ -156,11 +156,23 @@ describe('findLinks', () => {
       const headSha = await commitFiles(r, {}, 'link');
       const files = await diffOf(r, baseSha, headSha);
       expect(files.map((f) => [f.path, f.status])).toEqual([['src/evil.ts', 'added']]);
-      expect(await findLinks(realExec, r.dir, files, [])).toEqual({ links: [], skippedNames: 0 });
+      expect(await findLinks(realExec, r.dir, files, [])).toEqual({ links: [], skippedNames: 0, limits: [] });
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
   });
+
+  it('writes down a searched name that has more than 40 places, and links only the first 40', async () => {
+    const r = await newRepo();
+    const users: Record<string, string> = {};
+    for (let i = 0; i < 45; i++) users[`src/u${String(i).padStart(2, '0')}.ts`] = "import { widelyUsed } from './w';\nwidelyUsed();\n";
+    const files = await makeChange(r, { 'src/w.ts': 'export const widelyUsed = () => 1;\n', ...users }, {
+      'src/w.ts': 'export const widelyUsed = () => 2;\n',
+    });
+    const { links, limits } = await findLinks(realExec, r.dir, files, []);
+    expect(ofKind(links, 'uses')).toHaveLength(40);
+    expect(limits).toEqual(['links: "widelyUsed" was found on 90 lines; only the first 40 places in path order were linked']);
+  }, 60_000);
 
   it('a deleted file produces no links, even when its subject and callers still exist', async () => {
     const r = await newRepo();
@@ -175,7 +187,7 @@ describe('findLinks', () => {
     expect(files.map((f) => [f.path, f.status])).toEqual([
       ['billing/app.py', 'deleted'], ['src/keep.test.ts', 'deleted'], ['src/old.ts', 'deleted'],
     ]);
-    expect(await findLinks(realExec, r.dir, files, [])).toEqual({ links: [], skippedNames: 0 });
+    expect(await findLinks(realExec, r.dir, files, [])).toEqual({ links: [], skippedNames: 0, limits: [] });
   });
 
   it('a deleted file marked with added lines still produces no links', async () => {
@@ -186,7 +198,7 @@ describe('findLinks', () => {
       hunks: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 1, header: '',
         lines: [{ kind: 'add', oldNo: null, newNo: 1, text: 'def compute_total(items):' }] }],
     };
-    expect(await findLinks(realExec, r.dir, [gone], [])).toEqual({ links: [], skippedNames: 0 });
+    expect(await findLinks(realExec, r.dir, [gone], [])).toEqual({ links: [], skippedNames: 0, limits: [] });
   });
 
   it('applies the import filter before the 40-hit cap', async () => {

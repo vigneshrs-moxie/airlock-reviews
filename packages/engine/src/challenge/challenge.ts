@@ -4,8 +4,10 @@ import { z } from 'zod';
 import { asMaterial, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner, AgentUsage } from '../agent/runner.js';
 import { budgetedDiff } from '../lenses/cohort-lens.js';
-import { cohortOutline, factsBlock, instructionsFor, prBlock, sendRequest, standaloneCohort, tierOf } from '../lenses/context.js';
-import type { LensContext } from '../lenses/context.js';
+import {
+  cohortOutline, diffCutSentence, factsBlock, instructionsFor, prBlock, sendRequest, standaloneCohort, tierOf,
+} from '../lenses/context.js';
+import type { DiffCut, LensContext } from '../lenses/context.js';
 import { SEVERITY_RANK } from '../rules/sweep.js';
 import { createEvidence, proveDrop } from './proof.js';
 import type { Evidence, ReadFile } from './proof.js';
@@ -33,6 +35,8 @@ export interface ChallengeResult {
   dropped: Dropped[];
   errors: StageError[];
   usage: AgentUsage[];
+  /** Plain sentences saying what a request was not shown because of a size limit. */
+  limits: string[];
 }
 
 type Item = Candidate & { anchor: Anchor };
@@ -79,20 +83,22 @@ function findingBlock(c: Item): string {
 }
 
 /** The finding, the pull request, the finding's cohort, the diff and facts of its files, then the repository's rule files. */
-function challengeMaterial(ctx: LensContext, c: Item, tier: (path: string) => Tier): string {
+function challengeMaterial(ctx: LensContext, c: Item, tier: (path: string) => Tier): { material: string; cut: DiffCut | null } {
   const paths = new Set([c.path, ...c.connected.map((p) => p.path)]);
   const byPath = new Map(ctx.files.map((f) => [f.path, f]));
   const diffs = [...paths].flatMap((p) => byPath.get(p) ?? []);
   const cohort = c.cohortId === null ? undefined
     : [...ctx.map.cohorts, standaloneCohort(ctx.map)].find((k) => k.id === c.cohortId);
-  return [
+  const diff = diffs.length === 0 ? { text: '(none)', cut: null } : budgetedDiff(diffs, CHALLENGE_DIFF_LINE_BUDGET);
+  const material = [
     findingBlock(c),
     prBlock(ctx.pr),
     ...(cohort ? [asMaterial('cohort', cohortOutline(cohort, tier).join('\n'))] : []),
-    asMaterial('diff', diffs.length === 0 ? '(none)' : budgetedDiff(diffs, CHALLENGE_DIFF_LINE_BUDGET)),
+    asMaterial('diff', diff.text),
     factsBlock(ctx.facts.filter((f) => paths.has(f.path))),
     ...ctx.repoRules.map((r) => asMaterial(`repository rule file ${r.path}`, r.text)),
   ].join('\n\n');
+  return { material, cut: diff.cut };
 }
 
 // ---- The answer ----
@@ -146,7 +152,7 @@ export async function challenge(
   items: Item[],
   read: ReadFile,
 ): Promise<ChallengeResult> {
-  const out: ChallengeResult = { kept: [], dropped: [], errors: [], usage: [] };
+  const out: ChallengeResult = { kept: [], dropped: [], errors: [], usage: [], limits: [] };
   if (!items.some(isChallenged)) {
     out.kept = items.map((item) => ({ ...item, checked: NOT_CHALLENGED }));
     return out;
@@ -155,7 +161,7 @@ export async function challenge(
   const instructions = instructionsFor(await loadTemplate('challenge'), ctx.packs, null);
   const evidence = createEvidence(read, ctx.files, ctx.packs);
   const tier = tierOf(ctx.tiers);
-  type ItemResult = Outcome & { usage?: AgentUsage; error?: StageError };
+  type ItemResult = Outcome & { usage?: AgentUsage; error?: StageError; limit?: string };
   const failed = (item: Item, message: string, usage: AgentUsage | undefined): ItemResult => ({
     kept: { ...item, checked: DID_NOT_COMPLETE }, ...(usage ? { usage } : {}),
     error: { stage: 'challenge', cohortId: item.cohortId, message: `${item.id}: ${message}` },
@@ -163,11 +169,14 @@ export async function challenge(
   const results = await Promise.all(items.map(async (item): Promise<ItemResult> => {
     if (!isChallenged(item)) return { kept: { ...item, checked: NOT_CHALLENGED } };
     let usage: AgentUsage | undefined;
+    let limit: string | undefined;
     try {
+      const { material, cut } = challengeMaterial(ctx, item, tier);
+      if (cut !== null) limit = diffCutSentence('challenge', item.title, cut);
       const result = await sendRequest<ChallengeOutput>(runner, ctx, {
         role: `challenge:${item.id}`,
         instructions,
-        material: challengeMaterial(ctx, item, tier),
+        material,
         schema: ChallengeOutputSchema,
         cwd: ctx.headDir,
         extraDirs: [ctx.baseDir],
@@ -175,10 +184,11 @@ export async function challenge(
         effort: ctx.models.effort,
       });
       usage = result.usage;
-      if (!result.ok) return failed(item, result.error, usage);
-      return { ...(await applyAnswer(item, result.output, evidence)), usage };
+      const noted = limit === undefined ? {} : { limit };
+      if (!result.ok) return { ...failed(item, result.error, usage), ...noted };
+      return { ...(await applyAnswer(item, result.output, evidence)), usage, ...noted };
     } catch (err) {
-      return failed(item, err instanceof Error ? err.message : String(err), usage);
+      return { ...failed(item, err instanceof Error ? err.message : String(err), usage), ...(limit === undefined ? {} : { limit }) };
     }
   }));
 
@@ -187,6 +197,7 @@ export async function challenge(
     else out.dropped.push(r.dropped);
     if (r.error) out.errors.push(r.error);
     if (r.usage) out.usage.push(r.usage);
+    if (r.limit !== undefined) out.limits.push(r.limit);
   }
   return out;
 }

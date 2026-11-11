@@ -5,6 +5,7 @@ import type { ChangeMap, Cohort, FileDiff, FileFact, Link, ModelConfig, Neighbou
 import { z } from 'zod';
 import { asMaterial, fill, loadTemplate } from '../agent/prompt.js';
 import type { AgentRequest, AgentRunner, AgentUsage } from '../agent/runner.js';
+import { descriptionCutSentence } from '../lenses/context.js';
 import { checkChangeMap, placeablePaths } from './check.js';
 
 export interface MapInput {
@@ -22,6 +23,8 @@ export interface MapResult {
   map: ChangeMap;
   usage: AgentUsage[];
   error: string | null;
+  /** Plain sentences saying what the mapper was not shown because of a size limit. */
+  limits: string[];
 }
 
 const MapperAnswerSchema = z.object({ cohorts: z.array(CohortSchema), standalone: z.array(z.string()) });
@@ -177,7 +180,7 @@ export async function buildChangeMap(runner: AgentRunner, input: MapInput): Prom
   const diffPaths = new Set(input.files.map((f) => f.path));
   const mapLinks = linksBetween(input.links, changed);
 
-  if (placeable.length === 0) return { map: { cohorts: [], standalone: [], links: [] }, usage: [], error: null };
+  if (placeable.length === 0) return { map: { cohorts: [], standalone: [], links: [] }, usage: [], error: null, limits: [] };
 
   if (placeable.length === 1) {
     const path = placeable[0]!;
@@ -187,7 +190,7 @@ export async function buildChangeMap(runner: AgentRunner, input: MapInput): Prom
       neighbours: input.neighbours.filter((n) => !diffPaths.has(n.path)),
       inferredLinks: [],
     };
-    return { map: { cohorts: [cohort], standalone: [], links: mapLinks }, usage: [], error: null };
+    return { map: { cohorts: [cohort], standalone: [], links: mapLinks }, usage: [], error: null, limits: [] };
   }
 
   const instructions = fill(await loadTemplate('mapper'), {}).trimEnd();
@@ -202,6 +205,7 @@ export async function buildChangeMap(runner: AgentRunner, input: MapInput): Prom
   };
 
   const usage: AgentUsage[] = [];
+  const limits = [descriptionCutSentence('mapper', input.pr.body, MAX_DESCRIPTION_CHARS)].flatMap((l) => l ?? []);
   let problems: string[] = [];
   for (let attempt = 1; attempt <= 2; attempt++) {
     // The problems quote file names from the pull request and ids the model wrote, so they go in as material, never instructions.
@@ -218,12 +222,12 @@ export async function buildChangeMap(runner: AgentRunner, input: MapInput): Prom
     const answer = await repairNeighbours(result.output, diffPaths, input.headDir);
     const map: ChangeMap = { ...answer, links: mapLinks };
     problems = checkChangeMap(map, input.files, input.facts);
-    if (problems.length === 0) return { map, usage, error: null };
+    if (problems.length === 0) return { map, usage, error: null, limits };
   }
 
   const last = problems[0] ?? 'no reason given';
   const reason = last.length > MAX_ERROR_CHARS ? `${last.slice(0, MAX_ERROR_CHARS)}…` : last;
   const extra = problems.length - 1;
   const more = extra > 0 ? ` (and ${extra} more problem${extra === 1 ? '' : 's'})` : '';
-  return { map: fallbackMap(input.files, input.facts, input.links), usage, error: `mapper failed twice: ${reason}${more}` };
+  return { map: fallbackMap(input.files, input.facts, input.links), usage, error: `mapper failed twice: ${reason}${more}`, limits };
 }

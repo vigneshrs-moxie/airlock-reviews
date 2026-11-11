@@ -222,6 +222,15 @@ describe('renderReview', () => {
     expect(renderReview(minimalDocument())).not.toContain('Not reviewed');
   });
 
+  it('prints the limits under Not shown to the reviewer, after Not reviewed', () => {
+    const doc = fullDocument();
+    doc.files.push({ path: 'yarn.lock', tier: 'ignored', reason: 'lock file (built-in: **/yarn.lock)' });
+    doc.limits = ['lenses: Totals: 1,500 of 4,556 changed lines were shown (2 files cut)'];
+    const out = renderReview(doc);
+    expect(out).toContain('\nNot shown to the reviewer\n\n- lenses: Totals: 1,500 of 4,556 changed lines were shown (2 files cut)\n');
+    expect(out.indexOf('\nNot reviewed\n')).toBeLessThan(out.indexOf('\nNot shown to the reviewer\n'));
+  });
+
   it('shows 5 files per layer and a count of the rest past 40 files', () => {
     const doc = minimalDocument();
     const files = Array.from({ length: 41 }, (_, i) => `src/f${i}.ts`);

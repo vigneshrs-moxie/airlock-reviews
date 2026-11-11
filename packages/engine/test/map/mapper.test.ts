@@ -149,7 +149,7 @@ describe('buildChangeMap', () => {
         }],
         standalone: [], links: [],
       },
-      usage: [], error: null,
+      usage: [], error: null, limits: [],
     });
     expect(checkChangeMap(r.map, files, facts)).toEqual([]);
   });
@@ -167,7 +167,7 @@ describe('buildChangeMap', () => {
     const files = [diff('package-lock.json'), diff('dist/out.js')];
     const r = await buildChangeMap(runner, input({ files, facts: files.map((f) => fact(f.path, 'ignored')), links: [link('dist/out.js', 'package-lock.json')] }));
     expect(runner.calls).toHaveLength(0);
-    expect(r).toEqual({ map: { cohorts: [], standalone: [], links: [] }, usage: [], error: null });
+    expect(r).toEqual({ map: { cohorts: [], standalone: [], links: [] }, usage: [], error: null, limits: [] });
   });
 
   it('the mapper request lists files and links but not the diff text', async () => {
@@ -191,6 +191,15 @@ describe('buildChangeMap', () => {
     expect(material).toMatch(/\d+ more links left out/);
     expect(material).toMatch(/\d+ more neighbours left out/);
     expect(material).toMatch(/description cut at \d+ characters/);
+  });
+
+  it('writes down that it cut the description when it sends a request, and nothing otherwise', async () => {
+    const runner = createFakeRunner(() => goodAnswer);
+    const long = { ...pr, body: 'd'.repeat(7_000) };
+    expect((await buildChangeMap(runner, input({ pr: long }))).limits).toEqual(['mapper: the description was cut at 6,000 of 7,000 characters']);
+    expect((await buildChangeMap(runner, input())).limits).toEqual([]);
+    const one = [diff('src/a.ts')];
+    expect((await buildChangeMap(runner, input({ pr: long, files: one, facts: one.map((f) => fact(f.path)) }))).limits).toEqual([]);
   });
 
   it('sends at most 400 links, those between changed files first and in path order, and at most 60 neighbours', async () => {

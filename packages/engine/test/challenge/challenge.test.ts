@@ -319,7 +319,7 @@ describe('challenge', () => {
     expect(r.kept.map((k) => k.checked)).toEqual(['not challenged', 'not challenged']);
     expect(r.usage).toEqual([]);
     const empty = await challenge(runner, ctx(), [], read);
-    expect(empty).toEqual({ kept: [], dropped: [], errors: [], usage: [] });
+    expect(empty).toEqual({ kept: [], dropped: [], errors: [], usage: [], limits: [] });
   });
 
   it('writes a default when the agent leaves checked empty', async () => {
@@ -728,5 +728,16 @@ describe('challenge', () => {
       expect(r.dropped.map((d) => d.candidate.id)).toEqual(['c2', 'c4']);
       expect(r.errors).toHaveLength(1);
     });
+  });
+
+  it('says how much of the diff the challenger was shown when the budget cut it, naming the finding', async () => {
+    const runner = createFakeRunner(() => answer());
+    const { read } = memoryRead();
+    const r = await challenge(runner, ctx({ files: [diff('src/pause.ts', 900)] }), [item('c1', 'fix')], read);
+    const shown = block(runner.calls[0]!.material, 'diff')!.split('\n').filter((l) => /^\s*\d* [+-] /.test(l)).length;
+    expect(shown).toBeLessThan(900);
+    expect(r.limits).toEqual([`challenge: Finding c1: ${shown} of 900 changed lines were shown (1 file cut)`]);
+    const fits = await challenge(createFakeRunner(() => answer()), ctx(), [item('c1', 'fix')], read);
+    expect(fits.limits).toEqual([]);
   });
 });
