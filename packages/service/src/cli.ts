@@ -28,6 +28,8 @@ export interface CliOverrides {
   home?: string;
   /** Writes a text file (making its folder) with the given mode. */
   writeFile?: (path: string, text: string, mode: number) => Promise<void>;
+  /** Sets a file's mode (used to make an existing log file private when it is opened). */
+  chmodFile?: (path: string, mode: number) => Promise<void>;
   removeFile?: (path: string) => Promise<void>;
   makeDir?: (path: string) => Promise<void>;
   /** The current folder, against which relative AIRLOCK_* paths are resolved at install. */
@@ -172,6 +174,7 @@ async function start(io: CliIo, o: CliOverrides): Promise<number> {
     try {
       await rotateLog(logFile);
       const fd = openSync(logFile, 'a', 0o600);
+      await (o.chmodFile ?? chmod)(logFile, 0o600);
       sink = (text) => {
         try {
           writeSync(fd, text);
@@ -355,7 +358,7 @@ async function install(io: CliIo, o: CliOverrides): Promise<number> {
     ['the log path', launchdLog], ...environment,
   ];
   for (const [name, value] of named) {
-    if (/[\u0000-\u0008\u000a-\u001f\u007f]/.test(value)) {
+    if (/[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/.test(value)) {
       io.err(`Airlock cannot write ${clean(name)} into the login item because it contains a control character.\n`);
       return 1;
     }
@@ -365,8 +368,17 @@ async function install(io: CliIo, o: CliOverrides): Promise<number> {
 
   await (o.makeDir ?? ((p) => mkdir(p, { recursive: true, mode: 0o700 }).then(() => undefined)))(dirname(log));
   await (o.writeFile ?? writeWithMode)(plist, text, 0o644);
-  const alreadyRunning = (await answersHello(config, { ...o, timeoutMs: o.timeoutMs ?? 2000 })) !== null;
   await bootout(exec, uid);
+  // The agent's own previous copy is gone after bootout; whatever still answers is another copy. Wait up to two
+  // seconds for the port to go quiet before deciding.
+  const wait = o.timeoutMs ?? 2000;
+  const deadline = Date.now() + wait;
+  let alreadyRunning = false;
+  for (;;) {
+    alreadyRunning = (await answersHello(config, { ...o, timeoutMs: wait })) !== null;
+    if (!alreadyRunning || Date.now() >= deadline) break;
+    await new Promise((r) => setTimeout(r, 25));
+  }
   let result;
   try {
     result = await exec('launchctl', ['bootstrap', `gui/${uid}`, plist]);
@@ -379,11 +391,12 @@ async function install(io: CliIo, o: CliOverrides): Promise<number> {
     return 1;
   }
   io.out(`Wrote ${clean(plist)}.\n`);
-  io.out('Airlock service now starts at login (and is running now).\n');
-  io.out(`Its log is ${clean(log)} (start-up problems go to ${clean(launchdLog)}).\n`);
   if (alreadyRunning) {
-    io.out(`A copy of Airlock is already running on port ${config.port}. The login item is installed and will take over the next time you log in or after that copy stops.\n`);
+    io.out(`A copy of Airlock is already running on port ${config.port}, so the login item did not start a second one. It will start Airlock the next time you log in. To switch to it now, stop the running copy and run: ${START_HINT}:install\n`);
+  } else {
+    io.out('Airlock service now starts at login and is running now.\n');
   }
+  io.out(`Its log is ${clean(log)} (start-up problems go to ${clean(launchdLog)}).\n`);
   for (const name of missing) io.out(`${name} was not found on your PATH: reviews will not work until it is installed.\n`);
   return 0;
 }

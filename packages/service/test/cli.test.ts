@@ -75,6 +75,7 @@ function harness(options: { exists?: boolean; env?: Record<string, string>; boot
     if (!path.startsWith(`${root}${sep}`)) throw new Error(`a test reached outside its temporary folder: ${path}`);
     return path;
   };
+  const chmodCalls: Array<{ path: string; mode: number }> = [];
   const createToken = vi.fn(async () => TOKEN);
   const overrides: Required<CliOverrides> = {
     createServer: (deps) => { created.push(deps); return server; },
@@ -92,6 +93,7 @@ function harness(options: { exists?: boolean; env?: Record<string, string>; boot
       writeFileSync(path, text, { mode });
       chmodSync(path, mode);
     },
+    chmodFile: async (path, mode) => { chmodCalls.push({ path, mode }); chmodSync(inside(path), mode); },
     removeFile: async (path) => { rmSync(inside(path), { force: true }); },
     makeDir: async (path) => { mkdirSync(inside(path), { recursive: true }); },
     cwd: root,
@@ -104,7 +106,7 @@ function harness(options: { exists?: boolean; env?: Record<string, string>; boot
   };
   const io = { out: (t: string) => out.push(t), err: (t: string) => err.push(t) };
   const plist = join(fakeHome, 'Library', 'LaunchAgents', 'com.airlock.service.plist');
-  return { root, airlockHome, fakeHome, repoRoot, cliPath, binDirs, out, err, calls, handlers, server, created, overrides, io, plist, config, createToken };
+  return { root, airlockHome, fakeHome, repoRoot, cliPath, binDirs, out, err, calls, handlers, server, created, overrides, io, plist, config, createToken, chmodCalls };
 }
 
 const all = (h: { out: string[]; err: string[] }): string => [...h.out, ...h.err].join('');
@@ -219,6 +221,20 @@ describe('start', () => {
     expect(readFileSync(log, 'utf8')).toBe('2026-11-11T09:00:00.000Z GET /x 200 1ms\n');
     expect(statSync(log).mode & 0o777).toBe(0o600);
     expect(h.out.join('')).not.toContain('GET /x');
+  });
+
+  it('sets an existing log file to 0600 when it opens it, through the chmod override', async () => {
+    const h = harness();
+    const log = join(h.root, 'service.log');
+    writeFileSync(log, 'x\n', { mode: 0o644 });
+    chmodSync(log, 0o644);
+    h.overrides.env = { ...h.overrides.env, AIRLOCK_LOG_FILE: log };
+    const done = main(['start'], h.io, h.overrides);
+    await waitFor(() => h.handlers.has('SIGTERM'));
+    h.handlers.get('SIGTERM')?.();
+    await done;
+    expect(h.chmodCalls).toEqual([{ path: log, mode: 0o600 }]);
+    expect(statSync(log).mode & 0o777).toBe(0o600);
   });
 
   it('appends to a small log file and leaves other files alone', async () => {
@@ -478,8 +494,35 @@ describe('install and uninstall', () => {
     h.overrides.fetch = (async () => new Response(JSON.stringify({ airlock: true, version: '1', paired: false }), { status: 200 })) as typeof fetch;
     expect(await main(['install'], h.io, h.overrides)).toBe(0);
     expect(h.out.join('')).toContain(
-      `A copy of Airlock is already running on port ${PORT}. The login item is installed and will take over the next time you log in or after that copy stops.`);
+      `A copy of Airlock is already running on port ${PORT}, so the login item did not start a second one. It will start Airlock the next time you log in. To switch to it now, stop the running copy and run: npm run service:install`);
+    expect(h.out.join('')).not.toContain('is running now');
+    expect(h.out.join('')).not.toContain('starts at login');
     expect(h.calls).toHaveLength(2);
+  });
+
+  it('on a re-install the agent\'s own previous copy (gone after bootout) is not another copy', async () => {
+    const h = harness();
+    let stopped = false;
+    const exec = h.overrides.exec;
+    h.overrides.exec = async (cmd, args, opts) => {
+      if (args[0] === 'bootout') stopped = true;
+      return exec(cmd, args, opts);
+    };
+    h.overrides.fetch = (async () => {
+      if (stopped) throw new TypeError('fetch failed');
+      return new Response(JSON.stringify({ airlock: true, version: '1', paired: false }), { status: 200 });
+    }) as typeof fetch;
+    expect(await main(['install'], h.io, h.overrides)).toBe(0);
+    expect(h.out.join('')).toContain('starts at login');
+    expect(h.out.join('')).toContain('running now');
+    expect(h.out.join('')).not.toContain('already running');
+  });
+
+  it('refuses a C1 control character (U+0085) too', async () => {
+    const h = harness({ env: { AIRLOCK_PACKS_DIR: '/x/pa\u0085ks' } });
+    expect(await main(['install'], h.io, h.overrides)).toBe(1);
+    expect(h.err.join('')).toContain('contains a control character');
+    expect(existsSync(h.plist)).toBe(false);
   });
 
   it('does not say so when nothing answers', async () => {
