@@ -1,6 +1,6 @@
 import type { Timers } from '../client/timers';
 import type { PanelState, UserAction } from '../state/reduce';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Frame, connectionOf, useAnnounce } from './Frame';
 import { Offline } from './Offline';
 import { Pair } from './Pair';
@@ -10,8 +10,9 @@ import { Running } from './Running';
 import { Verdict } from './Verdict';
 import type { OnJump } from './FindingDetail';
 import type { Depth, Finding, PackRef, PrSummary, ServiceStatus } from '@airlock/shared';
-import { DismissSheet, newDraft, type SheetDraft, type SheetView } from './DismissSheet';
+import { DismissSheet, focusAfterClose, newDraft, type SheetDraft, type SheetView } from './DismissSheet';
 import { Packs } from './Packs';
+import { PanelVisible } from './visible';
 
 export interface PanelScreenProps {
   state: PanelState;
@@ -98,14 +99,25 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, fetc
   const packsButton = useRef<HTMLButtonElement>(null);
   const wasOpen = useRef(false);
   // Back returns focus to the button that opened the screen.
-  useEffect(() => {
+  // A layout effect, so a move that waited in the panel while it was out of sight still happens after it.
+  useLayoutEffect(() => {
     if (packsOpen) wasOpen.current = true;
     else if (wasOpen.current) { wasOpen.current = false; packsButton.current?.focus(); }
   }, [packsOpen]);
-  const closeDismiss = useCallback((): void => setDraft(null), []);
+  // Focus goes back only when the person closes the sheet, not when the state takes it out of sight.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const closing = useRef<Finding | null>(null);
+  const closeDismiss = useCallback((): void => { closing.current = draftRef.current?.finding ?? null; setDraft(null); }, []);
   const startDismiss = (finding: Finding): void => { if (state.kind === 'review') setDraft(newDraft(finding, state.latest.document.id)); };
   const sheetView = sheetViewOf(state);
   const known = knownOf(state);
+  useEffect(() => {
+    const finding = closing.current;
+    if (draft !== null || finding === null) return;
+    closing.current = null;
+    (focusAfterClose(finding, sheetView) ?? document.querySelector<HTMLElement>('main'))?.focus();
+  }, [draft, sheetView]);
   return (
     <Frame
       status={connectionOf(state)} packsRef={packsButton} {...(timers ? { timers } : {})}
@@ -114,10 +126,12 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, fetc
       <FinishedAnnouncer kind={state.kind} />
       {/* Packs opens beside the panel, which stays as it was, out of sight and out of reach. */}
       <div className="kept" hidden={packsOpen} inert={packsOpen}>
+        <PanelVisible value={!packsOpen}>
         <Body state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={startDismiss} defaultDepth={defaultDepth} />
         {draft !== null && sheetView !== null && (
           <DismissSheet draft={draft} onDraft={setDraft} view={sheetView} dispatch={dispatch} active={!packsOpen} onClose={closeDismiss} />
         )}
+        </PanelVisible>
       </div>
       {packsOpen && (
         <Packs

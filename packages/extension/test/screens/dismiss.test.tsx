@@ -222,6 +222,7 @@ describe('the dismiss sheet', () => {
     const f = finding(1);
     const { rerender } = open([f]);
     fireEvent.click(radio('Not now'));
+    fireEvent.click(save());
     rerender(reviewState([f], { busy: true }));
     expect(save().disabled).toBe(true);
     rerender(reviewState([f], { dismissals: [dismissal(f, { reason: 'not-now' })], busy: true }));
@@ -255,7 +256,7 @@ describe('the sheet keeps the typed line (fix round 1)', () => {
     expect(field().value).toBe('Totals are rounded on purpose');
     expect(save().disabled).toBe(true);
     rerender(reviewState([finding(1)]));
-    expect(screen.queryByText(KEPT)).toBeNull();
+    expect(within(screen.getByRole('dialog')).queryByText(KEPT)).toBeNull();
     expect(field().value).toBe('Totals are rounded on purpose');
     expect(save().disabled).toBe(false);
   });
@@ -399,6 +400,7 @@ describe('closing', () => {
     const f = finding(1);
     const { rerender } = open([f, finding(2)]);
     fireEvent.click(radio('Not now'));
+    fireEvent.click(save());
     rerender(reviewState([f, finding(2)], { dismissals: [dismissal(f, { reason: 'not-now' })], busy: true }));
     expect((screen.getByRole('button', { name: 'Done' }) as HTMLButtonElement).disabled).toBe(true);
   });
@@ -495,5 +497,90 @@ describe('Verdict on its own', () => {
     fireEvent.click(document.querySelector('.finding-card button')!);
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     expect(onDismiss).toHaveBeenCalledWith(f);
+  });
+});
+
+const FOREIGN = 'This finding was already dismissed, so this line cannot be saved to it.';
+
+describe('a dismissal that is not this sheet\'s own (fix round 2)', () => {
+  const learned = { packId: 'orbit', kind: 'wrong' as const, date: '2026-11-11' };
+  function expectReadOnly(text: string) {
+    const d = dlg();
+    expect(d.getByText(FOREIGN)).toBeTruthy();
+    expect(d.getByText(text)).toBeTruthy();
+    expect(d.getByRole('button', { name: 'Copy line' })).toBeTruthy();
+    expect(d.queryByRole('button', { name: 'Save' })).toBeNull();
+    expect(d.queryByRole('button', { name: 'Undo' })).toBeNull();
+    expect(d.queryByText(/^Saved to/)).toBeNull();
+    expect((d.getByRole('button', { name: 'Close' }) as HTMLButtonElement).disabled).toBe(false);
+  }
+
+  it('arriving before any submit makes the sheet read-only with the text kept', () => {
+    const f = finding(1);
+    const { rerender } = open([f]);
+    fireEvent.click(radio('Intended'));
+    type('Totals are rounded on purpose');
+    rerender(reviewState([f], { dismissals: [dismissal(f, { reason: 'wrong', learned })] }));
+    expectReadOnly('Totals are rounded on purpose');
+  });
+
+  it('arriving after a refused submit makes the sheet read-only', () => {
+    const f = finding(1);
+    const { rerender } = open([f]);
+    fireEvent.click(radio('Intended'));
+    type('Totals are rounded on purpose');
+    fireEvent.click(save());
+    rerender(reviewState([f], { notice: 'Refused.' }));
+    expect(dlg().getByText('Refused.')).toBeTruthy();
+    rerender(reviewState([f], { dismissals: [dismissal(f, { reason: 'wrong', learned })] }));
+    expectReadOnly('Totals are rounded on purpose');
+  });
+
+  it('after Undo, a later foreign dismissal is also read-only', () => {
+    const f = finding(1);
+    const { rerender } = open([f]);
+    fireEvent.click(radio('Not now'));
+    fireEvent.click(save());
+    rerender(reviewState([f], { dismissals: [dismissal(f, { reason: 'not-now' })] }));
+    expect(dlg().getByText('Hidden on this pull request.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    rerender(reviewState([f]));
+    expect(save()).toBeTruthy();
+    rerender(reviewState([f], { dismissals: [dismissal(f, { reason: 'not-now' })] }));
+    expect(dlg().getByText(FOREIGN)).toBeTruthy();
+  });
+});
+
+describe('the sheet and focus (fix round 2)', () => {
+  it('announces the offline line when it appears', () => {
+    const { rerender } = open();
+    rerender(offlineOf(reviewState([finding(1)])));
+    expect(document.querySelector('[aria-live]')?.textContent).toBe(KEPT);
+  });
+
+  it('does not move focus when the state hides it, and Cancel after it comes back still returns to Dismiss', () => {
+    const { rerender, opener } = open();
+    fireEvent.click(radio('Intended'));
+    rerender({ kind: 'unpaired' });
+    const outside = document.activeElement;
+    rerender({ kind: 'loading' });
+    expect(document.activeElement).toBe(outside);
+    rerender(reviewState([finding(1)]));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    // The body was rebuilt on the list, so the original button is gone; the finding's card takes focus.
+    expect(opener.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.querySelector('[data-finding-id]'));
+  });
+
+  it('does not take focus while Packs is open, and takes it when Packs closes', () => {
+    const { rerender } = open();
+    fireEvent.click(radio('Intended'));
+    rerender({ kind: 'unpaired' });
+    fireEvent.click(screen.getByRole('button', { name: 'Packs' }));
+    rerender(reviewState([finding(1)]));
+    expect(document.querySelector('.sheet')!.contains(document.activeElement)).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
   });
 });

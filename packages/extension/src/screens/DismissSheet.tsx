@@ -37,9 +37,11 @@ export interface SheetDraft {
   text: string;
   /** The person has typed in the field, so a change of reason keeps the text. */
   typed: boolean;
+  /** This sheet pressed Save and has not been refused or undone since: a dismissal that then appears is its own. */
+  submitted: boolean;
 }
 
-export const newDraft = (finding: Finding, reviewId: string): SheetDraft => ({ finding, reviewId, reason: null, text: '', typed: false });
+export const newDraft = (finding: Finding, reviewId: string): SheetDraft => ({ finding, reviewId, reason: null, text: '', typed: false, submitted: false });
 
 /** The review on screen under the sheet: the finished review or the kept one while the service is away. */
 export interface SheetView {
@@ -51,6 +53,7 @@ export interface SheetView {
 }
 
 export const OFFLINE_KEPT = 'Airlock could not reach its service. Your line is kept.';
+export const ALREADY_DISMISSED = 'This finding was already dismissed, so this line cannot be saved to it.';
 export const NOT_THIS_REVIEW = 'This review is no longer the one on screen, so this line cannot be saved to it.';
 
 /** One request to the service and what came back: `reply` is the state's notice once it is an answer to this request. */
@@ -91,36 +94,40 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
   const undo = useRequest(view.notice, busy);
 
   const current = doc.id === draft.reviewId && doc.findings.some((f) => f.id === finding.id);
-  const saved = current ? latest.dismissals.find((d) => d.fingerprint === finding.fingerprint) : undefined;
+  const dismissal = current ? latest.dismissals.find((d) => d.fingerprint === finding.fingerprint) : undefined;
+  // A dismissal is this sheet's own only when the sheet submitted and it then appeared.
+  const saved = draft.submitted ? dismissal : undefined;
+  const foreign = dismissal !== undefined && !draft.submitted;
   const result = saved === undefined ? null
     : saved.learned === null ? 'Hidden on this pull request.'
       : `Saved to ${pr.packs.find((p) => p.id === saved.learned?.packId)?.title ?? saved.learned.packId}.`;
   useEffect(() => { if (result !== null) announce(result); }, [announce, result]);
 
+  const showing = !current ? 'stale' : foreign ? 'dismissed' : result === null ? 'form' : 'result';
+  useEffect(() => { if (offline) announce(OFFLINE_KEPT); }, [announce, offline]);
+
+  // Pressing Save is only this sheet's own until it is refused or undone.
+  const wasResult = useRef(showing === 'result');
+  useEffect(() => {
+    const undone = wasResult.current && showing === 'form';
+    wasResult.current = showing === 'result';
+    const refused = draft.submitted && dismissal === undefined && save.reply !== null;
+    if (draft.submitted && (undone || refused)) onDraft({ ...draft, submitted: false });
+  }, [showing, draft, dismissal, save.reply, onDraft]);
+
   // The control that had focus is gone when the sheet changes between its form and its result; focus goes to its heading.
-  const showing = !current ? 'stale' : result === null ? 'form' : 'result';
+  // Out of sight the move waits and is not used up.
   const was = useRef(showing);
   useEffect(() => {
-    if (was.current !== showing) { was.current = showing; heading.current?.focus(); }
-  }, [showing]);
+    if (!active || was.current === showing) return;
+    was.current = showing;
+    heading.current?.focus();
+  }, [showing, active]);
 
   const saves = reason !== null && reason !== 'not-now';
   const problem = saves ? checkLearnedText(text, reason) : null;
   // Closing is for when the person can see how the request ended.
   const close = (): void => { if (!busy) onClose(); };
-
-  // After a dismissal the finding's Dismiss button is gone: focus goes to the next card, else to a heading.
-  const focusAfter = (): HTMLElement | null => {
-    const cards = [...document.querySelectorAll<HTMLElement>('[data-finding-id]')];
-    const card = (id: string | undefined): HTMLElement | null => cards.find((c) => c.dataset.findingId === id) ?? null;
-    const shown = listFindings(doc.findings, latest.dismissals).order;
-    if (shown.some((f) => f.id === finding.id)) return card(finding.id);
-    const all = listFindings(doc.findings, latest.dismissals.filter((d) => d.fingerprint !== finding.fingerprint)).order;
-    const at = all.findIndex((f) => f.id === finding.id);
-    const near = at === -1 ? [] : [all[at + 1], all[at - 1]];
-    for (const f of near) { const found = card(f?.id); if (found !== null) return found; }
-    return document.querySelector<HTMLElement>('[data-focus="findings"]') ?? document.querySelector<HTMLElement>('[data-focus="verdict"]');
-  };
 
   const choose = (next: DismissReason): void => {
     save.reset();
@@ -137,6 +144,7 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
     if (reason === null) return;
     undo.reset();
     save.begin();
+    if (!draft.submitted) onDraft({ ...draft, submitted: true });
     dispatch({
       type: 'dismiss',
       body: { repo: pr.repo, number: pr.number, reviewId: draft.reviewId, findingId: finding.id, reason, text: saves ? text : '' },
@@ -155,20 +163,20 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
     </>
   );
   const shell = (children: React.ReactNode) => (
-    <Sheet labelledBy={titleId} initialFocus={heading} fallbackFocus={focusAfter} active={active} onClose={close}>
+    <Sheet labelledBy={titleId} initialFocus={heading} returnFocus={false} active={active} onClose={close}>
       {header}
       {children}
     </Sheet>
   );
 
-  if (showing === 'stale') {
+  if (showing === 'stale' || showing === 'dismissed') {
     return shell(
       <>
-        <p role="alert" className="notice">{NOT_THIS_REVIEW}</p>
+        <p role="alert" className="notice">{showing === 'stale' ? NOT_THIS_REVIEW : ALREADY_DISMISSED}</p>
         {text !== '' && <pre className="quote">{text}</pre>}
         <div className="actions">
           <CopyButton text={() => text} label="Copy line" />
-          <button type="button" className="btn primary" disabled>Save</button>
+          {showing === 'stale' && <button type="button" className="btn primary" disabled>Save</button>}
           <button type="button" className="btn" onClick={onClose}>Close</button>
         </div>
       </>,
@@ -230,4 +238,25 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
       </div>
     </>,
   );
+}
+
+/** Where focus goes after the sheet is closed over a finding: the finding's own Dismiss button, else its card or the next one, else a heading. */
+export function focusAfterClose(finding: Finding, view: Pick<SheetView, 'latest'> | null): HTMLElement | null {
+  const find = (attr: string, id: string): HTMLElement | null =>
+    [...document.querySelectorAll<HTMLElement>(`[${attr}]`)].find((n) => n.getAttribute(attr) === id) ?? null;
+  const button = find('data-dismiss-for', finding.id);
+  if (button !== null && !button.hasAttribute('disabled')) return button;
+  const card = (id: string | undefined): HTMLElement | null => (id === undefined ? null : find('data-finding-id', id));
+  if (view !== null) {
+    const { document: doc, dismissals } = view.latest;
+    if (listFindings(doc.findings, dismissals).order.some((f) => f.id === finding.id)) {
+      const own = card(finding.id);
+      if (own !== null) return own;
+    } else {
+      const all = listFindings(doc.findings, dismissals.filter((d) => d.fingerprint !== finding.fingerprint)).order;
+      const at = all.findIndex((f) => f.id === finding.id);
+      for (const f of at === -1 ? [] : [all[at + 1], all[at - 1]]) { const found = card(f?.id); if (found !== null) return found; }
+    }
+  }
+  return document.querySelector<HTMLElement>('[data-focus="findings"]') ?? document.querySelector<HTMLElement>('[data-focus="verdict"]');
 }

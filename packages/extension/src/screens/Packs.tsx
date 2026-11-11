@@ -95,7 +95,7 @@ export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onD
       <ServiceSection fetchStatus={fetchStatus} />
       <section className="card" aria-labelledby="packs-pairing">
         <h3 className="label" id="packs-pairing">Pairing</h3>
-        {paired === null ? null : paired ? (
+        {paired === null ? <p className="muted">Not known yet.</p> : paired ? (
           <>
             <p>This panel is paired.</p>
             <CommandBox intro="To unpair, in the airlock-reviews folder run:" command={UNPAIR_COMMAND} {...(timers ? { timers } : {})} />

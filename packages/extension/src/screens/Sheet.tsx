@@ -6,15 +6,15 @@ const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), textarea:not(:di
  * A dialog over the panel: it has a role and a label, closes on Escape or a click on the backdrop, takes focus when it
  * opens, keeps focus inside while open and gives focus back to what had it before. The content is the children.
  */
-export function Sheet({ labelledBy, initialFocus, returnFocusTo, fallbackFocus, active = true, onClose, children }: {
+export function Sheet({ labelledBy, initialFocus, returnFocusTo, returnFocus = true, active = true, onClose, children }: {
   /** The id of the heading that names the dialog. */
   labelledBy: string;
   /** What takes focus when the sheet opens. */
   initialFocus: RefObject<HTMLElement | null>;
   /** Where focus goes on close, when the control that opened the sheet is not the one that had focus. */
   returnFocusTo?: RefObject<HTMLElement | null>;
-  /** Where focus goes on close when the opener is gone; read when the sheet closes. */
-  fallbackFocus?: () => HTMLElement | null;
+  /** False when the owner of the sheet puts focus back itself (it knows when the person closed it, not when it was hidden). */
+  returnFocus?: boolean;
   /** False while the sheet is kept out of sight (hidden): it then neither traps focus nor reacts to keys. */
   active?: boolean;
   onClose: () => void;
@@ -23,19 +23,23 @@ export function Sheet({ labelledBy, initialFocus, returnFocusTo, fallbackFocus, 
   const sheet = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
   close.current = onClose;
-  const fallback = useRef(fallbackFocus);
-  fallback.current = fallbackFocus;
+  const was = useRef<HTMLElement | null>(null);
+  const focused = useRef(false);
 
+  // The sheet takes focus once, when it is first in sight; while hidden it waits.
   useEffect(() => {
-    const was = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (!active || focused.current) return;
+    focused.current = true;
+    was.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     initialFocus.current?.focus();
-    return () => {
-      const opener = returnFocusTo?.current ?? was;
-      // Back to the opener; when it is gone (a dismissed finding's button), to where the panel says, or its content.
-      if (opener?.isConnected === true && !opener.hasAttribute('disabled')) opener.focus();
-      else (fallback.current?.() ?? document.querySelector<HTMLElement>('main'))?.focus();
-    };
-  }, [initialFocus, returnFocusTo]);
+  }, [active, initialFocus]);
+
+  useEffect(() => () => {
+    if (!returnFocus) return;
+    const opener = returnFocusTo?.current ?? was.current;
+    if (opener?.isConnected === true && !opener.hasAttribute('disabled')) opener.focus();
+    else document.querySelector<HTMLElement>('main')?.focus();
+  }, [returnFocus, returnFocusTo]);
 
   useEffect(() => {
     if (!active) return undefined;

@@ -7,6 +7,7 @@ import { AlsoFound } from './AlsoFound';
 import { BriefBlock } from './BriefBlock';
 import { Collapsible } from './Collapsible';
 import { CopyButton } from './CopyButton';
+import { useVisible } from './visible';
 import { DismissedList } from './DismissedList';
 import { DroppedSheet } from './DroppedSheet';
 import { FindingCard } from './FindingCard';
@@ -41,6 +42,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const { pr, latest, stale } = state;
   const doc = latest.document;
   const announce = useAnnounce();
+  const visible = useVisible();
   const t = timers ? { timers } : {};
   const lists = useMemo(() => listFindings(doc.findings, latest.dismissals), [doc.findings, latest.dismissals]);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
@@ -88,13 +90,14 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   useEffect(() => {
     if (detailId !== null) { shownDetail.current = detailId; return; }
     const id = shownDetail.current;
-    if (id === null) return;
+    // Out of sight, the move waits and is not used up; it happens when the panel is in sight again.
+    if (id === null || !visible) return;
     const node = nodes.current.get(id);
     if (node) { node.focus(); shownDetail.current = null; return; }
     if (lists.also.some((f) => f.id === id) && !folds.has('also')) { setFolds((was) => toggled(was, 'also')); return; }
     (findingsHeading.current ?? verdictHeading.current)?.focus();
     shownDetail.current = null;
-  }, [detailId, folds, lists]);
+  }, [detailId, folds, lists, visible]);
 
   const empty = lists.order.length === 0;
   const unfinished = doc.verdict.label === 'incomplete';

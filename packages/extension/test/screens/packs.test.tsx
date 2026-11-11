@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PanelScreen, type PanelScreenProps } from '../../src/screens/PanelScreen';
 import type { PanelState } from '../../src/state/reduce';
 import { prSummary } from './fixtures';
-import { finding, reviewState } from './review-fixtures';
+import { dismissal as dismissalFor, finding, reviewState } from './review-fixtures';
 
 afterEach(cleanup);
 
@@ -173,13 +173,39 @@ describe('the Packs screen (fix round 1)', () => {
     expect((screen.getByRole('radio', { name: /^Deep/ }) as HTMLInputElement).checked).toBe(true);
   });
 
-  it('keeps an open finding and its sheet while open and after Back', async () => {
+  it('keeps an open finding, its sheet and the typed line while Packs is open and after Back', async () => {
     show(reviewState([finding(1)]));
     fireEvent.click(document.querySelector('.finding-card button')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Intended' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'The line that will be saved to your pack' }), { target: { value: 'Totals are rounded on purpose' } });
     await openPacks();
-    expect(document.querySelector('.kept')!.hasAttribute('inert')).toBe(true);
+    const kept = document.querySelector('.kept')!;
+    expect(kept.hasAttribute('inert')).toBe(true);
+    expect(kept.contains(document.activeElement)).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
-    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeTruthy();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect((screen.getByRole('textbox', { name: 'The line that will be saved to your pack' }) as HTMLTextAreaElement).value).toBe('Totals are rounded on purpose');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
+  });
+
+  it('says it is not known yet when nothing proves whether the panel is paired', async () => {
+    show({ kind: 'no-pr' });
+    await openPacks();
+    expect(screen.getByText('Not known yet.')).toBeTruthy();
+  });
+
+  it('holds a focus move that falls due while hidden until the body is visible again', async () => {
+    const f = finding(1);
+    const view = show(reviewState([f]));
+    fireEvent.click(document.querySelector('.finding-card button')!);
+    await openPacks();
+    const heading = document.querySelector<HTMLElement>('.packs-screen h2')!;
+    // The open finding is dismissed elsewhere while Packs is open; the detail closes behind it.
+    view.rerender(<PanelScreen state={reviewState([f], { dismissals: [dismissalFor(f)] })} dispatch={view.dispatch} fetchStatus={view.fetchStatus} />);
+    expect(document.activeElement).toBe(heading);
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(document.activeElement?.hasAttribute('data-focus') || document.activeElement?.tagName === 'H2').toBe(true);
   });
 
   it('changes nothing when a status fetch resolves after Back', async () => {

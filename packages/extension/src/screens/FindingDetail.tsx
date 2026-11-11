@@ -2,6 +2,7 @@ import type { Finding, PrSummary } from '@airlock/shared';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Timers } from '../client/timers';
 import { CopyButton } from './CopyButton';
+import { useVisible } from './visible';
 import { fromText, locationText, placeText, severityWord } from './words';
 
 export interface JumpTarget { path: string; line: number | null }
@@ -38,7 +39,13 @@ export interface FindingDetailProps {
 export function FindingDetail({ finding, packs, previous, next, canDismiss, fixPrompt, onBack, onOpen, onJump, onDismiss, timers }: FindingDetailProps) {
   const title = useRef<HTMLHeadingElement>(null);
   const [note, setNote] = useState<{ key: string; text: string } | null>(null);
-  useEffect(() => title.current?.focus(), []);
+  const visible = useVisible();
+  const focused = useRef(false);
+  useEffect(() => {
+    if (!visible || focused.current) return;
+    focused.current = true;
+    title.current?.focus();
+  }, [visible]);
 
   const jump = (key: string, place: JumpTarget): void => {
     const said = (text: string): void => setNote({ key, text });
@@ -88,7 +95,7 @@ export function FindingDetail({ finding, packs, previous, next, canDismiss, fixP
         </div>
         <div className="action"><CopyButton text={fixPrompt} label="Copy fix prompt" {...(timers ? { timers } : {})} /></div>
         <div className="action">
-          <button type="button" className="btn" disabled={!canDismiss} onClick={() => onDismiss(finding)}>Dismiss</button>
+          <button type="button" className="btn" data-dismiss-for={finding.id} disabled={!canDismiss} onClick={() => onDismiss(finding)}>Dismiss</button>
         </div>
       </div>
       <div className="actions">
