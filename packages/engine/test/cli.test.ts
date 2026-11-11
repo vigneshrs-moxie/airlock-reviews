@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { minimalDocument, type ReviewDocument } from '@airlock/shared';
 import type { ReviewEvent } from '@airlock/shared';
 import { usage } from '../src/cli-args.js';
@@ -32,6 +32,10 @@ function harness(doc: ReviewDocument = minimalDocument(), events: ReviewEvent[] 
 }
 
 beforeEach(() => { vi.mocked(createSdkRunner).mockClear(); });
+afterEach(() => { vi.unstubAllEnvs(); });
+
+const RAW = ['\u001b', '\u0007', '\r'];
+const expectClean = (text: string) => { for (const c of RAW) expect(text).not.toContain(c); };
 
 describe('main', () => {
   it('prints usage and returns 0 for help and for no arguments', async () => {
@@ -47,7 +51,7 @@ describe('main', () => {
     for (const argv of [['review', 'a/b#1', '--bogus'], ['review', 'not-a-ref']]) {
       const h = harness();
       expect(await main(argv, h.io, h.overrides)).toBe(2);
-      expect(h.err.join('')).not.toBe('');
+      expect(h.err.join('')).toMatch(argv[2] === '--bogus' ? /^Unknown option "--bogus"\. Run "airlock help" for usage\.\n$/ : /^Not a pull request reference: not-a-ref/);
       expect(h.out).toEqual([]);
       expect(h.requests).toHaveLength(0);
     }
@@ -162,5 +166,91 @@ describe('main', () => {
     delete h.overrides.deps;
     expect(await main(['review', 'acme/widgets#42'], h.io, h.overrides)).toBe(0);
     expect(createSdkRunner).not.toHaveBeenCalled();
+  });
+
+  describe('cleaning and never throwing', () => {
+    it('cleans a thrown review error, with the stack under AIRLOCK_DEBUG', async () => {
+      vi.stubEnv('AIRLOCK_DEBUG', '1');
+      const h = harness();
+      h.overrides.review = async () => {
+        const e = new Error('bad\u001b[31m\r\nquote');
+        e.stack = 'Error: bad\n    at \u001b[31mfoo (x.ts:1)\r\n    at bar (y.ts:2)';
+        throw e;
+      };
+      expect(await main(['review', 'acme/widgets#42'], h.io, h.overrides)).toBe(1);
+      const err = h.err.join('');
+      expectClean(err);
+      expect(err).toContain('could not review this pull request: bad[31m quote');
+      expect(err).toContain('\n    at [31mfoo (x.ts:1)\n    at bar (y.ts:2)');
+    });
+
+    it('prints a stack only when AIRLOCK_DEBUG is 1', async () => {
+      const run = async (value: string) => {
+        vi.stubEnv('AIRLOCK_DEBUG', value);
+        const h = harness();
+        h.overrides.review = async () => { throw new Error('boom'); };
+        await main(['review', 'acme/widgets#42'], h.io, h.overrides);
+        return h.err.join('');
+      };
+      expect(await run('1')).toMatch(/\n\s+at /);
+      expect(await run('')).not.toMatch(/\n\s+at /);
+    });
+
+    it('cleans the write error and the file path', async () => {
+      const h = harness();
+      const writeFile = async () => { throw new Error('no\u001b[31m\rspace'); };
+      await main(['review', 'acme/widgets#42', '--json', 'a\u001b[2Jb.json'], h.io, { ...h.overrides, writeFile });
+      const err = h.err.join('');
+      expectClean(err);
+      expect(err).toContain('the file a[2Jb.json could not be written: no[31m space');
+    });
+
+    it('cleans a bad reference and a bad option', async () => {
+      for (const argv of [['review', 'x\u001b[31my\r'], ['review', 'a/b#1', '--bo\u001b[31mgus']]) {
+        const h = harness();
+        expect(await main(argv, h.io, h.overrides)).toBe(2);
+        expectClean(h.err.join(''));
+      }
+    });
+
+    it('uses AIRLOCK_PACKS_DIR, lets overrides.packsDir win, and cleans a missing path', async () => {
+      const other = mkdtempSync(join(tmpdir(), 'airlock-cli-env-'));
+      vi.stubEnv('AIRLOCK_PACKS_DIR', other);
+      let h = harness();
+      delete h.overrides.packsDir;
+      expect(await main(['review', 'a/b#1'], h.io, h.overrides)).toBe(0);
+      expect(h.requests[0]!.packsDir).toBe(other);
+      h = harness();
+      expect(await main(['review', 'a/b#1'], h.io, h.overrides)).toBe(0);
+      expect(h.requests[0]!.packsDir).toBe(packsDir);
+      vi.stubEnv('AIRLOCK_PACKS_DIR', '/nope\u001b[31m\r/x');
+      h = harness();
+      delete h.overrides.packsDir;
+      expect(await main(['review', 'a/b#1'], h.io, h.overrides)).toBe(1);
+      expectClean(h.err.join(''));
+      expect(h.err.join('')).toContain('/nope[31m /x');
+    });
+
+    it('treats a file as a missing packs folder', async () => {
+      const file = join(mkdtempSync(join(tmpdir(), 'airlock-cli-file-')), 'packs');
+      writeFileSync(file, 'x');
+      const h = harness();
+      expect(await main(['review', 'a/b#1'], h.io, { ...h.overrides, packsDir: file })).toBe(1);
+      expect(h.err.join('')).toContain(`The packs folder was not found at ${file}.`);
+    });
+
+    it('returns 1 with a message when rendering throws', async () => {
+      const h = harness();
+      h.overrides.review = async () => ({}) as ReviewDocument;
+      await expect(main(['review', 'a/b#1'], h.io, h.overrides)).resolves.toBe(1);
+      expect(h.err.join('')).toContain('Airlock could not review this pull request: ');
+    });
+
+    it('returns 1 with a message when printing throws', async () => {
+      const h = harness();
+      h.io.out = () => { throw new Error('closed\u001b[31m'); };
+      await expect(main(['review', 'a/b#1'], h.io, h.overrides)).resolves.toBe(1);
+      expect(h.err.join('')).toContain('Airlock could not review this pull request: closed[31m');
+    });
   });
 });

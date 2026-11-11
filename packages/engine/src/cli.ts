@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { existsSync, realpathSync } from 'node:fs';
-import { writeFile as writeFileToDisk } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { stat, writeFile as writeFileToDisk } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import type { ReviewEvent } from '@airlock/shared';
 import { createSdkRunner } from './agent/sdk-runner.js';
@@ -19,7 +19,20 @@ export interface CliOverrides {
   writeFile?: (path: string, text: string) => Promise<void>;
 }
 
-const messageOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+const clean = cleanForTerminal;
+/** The message of anything thrown, cleaned for the terminal. */
+const messageOf = (e: unknown): string => clean(e instanceof Error ? e.message : String(e));
+/** A stack, cleaned line by line so its line breaks stay. */
+const stackOf = (e: unknown): string =>
+  e instanceof Error && e.stack ? `\n${e.stack.split(/\r?\n/).map(clean).join('\n')}` : '';
+
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 /** The packs folder sits at the repository root, three levels above both src/cli.ts and dist/cli.js. */
 function resolvePacksDir(overrides: CliOverrides): string {
@@ -58,6 +71,19 @@ function progressLine(e: ReviewEvent): string | null {
 
 /** Runs one command and returns the process exit code. Never throws and never calls process.exit. */
 export async function main(argv: string[], io: CliIo, overrides: CliOverrides = {}): Promise<number> {
+  try {
+    return await run(argv, io, overrides);
+  } catch (err) {
+    try {
+      io.err(`Airlock could not review this pull request: ${messageOf(err)}\n`);
+    } catch {
+      // nothing left to report to
+    }
+    return 1;
+  }
+}
+
+async function run(argv: string[], io: CliIo, overrides: CliOverrides = {}): Promise<number> {
   let args: ReturnType<typeof parseArgs>;
   let target: { repo: string; number: number } | undefined;
   try {
@@ -73,8 +99,8 @@ export async function main(argv: string[], io: CliIo, overrides: CliOverrides = 
   }
 
   const packsDir = resolvePacksDir(overrides);
-  if (!existsSync(packsDir)) {
-    io.err(`The packs folder was not found at ${packsDir}. Set AIRLOCK_PACKS_DIR to its location.\n`);
+  if (!(await isDirectory(packsDir))) {
+    io.err(`The packs folder was not found at ${clean(packsDir)}. Set AIRLOCK_PACKS_DIR to its location.\n`);
     return 1;
   }
 
@@ -91,19 +117,18 @@ export async function main(argv: string[], io: CliIo, overrides: CliOverrides = 
       const line = progressLine(e);
       if (line !== null) io.err(`${line}\n`);
     });
+    io.out(renderReview(doc, { color: io.color }));
   } catch (err) {
-    const detail = process.env['AIRLOCK_DEBUG'] === '1' && err instanceof Error && err.stack ? `\n${err.stack}` : '';
+    const detail = process.env['AIRLOCK_DEBUG'] === '1' ? stackOf(err) : '';
     io.err(`Airlock could not review this pull request: ${messageOf(err)}${detail}\n`);
     return 1;
   }
-
-  io.out(renderReview(doc, { color: io.color }));
   if (args.json !== undefined) {
     const write = overrides.writeFile ?? ((path, text) => writeFileToDisk(path, text, 'utf8'));
     try {
       await write(args.json, `${JSON.stringify(doc, null, 2)}\n`);
     } catch (err) {
-      io.err(`The review was printed, but the file ${args.json} could not be written: ${messageOf(err)}\n`);
+      io.err(`The review was printed, but the file ${clean(args.json)} could not be written: ${messageOf(err)}\n`);
       return 1;
     }
   }
@@ -113,11 +138,12 @@ export async function main(argv: string[], io: CliIo, overrides: CliOverrides = 
 function isEntryPoint(): boolean {
   const entry = process.argv[1];
   if (entry === undefined) return false;
-  try {
-    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
-  } catch {
-    return false;
-  }
+  const real = (path: string): string | undefined => {
+    try { return realpathSync(path); } catch { return undefined; }
+  };
+  const self = real(fileURLToPath(import.meta.url));
+  const started = real(entry) ?? real(`${entry}.js`);
+  return self !== undefined && started === self;
 }
 
 if (isEntryPoint()) {
@@ -126,5 +152,11 @@ if (isEntryPoint()) {
     err: (t) => { process.stderr.write(t); },
     color: process.stdout.isTTY === true && process.env['NO_COLOR'] === undefined,
   };
-  process.exitCode = await main(process.argv.slice(2), io);
+  main(process.argv.slice(2), io).then(
+    (code) => { process.exitCode = code; },
+    (err: unknown) => {
+      process.stderr.write(`Airlock could not review this pull request: ${messageOf(err)}\n`);
+      process.exitCode = 1;
+    },
+  );
 }

@@ -108,7 +108,7 @@ function droppedItem(d: ReviewDocument['dropped'][number]): string[] {
   if (r === null) return [head];
   const place = `${r.path}${r.line === null ? '' : `:${r.line}`} (${r.role})`;
   if (r.role === 'head' || r.role === 'base') {
-    const quote = r.quote.length > CODE_QUOTE_LIMIT ? `${r.quote.slice(0, CODE_QUOTE_LIMIT)}…` : r.quote;
+    const quote = [...r.quote].length > CODE_QUOTE_LIMIT ? `${[...r.quote].slice(0, CODE_QUOTE_LIMIT).join('')}…` : r.quote;
     return [head, `  proof: ${place} "${quote}"`];
   }
   return [head, ...wrap(`proof: ${place} "${r.quote}"`, '  ', '    ')];

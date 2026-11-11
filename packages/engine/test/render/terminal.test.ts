@@ -305,6 +305,18 @@ describe('renderReview', () => {
       expect(proof.join(' ').replace(/\s+/g, ' ')).toContain(`"${long}"`);
     });
 
+    it('cuts a code quote by code points, never inside a surrogate pair', () => {
+      const quote = 'a'.repeat(159) + '\u{1F600}' + 'tail';
+      const out = renderReview(withRefutation({ path: 'a.ts', line: 1, role: 'head', quote }));
+      expect(out).toContain(`"${'a'.repeat(159)}\u{1F600}…"`);
+    });
+
+    it('prints a recorded decision with one very long unbroken word whole', () => {
+      const word = 'x'.repeat(300);
+      const out = renderReview(withRefutation({ path: 'log.md', line: 1, role: 'learned', quote: word }));
+      expect(out).toContain(word);
+    });
+
     it('cleans control characters out of the proof line', () => {
       const out = renderReview(withRefutation({ path: 'a\u001b[31m.ts', line: 1, role: 'he\u0007ad', quote: 'x\r\ny\u2028z' }));
       expect(out).toContain('  proof: a[31m.ts:1 (head) "x yz"');
