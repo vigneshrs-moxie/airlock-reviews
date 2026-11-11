@@ -149,6 +149,13 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
     const n = unfinished.length;
     io.err(`${n} ${n === 1 ? 'case' : 'cases'} did not finish: ${clean(unfinished.join(', '))}. The report lists ${n === 1 ? 'it' : 'them'}.`);
   }
+  if (summary.stopped) {
+    const n = summary.stopped.notStarted.length;
+    io.err(
+      `Claude's usage limit was reached during ${clean(summary.stopped.caseId)}. ` +
+        `The run stopped there; ${n} ${n === 1 ? 'case was' : 'cases were'} not started. Run the same command again later to continue.`,
+    );
+  }
   io.out(clean(join(opts.out, summary.runId, 'report.md')));
   io.out(`Half of the known problems in the top list: ${word(summary.meets.halfInTop)}`);
   io.out(`Clean pull requests stay clean: ${word(summary.meets.cleanControls)}`);

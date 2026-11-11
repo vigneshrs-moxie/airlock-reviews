@@ -581,6 +581,95 @@ describe('runReplay', () => {
     });
   });
 
+  describe('a usage limit stops the run instead of spoiling it', () => {
+    const five = [1, 2, 3, 4, 5].map((n) => replayCase({
+      id: `pr${n}`, pr: n, baseSha: String(n).repeat(40), headSha: 'e'.repeat(40), known: [problem({ id: `K${n}` })],
+    }));
+    const answerAll = (req: AgentRequest<unknown>) => ({
+      matches: five.map((c) => c.known[0]!.id).filter((id) => isFor(req, id)).map((knownId) => ({ knownId, itemId: 'f1', partial: false, reason: 'Same.' })),
+    });
+    const limited = (req: ReviewRequest, error: { message: string; kind?: 'usage-limit' }): ReviewDocument => ({
+      ...reviewFor(req),
+      verdict: { label: 'incomplete', sentence: 'The review did not finish.', counts: { block: 0, fix: 0, ask: 0, note: 1 } },
+      stageErrors: [{ stage: 'lenses', cohortId: 'c1', ...error }],
+    });
+
+    for (const [label, error] of [
+      ['a stage error of kind usage-limit', { message: 'The request failed.', kind: 'usage-limit' }],
+      ['a stage error without a kind whose message names the usage limit', { message: 'Claude AI usage limit reached|1762963200' }],
+    ] as const) {
+      it(`${label} during the third of five cases stops the run there, and a second run picks up exactly the unfinished cases`, async () => {
+        const review = fakeReview((req) => (req.number === 3 ? limited(req, error) : reviewFor(req)));
+        const runner = createFakeRunner(answerAll);
+        const { events, onCase } = recorder();
+        const summary = await runReplay(options({ cases: five, parallelCases: 1 }), deps(review, runner), onCase);
+
+        expect(review.requests.map((r) => r.number)).toEqual([1, 2, 3]);
+        expect(runner.calls).toHaveLength(2);
+        expect(await exists(join(caseDir('pr3'), 'review.json'))).toBe(true);
+        await expect(stat(caseDir('pr4'))).rejects.toThrow(/ENOENT/);
+        await expect(stat(caseDir('pr5'))).rejects.toThrow(/ENOENT/);
+        expect(events.some((e) => e.caseId === 'pr4' || e.caseId === 'pr5')).toBe(false);
+        expect(summary.incompleteCases).toEqual(['pr3', 'pr4', 'pr5']);
+        expect(summary.stopped).toEqual({ reason: 'usage-limit', caseId: 'pr3', notStarted: ['pr4', 'pr5'] });
+        expect(await readJson(join(outDir, 'run-a', 'summary.json'))).toEqual(summary);
+        expect(await exists(join(outDir, 'run-a', 'report.md'))).toBe(true);
+        const { details } = await loadRun(join(outDir, 'run-a'), five);
+        expect(details.pr4!.doc.stageErrors.at(-1)!.message).toBe('This case has not been run.');
+
+        const healthy = fakeReview();
+        const again = createFakeRunner(answerAll);
+        const second = await runReplay(options({ cases: five, parallelCases: 1 }), deps(healthy, again));
+        expect(healthy.requests.map((r) => r.number)).toEqual([3, 4, 5]);
+        expect(again.calls).toHaveLength(3);
+        expect(second.incompleteCases).toEqual([]);
+        expect(second.stopped).toBeUndefined();
+      });
+    }
+
+    it('a judge that fails with a usage limit stops the run too', async () => {
+      const runner = createFakeRunner((req) => (isFor(req, 'K2') ? new Error('Claude usage limit reached; resets at 17:00') : answerAll(req)));
+      const review = fakeReview();
+      const summary = await runReplay(options({ cases: five, parallelCases: 1 }), deps(review, runner));
+      expect(review.requests.map((r) => r.number)).toEqual([1, 2]);
+      expect(summary.stopped).toEqual({ reason: 'usage-limit', caseId: 'pr2', notStarted: ['pr3', 'pr4', 'pr5'] });
+      expect(summary.incompleteCases).toEqual(['pr2', 'pr3', 'pr4', 'pr5']);
+      // The saved review is kept; only the judge runs again next time.
+      expect((await readdir(caseDir('pr2'))).sort()).toEqual(['error.txt', 'review.json']);
+    });
+
+    it('a judge result marked as a usage limit stops the run', async () => {
+      const inner = createFakeRunner(answerAll);
+      const runner: ReplayDeps['runner'] = {
+        run: async (req) => (isFor(req as AgentRequest<unknown>, 'K1')
+          ? ({ ok: false, error: 'The request was refused.', kind: 'usage-limit', usage: { ms: 0, inputTokens: 0, outputTokens: 0, costUsd: null, turns: 0 } } as never)
+          : inner.run(req)),
+      };
+      const summary = await runReplay(options({ cases: five, parallelCases: 1 }), deps(fakeReview(), runner));
+      expect(summary.stopped).toEqual({ reason: 'usage-limit', caseId: 'pr1', notStarted: ['pr2', 'pr3', 'pr4', 'pr5'] });
+    });
+
+    it('cases already in flight finish, and a done case is still counted as done', async () => {
+      await runReplay(options({ cases: [five[4]!], dataset: five }), deps(fakeReview(), createFakeRunner(answerAll)));
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const review = fakeReview(async (req) => {
+        if (req.number === 1) return limited(req, { message: 'x', kind: 'usage-limit' });
+        if (req.number === 2) { await gate; return reviewFor(req); }
+        return reviewFor(req);
+      });
+      const runner = createFakeRunner(answerAll);
+      const running = runReplay(options({ cases: five, parallelCases: 2 }), deps(review, runner));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      release();
+      const summary = await running;
+      expect(review.requests.map((r) => r.number).sort()).toEqual([1, 2]);
+      expect(summary.cases.find((s) => s.caseId === 'pr2')).toMatchObject({ inTop: 1, verdict: 'approve' });
+      expect(summary.cases.find((s) => s.caseId === 'pr5')).toMatchObject({ inTop: 1, verdict: 'approve' });
+      expect(summary.stopped).toEqual({ reason: 'usage-limit', caseId: 'pr1', notStarted: ['pr3', 'pr4'] });
+    });
+  });
+
   it('the judge runs in a fresh, empty folder made for the run and removed at the end', async () => {
     const seen: { cwd: string; entries: string[] }[] = [];
     const runner = createFakeRunner((req) => {

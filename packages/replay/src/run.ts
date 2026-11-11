@@ -8,7 +8,7 @@ import { DepthSchema, ReviewDocumentSchema } from '@airlock/shared';
 import type { Depth, ReviewDocument } from '@airlock/shared';
 import { z } from 'zod';
 import type { ReplayCase } from './dataset.js';
-import { judgeCase } from './judge.js';
+import { judgeCase, mentionsUsageLimit, UsageLimitError } from './judge.js';
 import type { Match } from './judge.js';
 import { renderReport } from './report.js';
 import { scoreCase, summarise } from './score.js';
@@ -52,6 +52,10 @@ export type CaseEvent = {
   message?: string;
   score?: CaseScore;
 };
+
+/** True when a stage of the review failed because Claude's usage limit was reached. */
+const hitUsageLimit = (doc: ReviewDocument): boolean =>
+  doc.stageErrors.some((e) => e.kind === 'usage-limit' || (e.kind === undefined && mentionsUsageLimit(e.message)));
 
 /** Per case, the document and matches the report is rendered from. */
 export type RunDetails = Record<string, { doc: ReviewDocument; matches: Match[] }>;
@@ -399,6 +403,10 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   // The judge reads nothing from disk: it runs in an empty folder made for this run.
   const judgeDir = await mkdtemp(join(tmpdir(), 'airlock-replay-judge-'));
 
+  // Set when a review or the judge reaches Claude's usage limit: no case starts after that, so none is spoiled.
+  let limitReachedIn: string | null = null;
+  const notStarted = new Set<string>();
+
   /**
    * Works on one case until it is done: reviews it unless a finished review of it is saved, then judges it. A review
    * that comes back incomplete is saved, in place of the old one, and not judged. Never throws.
@@ -410,6 +418,10 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
     try {
       const saved = await readOutcome(dir, c);
       if (saved.kind === 'done') return finish(c, saved, 'skipped');
+      if (limitReachedIn !== null) {
+        notStarted.add(c.id);
+        return scoreOutcome(c, saved, scoring);
+      }
 
       emit({ caseId: c.id, status: 'start', ...(saved.kind === 'not-judged' ? { message: 'judging the saved review again' } : {}) });
       await mkdir(dir, { recursive: true });
@@ -424,6 +436,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
         lead = 'Saving the review failed';
         await writeAtomic(join(dir, 'review.json'), json(doc));
         emit({ caseId: c.id, status: 'reviewed' });
+        if (hitUsageLimit(doc)) limitReachedIn ??= c.id;
         if (doc.verdict.label === 'incomplete') {
           const reason = didNotFinish(doc);
           return finish(c, { kind: 'not-done', doc, reason }, 'failed', reason);
@@ -437,6 +450,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
       await writeAtomic(join(dir, 'matches.json'), json(matches));
       return finish(c, { kind: 'done', doc: kept, matches }, 'judged');
     } catch (err) {
+      if (err instanceof UsageLimitError) limitReachedIn ??= c.id;
       const error = failureText(lead, err);
       await writeAtomic(join(dir, 'error.txt'), `${error}\n`).catch(() => undefined);
       return finish(c, kept ? { kind: 'not-judged', doc: kept, reason: error } : { kind: 'not-done', doc: null, reason: error }, 'failed', error);
@@ -459,7 +473,12 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
     const c = opened.cases[i]!;
     return scoreOutcome(c, { kind: 'not-done', doc: null, reason: failureText('The case failed', r.reason) }, scoring);
   });
-  const summary = summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases);
+  const summary: RunSummary = {
+    ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases),
+    ...(limitReachedIn === null ? {} : {
+      stopped: { reason: 'usage-limit', caseId: limitReachedIn, notStarted: opened.cases.filter((c) => notStarted.has(c.id)).map((c) => c.id) },
+    }),
+  };
   const details: RunDetails = Object.fromEntries(opened.cases.map((c, i) => [c.id, results[i]!.detail]));
   await saveRunReport(runDir, summary, opened.cases, details);
   return summary;

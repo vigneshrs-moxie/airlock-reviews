@@ -28,6 +28,12 @@ const answerSchema = z.object({
   })),
 });
 
+/** The judge could not answer because Claude's usage limit was reached: the run stops rather than carry on failing. */
+export class UsageLimitError extends Error {}
+
+/** True for an error text that says Claude's usage limit was reached, for failures that carry no kind. */
+export const mentionsUsageLimit = (text: string): boolean => /usage limit/i.test(text);
+
 /** packages/replay/prompts/, from both src/ and a built dist/. */
 const PROMPTS_DIR = new URL('../prompts/', import.meta.url);
 let template: string | undefined;
@@ -101,12 +107,17 @@ export async function judgeCase(
   if (c.known.length === 0) return [];
   const instructions = await loadJudgeTemplate();
   let result: AgentResult<z.infer<typeof answerSchema>>;
+  const failed = (error: string, usageLimit: boolean): Error => {
+    const message = `The judge failed on case ${c.id}: ${error}`;
+    return usageLimit || mentionsUsageLimit(error) ? new UsageLimitError(message) : new Error(message);
+  };
   try {
     result = await runner.run({ role: 'judge', instructions, material: material(c, doc), schema: answerSchema, cwd, model, effort: 'high' });
   } catch (err) {
-    throw new Error(`The judge failed on case ${c.id}: ${err instanceof Error ? err.message : String(err)}`);
+    throw failed(err instanceof Error ? err.message : String(err), false);
   }
-  if (!result.ok) throw new Error(`The judge failed on case ${c.id}: ${result.error}`);
+  // A runner that can tell why a request failed marks a usage limit with `kind`; older runners only say so in words.
+  if (!result.ok) throw failed(result.error, 'kind' in result && result.kind === 'usage-limit');
 
   const answers = new Map<string, z.infer<typeof answerSchema>['matches'][number]>();
   for (const a of result.output.matches) if (!answers.has(a.knownId)) answers.set(a.knownId, a);

@@ -54,6 +54,11 @@ export interface RunSummary {
   positivesIncomplete: number;
   negativesIncomplete: number;
   totals: { ms: number; inputTokens: number; outputTokens: number; agentRuns: number };
+  /**
+   * Present when the run stopped early because Claude's usage limit was reached during `caseId`: the cases in
+   * `notStarted` were left untouched. Only the run itself knows this; a summary rebuilt from the folder does not have it.
+   */
+  stopped?: { reason: 'usage-limit'; caseId: string; notStarted: string[] };
   meets: {
     /** 'not tested' when the run has no positive cases. */
     halfInTop: boolean | 'not tested';

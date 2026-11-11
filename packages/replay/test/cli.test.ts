@@ -213,6 +213,22 @@ describe('airlock-replay', () => {
     expect((await stat(join(work, RUN_ID, 'report.md'))).isFile()).toBe(true);
   });
 
+  it('stops at a usage limit, says how to continue and returns 0', async () => {
+    const h = harness({ review: (req) => (req.number === 1 ? {
+      ...reviewFor(req),
+      verdict: { label: 'incomplete', sentence: 's', counts: { block: 0, fix: 0, ask: 0, note: 1 } },
+      stageErrors: [{ stage: 'lenses', cohortId: null, message: 'limit', kind: 'usage-limit' }],
+    } : reviewFor(req)) });
+    const t = io();
+    const code = await keepingEnv(() => main(['run', '--cases', 'all', '--out', work], t.io, h.overrides));
+    expect(code).toBe(0);
+    expect(h.requests.map((r) => r.number)).toEqual([1]);
+    expect(t.err).toContain(
+      "Claude's usage limit was reached during pr1. The run stopped there; 2 cases were not started. Run the same command again later to continue.",
+    );
+    expect(t.out[0]).toBe(join(work, RUN_ID, 'report.md'));
+  });
+
   it('prints text from outside without terminal control characters, each message on one line', async () => {
     const h = harness({ review: (req) => { if (req.number === 2) throw new Error('bad\u001b[2K\rthing\nsecond line'); return reviewFor(req); } });
     const t = io();
