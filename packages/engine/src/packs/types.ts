@@ -1,0 +1,26 @@
+import type { Severity } from '@airlock/shared';
+import type { StageRule } from '../intake/pr.js';
+
+export interface Rule {
+  id: string; title: string; paths: string[]; severityFloor: Severity; sourcePrs: number[];
+  origin: string; body: string; packId: string;
+}
+export interface LensDef { id: string; title: string; instructions: string }
+export interface CheckDef {
+  id: string; kind: 'added-line-matches' | 'file-pair' | 'new-file-requires' | 'file-touched';
+  paths: string[]; pattern?: string; exceptPaths?: string[];
+  requires?: { path: string; pattern?: string }[]; message: string;
+}
+export interface LinkRule {
+  id: string; from: string; capture: string; transform: 'none' | 'camel' | 'pascal';
+  searchIn: string[]; detail: string;
+}
+export interface LearnedEntry { date: string; repo: string; kind: 'wrong' | 'intended'; text: string }
+export interface Pack {
+  id: string; title: string; version: string; dir: string; repos: string[]; appRoot: string | null;
+  stageRules: StageRule[]; tiers: { read: string[]; trust: string[]; ignore: string[] };
+  siblings: { id: string; glob: string }[]; linkRules: LinkRule[]; checks: CheckDef[];
+  standards: { name: string; text: string; dated: boolean }[]; lenses: LensDef[]; rules: Rule[];
+  learned: LearnedEntry[];
+}
+export interface Holdout { pr: number; reviewedAt: string }
