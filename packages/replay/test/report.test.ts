@@ -310,11 +310,16 @@ describe('renderReport', () => {
       expect(shared).toContain('  - For A3 the judge also named: d1, dropped by the challenge.');
     });
 
-    it('says merge in words wherever a stage is named', () => {
+    it('says merge in words: a stage that failed is merging duplicates, and a finding\'s fate is merged into another finding', () => {
       const report = text();
       expect(section(report, 'What was missed')).toContain('It was found, then merged into another finding. Its reason: Merged with a finding that is gone.');
-      expect(section(report, 'Incomplete reviews')).toContain('  - merged into another finding: The merge request failed.');
+      expect(section(report, 'Incomplete reviews')).toContain('  - merging duplicates: The merge request failed.');
+      expect(section(report, 'Incomplete reviews')).not.toContain('merged into another finding');
       expect(report).not.toMatch(/\bmerge:/);
+      // Another item the judge named that was merged away is described by its fate too.
+      const others: Match[] = [{ ...match('A1', 'also', 'f2'), others: [{ itemId: 'm1', where: 'dropped', partial: false }] }, match('A2', 'none', null), match('A3', 'none', null)];
+      const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, others)], [c]);
+      expect(section(renderReport(summary, [c], { a: { doc: d, matches: others } }), 'What was missed')).toContain('The judge also named: m1, merged into another finding.');
     });
 
     it('a match saved without others reads as having none', () => {

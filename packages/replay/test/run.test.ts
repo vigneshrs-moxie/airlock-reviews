@@ -870,7 +870,7 @@ describe('runReplay', () => {
     }));
     const { events, onCase } = recorder();
     await runReplay(options({ cases: [cases()[0]!] }), deps(review), onCase);
-    expect(events.at(-1)!.message).toBe('The review did not finish (merged into another finding).');
+    expect(events.at(-1)!.message).toBe('The review did not finish (merging duplicates).');
   });
 
   it('the run\'s total time is the time each call was working on cases, added up across resumes', async () => {

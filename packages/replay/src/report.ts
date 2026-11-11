@@ -45,10 +45,13 @@ function table(header: string[], rows: string[][]): string[] {
   return [line(header), line(header.map(() => '---')), ...rows.map(line)];
 }
 
-/** A stage's name for a reader: `merge` in words, the others as they are. */
+/** A stage named as one that failed or did not finish: `merge` in words, the others as they are. */
 export function stageWords(stage: string): string {
-  return stage === 'merge' ? 'merged into another finding' : stage;
+  return stage === 'merge' ? 'merging duplicates' : stage;
 }
+
+/** What the merge stage did to a finding it dropped. */
+const MERGED = 'merged into another finding';
 
 /** Plain words for what a stage did to an item it dropped. */
 function droppedWords(stage: string | undefined): string {
@@ -62,7 +65,7 @@ function droppedWords(stage: string | undefined): string {
     case 'select':
       return 'left out of the top five and not shown';
     case 'merge':
-      return stageWords('merge');
+      return MERGED;
     default:
       return 'dropped';
   }
@@ -111,7 +114,7 @@ function whereLost(m: Match | undefined, doc: ReviewDocument): string {
         case 'challenge':
           return `It was found, then dropped by the challenge.${reason}`;
         case 'merge':
-          return `It was found, then ${stageWords('merge')}.${reason}`;
+          return `It was found, then ${MERGED}.${reason}`;
         case 'anchor':
           return 'It was found, then dropped because the quoted code was not in the file.';
         case 'schema':
