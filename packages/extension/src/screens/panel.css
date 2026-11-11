@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light dark;
   --bg: #ffffff;
   --card: #f6f7f9;
   --fg: #1b1f24;
@@ -61,4 +62,6 @@ p { margin: 4px 0; overflow-wrap: anywhere; }
 .switch { align-items: center; cursor: pointer; }
 .notice { color: var(--danger); font-weight: 600; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.masked { -webkit-text-security: disc; }
+.row { flex-wrap: wrap; }

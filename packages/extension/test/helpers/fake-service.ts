@@ -167,7 +167,7 @@ export class FakeService {
   private answer(route: string, req: Request): Response {
     if (route === 'GET /hello') return json({ airlock: true, version: '0.1.0', paired: this.paired });
     if (req.headers.get('authorization') !== `Bearer ${this.token}`) {
-      return json({ error: 'Airlock needs the pairing token. Run "airlock-service token".' }, 401);
+      return json({ error: 'Airlock needs the pairing token. Run "npm run service -- token".' }, 401);
     }
     const key = `${req.url.searchParams.get('repo')}#${req.url.searchParams.get('number')}`;
     switch (route) {

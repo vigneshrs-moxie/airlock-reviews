@@ -11,9 +11,12 @@ export function usePanel(start: StartPanel): { state: PanelState; dispatch: (act
   const startRef = useRef(start);
 
   useEffect(() => {
-    const panel = startRef.current(setState);
+    // A panel that was stopped (StrictMode's first mount, or an unmount) must not change what is shown.
+    let live = true;
+    const panel = startRef.current((next) => { if (live) setState(next); });
     running.current = panel;
     return () => {
+      live = false;
       running.current = null;
       panel.stop();
     };

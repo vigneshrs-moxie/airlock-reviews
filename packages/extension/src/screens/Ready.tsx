@@ -23,6 +23,8 @@ export function Ready({ state, dispatch }: { state: Extract<PanelState, { kind: 
   const [depth, setDepth] = useState<Depth>(pr.suggestedDepth);
   const [off, setOff] = useState<ReadonlySet<string>>(new Set());
   const group = useId();
+  const hintId = useId();
+  const busy = state.busy === true;
   const on = pr.packs.filter((p) => !off.has(p.id));
 
   const toggle = (id: string): void => {
@@ -48,9 +50,14 @@ export function Ready({ state, dispatch }: { state: Extract<PanelState, { kind: 
           {pr.packs.map((p) => (
             <li key={p.id} className="row">
               <label className="switch">
-                <input type="checkbox" role="switch" checked={!off.has(p.id)} disabled={!off.has(p.id) && on.length === 1} onChange={() => toggle(p.id)} />
+                <input
+                  type="checkbox" role="switch" checked={!off.has(p.id)} onChange={() => toggle(p.id)}
+                  disabled={busy || (!off.has(p.id) && on.length === 1)}
+                  {...(!off.has(p.id) && on.length === 1 ? { 'aria-describedby': hintId } : {})}
+                />
                 <span>{p.title}</span>
               </label>
+              {!off.has(p.id) && on.length === 1 && <p id={hintId} className="muted">At least one pack stays on.</p>}
             </li>
           ))}
         </ul>
@@ -59,12 +66,12 @@ export function Ready({ state, dispatch }: { state: Extract<PanelState, { kind: 
         <legend className="label">Depth</legend>
         {DEPTHS.map((d) => (
           <label key={d.depth} className="choice">
-            <input type="radio" name={group} value={d.depth} checked={depth === d.depth} onChange={() => setDepth(d.depth)} />
+            <input type="radio" name={group} value={d.depth} checked={depth === d.depth} onChange={() => setDepth(d.depth)} disabled={busy} />
             <span><strong>{d.name}</strong><span className="muted block">{d.line}</span></span>
           </label>
         ))}
       </fieldset>
-      <button type="button" className="btn primary wide" disabled={state.busy === true} onClick={start}>Review</button>
+      <button type="button" className="btn primary wide" disabled={busy} onClick={start}>Review</button>
       {state.notice !== undefined && <p role="alert" className="notice">{state.notice}</p>}
     </>
   );

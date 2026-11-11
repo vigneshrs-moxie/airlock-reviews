@@ -3,7 +3,6 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { E2E_PORT } from './port';
 import { startFakeService, type FakeService } from './fake-service';
 
 // Written in wxt.config.ts next to the key it comes from.
@@ -30,22 +29,38 @@ test.afterAll(async () => {
   if (profile) await rm(profile, { recursive: true, force: true });
 });
 
-test('the panel page loads and reaches the fake service without any prompt', async () => {
+test('the panel, beside a pull request tab, reaches the fake service and asks for pairing', async () => {
   let worker = context.serviceWorkers()[0];
   worker ??= await context.waitForEvent('serviceworker');
   const id = new URL(worker.url()).host;
   expect(id).toBe(EXTENSION_ID);
 
+  // A stubbed pull request page, made the active tab by the extension's own service worker.
+  await context.route('https://github.com/acme/widgets/pull/1', (route) =>
+    route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>stub</title><p>stub</p>' }));
+  const github = await context.newPage();
+  await github.goto('https://github.com/acme/widgets/pull/1');
+  await worker.evaluate(async () => {
+    const chrome = (globalThis as unknown as { chrome: typeof browser }).chrome;
+    const [tab] = await chrome.tabs.query({ url: 'https://github.com/acme/widgets/pull/1' });
+    if (tab?.id === undefined) throw new Error('the pull request tab was not found');
+    await chrome.tabs.update(tab.id, { active: true });
+  });
+
   const page = await context.newPage();
   const dialogs: string[] = [];
   page.on('dialog', (d) => dialogs.push(d.message()));
   await page.goto(`chrome-extension://${id}/sidepanel.html`);
-  // This tab is not a pull request, so the panel has nothing to look at and says so.
-  await expect(page.getByText('Open a pull request on GitHub and Airlock will appear here.')).toBeVisible();
-  // The panel page may reach the service (host permission), with no prompt: the same call the panel makes.
-  const base = `http://127.0.0.1:${E2E_PORT}`;
-  const hello = await page.evaluate(async (url) => (await fetch(`${url}/hello`)).json() as Promise<{ airlock: boolean }>, base);
-  expect(hello.airlock).toBe(true);
+  await github.bringToFront();
+  await worker.evaluate(async () => {
+    const chrome = (globalThis as unknown as { chrome: typeof browser }).chrome;
+    const [tab] = await chrome.tabs.query({ url: 'https://github.com/acme/widgets/pull/1' });
+    if (tab?.id !== undefined) await chrome.tabs.update(tab.id, { active: true });
+  });
+  service.requests.length = 0;
+  await page.reload();
+  await expect(page.getByText('Not paired')).toBeVisible();
+  await expect(page.getByLabel('Pairing token')).toBeVisible();
 
   expect(dialogs).toEqual([]);
   expect(service.requests.some((r) => r.method === 'GET' && r.url === '/hello')).toBe(true);

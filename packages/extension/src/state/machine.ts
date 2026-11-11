@@ -8,7 +8,7 @@ import type { TabWatcher } from './tab';
 export type { PanelState, StageLine, UserAction } from './reduce';
 
 export const LOST_MESSAGE = 'Airlock lost its connection to the review. Press Retry to look again.';
-export const NOT_A_TOKEN = 'That is not a pairing token. Run "airlock-service token" and paste the 64 characters it prints.';
+export const NOT_A_TOKEN = 'That is not a pairing token. Run "npm run service -- token" and paste the 64 characters it prints.';
 export const TAB_UNREADABLE = 'Airlock could not read the address of this tab. Press Retry to read it again.';
 export const RUN_STOPPED = 'The review that was running stopped when the Airlock service stopped. Start it again when you are ready.';
 export const SHOWING_PROBLEM = 'Airlock had a problem showing this review.';

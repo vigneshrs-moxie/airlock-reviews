@@ -143,11 +143,11 @@ describe('startPanel: loading', () => {
 
     h.panel.dispatch({ type: 'pair', token: '  not a token ' });
     const odd = await until(h, 'unpaired', (s) => s.message !== undefined);
-    expect(odd.message).toMatch(/airlock-service token/);
+    expect(odd.message).toMatch(/npm run service -- token/);
     expect(h.svc.calls).not.toContain('POST /pair');
 
     h.panel.dispatch({ type: 'pair', token: 'c'.repeat(64) });
-    await until(h, 'unpaired', (s) => s.message === 'Airlock needs the pairing token. Run "airlock-service token".');
+    await until(h, 'unpaired', (s) => s.message === 'Airlock needs the pairing token. Run "npm run service -- token".');
     expect(h.settings.token).toBe(OTHER_TOKEN);
 
     h.panel.dispatch({ type: 'pair', token: `${TOKEN}\n` });

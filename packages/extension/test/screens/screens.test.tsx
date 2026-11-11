@@ -30,6 +30,24 @@ describe('frame', () => {
     show({ kind: 'unpaired' });
     expect(screen.getByText('Not paired')).toBeTruthy();
   });
+  it('says only what the state proves', () => {
+    const pr = prSummary();
+    const cases: [PanelState, string | null][] = [
+      [{ kind: 'loading' }, 'Checking…'],
+      [{ kind: 'no-pr' }, null],
+      [{ kind: 'problem', pr: null, message: 'x' }, 'Problem'],
+      [{ kind: 'ready', pr }, 'Connected'],
+      [running(), 'Connected'],
+      [{ kind: 'review', pr, latest: latestFor(pr), stale: false }, 'Connected'],
+    ];
+    for (const [state, word] of cases) {
+      show(state);
+      const status = document.querySelector('.status');
+      if (word === null) expect(status).toBeNull();
+      else expect(status?.textContent).toBe(word);
+      cleanup();
+    }
+  });
   it('loading and no-pr show one line each', () => {
     show({ kind: 'loading' });
     expect(screen.getByText('Looking at this pull request…')).toBeTruthy();
@@ -47,6 +65,11 @@ describe('offline', () => {
     expect(screen.getByText('Airlock checks again every few seconds.')).toBeTruthy();
     expect(screen.getByRole('button', { name: /copy/i })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Review' })).toBeNull();
+  });
+  it('labels the command box with visible text, not an aria-label on the code', () => {
+    show({ kind: 'offline' });
+    expect(document.querySelector('code')?.hasAttribute('aria-label')).toBe(false);
+    expect(screen.getByRole('group', { name: /In the airlock-reviews folder, run:/ })).toBeTruthy();
   });
   it('copies the command, and selects it when copying is refused', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -77,7 +100,29 @@ describe('unpaired', () => {
     show({ kind: 'unpaired', message: 'That token was refused.' });
     expect(screen.getByText('npm run service -- token')).toBeTruthy();
     expect(screen.getByText('That token was refused.')).toBeTruthy();
-    expect(screen.getByLabelText('Pairing token').getAttribute('type')).toBe('password');
+  });
+  it('keeps the field out of the password manager', () => {
+    show({ kind: 'unpaired' });
+    const field = screen.getByLabelText('Pairing token') as HTMLInputElement;
+    expect(field.getAttribute('type')).toBe('text');
+    expect(field.hasAttribute('name')).toBe(false);
+    expect(field.closest('form')).toBeNull();
+    expect(document.querySelector('form')).toBeNull();
+    expect(field.getAttribute('autocomplete')).toBe('off');
+    expect(field.getAttribute('spellcheck')).toBe('false');
+    expect(field.getAttribute('autocapitalize')).toBe('off');
+    expect(field.getAttribute('autocorrect')).toBe('off');
+    expect(field.getAttribute('data-1p-ignore')).not.toBeNull();
+    expect(field.getAttribute('data-lpignore')).toBe('true');
+    expect(field.getAttribute('data-form-type')).toBe('other');
+    expect(field.className).toContain('masked');
+  });
+  it('presses Pair on Enter in the field', () => {
+    const { dispatch } = show({ kind: 'unpaired' });
+    const field = screen.getByLabelText('Pairing token');
+    fireEvent.change(field, { target: { value: 'abc' } });
+    fireEvent.keyDown(field, { key: 'Enter' });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'pair', token: 'abc' });
   });
   it('clears the field after Pair and shows the token nowhere else', () => {
     const token = 'a'.repeat(64);
@@ -144,6 +189,19 @@ describe('ready', () => {
     expect((screen.getByRole('button', { name: 'Review' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText('Another review is running.')).toBeTruthy();
   });
+  it('disables the switches and the depth choice while busy', () => {
+    show({ kind: 'ready', pr: prSummary(two), busy: true });
+    for (const box of screen.getAllByRole('switch')) expect((box as HTMLInputElement).disabled).toBe(true);
+    for (const radio of screen.getAllByRole('radio')) expect((radio as HTMLInputElement).disabled).toBe(true);
+  });
+  it('explains the last pack switch that cannot be turned off', () => {
+    show({ kind: 'ready', pr: prSummary(two) });
+    expect(screen.queryByText('At least one pack stays on.')).toBeNull();
+    fireEvent.click(screen.getByRole('switch', { name: 'Orbit' }));
+    const hint = screen.getByText('At least one pack stays on.');
+    const last = screen.getByRole('switch', { name: 'Generic' });
+    expect(last.getAttribute('aria-describedby')).toBe(hint.id);
+  });
   it('has no last-reviewed link', () => {
     show({ kind: 'ready', pr: prSummary() });
     expect(screen.queryByText(/last reviewed/i)).toBeNull();
@@ -206,6 +264,15 @@ describe('running', () => {
     const regions = document.querySelectorAll('[aria-live="polite"]');
     expect(regions).toHaveLength(1);
     expect(regions[0]?.textContent).toContain('Mapping the change: Done');
+    expect(regions[0]?.closest('.panel')).not.toBeNull();
+  });
+  it('announces the move to a finished review through the same region', () => {
+    const { rerender, dispatch } = show(running());
+    const pr = prSummary();
+    rerender(<PanelScreen state={{ kind: 'review', pr, latest: latestFor(pr), stale: false }} dispatch={dispatch} onOpenPacks={() => undefined} />);
+    const regions = document.querySelectorAll('[aria-live="polite"]');
+    expect(regions).toHaveLength(1);
+    expect(regions[0]?.textContent).toContain('Review finished.');
   });
 });
 
@@ -217,11 +284,16 @@ describe('problem and review', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(dispatch).toHaveBeenCalledWith({ type: 'retry' });
   });
+  it('Review again is disabled while busy', () => {
+    const pr = prSummary();
+    show({ kind: 'review', pr, latest: latestFor(pr), stale: false, busy: true });
+    expect((screen.getByRole('button', { name: 'Review again' }) as HTMLButtonElement).disabled).toBe(true);
+  });
   it('the review placeholder shows the title and Review again', () => {
     const pr = prSummary({ title: 'Add totals' });
     const { dispatch } = show({ kind: 'review', pr, latest: latestFor(pr), stale: false });
     expect(screen.getByText('Add totals')).toBeTruthy();
-    expect(screen.getByText('Review finished.')).toBeTruthy();
+    expect(within(document.querySelector('main') as HTMLElement).getByText('Review finished.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Review again' }));
     expect(dispatch).toHaveBeenCalledWith({ type: 'start', depth: pr.suggestedDepth });
   });

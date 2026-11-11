@@ -103,7 +103,7 @@ describe('ServiceClient', () => {
     expect(await client.pair(TOKEN)).toEqual({ paired: true, extension: 'new' });
     expect(svc.requests[0]?.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
     expect(svc.requests[0]?.body).toBeUndefined();
-    expect(await client.pair(OTHER_TOKEN)).toEqual({ error: 'Airlock needs the pairing token. Run "airlock-service token".' });
+    expect(await client.pair(OTHER_TOKEN)).toEqual({ error: 'Airlock needs the pairing token. Run "npm run service -- token".' });
     svc.on('POST /pair', () => json({ error: 'Airlock is already paired with another copy of the extension.' }, 409));
     expect(await client.pair(TOKEN)).toEqual({ error: 'Airlock is already paired with another copy of the extension.' });
     svc.down = true;

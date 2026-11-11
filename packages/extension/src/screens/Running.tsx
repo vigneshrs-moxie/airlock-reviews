@@ -1,25 +1,25 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
+import { useAnnounce } from './Frame';
 import type { PanelState, StageLine } from '../state/reduce';
 import { BriefBlock } from './BriefBlock';
 import { MapBlock } from './MapBlock';
 
 const STATUS_WORDS: Record<StageLine['status'], string> = { working: 'Working', done: 'Done', failed: 'Failed', skipped: 'Skipped' };
 
-/** The sentence for the one live region: the lines whose status changed since the last render. */
-function useAnnouncement(stages: StageLine[]): string {
+/** The sentence for the frame's live region: the lines whose status changed since the last render. */
+function useAnnouncement(stages: StageLine[]): void {
   const seen = useRef(new Map<string, StageLine['status']>());
-  const [said, setSaid] = useState('');
+  const announce = useAnnounce();
   useEffect(() => {
     const changed = stages.filter((s) => seen.current.get(s.stage) !== s.status);
     const first = seen.current.size === 0;
     seen.current = new Map(stages.map((s) => [s.stage, s.status]));
-    if (changed.length > 0 && !first) setSaid(changed.map((s) => `${s.words}: ${STATUS_WORDS[s.status]}`).join('. '));
-  }, [stages]);
-  return said;
+    if (changed.length > 0 && !first) announce(changed.map((s) => `${s.words}: ${STATUS_WORDS[s.status]}`).join('. '));
+  }, [stages, announce]);
 }
 
 export function Running({ state }: { state: Extract<PanelState, { kind: 'running' }> }) {
-  const said = useAnnouncement(state.stages);
+  useAnnouncement(state.stages);
   return (
     <>
       <section className="card">
@@ -35,7 +35,6 @@ export function Running({ state }: { state: Extract<PanelState, { kind: 'running
             </li>
           ))}
         </ul>
-        <div aria-live="polite" className="sr-only">{said}</div>
       </section>
       {state.brief !== null && <BriefBlock brief={state.brief} />}
       {state.map !== null && <MapBlock map={state.map} />}
