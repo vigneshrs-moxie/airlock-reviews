@@ -14,6 +14,10 @@ import { SEVERITY_RANK } from '../rules/sweep.js';
 export const MAX_TOP = 5;
 /** `whoseCall` and `checksAfterMerge` keep at most this many lines each. */
 const MAX_LINES = 5;
+/** An agent group listing more ids than this is ignored: that large a group is more likely careless than a real duplicate. */
+const MAX_GROUP = 4;
+/** The longest title quoted in the verdict sentence, the closing `…` of a cut title included. */
+const MAX_TITLE = 120;
 
 export const SelectOutputSchema = z.object({
   top: z.array(z.string()),
@@ -38,11 +42,9 @@ export interface SelectResult {
 
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 const squash = (text: string): string => text.replace(/\s+/g, '');
-/** Higher severity first, then the order given. */
-const bySeverity = (items: KeptCandidate[]): KeptCandidate[] =>
-  items.map((item, i) => ({ item, i }))
-    .sort((a, b) => SEVERITY_RANK[b.item.severity] - SEVERITY_RANK[a.item.severity] || a.i - b.i)
-    .map(({ item }) => item);
+/** The positions `at` in `items`, higher severity first, then by position. */
+const bySeverity = (items: KeptCandidate[], at: number[]): number[] =>
+  [...at].sort((a, b) => SEVERITY_RANK[items[b]!.severity] - SEVERITY_RANK[items[a]!.severity] || a - b);
 
 // ---- Merging duplicates ----
 
@@ -68,7 +70,8 @@ function asCandidate(item: KeptCandidate): Candidate {
 
 /**
  * Merges items that are the same underlying problem: always those with the identical fingerprint, and the items of an
- * agent group when every pair of them shares a file (otherwise the group is ignored). Lines alone never merge two items.
+ * agent group of at most MAX_GROUP ids when every pair of items it would end up joining, including those of sets it
+ * joins, shares a file (otherwise the group is ignored). Lines alone never merge two items.
  * Each merged set keeps its most serious item (the first on a tie) with the connected places of all of them, and
  * records the others as dropped at stage `select`. Survivors and dropped items keep the input order. Inputs are not changed.
  */
@@ -98,10 +101,15 @@ export function mergeDuplicates(
   items.forEach((item, i) => {
     if (!indexOf.has(item.id)) indexOf.set(item.id, i);
   });
+  const allShare = (set: number[]): boolean =>
+    set.every((a, k) => set.slice(k + 1).every((b) => shareFile(items[a]!, items[b]!)));
   for (const group of groups) {
+    if (new Set(group).size > MAX_GROUP) continue;
     const members = [...new Set(group.flatMap((id) => indexOf.get(id) ?? []))];
-    const allShare = members.every((a, k) => members.slice(k + 1).every((b) => shareFile(items[a]!, items[b]!)));
-    if (members.length < 2 || !allShare) continue;
+    if (members.length < 2) continue;
+    // The test covers everything the group would end up with, so two groups cannot chain unrelated files together.
+    const roots = new Set(members.map(root));
+    if (!allShare(items.flatMap((_, i) => (roots.has(root(i)) ? [i] : [])))) continue;
     for (const m of members.slice(1)) join(members[0]!, m);
   }
 
@@ -159,46 +167,46 @@ function selectMaterial(ctx: LensContext, items: KeptCandidate[], questions: Que
 
 /**
  * The top list: the agent's `top` ids in order (unknown and repeated ids ignored), or, when none is usable, the most
- * serious items. Then every block left out is added while there is room, or takes the place of the last item that is not
- * a block, which goes to the head of also found. Also found: the displaced items, the agent's `also` ids in order, then
- * the rest by severity and order given.
+ * serious items. Then the blocks left out, in input order, are added while there is room, then take the places of the
+ * last items that are not blocks, which go under also found. Also found: blocks that still do not fit, the displaced
+ * items, the agent's `also` ids in order, then the rest by severity and order given.
+ * Items are placed by position, so each is placed exactly once even if two share an id; an id names its first item.
  */
 function rank(items: KeptCandidate[], answer: SelectOutput | null): { top: KeptCandidate[]; also: KeptCandidate[] } {
-  const byId = new Map(items.map((item) => [item.id, item]));
-  const placed = new Set<string>();
-  const top: KeptCandidate[] = [];
-  const place = (list: KeptCandidate[], item: KeptCandidate): void => {
-    list.push(item);
-    placed.add(item.id);
+  const all = items.map((_, i) => i);
+  const indexOf = new Map<string, number>();
+  all.forEach((i) => {
+    if (!indexOf.has(items[i]!.id)) indexOf.set(items[i]!.id, i);
+  });
+  const isBlock = (i: number): boolean => items[i]!.severity === 'block';
+  const placed = new Set<number>();
+  const place = (list: number[], ...add: number[]): void => {
+    list.push(...add);
+    for (const i of add) placed.add(i);
   };
+  const byId = (ids: string[]): number[] => ids.flatMap((id) => indexOf.get(id) ?? []);
 
-  for (const id of answer?.top ?? []) {
-    const item = byId.get(id);
-    if (item && !placed.has(id) && top.length < MAX_TOP) place(top, item);
-  }
-  if (top.length === 0) for (const item of bySeverity(items).slice(0, MAX_TOP)) place(top, item);
+  const top: number[] = [];
+  for (const i of byId(answer?.top ?? [])) if (!placed.has(i) && top.length < MAX_TOP) place(top, i);
+  if (top.length === 0) place(top, ...bySeverity(items, all).slice(0, MAX_TOP));
 
-  const displaced: KeptCandidate[] = [];
-  for (const item of items) {
-    if (item.severity !== 'block' || placed.has(item.id)) continue;
-    if (top.length < MAX_TOP) {
-      place(top, item);
-      continue;
-    }
-    const at = top.findLastIndex((t) => t.severity !== 'block');
-    if (at < 0) break;
-    displaced.unshift(top[at]!);
-    top[at] = item;
-    placed.add(item.id);
-  }
+  const leftOut = all.filter((i) => isBlock(i) && !placed.has(i));
+  const room = MAX_TOP - top.length;
+  place(top, ...leftOut.slice(0, room));
+  const waiting = leftOut.slice(room);
+  const nonBlocks = top.flatMap((i, at) => (isBlock(i) ? [] : [at]));
+  const vacated = nonBlocks.slice(Math.max(0, nonBlocks.length - waiting.length));
+  const displaced = vacated.map((at) => top[at]!);
+  vacated.forEach((at, k) => {
+    top[at] = waiting[k]!;
+    placed.add(waiting[k]!);
+  });
 
-  const also = [...displaced];
-  for (const id of answer?.also ?? []) {
-    const item = byId.get(id);
-    if (item && !placed.has(id)) place(also, item);
-  }
-  also.push(...bySeverity(items.filter((item) => !placed.has(item.id))));
-  return { top, also };
+  const also: number[] = [];
+  place(also, ...waiting.slice(vacated.length), ...displaced);
+  for (const i of byId(answer?.also ?? [])) if (!placed.has(i)) place(also, i);
+  place(also, ...bySeverity(items, all.filter((i) => !placed.has(i))));
+  return { top: top.map((i) => items[i]!), also: also.map((i) => items[i]!) };
 }
 
 const toFinding = (item: KeptCandidate, bucket: Finding['bucket'], rank: number | null): Finding =>
@@ -236,7 +244,25 @@ function firstToFix(findings: Finding[]): string {
   const order = (f: Finding): number => (f.bucket === 'top' ? (f.rank ?? MAX_TOP) : Number.POSITIVE_INFINITY);
   const ranked = findings.map((f, i) => ({ f, i })).sort((a, b) => order(a.f) - order(b.f) || a.i - b.i).map(({ f }) => f);
   const first = ranked.find((f) => f.severity === 'block' || f.severity === 'fix');
-  return first ? asSentence(oneLine(first.title)) : '';
+  return first ? quotedTitle(first.title) : '';
+}
+
+/** Trailing `:`, `;`, `,`, `…` or `...`, with any spaces before them. */
+const TRAILING = /(?:\s*(?:[:;,…]|\.\.\.))+$/;
+
+/**
+ * A title to end the verdict sentence: on one line, without trailing punctuation that cannot end a sentence, with a full
+ * stop. A title longer than MAX_TITLE is cut at a word boundary and ends with `…` instead.
+ */
+function quotedTitle(title: string): string {
+  const text = oneLine(title).replace(TRAILING, '');
+  if (text.length <= MAX_TITLE) return asSentence(text);
+  let cut = text.slice(0, MAX_TITLE - 1);
+  if (text[MAX_TITLE - 1] !== ' ') {
+    const space = cut.lastIndexOf(' ');
+    if (space > 0) cut = cut.slice(0, space);
+  }
+  return `${cut.replace(TRAILING, '').trimEnd()}…`;
 }
 
 /**

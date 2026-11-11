@@ -43,7 +43,7 @@ const topIds = (fs: Finding[]): string[] => ids(fs.filter((f) => f.bucket === 't
 const alsoIds = (fs: Finding[]): string[] => ids(fs.filter((f) => f.bucket === 'also'));
 
 describe('mergeDuplicates', () => {
-  it('merges two candidates on overlapping lines and keeps the block', () => {
+  it('merges two candidates through an agent group that shares a file, and keeps the block', () => {
     const fix = item('a', 'fix', { path: 'src/pause.ts', quote: 'if (plan.active) charge(plan);' });
     const blk = item('b', 'block', { path: 'src/pause.ts', quote: 'if (plan.active) charge(plan);', title: 'Paused plans are charged' });
     const r = mergeDuplicates([fix, blk], [['a', 'b']]);
@@ -93,6 +93,22 @@ describe('mergeDuplicates', () => {
     const b = item('b', 'fix', { path: 'src/a.ts' });
     const c = item('c', 'fix', { path: 'src/c.ts' });
     expect(ids(mergeDuplicates([a, b, c], [['a', 'b', 'c']]).merged)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('ignores a group that would join a set whose items share no file with it', () => {
+    const a = item('a', 'fix', { path: 'src/a.ts' });
+    const b = item('b', 'fix', { path: 'src/b.ts', connected: [
+      { path: 'src/a.ts', line: 1, role: 'x', quote: 'x();' }, { path: 'src/c.ts', line: 1, role: 'y', quote: 'y();' },
+    ] });
+    const c = item('c', 'fix', { path: 'src/c.ts' });
+    expect(ids(mergeDuplicates([a, b, c], [['a', 'b'], ['b', 'c']]).merged)).toEqual(['a', 'c']);
+    expect(ids(mergeDuplicates([a, b, c], [['b', 'c'], ['a', 'b']]).merged)).toEqual(['a', 'b']);
+  });
+
+  it('ignores a group of more than four ids, even on one file', () => {
+    const five = ['a', 'b', 'c', 'd', 'e'].map((id) => item(id, 'fix', { path: 'src/one.ts' }));
+    expect(ids(mergeDuplicates(five, [['a', 'b', 'c', 'd', 'e']]).merged)).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(ids(mergeDuplicates(five, [['a', 'b', 'c', 'd']]).merged)).toEqual(['a', 'e']);
   });
 
   it('does not merge two different problems on the same line without a group', () => {
@@ -180,6 +196,64 @@ describe('select', () => {
     const r = await select(runner, ctx(), kept, [], []);
     expect(topIds(r.findings)).toEqual(['f1', 'b1', 'f2', 'b3', 'b2']);
     expect(alsoIds(r.findings)).toEqual(['n1', 'f3']);
+  });
+
+  it('keeps left-out blocks in input order when they replace non-blocks', async () => {
+    const kept = [item('n1', 'fix'), item('b1', 'block'), item('n2', 'fix'), item('n3', 'note'), item('b2', 'block'), item('n4', 'ask'), item('n5', 'note')];
+    const runner = createFakeRunner(() => answer({ top: ['n1', 'n2', 'n3', 'n4', 'n5'] }));
+    const r = await select(runner, ctx(), kept, [], []);
+    expect(topIds(r.findings)).toEqual(['n1', 'n2', 'n3', 'b1', 'b2']);
+    expect(alsoIds(r.findings)).toEqual(['n4', 'n5']);
+  });
+
+  it('puts blocks that cannot fit first under also found', async () => {
+    const kept = [...['b1', 'b2', 'b3', 'b4', 'b5', 'b6'].map((id) => item(id, 'block')), item('f1', 'fix'), item('f2', 'fix')];
+    const runner = createFakeRunner(() => answer({ top: ['b1', 'b2', 'b3', 'b4', 'f1'], also: ['f2', 'b6', 'b5'] }));
+    const r = await select(runner, ctx(), kept, [], []);
+    expect(topIds(r.findings)).toEqual(['b1', 'b2', 'b3', 'b4', 'b5']);
+    expect(alsoIds(r.findings)).toEqual(['b6', 'f1', 'f2']);
+  });
+
+  it('places every item once even when two share an id', async () => {
+    const kept = [item('a', 'fix', { path: 'src/x.ts' }), item('a', 'note', { path: 'src/y.ts' })];
+    const runner = createFakeRunner(() => answer({ top: ['a'], also: ['a'] }));
+    const r = await select(runner, ctx(), kept, [], []);
+    expect(r.findings.map((f) => [f.id, f.path, f.bucket])).toEqual([['a', 'src/x.ts', 'top'], ['a', 'src/y.ts', 'also']]);
+    expect(r.dropped).toEqual([]);
+  });
+
+  it('ignores a group listing every id of a one-file pull request', async () => {
+    const kept = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => item(id, 'fix', { path: 'src/one.ts' }));
+    const runner = createFakeRunner(() => answer({ top: ['a'], sameAs: [['a', 'b', 'c', 'd', 'e', 'f']] }));
+    const r = await select(runner, ctx(), kept, [], []);
+    expect(r.findings).toHaveLength(6);
+    expect(r.dropped).toEqual([]);
+  });
+
+  it('never loses an item, whatever the answer', async () => {
+    let seed = 7;
+    const next = (n: number): number => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    const severities: Severity[] = ['block', 'fix', 'ask', 'note'];
+    for (let round = 0; round < 60; round += 1) {
+      const count = 1 + next(12);
+      const kept = Array.from({ length: count }, (_, i) => item(`i${next(3) === 0 ? next(count) : i}`, severities[next(4)]!, {
+        path: `src/f${next(3)}.ts`, quote: `q${next(4)}();`,
+        connected: next(2) === 0 ? [] : [{ path: `src/f${next(3)}.ts`, line: 1, role: 'r', quote: 'c();' }],
+      }));
+      const every = kept.map((k) => k.id);
+      const hostile = [
+        answer({ top: [...every, ...every, 'ghost'], also: [...every, 'nobody', ...every], sameAs: [every, [...every].reverse()] }),
+        answer({ top: [], also: [], sameAs: [every.slice(0, 2), every.slice(1, 3), every.slice(0, 4)] }),
+        new Error('down'),
+      ][round % 3]!;
+      const r = await select(createFakeRunner(() => hostile), ctx(), kept, [], []);
+      const droppedHere = r.dropped.filter((d) => d.stage === 'select');
+      expect(r.findings.length + droppedHere.length).toBe(kept.length);
+      expect(r.findings.filter((f) => f.bucket === 'top').length).toBeLessThanOrEqual(MAX_TOP);
+    }
   });
 
   it('fills the top list by severity when the agent gives no usable top ids', async () => {
@@ -370,6 +444,29 @@ describe('decideVerdict', () => {
   it('does not add a second full stop after a title that has one', () => {
     const f = { ...finding('f', 'fix'), title: 'The total is wrong.' };
     expect(decideVerdict(own, [f], [], false).sentence).toBe('1 thing to fix before this merges. The first: The total is wrong.');
+  });
+
+  it('strips trailing punctuation and ellipses from the title before the full stop', () => {
+    const sentence = (title: string): string => decideVerdict(own, [{ ...finding('f', 'fix'), title }], [], false).sentence;
+    const expected = '1 thing to fix before this merges. The first: Totals are wrong.';
+    expect(sentence('Totals are wrong:')).toBe(expected);
+    expect(sentence('Totals are wrong;')).toBe(expected);
+    expect(sentence('Totals are wrong,')).toBe(expected);
+    expect(sentence('Totals are wrong…')).toBe(expected);
+    expect(sentence('Totals are wrong...')).toBe(expected);
+    expect(sentence('Totals are wrong ; , …')).toBe(expected);
+  });
+
+  it('cuts a long title at a word boundary, within 120 characters, ending with an ellipsis', () => {
+    const words = Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ');
+    const { sentence } = decideVerdict(own, [{ ...finding('f', 'fix'), title: words }], [], false);
+    const quoted = sentence.slice(sentence.indexOf('The first: ') + 'The first: '.length);
+    expect(quoted.length).toBeLessThanOrEqual(120);
+    expect(quoted.endsWith('…')).toBe(true);
+    expect(words.startsWith(quoted.slice(0, -1))).toBe(true);
+    expect(words[quoted.length - 1]).toBe(' ');
+    const exact = 'x'.repeat(120);
+    expect(decideVerdict(own, [{ ...finding('f', 'fix'), title: exact }], [], false).sentence.endsWith(`${exact}.`)).toBe(true);
   });
 
   it('any stage error makes the verdict incomplete and names the stage', () => {
