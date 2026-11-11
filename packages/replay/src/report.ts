@@ -109,6 +109,15 @@ function findingLines(f: Finding): string[] {
   ];
 }
 
+const NOT_JUDGED = 'Not judged: this review did not finish; see Incomplete reviews.';
+
+/**
+ * A case with known problems that the replay could not judge: its review or its judge failed, so it is incomplete
+ * and its known problems are neither raised nor lost at any stage.
+ */
+const notJudged = (s: CaseScore): boolean =>
+  s.verdict === 'incomplete' && s.raised + Object.values(s.lostAt).reduce((n, x) => n + x, 0) < s.known;
+
 /** Renders a replay run as Markdown for a reader who is not an engineer by training. */
 export function renderReport(summary: RunSummary, cases: ReplayCase[], details: Details): string {
   const caseById = new Map(cases.map((c) => [c.id, c]));
@@ -210,6 +219,11 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
       out.push(`### ${prName(c, s.caseId)}`, '', 'Details not available.', '');
       continue;
     }
+    if (notJudged(s)) {
+      anyListed = true;
+      out.push(`### ${prName(c, s.caseId)}`, '', NOT_JUDGED, '');
+      continue;
+    }
     const byKnown = new Map(d.matches.map((m) => [m.knownId, m]));
     const missed = c.known.filter((k) => byKnown.get(k.id)?.where !== 'top');
     if (missed.length === 0) continue;
@@ -227,7 +241,9 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
     const c = caseById.get(s.caseId);
     const d = details[s.caseId];
     out.push(`### ${prName(c, s.caseId)}`, '');
+    if (s.verdict === 'incomplete') out.push(NOT_JUDGED, '');
     if (!d) out.push('No review was saved for this pull request.', '');
+    else if (s.verdict === 'incomplete' && d.doc.findings.length === 0) continue;
     else if (d.doc.findings.length === 0) out.push('No findings shown.', '');
     else out.push(...d.doc.findings.flatMap(findingLines), '');
   }
