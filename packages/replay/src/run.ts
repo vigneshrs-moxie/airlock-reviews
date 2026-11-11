@@ -330,7 +330,6 @@ const NOT_LOST: CaseScore['lostAt'] = { lenses: 0, schema: 0, anchor: 0, merge: 
 type Scored = { score: CaseScore; detail: { doc: ReviewDocument; matches: Match[] } };
 type RunInfo = { model: string; sweepModel: string; effort: ReplayEffort; depth: Depth; createdAt: string };
 
-/** How a run's cases are scored; a run.json written before effort and sweep model were recorded reads as `high` and the main model (`report` only). */
 /**
  * A case's score and details from its outcome, with what it spent from its folder's spent.json. Without a readable
  * spent.json the counts are the kept review's own, marked about; a case with no review of its own spent nothing known.
@@ -357,6 +356,7 @@ async function scoreFolder(dir: string, c: ReplayCase, o: Outcome, run: RunInfo)
   };
 }
 
+/** How a run's cases are scored; a run.json written before effort and sweep model were recorded reads as `high` and the main model (`report` only). */
 const runInfo = (run: RunFile): RunInfo =>
   ({ model: run.model, sweepModel: run.sweepModel ?? run.model, effort: run.effort ?? 'high', depth: run.depth, createdAt: run.startedAt });
 
@@ -607,7 +607,8 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
         await rm(join(dir, 'matches.json'), { force: true });
         await rm(join(dir, 'error.txt'), { recursive: true, force: true });
         await writeAtomic(join(dir, 'review.json'), json(doc));
-        await recordSpent(dir, { step: 'review', finished: doc.verdict.label !== 'incomplete', ...usageOf(doc) });
+        // A record that cannot be written does not fail the case: without spent.json its counts are marked about.
+        await recordSpent(dir, { step: 'review', finished: doc.verdict.label !== 'incomplete', ...usageOf(doc) }).catch(() => undefined);
         emit({ caseId: c.id, status: 'reviewed' });
         if (hitUsageLimit(doc)) limitReachedIn ??= c.id;
         if (doc.verdict.label === 'incomplete') {

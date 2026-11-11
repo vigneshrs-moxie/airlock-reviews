@@ -890,6 +890,15 @@ describe('runReplay', () => {
       expect((await readdir(caseDir('pr2', 'run-b'))).sort()).toEqual(['error.txt']);
     });
 
+    it('a spent.json that cannot be read is left as it is, and the case is still reviewed and judged, its counts marked about', async () => {
+      await runReplay(options({ cases: one() }), deps(fakeReview(() => { throw new Error('clone failed'); })));
+      await writeFile(join(caseDir('pr1'), 'spent.json'), '{ not json');
+      const summary = await runReplay(options({ cases: one() }), deps(fakeReview()));
+      expect(await readFile(join(caseDir('pr1'), 'spent.json'), 'utf8')).toBe('{ not json');
+      expect(summary.incompleteCases).toEqual([]);
+      expect(summary.cases[0]).toMatchObject({ inTop: 1, inputTokens: 300, usageAbout: true });
+    });
+
     it('a folder without spent.json counts the kept review\'s own usage, marked about', async () => {
       await runReplay(options(), deps(fakeReview()));
       await rm(join(caseDir('pr1'), 'spent.json'));
