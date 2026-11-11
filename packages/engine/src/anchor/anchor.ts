@@ -17,9 +17,16 @@ function findRuns(hay: string[], needle: string[]): number[] {
 
 /**
  * Turn a quotation into line numbers in the head file. Whitespace is ignored. Prefers a match inside the
- * diff, then the one nearest `lineHint`. With `file` undefined any match is `outside-diff`.
+ * diff, then the one nearest `lineHint`. With `file` undefined any match is `outside-diff`. When the whole quote is
+ * not found, the longest line of 12 or more characters is tried alone, unless `exact` is set.
  */
-export function anchorQuote(headText: string | null, quote: string, lineHint: number | null, file: FileDiff | undefined): Anchor {
+export function anchorQuote(
+  headText: string | null,
+  quote: string,
+  lineHint: number | null,
+  file: FileDiff | undefined,
+  { exact = false }: { exact?: boolean } = {},
+): Anchor {
   if (headText === null) return NOT_FOUND;
   const quoteLines = quote.split('\n').map(squash);
   while (quoteLines.length > 0 && quoteLines[0] === '') quoteLines.shift();
@@ -29,7 +36,7 @@ export function anchorQuote(headText: string | null, quote: string, lineHint: nu
   const hay = headText.split('\n').map(squash);
   let span = quoteLines.length;
   let starts = findRuns(hay, quoteLines);
-  if (starts.length === 0) {
+  if (starts.length === 0 && !exact) {
     const longest = quoteLines.reduce((a, b) => (b.length > a.length ? b : a), '');
     if (longest.length < MIN_FALLBACK_CHARS) return NOT_FOUND;
     span = 1;

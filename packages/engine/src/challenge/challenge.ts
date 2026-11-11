@@ -1,13 +1,16 @@
 import type { Anchor, Candidate, Dropped, Place, Severity, StageError, Tier } from '@airlock/shared';
 import { SeveritySchema } from '@airlock/shared';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, posix } from 'node:path';
 import { z } from 'zod';
 import { asMaterial, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner, AgentUsage } from '../agent/runner.js';
 import { anchorQuote } from '../anchor/anchor.js';
 import { budgetedDiff } from '../lenses/cohort-lens.js';
-import { cohortOutline, factsBlock, instructionsFor, prBlock, sendRequest, standaloneCohort, tierOf } from '../lenses/context.js';
-import type { LensContext } from '../lenses/context.js';
+import {
+  cohortOutline, factsBlock, instructionsFor, learnedDocuments, prBlock, sendRequest, standaloneCohort, standardDocuments,
+  tierOf,
+} from '../lenses/context.js';
+import type { LensContext, StandardDocument } from '../lenses/context.js';
 import { SEVERITY_RANK } from '../rules/sweep.js';
 
 /** The challenge's diff budget, in lines of formatForPrompt output, shared by the finding's file and its connected files. */
@@ -19,7 +22,7 @@ export const ChallengeOutputSchema = z.object({
   outcome: z.enum(['keep', 'drop', 'downgrade', 'ask']),
   ground: z.enum(['unreachable', 'pre-existing', 'guarded-elsewhere', 'documented-intent', 'smaller', 'none']),
   explanation: z.string(),
-  refutation: z.object({ path: z.string(), quote: z.string(), where: z.enum(['head', 'base']) }).nullable(),
+  refutation: z.object({ path: z.string(), quote: z.string(), where: z.enum(['head', 'base', 'standard']) }).nullable(),
   newSeverity: SeveritySchema.nullable(),
   checked: z.string(),
 });
@@ -117,30 +120,73 @@ function challengeMaterial(ctx: LensContext, c: Item, tier: (path: string) => Ti
 
 // ---- The answer ----
 
-/** The place the refutation quotes, when its quote is found in that file on that side. */
-async function confirmRefutation(refutation: ChallengeOutput['refutation'], read: ReadFile): Promise<Place | null> {
-  if (refutation === null || !isRepoRelative(refutation.path)) return null;
-  const found = anchorQuote(await read(refutation.where, refutation.path), refutation.quote, null, undefined);
-  if (found.status === 'not-found') return null;
-  return { path: refutation.path, line: found.startLine, role: refutation.where, quote: refutation.quote };
+/** A quote proves nothing unless one of its lines, without whitespace, has this many characters and a letter or digit. */
+const MIN_PROOF_CHARS = 12;
+const squash = (text: string): string => text.replace(/\s+/g, '');
+const hasSubstance = (quote: string): boolean =>
+  quote.split('\n').map(squash).some((l) => l.length >= MIN_PROOF_CHARS && /[\p{L}\p{N}]/u.test(l));
+
+/** Text that ends a sentence, with a full stop added when it has none. */
+const asSentence = (text: string): string => (/[.!?]["')\]]*$/.test(text) ? text : `${text}.`);
+
+const overlaps = (found: Anchor, own: Anchor): boolean =>
+  found.startLine !== null && own.startLine !== null
+  && found.startLine <= (own.endLine ?? own.startLine) && own.startLine <= (found.endLine ?? found.startLine);
+
+type Proof = { place: Place } | { place: null; ownCode: boolean };
+const NO_PROOF: Proof = { place: null, ownCode: false };
+
+/**
+ * The place a drop's refutation proves, if it does. Documented intent must quote the standards or learned entries the
+ * challenger was given; every other ground must quote code, on the base side for a pre-existing fault. The whole quote
+ * must be found, it must have substance, and on the head it must not be the finding's own lines.
+ */
+async function proveDrop(item: Item, answer: ChallengeOutput, read: ReadFile, documents: StandardDocument[]): Promise<Proof> {
+  const ref = answer.refutation;
+  if (ref === null || !hasSubstance(ref.quote)) return NO_PROOF;
+  if (answer.ground === 'documented-intent') {
+    if (ref.where !== 'standard') return NO_PROOF;
+    const needle = squash(ref.quote);
+    const doc = documents.find((d) => squash(d.text).includes(needle));
+    return doc ? { place: { path: doc.name, line: null, role: 'standard', quote: ref.quote } } : NO_PROOF;
+  }
+  if (ref.where === 'standard' || (answer.ground === 'pre-existing' && ref.where !== 'base') || !isRepoRelative(ref.path)) {
+    return NO_PROOF;
+  }
+  const found = anchorQuote(await read(ref.where, ref.path), ref.quote, null, undefined, { exact: true });
+  if (found.status === 'not-found') return NO_PROOF;
+  if (ref.where === 'head' && posix.normalize(ref.path) === posix.normalize(item.path) && overlaps(found, item.anchor)) {
+    return { place: null, ownCode: true };
+  }
+  return { place: { path: ref.path, line: found.startLine, role: ref.where, quote: ref.quote } };
 }
 
 const lowered = (current: Severity, proposed: Severity | null): Severity =>
   proposed !== null && SEVERITY_RANK[proposed] < SEVERITY_RANK[current] ? proposed : current;
 
-/** Applies the answer: a drop needs a refutation found in the code, a downgrade only lowers, an ask becomes ask. */
-async function applyAnswer(item: Item, answer: ChallengeOutput, read: ReadFile): Promise<Outcome> {
+/**
+ * Applies the answer. A drop is honoured only on grounds 1 to 4 with a proved refutation; a drop on the ground
+ * `smaller` is a downgrade. A downgrade only lowers, and an ask becomes ask.
+ */
+async function applyAnswer(item: Item, answer: ChallengeOutput, read: ReadFile, documents: StandardDocument[]): Promise<Outcome> {
   const checked = answer.checked.trim() === '' ? NOTHING_SAID : answer.checked.trim();
+  const downgraded: Outcome = { kept: { ...item, severity: lowered(item.severity, answer.newSeverity), checked } };
   switch (answer.outcome) {
     case 'drop': {
-      const place = await confirmRefutation(answer.refutation, read);
-      if (place === null) return { kept: { ...item, checked: `${checked}${UNCONFIRMED}` } };
+      if (answer.ground === 'smaller') return downgraded;
+      const proof = answer.ground === 'none' ? NO_PROOF : await proveDrop(item, answer, read, documents);
+      if (proof.place === null) {
+        // On the finding's own lines the challenger reads the code differently; the reader should see its argument.
+        const explanation = answer.explanation.trim();
+        const said = proof.ownCode && explanation !== '' ? `${asSentence(checked)} ${explanation}` : checked;
+        return { kept: { ...item, checked: `${asSentence(said)}${UNCONFIRMED}` } };
+      }
       const { anchor: _anchor, ...candidate } = item;
       const reason = `${answer.ground}: ${answer.explanation.trim()}`;
-      return { dropped: { candidate, stage: 'challenge', reason, refutation: place } };
+      return { dropped: { candidate, stage: 'challenge', reason, refutation: proof.place } };
     }
     case 'downgrade':
-      return { kept: { ...item, severity: lowered(item.severity, answer.newSeverity), checked } };
+      return downgraded;
     case 'ask':
       return { kept: { ...item, severity: 'ask', checked } };
     case 'keep':
@@ -150,8 +196,9 @@ async function applyAnswer(item: Item, answer: ChallengeOutput, read: ReadFile):
 
 /**
  * The challenge stage: one request per block or fix candidate tries to refute it. A candidate is removed only when the
- * code the challenger quotes is found on the side it names. Ask and note candidates pass through unchallenged. A failed
- * request keeps its candidate and becomes a stage error; the others carry on. `kept` and `dropped` keep the input order.
+ * whole quote the challenger offers as proof is found where it says (see proveDrop). Ask and note candidates pass
+ * through unchallenged. A request that fails, or an item that throws, keeps its candidate and becomes a stage error; the
+ * others carry on. `kept` and `dropped` keep the input order.
  * `read` returns a file's text on one side, or null; it is called only to confirm refutations, once per side and path.
  */
 export async function challenge(
@@ -167,27 +214,34 @@ export async function challenge(
   }
 
   const instructions = instructionsFor(await loadTemplate('challenge'), ctx.packs, null);
+  const documents = [...standardDocuments(ctx.packs), ...learnedDocuments(ctx.packs)];
   const tier = tierOf(ctx.tiers);
   const readFile = readOnce(read);
-  const results = await Promise.all(items.map(async (item): Promise<Outcome & { usage?: AgentUsage; error?: StageError }> => {
+  type ItemResult = Outcome & { usage?: AgentUsage; error?: StageError };
+  const failed = (item: Item, message: string, usage: AgentUsage | undefined): ItemResult => ({
+    kept: { ...item, checked: DID_NOT_COMPLETE }, ...(usage ? { usage } : {}),
+    error: { stage: 'challenge', cohortId: item.cohortId, message: `${item.id}: ${message}` },
+  });
+  const results = await Promise.all(items.map(async (item): Promise<ItemResult> => {
     if (!isChallenged(item)) return { kept: { ...item, checked: NOT_CHALLENGED } };
-    const result = await sendRequest<ChallengeOutput>(runner, ctx, {
-      role: `challenge:${item.id}`,
-      instructions,
-      material: challengeMaterial(ctx, item, tier),
-      schema: ChallengeOutputSchema,
-      cwd: ctx.headDir,
-      extraDirs: [ctx.baseDir],
-      model: ctx.models.challenger,
-      effort: ctx.models.effort,
-    });
-    if (!result.ok) {
-      return {
-        kept: { ...item, checked: DID_NOT_COMPLETE }, usage: result.usage,
-        error: { stage: 'challenge', cohortId: item.cohortId, message: `${item.id}: ${result.error}` },
-      };
+    let usage: AgentUsage | undefined;
+    try {
+      const result = await sendRequest<ChallengeOutput>(runner, ctx, {
+        role: `challenge:${item.id}`,
+        instructions,
+        material: challengeMaterial(ctx, item, tier),
+        schema: ChallengeOutputSchema,
+        cwd: ctx.headDir,
+        extraDirs: [ctx.baseDir],
+        model: ctx.models.challenger,
+        effort: ctx.models.effort,
+      });
+      usage = result.usage;
+      if (!result.ok) return failed(item, result.error, usage);
+      return { ...(await applyAnswer(item, result.output, readFile, documents)), usage };
+    } catch (err) {
+      return failed(item, err instanceof Error ? err.message : String(err), usage);
     }
-    return { ...(await applyAnswer(item, result.output, readFile)), usage: result.usage };
   }));
 
   for (const r of results) {

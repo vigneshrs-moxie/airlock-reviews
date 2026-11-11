@@ -44,6 +44,13 @@ describe('anchorQuote', () => {
     expect(anchorQuote('a = 1;', 'x = 1;\ny = 2;', null, undefined).status).toBe('not-found');
   });
 
+  it('with exact, needs every line of the quote and never falls back', () => {
+    const t = 'short\nconst result = compute(alpha, beta);\nend';
+    expect(anchorQuote(t, 'if (x) {\nconst result = compute(alpha, beta);', null, undefined, { exact: true }).status).toBe('not-found');
+    expect(anchorQuote(t, '  const result = compute(alpha, beta);\nend', null, undefined, { exact: true }))
+      .toEqual({ status: 'outside-diff', startLine: 2, endLine: 3 });
+  });
+
   it('reports outside-diff for code the pull request did not touch', () => {
     expect(anchorQuote(text, 'three', null, file({ addedLines: [2] }))).toEqual({ status: 'outside-diff', startLine: 5, endLine: 5 });
   });

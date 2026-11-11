@@ -80,23 +80,28 @@ export function readerOf(pr: PrInfo): string {
     : 'The reader is a reviewer deciding whether to ask the author for changes, who will pass on what you find in their own words.';
 }
 
-/** Every standard of every pack, each under a heading naming the pack and the standard. */
-function standardsText(packs: Pack[]): string {
-  const parts = packs.flatMap((p) => p.standards.map((s) => `## ${p.title}: ${s.name}\n\n${s.text.trim()}`));
-  return parts.length === 0 ? '' : `# The team's standards\n\n${parts.join('\n\n')}`;
+/** A named piece of the instructions' standard: one pack standard, or one list of learned entries. */
+export interface StandardDocument {
+  name: string;
+  text: string;
 }
 
-/** Learned entries of every pack as two lists; each list is left out when empty. */
-function learnedText(packs: Pack[]): string {
-  const list = (kind: 'wrong' | 'intended'): string[] =>
-    packs.flatMap((p) => p.learned.filter((e) => e.kind === kind).map((e) => `- ${oneLine(e.text)}`));
-  const parts: string[] = [];
-  const wrong = list('wrong');
-  const intended = list('intended');
-  if (wrong.length > 0) parts.push(`## Things flagged before that were wrong\n\n${wrong.join('\n')}`);
-  if (intended.length > 0) parts.push(`## Product facts to respect\n\n${intended.join('\n')}`);
-  return parts.length === 0 ? '' : `# Learned from earlier reviews\n\n${parts.join('\n\n')}`;
+/** Every standard of every pack, named `<pack title>: <standard name>`. */
+export function standardDocuments(packs: Pack[]): StandardDocument[] {
+  return packs.flatMap((p) => p.standards.map((s) => ({ name: `${p.title}: ${s.name}`, text: s.text.trim() })));
 }
+
+/** Learned entries of every pack as two lists, one entry per line; each list is left out when empty. */
+export function learnedDocuments(packs: Pack[]): StandardDocument[] {
+  const list = (name: string, kind: 'wrong' | 'intended'): StandardDocument[] => {
+    const lines = packs.flatMap((p) => p.learned.filter((e) => e.kind === kind).map((e) => `- ${oneLine(e.text)}`));
+    return lines.length === 0 ? [] : [{ name, text: lines.join('\n') }];
+  };
+  return [...list('Things flagged before that were wrong', 'wrong'), ...list('Product facts to respect', 'intended')];
+}
+
+const section = (title: string, docs: StandardDocument[]): string =>
+  docs.length === 0 ? '' : `# ${title}\n\n${docs.map((d) => `## ${d.name}\n\n${d.text}`).join('\n\n')}`;
 
 function helpersText(missing: string[]): string {
   if (missing.length === 0) return '';
@@ -111,7 +116,12 @@ function helpersText(missing: string[]): string {
 
 /** The template, then the standards, the learned entries and (when given) the missing helpers. */
 export function instructionsFor(template: string, packs: Pack[], missingHelpers: string[] | null): string {
-  return [template.trimEnd(), standardsText(packs), learnedText(packs), missingHelpers ? helpersText(missingHelpers) : '']
+  return [
+    template.trimEnd(),
+    section("The team's standards", standardDocuments(packs)),
+    section('Learned from earlier reviews', learnedDocuments(packs)),
+    missingHelpers ? helpersText(missingHelpers) : '',
+  ]
     .filter((s) => s !== '')
     .join('\n\n');
 }
