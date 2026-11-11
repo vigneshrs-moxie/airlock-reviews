@@ -2,7 +2,9 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
-  DismissBodySchema, DismissalSchema, PrSummarySchema, ServiceEventSchema, SMALL_PR_LINES, StartReviewBodySchema,
+  DismissBodySchema, DismissalSchema, FindingIdSchema, FingerprintSchema, LEARNED_TEXT_MAX, LEARNED_TEXT_MIN,
+  PackIdSchema, PrSummarySchema, RepoSchema, ReviewIdSchema, RestoreBodySchema, RunIdSchema, ServiceEventSchema,
+  ServiceStatusSchema, SMALL_PR_LINES, StartReviewBodySchema, StartReviewReplySchema, checkLearnedText, isRepo,
   minimalDocument, prRefFromUrl, suggestedDepth,
 } from '@airlock/shared';
 
@@ -49,7 +51,7 @@ describe('prRefFromUrl', () => {
 
 describe('request and reply schemas', () => {
   const dismissal = {
-    repo: 'acme/widgets', number: 1, reviewId: 'review-1', findingId: 'f1', reason: 'wrong' as const,
+    repo: 'acme/widgets', number: 1, reviewId: 'r_0123456789', findingId: 'c_01234567', reason: 'wrong' as const,
     text: 'This is checked in the caller.',
   };
   it('a dismissal of kind wrong needs at least 10 characters and one line', () => {
@@ -71,7 +73,7 @@ describe('request and reply schemas', () => {
     expect(StartReviewBodySchema.safeParse({ repo: 'acme/widgets', number: 3, depth: 'deep', packIds: ['a'] }).success).toBe(true);
   });
   it('accepts a dismissal with and without a learned line', () => {
-    const base = { fingerprint: 'fp', findingId: 'f1', reviewId: 'r1', reason: 'wrong', text: '', at: '2026-11-11T00:00:00Z' };
+    const base = { fingerprint: '0123456789abcdef', findingId: 'c_01234567', reviewId: 'r_0123456789', reason: 'wrong', text: '', at: '2026-11-11T00:00:00Z' };
     expect(DismissalSchema.safeParse({ ...base, learned: null }).success).toBe(true);
     expect(DismissalSchema.safeParse({ ...base, learned: { packId: 'core', kind: 'wrong', date: '2026-11-11' } }).success).toBe(true);
     expect(DismissalSchema.safeParse({ ...base, learned: { packId: 'core', kind: 'not-now', date: 'x' } }).success).toBe(false);
@@ -102,14 +104,112 @@ describe('request and reply schemas', () => {
 });
 
 describe('portability', () => {
-  it('no source file of the shared package imports from node:', () => {
+  it('no source file of the shared package imports from node: or uses a Node-only global', () => {
     const dir = fileURLToPath(new URL('../src/', import.meta.url));
-    const files = readdirSync(dir).filter((f) => f.endsWith('.ts'));
-    expect(files.length).toBeGreaterThan(0);
+    const files = readdirSync(dir, { recursive: true, encoding: 'utf8' }).filter((f) => f.endsWith('.ts'));
+    expect(files).toContain('testing.ts');
+    const banned = [/['"]node:/, /\brequire\(/, /\bprocess\./, /\bBuffer\b/];
     for (const file of files) {
       const source = readFileSync(dir + file, 'utf8');
-      expect(source, file).not.toContain("from 'node:");
-      expect(source, file).not.toContain('require(');
+      for (const pattern of banned) expect(source, `${file} ${pattern}`).not.toMatch(pattern);
     }
+  });
+});
+
+describe('one repository rule', () => {
+  it.each(['..', '.', 'a/..', '../a', './x', '.../x', 'a/b.git', 'a/b.GIT', 'a/.git', '-a/b', 'a-/b', 'a/b/c', '', 'a', 'a b/c', `${'a'.repeat(101)}/b`, `a/${'b'.repeat(101)}`, 'a/b\n'])(
+    'refuses %j', (value) => {
+      expect(isRepo(value)).toBe(false);
+      expect(RepoSchema.safeParse(value).success).toBe(false);
+    });
+  it.each(['Moxie-Pest-Control-Phoenix/moxie-portal', 'user_corp/repo.js', 'a/b', `${'a'.repeat(100)}/${'b'.repeat(100)}`])(
+    'accepts %j', (value) => {
+      expect(isRepo(value)).toBe(true);
+      expect(RepoSchema.safeParse(value).success).toBe(true);
+    });
+  it('is used by prRefFromUrl', () => {
+    expect(prRefFromUrl('https://github.com/a/b.git/pull/1')).toBeNull();
+    expect(prRefFromUrl('https://github.com/-a/b/pull/1')).toBeNull();
+    expect(prRefFromUrl('https://github.com/a/.../pull/1')).toBeNull();
+    expect(prRefFromUrl('https://github.com/user_corp/repo.js/pull/1')?.repo).toBe('user_corp/repo.js');
+  });
+  it('is used in replies and requests, with a safe positive integer number', () => {
+    const run = { runId: 'run_0123456789ab', repo: 'a/..', number: 1 };
+    expect(ServiceStatusSchema.safeParse({ version: '1', claude: true, gh: true, packsDir: '/p', running: [run] }).success).toBe(false);
+    expect(ServiceStatusSchema.safeParse({ version: '1', claude: true, gh: true, packsDir: '/p', running: [{ ...run, repo: 'a/b', number: 2 ** 60 }] }).success).toBe(false);
+    expect(ServiceStatusSchema.safeParse({ version: '1', claude: true, gh: true, packsDir: '/p', running: [{ ...run, repo: 'a/b' }] }).success).toBe(true);
+    expect(StartReviewBodySchema.safeParse({ repo: 'a/..', number: 1 }).success).toBe(false);
+    expect(StartReviewBodySchema.safeParse({ repo: 'a/b', number: 2 ** 60 }).success).toBe(false);
+    expect(RestoreBodySchema.safeParse({ repo: 'a/b', number: 1, fingerprint: '0123456789abcdef' }).success).toBe(true);
+    expect(RestoreBodySchema.safeParse({ repo: 'a/b.git', number: 1, fingerprint: '0123456789abcdef' }).success).toBe(false);
+  });
+});
+
+describe('bounded ids', () => {
+  it.each([
+    ['ReviewIdSchema', ReviewIdSchema, 'r_0123456789'],
+    ['FindingIdSchema', FindingIdSchema, 'c_01234567'],
+    ['FingerprintSchema', FingerprintSchema, '0123456789abcdef'],
+    ['RunIdSchema', RunIdSchema, 'run_0123456789ab'],
+    ['PackIdSchema', PackIdSchema, 'orbit-mine'],
+  ])('%s accepts its form and refuses path-like values', (_name, schema, good) => {
+    expect(schema.safeParse(good).success).toBe(true);
+    expect(schema.safeParse('../x').success).toBe(false);
+    expect(schema.safeParse('a/b').success).toBe(false);
+    expect(schema.safeParse(`${good}/x`).success).toBe(false);
+    expect(schema.safeParse('').success).toBe(false);
+  });
+  it('limits packIds to 10 distinct entries', () => {
+    const ids = (n: number) => Array.from({ length: n }, (_v, i) => `p${i}`);
+    const body = (packIds: string[]) => StartReviewBodySchema.safeParse({ repo: 'a/b', number: 1, packIds }).success;
+    expect(body(ids(10))).toBe(true);
+    expect(body(ids(11))).toBe(false);
+    expect(body(['a', 'a'])).toBe(false);
+    expect(body(['../x'])).toBe(false);
+    expect(body(['-a'])).toBe(false);
+  });
+  it('uses ids in replies', () => {
+    expect(StartReviewReplySchema.safeParse({ runId: 'run_0123456789ab', reused: false }).success).toBe(true);
+    expect(StartReviewReplySchema.safeParse({ runId: '../x', reused: false }).success).toBe(false);
+    const base = { findingId: 'c_01234567', reviewId: 'r_0123456789', reason: 'wrong', text: '', at: 'x', learned: null };
+    expect(DismissalSchema.safeParse({ ...base, fingerprint: '0123456789abcdef' }).success).toBe(true);
+    expect(DismissalSchema.safeParse({ ...base, fingerprint: '../x' }).success).toBe(false);
+  });
+});
+
+describe('checkLearnedText', () => {
+  it('exports the limits', () => {
+    expect(LEARNED_TEXT_MAX).toBe(500);
+    expect(LEARNED_TEXT_MIN).toBe(10);
+  });
+  it.each([
+    ['U+0085', 'this has a \u0085 next line'], ['U+2028', 'this has a \u2028 separator'],
+    ['U+2029', 'this has a \u2029 separator'], ['U+202E', 'this has a \u202E override'],
+    ['U+2066', 'this has a \u2066 isolate'], ['U+200B', 'this has a \u200B zero width'],
+    ['U+FEFF', 'this has a \uFEFF mark'], ['lone surrogate', 'this has a \uD800 surrogate'],
+    ['newline', 'this has a \n newline'], ['DEL', 'this has a \u007f del'],
+  ])('refuses %s', (_name, text) => {
+    expect(checkLearnedText(text, 'wrong')).toEqual(expect.any(String));
+    expect(checkLearnedText(text, 'not-now')).toEqual(expect.any(String));
+    expect(DismissBodySchema.safeParse({ repo: 'a/b', number: 1, reviewId: 'r_0123456789', findingId: 'c_01234567', reason: 'wrong', text }).success).toBe(false);
+  });
+  it('refuses spaces only and leading or trailing whitespace', () => {
+    expect(checkLearnedText(' '.repeat(10), 'wrong')).not.toBeNull();
+    expect(checkLearnedText(' leading space here', 'wrong')).not.toBeNull();
+    expect(checkLearnedText('trailing space here ', 'intended')).not.toBeNull();
+    expect(checkLearnedText('fine with inner spaces', 'wrong')).toBeNull();
+  });
+  it('counts code points, not UTF-16 units', () => {
+    expect(checkLearnedText('\u{1F600}'.repeat(500), 'wrong')).toBeNull();
+    expect(checkLearnedText('\u{1F600}'.repeat(501), 'wrong')).not.toBeNull();
+    expect(checkLearnedText('\u{1F600}'.repeat(10), 'wrong')).toBeNull();
+    expect(checkLearnedText('\u{1F600}'.repeat(9), 'wrong')).not.toBeNull();
+    expect(checkLearnedText('abcdefghij', 'intended')).toBeNull();
+    expect(checkLearnedText('abcdefghi', 'intended')).not.toBeNull();
+  });
+  it('lets not-now be empty but not wrong or intended', () => {
+    expect(checkLearnedText('', 'not-now')).toBeNull();
+    expect(checkLearnedText('', 'wrong')).not.toBeNull();
+    expect(checkLearnedText('', 'intended')).not.toBeNull();
   });
 });

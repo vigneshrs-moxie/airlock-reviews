@@ -2,24 +2,48 @@ import { z } from 'zod';
 import { ReviewEventSchema } from './events.js';
 import { DepthSchema, ReviewDocumentSchema, StageSchema, type Depth } from './review.js';
 
-const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-// eslint-disable-next-line no-control-regex
-const ONE_LINE = /^[^\u0000-\u001f\u007f]*$/;
+const OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,98}[A-Za-z0-9])?$/;
+const NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
+const FORBIDDEN_TEXT = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 
-const repo = z.string().regex(REPO_PATTERN);
-const number = z.number().int().positive();
+/** A repository is `<owner>/<name>`; the one rule used for every repo in requests, replies and links. */
+export function isRepo(value: string): boolean {
+  const parts = value.split('/');
+  if (parts.length !== 2) return false;
+  const [owner, name] = parts as [string, string];
+  return OWNER_PATTERN.test(owner) && NAME_PATTERN.test(name) && !/^\.+$/.test(name) && !/\.git$/i.test(name);
+}
+
+export const RepoSchema = z.string().refine(isRepo, { message: 'not a repository name' });
+
+/** A pull request number: a positive safe integer. */
+export const PrNumberSchema = z.number().refine((n) => Number.isSafeInteger(n) && n > 0, {
+  message: 'not a pull request number',
+});
+
+export const ReviewIdSchema = z.string().regex(/^r_[0-9a-f]{10}$/);
+export const FindingIdSchema = z.string().regex(/^c_[0-9a-f]{8}$/);
+export const FingerprintSchema = z.string().regex(/^[0-9a-f]{16}$/);
+export const RunIdSchema = z.string().regex(/^run_[0-9a-f]{12}$/);
+export const PackIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/);
+
+const repo = RepoSchema;
+const number = PrNumberSchema;
+
+export const LEARNED_TEXT_MAX = 500;
+export const LEARNED_TEXT_MIN = 10;
 
 export const HelloSchema = z.object({ airlock: z.literal(true), version: z.string(), paired: z.boolean() });
 export type Hello = z.infer<typeof HelloSchema>;
 
 export const ServiceStatusSchema = z.object({
   version: z.string(), claude: z.boolean(), gh: z.boolean(), packsDir: z.string(),
-  running: z.array(z.object({ runId: z.string(), repo: z.string(), number: z.number().int() })),
+  running: z.array(z.object({ runId: RunIdSchema, repo, number })),
 });
 export type ServiceStatus = z.infer<typeof ServiceStatusSchema>;
 
 export const PrSummarySchema = z.object({
-  repo: z.string(), number: z.number().int(), title: z.string(), author: z.string(), viewer: z.string(),
+  repo, number, title: z.string(), author: z.string(), viewer: z.string(),
   isOwn: z.boolean(), stage: StageSchema, baseRef: z.string(), headRef: z.string(), headSha: z.string(),
   additions: z.number().int(), deletions: z.number().int(), changedFiles: z.number().int(),
   packs: z.array(z.object({ id: z.string(), title: z.string() })), suggestedDepth: DepthSchema,
@@ -27,11 +51,12 @@ export const PrSummarySchema = z.object({
 export type PrSummary = z.infer<typeof PrSummarySchema>;
 
 export const StartReviewBodySchema = z.object({
-  repo, number, depth: DepthSchema.optional(), packIds: z.array(z.string()).optional(),
+  repo, number, depth: DepthSchema.optional(),
+  packIds: z.array(PackIdSchema).max(10).refine((ids) => new Set(ids).size === ids.length, { message: 'duplicate pack' }).optional(),
 });
 export type StartReviewBody = z.infer<typeof StartReviewBodySchema>;
 
-export const StartReviewReplySchema = z.object({ runId: z.string(), reused: z.boolean() });
+export const StartReviewReplySchema = z.object({ runId: RunIdSchema, reused: z.boolean() });
 export type StartReviewReply = z.infer<typeof StartReviewReplySchema>;
 
 export const ServiceEventSchema = z.union([
@@ -44,23 +69,32 @@ export const DismissReasonSchema = z.enum(['wrong', 'intended', 'not-now']);
 export type DismissReason = z.infer<typeof DismissReasonSchema>;
 
 export const DismissalSchema = z.object({
-  fingerprint: z.string(), findingId: z.string(), reviewId: z.string(), reason: DismissReasonSchema,
+  fingerprint: FingerprintSchema, findingId: FindingIdSchema, reviewId: ReviewIdSchema, reason: DismissReasonSchema,
   text: z.string(), at: z.string(),
   learned: z.object({ packId: z.string(), kind: z.enum(['wrong', 'intended']), date: z.string() }).nullable(),
 });
 export type Dismissal = z.infer<typeof DismissalSchema>;
 
+/** Why text cannot be saved as a learned line, or null when it can. */
+export function checkLearnedText(text: string, reason: DismissReason): string | null {
+  if (FORBIDDEN_TEXT.test(text)) return 'The text has a control, invisible or line-break character; use plain characters on one line.';
+  if (text !== text.trim()) return 'The text starts or ends with a space; remove it.';
+  const length = [...text].length;
+  if (length > LEARNED_TEXT_MAX) return `The text is longer than ${LEARNED_TEXT_MAX} characters.`;
+  if (reason !== 'not-now' && length < LEARNED_TEXT_MIN) return `The text needs at least ${LEARNED_TEXT_MIN} characters.`;
+  return null;
+}
+
+// For 'not-now' the text may be present, but the service must never write it to a learned file.
 export const DismissBodySchema = z.object({
-  repo, number, reviewId: z.string(), findingId: z.string(), reason: DismissReasonSchema,
-  text: z.string().max(500).regex(ONE_LINE, 'one line, no control characters'),
+  repo, number, reviewId: ReviewIdSchema, findingId: FindingIdSchema, reason: DismissReasonSchema, text: z.string(),
 }).superRefine((body, ctx) => {
-  if (body.reason !== 'not-now' && body.text.length < 10) {
-    ctx.addIssue({ code: 'custom', path: ['text'], message: 'at least 10 characters' });
-  }
+  const problem = checkLearnedText(body.text, body.reason);
+  if (problem !== null) ctx.addIssue({ code: 'custom', path: ['text'], message: problem });
 });
 export type DismissBody = z.infer<typeof DismissBodySchema>;
 
-export const RestoreBodySchema = z.object({ repo, number, fingerprint: z.string() });
+export const RestoreBodySchema = z.object({ repo, number, fingerprint: FingerprintSchema });
 export type RestoreBody = z.infer<typeof RestoreBodySchema>;
 
 /** `note` is set when the learned line was no longer there to remove. */
@@ -111,7 +145,7 @@ export function prRefFromUrl(url: string): { repo: string; number: number; page:
   const [owner, name, pull, num, ...rest] = segments;
   if (owner === undefined || name === undefined || pull !== 'pull' || num === undefined) return null;
   const fullName = `${owner}/${name}`;
-  if (!REPO_PATTERN.test(fullName) || !/^[1-9][0-9]*$/.test(num)) return null;
+  if (!isRepo(fullName) || !/^[1-9][0-9]*$/.test(num)) return null;
   const parsedNumber = Number(num);
   if (!Number.isSafeInteger(parsedNumber)) return null;
   return { repo: fullName, number: parsedNumber, page: pageOf(rest) };
