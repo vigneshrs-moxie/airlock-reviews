@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { E2E_PORT } from './port';
 import { startFakeService, type FakeService } from './fake-service';
 
 // Written in wxt.config.ts next to the key it comes from.
@@ -39,7 +40,12 @@ test('the panel page loads and reaches the fake service without any prompt', asy
   const dialogs: string[] = [];
   page.on('dialog', (d) => dialogs.push(d.message()));
   await page.goto(`chrome-extension://${id}/sidepanel.html`);
-  await expect(page.getByText('Airlock service: connected (version test)')).toBeVisible();
+  // This tab is not a pull request, so the panel has nothing to look at and says so.
+  await expect(page.getByText('Open a pull request on GitHub and Airlock will appear here.')).toBeVisible();
+  // The panel page may reach the service (host permission), with no prompt: the same call the panel makes.
+  const base = `http://127.0.0.1:${E2E_PORT}`;
+  const hello = await page.evaluate(async (url) => (await fetch(`${url}/hello`)).json() as Promise<{ airlock: boolean }>, base);
+  expect(hello.airlock).toBe(true);
 
   expect(dialogs).toEqual([]);
   expect(service.requests.some((r) => r.method === 'GET' && r.url === '/hello')).toBe(true);
