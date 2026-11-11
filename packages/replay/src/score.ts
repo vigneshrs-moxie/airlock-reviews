@@ -105,7 +105,7 @@ export function scoreCase(c: ReplayCase, doc: ReviewDocument, matches: Match[]):
     caseId: c.id, kind: c.kind, known: c.known.length, knownDefects: 0, inTop: 0, shown: 0, raised: 0,
     defectsInTop: 0, defectsShown: 0, partialInTop: 0, asQuestion: 0,
     sharedMatches: sum([...sharedMatchItems(c, matches).values()], (ids) => ids.length),
-    lostAt: { lenses: 0, schema: 0, anchor: 0, challenge: 0, select: 0 },
+    lostAt: { lenses: 0, schema: 0, anchor: 0, merge: 0, challenge: 0, select: 0 },
     crossFileKnown: 0, crossFileInTop: 0, findingsShown: doc.findings.length,
     blockOrFixShown: doc.findings.filter((f) => f.severity === 'block' || f.severity === 'fix').length,
     ms: 0, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: doc.verdict.label,

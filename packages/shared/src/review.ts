@@ -120,12 +120,18 @@ export const FindingSchema = CandidateSchema.extend({
   anchor: AnchorSchema, fingerprint: z.string(), checked: z.string(),
   bucket: z.enum(['top', 'also']), rank: z.number().int().nullable(),
   status: z.enum(['new', 'still-open', 'fixed', 'moved']).nullable(),
+  /** The lenses and rules whose duplicates were merged into this finding. */
+  alsoRaisedBy: z.array(SourceSchema).optional(),
+  /** The fingerprints of those duplicates, so a dismissal or a re-review can recognise the finding under any of them. */
+  aliases: z.array(z.string()).optional(),
 });
 export type Finding = z.infer<typeof FindingSchema>;
 
 export const DroppedSchema = z.object({
-  candidate: CandidateSchema, stage: z.enum(['schema', 'anchor', 'challenge', 'select']),
+  candidate: CandidateSchema, stage: z.enum(['schema', 'anchor', 'merge', 'challenge', 'select']),
   reason: z.string(), refutation: PlaceSchema.nullable(),
+  /** For a duplicate merged into another finding: the id of the finding that was kept. */
+  mergedInto: z.string().nullable().optional(),
 });
 export type Dropped = z.infer<typeof DroppedSchema>;
 
@@ -145,14 +151,23 @@ export const VerdictSchema = z.object({
 });
 export type Verdict = z.infer<typeof VerdictSchema>;
 
+export const StageErrorKindSchema = z.enum(['invalid-output', 'turn-limit', 'usage-limit', 'timeout', 'other']);
+export type StageErrorKind = z.infer<typeof StageErrorKindSchema>;
+
 export const StageErrorSchema = z.object({
   stage: z.string(), cohortId: z.string().nullable(), message: z.string(),
+  /** Why the stage failed, when the engine can tell. A usage limit or a timeout is worth running again; a bad answer is not. */
+  kind: StageErrorKindSchema.optional(),
 });
 export type StageError = z.infer<typeof StageErrorSchema>;
 
 export const StageTimingSchema = z.object({
   stage: z.string(), ms: z.number(), agentRuns: z.number().int(), inputTokens: z.number().int(),
   outputTokens: z.number().int(), costUsd: z.number().nullable(),
+  /** When the stage started and finished (ISO times). Stages can overlap, so elapsed time is not the sum of `ms`. */
+  startedAt: z.string().optional(), finishedAt: z.string().optional(),
+  /** Model turns used by the stage's requests. */
+  turns: z.number().int().optional(),
 });
 export type StageTiming = z.infer<typeof StageTimingSchema>;
 
@@ -173,5 +188,9 @@ export const ReviewDocumentSchema = z.object({
   dropped: z.array(DroppedSchema), candidates: z.array(CandidateSchema), whoseCall: z.array(z.string()),
   checksAfterMerge: z.array(z.string()), selfReviewText: z.string(), stageErrors: z.array(StageErrorSchema),
   timings: z.array(StageTimingSchema),
+  /** Plain sentences saying what a model was not shown because of a size limit (a diff cut short, rule files left out). */
+  limits: z.array(z.string()).optional(),
+  /** When the review started (ISO time). `createdAt` is when the document was assembled, at the end of the review. */
+  startedAt: z.string().optional(),
 });
 export type ReviewDocument = z.infer<typeof ReviewDocumentSchema>;

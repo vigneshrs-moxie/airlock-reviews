@@ -196,7 +196,7 @@ function notFinishedDocument(c: ReplayCase, run: { model: string; depth: Depth; 
 const notJudged = (c: ReplayCase, reason: string): Match[] =>
   c.known.map((k) => ({ knownId: k.id, where: 'none', itemId: null, partial: false, reason }));
 
-const NOT_LOST: CaseScore['lostAt'] = { lenses: 0, schema: 0, anchor: 0, challenge: 0, select: 0 };
+const NOT_LOST: CaseScore['lostAt'] = { lenses: 0, schema: 0, anchor: 0, merge: 0, challenge: 0, select: 0 };
 
 type Scored = { score: CaseScore; detail: { doc: ReviewDocument; matches: Match[] } };
 type RunInfo = { model: string; depth: Depth; createdAt: string };

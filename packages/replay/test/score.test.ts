@@ -6,7 +6,7 @@ import { doc, dropped, finding, problem, raw, replayCase } from './fixtures.js';
 const match = (knownId: string, where: Match['where'], itemId: string | null, partial = false): Match =>
   ({ knownId, where, itemId, partial, reason: 'r' });
 
-const ZERO_LOST = { lenses: 0, schema: 0, anchor: 0, challenge: 0, select: 0 };
+const ZERO_LOST = { lenses: 0, schema: 0, anchor: 0, merge: 0, challenge: 0, select: 0 };
 
 describe('scoreCase', () => {
   it('counts a known problem matched in the top list as inTop, shown and raised', () => {
