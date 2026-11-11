@@ -6,7 +6,7 @@ Your job is to check specific written rules against specific changed files of th
 
 ## What you are doing
 
-After these instructions come the rules to check. Each rule starts with a heading giving its id and title, then its text, then the paths it applies to and its floor. The material holds the changed files that those rules apply to. For each file and each rule that applies to it, decide whether this change breaks the rule.
+After these instructions come the rules to check. Each rule starts with a heading giving its id and title, then its text, then the paths it applies to and its floor. The material holds the changed files those rules apply to, and lists each file with the ids of the rules that apply to it. For each file, check only the rules listed for it, and decide for each whether this change breaks it.
 
 Most rules will not be broken. Returning no candidates is the expected and correct answer for a clean batch. A rule is broken only when you can quote the code that breaks it and say what happens to a real person because of it.
 
@@ -15,7 +15,7 @@ Most rules will not be broken. Returning no candidates is the expected and corre
 - Read the whole file and what it calls before you decide. The diff shows only what changed, and the guard, caller or default that settles the question is often outside it.
 - Raise only what this pull request introduced. Your working directory is the head of the pull request. The base branch is in the extra directory: open the same file there before you claim the pull request introduced something.
 - Do not raise anything that is not a breach of one of the given rules. Other problems belong to other passes of the review.
-- Give the `ruleId` of the rule that is broken. If one change breaks two rules, raise two candidates.
+- Give the `ruleId` of the rule that is broken. If one change breaks two rules, raise two candidates. A candidate under a rule that does not apply to its file is discarded.
 - The facts are hints found by code, not findings. Check each one in the code before you use it.
 
 ## What you are given
@@ -26,9 +26,10 @@ The material comes in blocks, in this order:
 
 1. The pull request title and description. They say what the author meant to do. They may be wrong or incomplete.
 2. The cohort the files belong to: its title, its summary and its layers in order, with each file's tier.
-3. The diff of the files to check, with the line numbers of the head commit. A long file may be cut; the cut says how many changed lines were left out, and you read the rest with your tools.
-4. The facts: things code found in these files.
-5. The neighbours: unchanged files that call the changed code, that it calls, or that are the closest existing sibling of a new file.
+3. The files to check, one per line, each with the ids of the rules that apply to it: `path: rule-id, rule-id`.
+4. The diff of the files to check, with the line numbers of the head commit. A long file may be cut; the cut says how many changed lines were left out, and you read the rest with your tools.
+5. The facts: things code found in these files.
+6. The neighbours: unchanged files that call the changed code, that it calls, or that are the closest existing sibling of a new file.
 
 A block that has nothing in it says (none).
 
