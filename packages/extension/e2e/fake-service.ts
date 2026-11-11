@@ -13,6 +13,21 @@ const EXTENSION_ORIGIN = 'chrome-extension://nbcmjckbkploiemllhkmhegjimgeimoa';
 
 // The sentences the real service answers with (packages/service/src/{http,routes,sse,dismissals,server}.ts).
 const NOTHING_HERE = 'Airlock has nothing at this address.';
+const WRONG_METHOD = 'This address does not accept that method.';
+
+/** The real service's routes, as method and path pattern, so an unknown address is answered before the token. */
+const ROUTES: Array<{ method: string; path: RegExp }> = [
+  { method: 'GET', path: /^\/hello$/ },
+  { method: 'POST', path: /^\/pair$/ },
+  { method: 'GET', path: /^\/status$/ },
+  { method: 'GET', path: /^\/pr$/ },
+  { method: 'POST', path: /^\/reviews$/ },
+  { method: 'GET', path: /^\/reviews\/running$/ },
+  { method: 'GET', path: /^\/reviews\/latest$/ },
+  { method: 'GET', path: /^\/reviews\/[^/]+\/events$/ },
+  { method: 'POST', path: /^\/dismissals$/ },
+  { method: 'POST', path: /^\/dismissals\/restore$/ },
+];
 const NOT_HERE = 'Airlock only answers on this Mac.';
 const NOT_THIS_PAGE = 'Airlock does not accept requests from this page.';
 const NEEDS_TOKEN = 'Airlock needs its pairing token.';
@@ -273,9 +288,13 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     }
     requests.push({ method, url: req.url ?? '', headers: req.headers, ...(body === undefined ? {} : { body }) });
 
-    // The three checks, as the real router makes them.
+    // The checks in the real router's order: Host, OPTIONS, the address (404, then 405), then Origin and the token, which
+    // the open /hello skips.
     if (req.headers.host !== `127.0.0.1:${port}` && req.headers.host !== `localhost:${port}`) { refuse(res, 403, NOT_HERE); return; }
     if (method === 'OPTIONS') { refuse(res, 403, NOT_THIS_PAGE); return; }
+    const known = ROUTES.filter((r) => r.path.test(url.pathname));
+    if (known.length === 0) { refuse(res, 404, NOTHING_HERE); return; }
+    if (!known.some((r) => r.method === method)) { refuse(res, 405, WRONG_METHOD); return; }
     if (method === 'GET' && url.pathname === '/hello') {
       reply(res, HelloSchema, 200, { airlock: true, version: 'test', paired: pairedOrigin !== null });
       return;

@@ -79,7 +79,7 @@ export function reviewRoutes(
     timers,
     ...(deps.limits?.runMinutes === undefined ? {} : { runMinutes: deps.limits.runMinutes }),
     log: deps.log,
-    failure: (e) => `Airlock could not review this pull request: ${plainMessage(e, hidePaths)}`,
+    failure: (e) => plainMessage(e, hidePaths, 'Airlock could not review this pull request: '),
     launch: (body, emit, signal) => review(engineRequest(body, config.packsDir), { ...engine, signal }, emit),
     discard: discardStored,
   });
@@ -120,7 +120,7 @@ export function reviewRoutes(
         } catch (e) {
           // Judged on the whole message: the bounded one may have lost gh's status at its end.
           if (/HTTP 404/.test(e instanceof Error ? e.message : String(e))) return refuse(404, NO_SUCH_PR);
-          return refuse(502, `GitHub did not answer: ${plainMessage(e, hidePaths)}`);
+          return refuse(502, plainMessage(e, hidePaths, 'GitHub did not answer: '));
         }
         return reply<PrSummary>(PrSummarySchema, 200, {
           repo, number, title: pr.title, author: pr.author, viewer: pr.viewer, isOwn: pr.author === pr.viewer,

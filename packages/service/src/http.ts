@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
+import { MESSAGE_MAX } from '@airlock/shared';
 import type { ZodType } from 'zod';
 import { isExtensionOrigin } from './config.js';
 
@@ -27,7 +28,10 @@ export type Handler = (req: Req) => Promise<Res>;
 export interface Route {
   method: string;
   path: string;
-  /** Open routes need no token. They still get the Host check and the Origin rule. */
+  /**
+   * Open routes need no token and answer whatever the Origin header is (a page cannot read the reply: no Access-Control
+   * header is ever sent). They still get the Host check.
+   */
   open?: boolean;
   /** The pairing route: the Origin header is required and must be a chrome-extension origin; the handler decides the rest. */
   pairing?: boolean;
@@ -161,20 +165,25 @@ async function writeStream(
   }
 }
 
-export const MAX_MESSAGE_CHARS = 280;
-
-/**
- * An error message made safe to send: absolute paths under the given folders become `<path>`, line breaks become one
- * space, and anything past 280 characters (code points) is cut, ending in `…`. The log keeps the whole message.
- */
-export function plainMessage(e: unknown, hidePaths: readonly string[]): string {
-  let message = e instanceof Error ? e.message : String(e);
+/** The text with every absolute path under the given folders replaced by `<path>`. */
+export function hidePathsIn(text: string, hidePaths: readonly string[]): string {
+  let hidden = text;
   for (const folder of hidePaths) {
     if (folder === '') continue;
-    message = message.replace(new RegExp(`${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\s'"\`]*`, 'g'), '<path>');
+    hidden = hidden.replace(new RegExp(`${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\s'"\`]*`, 'g'), '<path>');
   }
-  const chars = [...message.replace(/[ \t]*[\r\n]+[ \t]*/g, ' ')];
-  return chars.length <= MAX_MESSAGE_CHARS ? chars.join('') : `${chars.slice(0, MAX_MESSAGE_CHARS - 1).join('')}…`;
+  return hidden;
+}
+
+/**
+ * An error sentence made safe to send: `lead` then the error's message, in which absolute paths under the given folders
+ * become `<path>` and line breaks become one space. The whole sentence is cut once to MESSAGE_MAX characters (code
+ * points), ending in `…`, which is what the panel shows. The log keeps the whole message.
+ */
+export function plainMessage(e: unknown, hidePaths: readonly string[], lead = ''): string {
+  const message = hidePathsIn(e instanceof Error ? e.message : String(e), hidePaths);
+  const chars = [...`${lead}${message.replace(/[ \t]*[\r\n]+[ \t]*/g, ' ')}`];
+  return chars.length <= MESSAGE_MAX ? chars.join('') : `${chars.slice(0, MESSAGE_MAX - 1).join('')}…`;
 }
 
 export interface RouterOptions {
@@ -230,14 +239,15 @@ export function createRouter(
     }
     const { route, params } = found;
 
-    // Check 2: an Origin header, when present, is the paired extension (or, for pairing, any extension).
+    // Check 2: an Origin header, when present, is the paired extension (or, for pairing, any extension). The open route
+    // answers any Origin, so pairing can begin whatever a browser sends with it.
     const origin = req.headers.origin ?? null;
     if (route.pairing === true) {
       if (origin === null || !isExtensionOrigin(origin)) {
         writeJson(res, 403, { error: NOT_THIS_PAGE });
         return;
       }
-    } else if (origin !== null && origin !== (await auth.pairedOrigin())) {
+    } else if (route.open !== true && origin !== null && origin !== (await auth.pairedOrigin())) {
       writeJson(res, 403, { error: NOT_THIS_PAGE });
       return;
     }
@@ -312,12 +322,12 @@ export function createRouter(
       reply = await route.handler({ method, path: rawPath, query, params, body, origin });
     } catch (e) {
       log(`${method} ${rawPath.slice(0, MAX_LOGGED_PATH)} failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
-      writeJson(res, 500, { error: `Airlock had a problem: ${plainMessage(e, hidePaths)}` });
+      writeJson(res, 500, { error: plainMessage(e, hidePaths, 'Airlock had a problem: ') });
       return;
     }
     if ('stream' in reply) {
       await writeStream(
-        res, reply.stream, (e) => `Airlock had a problem: ${plainMessage(e, hidePaths)}`,
+        res, reply.stream, (e) => plainMessage(e, hidePaths, 'Airlock had a problem: '),
         (e) => log(`${method} ${rawPath.slice(0, MAX_LOGGED_PATH)} stream failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`),
       );
       return;

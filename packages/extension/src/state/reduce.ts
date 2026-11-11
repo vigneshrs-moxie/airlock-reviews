@@ -1,10 +1,11 @@
-import type {
-  Brief, ChangeMap, Depth, DismissBody, Dismissal, LatestReply, PrSummary, ServiceEvent,
+import {
+  MESSAGE_MAX, type Brief, type ChangeMap, type Depth, type DismissBody, type Dismissal, type LatestReply, type PrSummary,
+  type ServiceEvent,
 } from '@airlock/shared';
 import { stageWords } from './stage-words';
 
 /** Text from the service that is shown (an error, a failed review's message, a restore note) is cut to this many characters. */
-export const NOTICE_MAX = 300;
+export const NOTICE_MAX = MESSAGE_MAX;
 
 export interface StageLine {
   stage: string;

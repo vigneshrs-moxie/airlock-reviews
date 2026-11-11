@@ -23,6 +23,12 @@ export const PackIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/);
 const repo = RepoSchema;
 const number = PrNumberSchema;
 
+/**
+ * The most characters of a sentence from the service the panel shows (an error, a failed review's message, a restore
+ * note). The service cuts its own error sentences to this, as a whole, so the panel never cuts them a second time.
+ */
+export const MESSAGE_MAX = 300;
+
 export const LEARNED_TEXT_MAX = 500;
 export const LEARNED_TEXT_MIN = 10;
 

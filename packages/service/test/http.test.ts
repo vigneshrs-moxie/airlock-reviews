@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { EngineDeps } from '@airlock/engine';
+import { MESSAGE_MAX } from '@airlock/shared';
 import { pair, pairedOrigin, readOrCreateToken } from '../src/config.js';
 import { createRouter, type Auth, type Handler } from '../src/http.js';
 import { createServer } from '../src/server.js';
@@ -127,12 +128,10 @@ describe('the three checks', () => {
     expect((r.json as { origin: string }).origin).toBe(ORIGIN);
   });
 
-  it('refuses any Origin on every route while nothing is paired, except pairing', async () => {
+  it('refuses any Origin on every route while nothing is paired, except pairing and the open /hello', async () => {
     const { port } = await routerRig();
-    for (const path of ['/things/1', '/hello']) {
-      const r = await send(port, 'GET', path, { headers: { ...bearer, Origin: ORIGIN } });
-      expect(r.status).toBe(403);
-    }
+    expect((await send(port, 'GET', '/things/1', { headers: { ...bearer, Origin: ORIGIN } })).status).toBe(403);
+    expect((await send(port, 'GET', '/hello', { headers: { Origin: ORIGIN } })).status).toBe(200);
     const p = await send(port, 'POST', '/pairing', { ...asJson({}), headers: { ...asJson({}).headers, ...bearer, Origin: ORIGIN } });
     expect(p.status).toBe(200);
   });
@@ -165,6 +164,17 @@ describe('the open route', () => {
     const r = await send(port, 'GET', '/hello');
     expect(r.status).toBe(200);
     expect(r.json).toEqual({ hi: true });
+  });
+
+  it('answers whatever the Origin header is, still with no Access-Control header, and still under the Host rule', async () => {
+    const { port } = await routerRig({ pairedOrigin: ORIGIN });
+    for (const origin of [ORIGIN, OTHER, 'https://evil.example', 'null']) {
+      const r = await send(port, 'GET', '/hello', { headers: { Origin: origin } });
+      expect(r.status, origin).toBe(200);
+      expect(Object.keys(r.headers).filter((h) => h.startsWith('access-control'))).toEqual([]);
+    }
+    expect((await send(port, 'GET', '/hello', { headers: { Origin: 'https://evil.example', Host: 'evil.example' } })).status).toBe(403);
+    expect((await send(port, 'GET', '/things/1', { headers: { ...bearer, Origin: 'https://evil.example' } })).status).toBe(403);
   });
 });
 
@@ -621,14 +631,15 @@ describe('fix round 1: errors', () => {
 });
 
 describe('task 4 fix round 1: bounded error text', () => {
-  it('collapses line breaks and cuts the 500 message to 280 characters', async () => {
+  it('collapses line breaks and cuts the whole 500 sentence once, to what the panel shows', async () => {
     const { port, log } = await routerRig();
     const r = await send(port, 'GET', '/long', { headers: bearer });
     expect(r.status).toBe(500);
-    const message = (r.json as { error: string }).error.slice('Airlock had a problem: '.length);
-    expect(message.startsWith('one two é')).toBe(true);
-    expect([...message]).toHaveLength(280);
-    expect(message.endsWith('…')).toBe(true);
+    const error = (r.json as { error: string }).error;
+    expect(error.startsWith('Airlock had a problem: one two é')).toBe(true);
+    expect([...error]).toHaveLength(MESSAGE_MAX);
+    expect(MESSAGE_MAX).toBe(300);
+    expect(error.endsWith('…')).toBe(true);
     // The log keeps the whole message.
     expect(log.some((l) => l.includes('é'.repeat(400)))).toBe(true);
   });

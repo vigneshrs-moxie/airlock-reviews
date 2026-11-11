@@ -158,6 +158,11 @@ describe('selectPacks', () => {
     expect(selectPacks(all, 'nobody/none').map((p) => p.id)).toEqual(['generic']);
   });
 
+  it('matches a repository without regard to letter case', () => {
+    expect(selectPacks(all, 'ACME/Web').map((p) => p.id)).toEqual(['a', 'b', 'generic']);
+    expect(selectPacks([stub('generic', []), stub('m', ['Moxie-Org/Portal'])], 'moxie-org/portal').map((p) => p.id)).toEqual(['m', 'generic']);
+  });
+
   it('does not add generic twice', () => {
     const list = [stub('generic', ['acme/web']), stub('a', ['acme/web'])];
     expect(selectPacks(list, 'acme/web').map((p) => p.id)).toEqual(['a', 'generic']);

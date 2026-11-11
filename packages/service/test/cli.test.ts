@@ -104,6 +104,7 @@ function harness(options: { exists?: boolean; env?: Record<string, string>; boot
     env,
     onSignal: (signal, handler) => { handlers.set(signal, handler); return () => { handlers.delete(signal); }; },
     exit: (code) => { exits.push(code); },
+    onUnhandledRejection: () => () => undefined,
     now: () => new Date('2026-11-11T09:00:00.000Z'),
   };
   const io = { out: (t: string) => out.push(t), err: (t: string) => err.push(t) };
@@ -196,19 +197,65 @@ describe('start', () => {
     expect(h.server.close).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses to run when the port is taken and says which port', async () => {
+  const airlockAnswers = (async (url: string) => {
+    expect(url).toBe(`http://127.0.0.1:${PORT}/hello`);
+    return new Response(JSON.stringify({ airlock: true, version: '1.0.0', paired: true }), { status: 200 });
+  }) as typeof fetch;
+  const inUse = (): Error => Object.assign(new Error('listen EADDRINUSE: address already in use 127.0.0.1:45611'), { code: 'EADDRINUSE' });
+
+  it('refuses to run when Airlock already has the port and says which port', async () => {
     const h = harness();
-    h.server.listen.mockRejectedValue(Object.assign(new Error('listen EADDRINUSE: address already in use 127.0.0.1:45611'), { code: 'EADDRINUSE' }));
+    h.overrides.fetch = airlockAnswers;
+    h.server.listen.mockRejectedValue(inUse());
     expect(await main(['start'], h.io, h.overrides)).toBe(1);
     expect(h.err.join('')).toBe(`Port ${PORT} is already in use. Airlock may already be running: npm run service -- status\n`);
     expect(h.handlers.size).toBe(0);
   });
 
-  it('under launchd a taken port is a quiet stop with 0, so launchd leaves it stopped', async () => {
+  it('under launchd, Airlock on the port is a quiet stop with 0, so launchd leaves it stopped', async () => {
     const h = harness({ env: { AIRLOCK_UNDER_LAUNCHD: '1' } });
-    h.server.listen.mockRejectedValue(Object.assign(new Error('in use'), { code: 'EADDRINUSE' }));
+    h.overrides.fetch = airlockAnswers;
+    h.server.listen.mockRejectedValue(inUse());
     expect(await main(['start'], h.io, h.overrides)).toBe(0);
     expect(h.err.join('')).toBe(`Port ${PORT} is already in use, so another copy of Airlock is running. This copy is stopping.\n`);
+  });
+
+  it('says another program has the port when what holds it is not Airlock, and exits 1 under launchd too', async () => {
+    for (const env of [{}, { AIRLOCK_UNDER_LAUNCHD: '1' }] as Array<Record<string, string>>) {
+      for (const f of [
+        (async () => new Response('nope', { status: 404 })) as typeof fetch,
+        (async () => { throw new TypeError('fetch failed'); }) as typeof fetch,
+      ]) {
+        const h = harness({ env });
+        h.overrides.fetch = f;
+        h.server.listen.mockRejectedValue(inUse());
+        expect(await main(['start'], h.io, h.overrides)).toBe(1);
+        expect(h.err.join('')).toBe(`Port ${PORT} is in use by another program.\n`);
+        expect(h.handlers.size).toBe(0);
+      }
+    }
+  });
+
+  it('writes an unhandled rejection\'s stack to the log with paths hidden, and keeps running', async () => {
+    const h = harness();
+    let onRejection: ((reason: unknown) => void) | undefined;
+    let removed = false;
+    h.overrides.onUnhandledRejection = (handler) => { onRejection = handler; return () => { removed = true; }; };
+    const done = main(['start'], h.io, h.overrides);
+    await waitFor(() => h.handlers.has('SIGTERM'));
+    const error = new Error(`could not read ${h.airlockHome}/reviews/x.json`);
+    error.stack = `Error: could not read ${h.airlockHome}/reviews/x.json\n    at read (${h.airlockHome}/lib.js:1:1)`;
+    onRejection?.(error);
+    const line = h.out.join('').split('\n').find((l) => l.includes('unhandled'));
+    expect(line).toBe('2026-11-11T09:00:00.000Z unhandled rejection: Error: could not read <path>     at read (<path>');
+    expect(all(h)).not.toContain(h.airlockHome);
+    onRejection?.('a plain reason');
+    expect(h.out.join('')).toContain('unhandled rejection: a plain reason');
+    expect(h.handlers.has('SIGTERM')).toBe(true);
+    expect(removed).toBe(false);
+    h.handlers.get('SIGTERM')?.();
+    expect(await done).toBe(0);
+    expect(removed).toBe(true);
   });
 
   it('the request log gets a time stamp, one line per request, and never the token or a header', async () => {
@@ -402,7 +449,8 @@ describe('status', () => {
     const text = h.out.join('');
     expect(text).toContain('Airlock service is running (version 9.9.9).');
     expect(text).toContain('An extension is paired.');
-    expect(text).toContain('Claude: found and signed in.');
+    expect(text).toContain('Claude: found.');
+    expect(text).not.toContain('Claude: found and signed in.');
     expect(text).toContain('GitHub command (gh): not found or not signed in.');
     expect(text).toContain('o/r#7');
     expect(all(h)).not.toContain(TOKEN);
@@ -418,15 +466,23 @@ describe('status', () => {
     expect(h.out.join('')).toContain('No reviews are running.');
   });
 
-  it('returns 1 with the start command when nothing answers or the answer is not Airlock', async () => {
+  it('returns 1 with the start command when nothing answers', async () => {
+    const h = harness();
+    h.overrides.fetch = (async () => { throw new TypeError('fetch failed'); }) as typeof fetch;
+    expect(await main(['status'], h.io, h.overrides)).toBe(1);
+    expect(h.err.join('')).toBe("Airlock's service is not running. Start it with: npm run service\n");
+    expect(all(h)).not.toContain(TOKEN);
+  });
+
+  it('says another program has the port when the answer is not Airlock, and returns 1', async () => {
     for (const f of [
-      (async () => { throw new TypeError('fetch failed'); }) as typeof fetch,
       (async () => json({ hello: 'world' })) as typeof fetch,
+      (async () => new Response('<html>', { status: 404 })) as typeof fetch,
     ]) {
       const h = harness();
       h.overrides.fetch = f;
       expect(await main(['status'], h.io, h.overrides)).toBe(1);
-      expect(h.err.join('')).toBe("Airlock's service is not running. Start it with: npm run service\n");
+      expect(h.err.join('')).toBe(`Port ${PORT} is in use by another program.\n`);
       expect(all(h)).not.toContain(TOKEN);
     }
   });
@@ -527,7 +583,7 @@ describe('install and uninstall', () => {
     h.overrides.env = { ...h.overrides.env, PATH: [shared, h.binDirs[2] as string, shared, '/usr/bin'].join(':') };
     await main(['install'], h.io, h.overrides);
     const text = readFileSync(h.plist, 'utf8');
-    expect(text).toContain(`<key>PATH</key>\n    <string>${shared}:${h.binDirs[2]}:/usr/bin:/bin:/usr/sbin:/sbin</string>`);
+    expect(text).toContain(`<key>PATH</key>\n    <string>${shared}:${h.binDirs[2]}:/opt/node/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>`);
     expect(text).toContain('<key>AIRLOCK_PORT</key>\n    <string>4700</string>');
     expect(text).toContain('<key>AIRLOCK_PACKS_DIR</key>\n    <string>/x/packs</string>');
     expect(text).not.toContain('<key>AIRLOCK_HOME</key>');
@@ -621,12 +677,17 @@ describe('install and uninstall', () => {
     expect(existsSync(h.plist)).toBe(true);
   });
 
+  it('a missing gh still says reviews will not work until it is installed', async () => {
+    const h = harness({ tools: ['claude', 'git'] });
+    expect(await main(['install'], h.io, h.overrides)).toBe(0);
+    expect(h.out.join('')).toContain('gh was not found on your PATH: reviews will not work until it is installed.\n');
+  });
+
   it('a missing claude prints one line and install still goes ahead', async () => {
     const h = harness({ tools: ['gh', 'git'] });
     expect(await main(['install'], h.io, h.overrides)).toBe(0);
     const lines = h.out.join('').split('\n').filter((l) => l.includes('claude'));
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('reviews will not work until it is installed');
+    expect(lines).toEqual(['claude was not found on your PATH.']);
     expect(h.out.join('')).not.toMatch(/gh was not found|git was not found/);
     expect(h.calls).toHaveLength(2);
   });

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { cleanForTerminal, realExec, type EngineDeps, type Exec } from '@airlock/engine';
 import { HelloSchema, ServiceStatusSchema, type Hello } from '@airlock/shared';
 import { loadConfig, readOrCreateToken, unpair, type ServiceConfig } from './config.js';
+import { hidePathsIn } from './http.js';
 import { createServer, defaultEngineDeps, type ServiceDeps } from './server.js';
 
 export interface CliIo { out: (text: string) => void; err: (text: string) => void }
@@ -44,6 +45,8 @@ export interface CliOverrides {
   onSignal?: (signal: Signal, handler: () => void) => () => void;
   /** Ends the process at once: a second stop signal while the running reviews are being stopped. */
   exit?: (code: number) => void;
+  /** Registers the process's handler for a rejection nobody handled and returns the function that removes it. */
+  onUnhandledRejection?: (handler: (reason: unknown) => void) => () => void;
   env?: NodeJS.ProcessEnv;
   now?: () => Date;
 }
@@ -152,6 +155,11 @@ const defaultSignals = (signal: Signal, handler: () => void): (() => void) => {
   return () => { process.off(signal, handler); };
 };
 
+const defaultRejections = (handler: (reason: unknown) => void): (() => void) => {
+  process.on('unhandledRejection', handler);
+  return () => { process.off('unhandledRejection', handler); };
+};
+
 /** Moves a log file above 5 MB to `<file>.1`, replacing an older one. */
 async function rotateLog(file: string): Promise<void> {
   try {
@@ -219,17 +227,30 @@ async function start(io: CliIo, o: CliOverrides): Promise<number> {
     }
   }
 
+  const log = (line: string): void => { sink(`${now().toISOString()} ${clean(line)}\n`); };
   const server = (o.createServer ?? createServer)({
     config,
     engine: (o.engineDeps ?? defaultEngineDeps)(),
     now,
-    log: (line) => { sink(`${now().toISOString()} ${clean(line)}\n`); },
+    log,
+  });
+  // A rejection nobody handled (in a review, say) would end the process and every running review: it is logged, with
+  // the home folders hidden as in replies, and the service keeps running.
+  const removeRejections = (o.onUnhandledRejection ?? defaultRejections)((reason) => {
+    const text = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+    log(`unhandled rejection: ${hidePathsIn(text, [config.home, homedir()])}`);
   });
   try {
     try {
       await server.listen();
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+        // Only another copy of Airlock is a reason to stay stopped; anything else may let go of the port, so launchd
+        // is asked (exit 1) to try again after its 30 seconds.
+        if (!(await answersHello(config, o))) {
+          io.err(`${portTaken(config)}\n`);
+          return 1;
+        }
         if (env['AIRLOCK_UNDER_LAUNCHD'] === '1') {
           io.err(`Port ${config.port} is already in use, so another copy of Airlock is running. This copy is stopping.\n`);
           return 0;
@@ -262,6 +283,7 @@ async function start(io: CliIo, o: CliOverrides): Promise<number> {
     }
     return 0;
   } finally {
+    removeRejections();
     closeLog();
   }
 }
@@ -274,22 +296,42 @@ async function token(io: CliIo, o: CliOverrides): Promise<number> {
 
 const timeoutSignal = (o: CliOverrides, fallback: number): AbortSignal => AbortSignal.timeout(o.timeoutMs ?? fallback);
 
-/** True when something on the configured port answers `/hello` as Airlock. */
-async function answersHello(config: ServiceConfig, o: CliOverrides): Promise<Hello | null> {
+const portTaken = (config: ServiceConfig): string => `Port ${config.port} is in use by another program.`;
+
+/**
+ * What answers `/hello` on the configured port: Airlock's hello; `other` when something answered over HTTP but not as
+ * Airlock; null when nothing answered.
+ */
+async function probe(config: ServiceConfig, o: CliOverrides): Promise<Hello | 'other' | null> {
+  let res: Response;
   try {
-    const res = await (o.fetch ?? fetch)(`http://127.0.0.1:${config.port}/hello`, { signal: timeoutSignal(o, 5000) });
-    const parsed = HelloSchema.safeParse(res.ok ? await res.json() : null);
-    return parsed.success ? parsed.data : null;
+    res = await (o.fetch ?? fetch)(`http://127.0.0.1:${config.port}/hello`, { signal: timeoutSignal(o, 5000) });
   } catch {
     return null;
   }
+  try {
+    const parsed = HelloSchema.safeParse(res.ok ? await res.json() : null);
+    return parsed.success ? parsed.data : 'other';
+  } catch {
+    return 'other';
+  }
+}
+
+/** True when something on the configured port answers `/hello` as Airlock. */
+async function answersHello(config: ServiceConfig, o: CliOverrides): Promise<boolean> {
+  const found = await probe(config, o);
+  return found !== null && found !== 'other';
 }
 
 async function status(io: CliIo, o: CliOverrides): Promise<number> {
   const config = (o.loadConfig ?? loadConfig)(o.env ?? process.env);
-  const hello = await answersHello(config, o);
+  const hello = await probe(config, o);
   if (hello === null) {
     io.err(`Airlock's service is not running. Start it with: ${START_HINT}\n`);
+    return 1;
+  }
+  if (hello === 'other') {
+    io.err(`${portTaken(config)}\n`);
     return 1;
   }
   // Read-only: the token is read if it exists and never made here.
@@ -325,7 +367,8 @@ async function status(io: CliIo, o: CliOverrides): Promise<number> {
     return 0;
   }
   const s = parsed.data;
-  io.out(`Claude: ${s.claude ? 'found and signed in.' : 'not found or not signed in.'}\n`);
+  // The service only looks for the claude command; it cannot tell whether it is signed in.
+  io.out(`Claude: ${s.claude ? 'found.' : 'not found.'}\n`);
   io.out(`GitHub command (gh): ${s.gh ? 'found and signed in.' : 'not found or not signed in.'}\n`);
   if (s.running.length === 0) io.out('No reviews are running.\n');
   else io.out(`Running reviews: ${s.running.map((r) => `${clean(r.repo)}#${r.number}`).join(', ')}\n`);
@@ -384,8 +427,10 @@ async function install(io: CliIo, o: CliOverrides): Promise<number> {
     if (dir === null) missing.push(name);
     else found.push(dir);
   }
+  // Node's own folder too: a claude installed by npm is a Node script, and so is the copy that comes with the SDK.
+  const execPath = o.execPath ?? process.execPath;
   const environment: Array<[string, string]> = [
-    ['PATH', unique([...found, ...SYSTEM_PATH]).join(delimiter)],
+    ['PATH', unique([...found, dirname(execPath), ...SYSTEM_PATH]).join(delimiter)],
     ['HOME', home],
     ['AIRLOCK_LOG_FILE', log],
     ['AIRLOCK_UNDER_LAUNCHD', '1'],
@@ -394,7 +439,6 @@ async function install(io: CliIo, o: CliOverrides): Promise<number> {
     const value = resolvedEnv[name];
     if (value !== undefined && value !== '') environment.push([name, value]);
   }
-  const execPath = o.execPath ?? process.execPath;
   const named: Array<[string, string]> = [
     ['the Node path', execPath], ['the built cli.js path', cliPath], ['the repository folder', root],
     ['the log path', launchdLog], ...environment,
@@ -417,7 +461,7 @@ async function install(io: CliIo, o: CliOverrides): Promise<number> {
   const deadline = Date.now() + wait;
   let alreadyRunning = false;
   for (;;) {
-    alreadyRunning = (await answersHello(config, { ...o, timeoutMs: wait })) !== null;
+    alreadyRunning = await answersHello(config, { ...o, timeoutMs: wait });
     if (!alreadyRunning || Date.now() >= deadline) break;
     await new Promise((r) => setTimeout(r, 25));
   }
@@ -439,7 +483,10 @@ async function install(io: CliIo, o: CliOverrides): Promise<number> {
     io.out('Airlock service now starts at login and is running now.\n');
   }
   io.out(`Its log is ${clean(log)} (start-up problems go to ${clean(launchdLog)}).\n`);
-  for (const name of missing) io.out(`${name} was not found on your PATH: reviews will not work until it is installed.\n`);
+  // Without claude on the PATH the engine falls back to the copy that comes with its SDK, so that is not a stop.
+  for (const name of missing) {
+    io.out(name === 'claude' ? 'claude was not found on your PATH.\n' : `${name} was not found on your PATH: reviews will not work until it is installed.\n`);
+  }
   return 0;
 }
 

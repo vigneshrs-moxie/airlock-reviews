@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ZodType } from 'zod';
 import { saveReview, type EngineDeps, type ReviewRequest, type runReview } from '@airlock/engine';
 import {
-  ApiErrorSchema, LatestReplySchema, minimalDocument, PrSummarySchema, ServiceEventSchema, ServiceStatusSchema,
+  ApiErrorSchema, LatestReplySchema, MESSAGE_MAX, minimalDocument, PrSummarySchema, ServiceEventSchema, ServiceStatusSchema,
   StartReviewReplySchema, type Dismissal, type ReviewDocument, type ReviewEvent,
 } from '@airlock/shared';
 import { pair, readOrCreateToken } from '../src/config.js';
@@ -593,7 +593,7 @@ describe('fix round 1', () => {
     expect(s.launched).toHaveLength(1);
   });
 
-  it('bounds error text: line breaks collapse and long messages are cut to 280 characters', async () => {
+  it('bounds error text: line breaks collapse and the whole sentence is cut once, to what the panel shows', async () => {
     const s = await startService();
     const long = `first line\n${'😀'.repeat(300)}\r\nlast line HTTP 500`;
     s.exec.set(`gh api repos/${REPO}/pulls/9`, { stdout: '', stderr: long, code: 1 });
@@ -601,9 +601,8 @@ describe('fix round 1', () => {
     expect(down.status).toBe(502);
     const error = (down.json as { error: string }).error;
     expect(error.startsWith('GitHub did not answer: gh api pulls/9: first line 😀')).toBe(true);
-    const message = error.slice('GitHub did not answer: '.length);
-    expect([...message]).toHaveLength(280);
-    expect(message.endsWith('…')).toBe(true);
+    expect([...error]).toHaveLength(MESSAGE_MAX);
+    expect(error.endsWith('…')).toBe(true);
     expect(error).not.toMatch(/[\r\n]/);
 
     const runId = runIdOf(await start(s));
@@ -611,9 +610,9 @@ describe('fix round 1', () => {
     const stream = await s.stream(runId);
     await stream.end;
     const failed = stream.events.at(-1) as { type: string; message: string };
-    const reason = failed.message.slice('Airlock could not review this pull request: '.length);
-    expect([...reason]).toHaveLength(280);
-    expect(reason).not.toMatch(/[\r\n]/);
+    expect(failed.message.startsWith('Airlock could not review this pull request: first line')).toBe(true);
+    expect([...failed.message]).toHaveLength(MESSAGE_MAX);
+    expect(failed.message).not.toMatch(/[\r\n]/);
   });
 
   it('still answers 404 for a GitHub 404 whose text is long', async () => {

@@ -14,7 +14,9 @@ export function selectPacks(all: Pack[], repo: string, override?: string[]): Pac
       return pack;
     });
   }
-  const matched = all.filter((p) => !appliesToEveryRepo(p) && p.repos.includes(repo));
+  // GitHub treats repository names without regard to letter case, so selection does too.
+  const wanted = repo.toLowerCase();
+  const matched = all.filter((p) => !appliesToEveryRepo(p) && p.repos.some((r) => r.toLowerCase() === wanted));
   const generic = all.find(appliesToEveryRepo);
   return generic ? [...matched, generic] : matched;
 }
