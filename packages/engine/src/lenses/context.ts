@@ -6,8 +6,8 @@ import { asMaterial } from '../agent/prompt.js';
 import { UNKNOWN_USAGE } from '../agent/runner.js';
 import type { AgentRequest, AgentResult, AgentRunner, AgentUsage } from '../agent/runner.js';
 import type { Pack } from '../packs/types.js';
-import { LensOutputSchema, acceptCandidates } from './candidate.js';
-import type { LensOutput } from './candidate.js';
+import { CombinedOutputSchema, LensOutputSchema, acceptCandidates, acceptCombined } from './candidate.js';
+import type { Accepted, CombinedOutput, LensOutput } from './candidate.js';
 
 /** What the lens stages need. `tiers` holds the read, skim, trust or ignored tier of each changed file. */
 export interface LensContext {
@@ -26,6 +26,11 @@ export interface LensContext {
   run: <T>(fn: () => Promise<T>) => Promise<T>;
   /** One more sentence for every cohort lens request, added after the lens's own instructions (the deep pass uses it). */
   extraInstructions?: string;
+  /**
+   * When the lenses of a group go in one combined request: `all` for every group (quick depth), `no-read-tier` for a group
+   * with no file in the read tier and for the standalone group; otherwise each lens has its own request.
+   */
+  combine?: 'all' | 'no-read-tier';
 }
 
 export interface LensStageResult {
@@ -214,6 +219,8 @@ export interface LensCall {
   cohortId: string | null;
   instructions: string;
   material: string;
+  /** For a combined request: each lens it carries, by the id candidates name it with (`<pack>/<lens>`). */
+  lenses?: ReadonlyMap<string, Source>;
 }
 
 /** Sends one request through the parallel cap. A runner that throws becomes a failed result, so one request never stops the others. */
@@ -227,11 +234,11 @@ export async function sendRequest<T>(runner: AgentRunner, ctx: LensContext, req:
 
 /** Sends one request through the parallel cap and turns its answer into candidates, questions and dropped extras. */
 export async function runLensCall(runner: AgentRunner, ctx: LensContext, call: LensCall, taken: Set<string>): Promise<LensStageResult> {
-  const result = await sendRequest<LensOutput>(runner, ctx, {
+  const result = await sendRequest<LensOutput | CombinedOutput>(runner, ctx, {
     role: call.role,
     instructions: call.instructions,
     material: call.material,
-    schema: LensOutputSchema,
+    schema: call.lenses === undefined ? LensOutputSchema : CombinedOutputSchema,
     cwd: ctx.headDir,
     extraDirs: [ctx.baseDir],
     model: ctx.models.main,
@@ -243,7 +250,9 @@ export async function runLensCall(runner: AgentRunner, ctx: LensContext, call: L
     out.errors.push({ stage: call.stage, cohortId: call.cohortId, message: `${call.name}: ${result.error}`, kind: result.kind });
     return out;
   }
-  const accepted = acceptCandidates(result.output.candidates, call.source, call.cohortId, taken);
+  const accepted: Accepted = call.lenses === undefined
+    ? acceptCandidates(result.output.candidates, call.source, call.cohortId, taken)
+    : acceptCombined(result.output.candidates, call.lenses, call.cohortId, taken);
   out.candidates.push(...accepted.candidates);
   out.dropped.push(...accepted.dropped);
   for (const q of result.output.questions) {

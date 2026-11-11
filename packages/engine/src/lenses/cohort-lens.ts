@@ -1,15 +1,17 @@
-import type { Cohort, FileDiff, Tier } from '@airlock/shared';
+import type { Cohort, FileDiff, Source, Tier } from '@airlock/shared';
 import { asMaterial, fill, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner } from '../agent/runner.js';
 import { formatForPrompt } from '../diff/format.js';
 import type { LensDef, Pack } from '../packs/types.js';
+import { COMBINED_SOURCE, MAX_CANDIDATES_COMBINED } from './candidate.js';
 import {
   briefBlock, cohortFiles, cohortOutline, diffCutSentence, factsBlock, instructionsFor, mergeResults, prBlock, readerOf,
-  reviewedCohorts, runLensCall, tierOf,
+  reviewedCohorts, runLensCall, STANDALONE_ID, tierOf,
 } from './context.js';
 import type { DiffCut, LensCall, LensContext, LensStageResult } from './context.js';
 
 export type { LensContext, LensStageResult } from './context.js';
+export { MAX_CANDIDATES_COMBINED } from './candidate.js';
 
 /** The most lines of formatForPrompt output one request carries, shared by the cohort's read and skim files. */
 export const DIFF_LINE_BUDGET = 1_500;
@@ -123,9 +125,23 @@ export function runnableLenses(packs: Pack[]): { pack: Pack; lens: LensDef }[] {
   });
 }
 
+/** True when this group's lenses go in one combined request (see LensContext.combine). */
+function combinesFor(ctx: LensContext, cohort: Cohort, tier: (path: string) => Tier): boolean {
+  if (ctx.combine === 'all') return true;
+  if (ctx.combine !== 'no-read-tier') return false;
+  return cohort.id === STANDALONE_ID || !cohortFiles(cohort).some((p) => tier(p) === 'read');
+}
+
+/** Every runnable lens's brief under its id, for the combined template. */
+function lensBriefs(lenses: { name: string; lens: LensDef }[]): string {
+  return lenses.map(({ name, lens }) => `### ${name}: ${lens.title}\n\n${lens.instructions.trim()}`).join('\n\n');
+}
+
 /**
- * One request per reviewed cohort per runnable lens, in cohort order, then pack order, then lens order. A failed
- * request becomes a stage error and the others carry on. `onDone` gets the cohort id and `<pack id>/<lens id>`.
+ * For each reviewed cohort, in cohort order: one request per runnable lens, in pack order then lens order; or, where
+ * the context says to combine (see LensContext.combine), one combined request carrying every lens's brief, whose
+ * candidates each name their lens. A failed request becomes a stage error and the others carry on. `onDone` gets the
+ * cohort id and `<pack id>/<lens id>`, or `airlock/combined`.
  */
 export async function runCohortLenses(
   runner: AgentRunner,
@@ -152,9 +168,32 @@ export async function runCohortLenses(
   const tier = tierOf(ctx.tiers);
   const calls: { cohortId: string; call: LensCall }[] = [];
   const limits: string[] = [];
+  let combined: { instructions: string; lenses: Map<string, Source> } | null = null;
+  const combinedCall = async (): Promise<NonNullable<typeof combined>> => {
+    combined ??= {
+      instructions: instructionsFor(
+        fill(await loadTemplate('lens-combined'), { reader, lensBriefs: lensBriefs(briefs), maxCandidates: String(MAX_CANDIDATES_COMBINED) }),
+        ctx.packs,
+        ctx.missingHelpers,
+      ),
+      lenses: new Map(briefs.map(({ pack, lens, name }) => [name, { pack: pack.id, lens: lens.id, ruleId: null }])),
+    };
+    return combined;
+  };
   for (const cohort of cohorts) {
     const { material, cut } = cohortMaterial(ctx, cohort, tier);
     if (cut !== null) limits.push(diffCutSentence('lenses', cohort.title, cut));
+    if (combinesFor(ctx, cohort, tier)) {
+      const { instructions, lenses } = await combinedCall();
+      calls.push({
+        cohortId: cohort.id,
+        call: {
+          role: 'lens:combined', name: 'airlock/combined', stage: 'lenses', source: COMBINED_SOURCE, cohortId: cohort.id,
+          instructions, material, lenses,
+        },
+      });
+      continue;
+    }
     for (const { pack, lens, name, instructions } of briefs) {
       calls.push({
         cohortId: cohort.id,

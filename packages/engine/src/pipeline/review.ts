@@ -17,7 +17,7 @@ import { runChecks } from '../facts/checks.js';
 import { classifyFiles } from '../facts/classify.js';
 import { fetchPr } from '../intake/pr.js';
 import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
-import { runCohortLenses, runnableLenses } from '../lenses/cohort-lens.js';
+import { runCohortLenses } from '../lenses/cohort-lens.js';
 import {
   descriptionCutSentence, emptyResult, MAX_DESCRIPTION_CHARS, type LensContext, type LensStageResult,
 } from '../lenses/context.js';
@@ -49,6 +49,11 @@ export interface ReviewRequest {
   /** The pull request's title and description as they were when it was reviewed, in place of today's (the replay). */
   prText?: { title: string; body: string };
   holdout?: Holdout;
+  /**
+   * At standard and deep depth, whether a group's lenses may share one combined request: `no-read-tier` combines them for
+   * a group with no file in the read tier and for the standalone group. Default `never`. Quick depth always combines.
+   */
+  combine?: 'never' | 'no-read-tier';
   packsDir: string;
   remoteUrl?: string;
   parallel?: number;
@@ -135,15 +140,6 @@ export function withUniqueIds(candidates: Candidate[], used: Set<string>): Candi
   });
 }
 
-/** Only the first lens that can run of each pack. */
-function firstLensOnly(packs: Pack[]): Pack[] {
-  const runnable = runnableLenses(packs);
-  return packs.map((pack) => {
-    const first = runnable.find((r) => r.pack === pack);
-    return { ...pack, lenses: first ? [first.lens] : [] };
-  });
-}
-
 /** Prepares the workspace; a clone or fetch refused for lack of credentials says how to fix it. */
 async function openWorkspace(exec: Exec, req: ReviewRequest, pr: PrInfo, reviewId: string): Promise<Workspace> {
   try {
@@ -201,7 +197,7 @@ function notReviewed(files: FileDiff[], tiers: FileFact[]): string | null {
   return `${files.length === 1 ? '1 changed file was' : `${files.length} changed files were`} not reviewed: ${named}${more}`;
 }
 
-interface Settings { depth: Depth; models: ModelConfig; parallel: number }
+interface Settings { depth: Depth; models: ModelConfig; parallel: number; combine: 'never' | 'no-read-tier' }
 
 interface Reviewed {
   range: ReviewRange; packs: Pack[]; tiers: FileFact[]; facts: Fact[]; map: ChangeMap; brief: Brief; questions: Question[];
@@ -304,6 +300,9 @@ async function reviewInWorkspace(
     headDir: ws.headDir, baseDir: ws.baseDir, models, run,
   };
   const quick = depth === 'quick';
+  // Quick depth is one combined lens request per group; the other depths combine only when the request says so.
+  const lensCombine: Pick<LensContext, 'combine'> = quick ? { combine: 'all' }
+    : settings.combine === 'no-read-tier' ? { combine: 'no-read-tier' } : {};
   let lensR = emptyResult();
   let sweepR = emptyResult();
   let seamsR = emptyResult();
@@ -314,7 +313,7 @@ async function reviewInWorkspace(
     // Checked without waiting, so the two stages start in the same order as always.
     const limited = (): boolean => deps.gate.stoppedBy() !== null;
     const lenses = (): Promise<LensStageResult> => (limited() ? limitedOut('lenses').then(emptyResult)
-      : lensStage(log, 'lenses', () => runCohortLenses(runner, quick ? { ...ctx, packs: firstLensOnly(packs) } : ctx)));
+      : lensStage(log, 'lenses', () => runCohortLenses(runner, { ...ctx, ...lensCombine })));
     const sweep = (): Promise<LensStageResult> => (limited() ? limitedOut('sweep').then(emptyResult)
       : lensStage(log, 'sweep', () => runSweep(runner, ctx)));
     [lensR, sweepR] = await Promise.all([lenses(), quick ? (log.skip('sweep', skipWhy), emptyResult()) : sweep()]);
@@ -420,7 +419,9 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
   const parallel = req.parallel ?? DEFAULT_PARALLEL;
   if (!Number.isInteger(parallel) || parallel < 1) throw new RangeError(`parallel must be a whole number of at least 1, got ${parallel}`);
   const models = Object.fromEntries(Object.entries(req.models ?? {}).filter(([, v]) => v !== undefined)) as Partial<ModelConfig>;
-  const settings: Settings = { depth: req.depth ?? 'standard', models: { ...DEFAULT_MODELS, ...models }, parallel };
+  const settings: Settings = {
+    depth: req.depth ?? 'standard', models: { ...DEFAULT_MODELS, ...models }, parallel, combine: req.combine ?? 'never',
+  };
   const id = hexId('r_', 5);
   const startedAt = given.now().toISOString();
   const { signal } = given;

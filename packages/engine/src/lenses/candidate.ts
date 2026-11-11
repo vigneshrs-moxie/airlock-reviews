@@ -28,6 +28,18 @@ export type RawCandidate = z.infer<typeof RawCandidateSchema>;
 export const LensOutputSchema = z.object({ candidates: z.array(RawCandidateSchema), questions: z.array(z.string()) });
 export type LensOutput = z.infer<typeof LensOutputSchema>;
 
+/** A combined lens request returns candidates each tagged with the id (`<pack>/<lens>`) of the lens it belongs to. */
+export const CombinedOutputSchema = z.object({
+  candidates: z.array(RawCandidateSchema.extend({ lens: z.string().optional() })),
+  questions: z.array(z.string()),
+});
+export type CombinedOutput = z.infer<typeof CombinedOutputSchema>;
+
+/** A combined lens request may return at most this many candidates in all. */
+export const MAX_CANDIDATES_COMBINED = 10;
+/** The source of a combined request's questions, and of a candidate whose lens is not one that was given. */
+export const COMBINED_SOURCE: Source = { pack: 'airlock', lens: 'combined', ruleId: null };
+
 export interface Accepted { candidates: Candidate[]; dropped: Dropped[]; questions: Question[] }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -132,4 +144,29 @@ export function acceptCandidates(raw: unknown[], source: Source, cohortId: strin
     candidate, stage: 'schema', reason: `more than ${MAX_CANDIDATES_PER_LENS} candidates from one lens`, refutation: null,
   }))];
   return { candidates: valid.slice(0, MAX_CANDIDATES_PER_LENS), dropped, questions };
+}
+
+/**
+ * Turns a combined lens request's raw candidates into checked ones, each with the source of the lens it names. A
+ * candidate that names no lens, or a lens that was not given, is dropped at stage `schema`; valid candidates after the
+ * first MAX_CANDIDATES_COMBINED are dropped too. Otherwise each is checked as acceptCandidates checks it.
+ */
+export function acceptCombined(
+  raw: CombinedOutput['candidates'], lenses: ReadonlyMap<string, Source>, cohortId: string | null, taken: Set<string>,
+): Accepted {
+  const out: Accepted = { candidates: [], dropped: [], questions: [] };
+  for (const item of raw) {
+    const named = (item.lens ?? '').trim();
+    const source = lenses.get(named) ?? null;
+    const accepted = acceptCandidates([item], source ?? COMBINED_SOURCE, cohortId, taken);
+    out.questions.push(...accepted.questions);
+    out.dropped.push(...accepted.dropped);
+    const candidate = accepted.candidates[0];
+    if (candidate === undefined) continue;
+    const reason = source === null ? (named === '' ? 'names no lens' : `names a lens that was not given: ${named}`)
+      : out.candidates.length >= MAX_CANDIDATES_COMBINED ? `more than ${MAX_CANDIDATES_COMBINED} candidates from one combined request` : null;
+    if (reason === null) out.candidates.push(candidate);
+    else out.dropped.push({ candidate, stage: 'schema', reason, refutation: null });
+  }
+  return out;
 }

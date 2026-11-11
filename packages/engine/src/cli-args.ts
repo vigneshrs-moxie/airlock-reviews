@@ -1,23 +1,29 @@
 import { DepthSchema, type Depth } from '@airlock/shared';
 
 export type CliArgs =
-  | { command: 'review'; ref: string; depth: Depth; packs?: string[]; model?: string; json?: string; base?: string; head?: string }
+  | {
+    command: 'review'; ref: string; depth: Depth; packs?: string[]; model?: string; combine?: 'never' | 'no-read-tier';
+    json?: string; base?: string; head?: string;
+  }
   | { command: 'help' };
 
 const TAIL = 'Run "airlock help" for usage.';
-const VALUE_FLAGS = ['--depth', '--packs', '--model', '--json', '--base', '--head'] as const;
+const VALUE_FLAGS = ['--depth', '--packs', '--model', '--combine', '--json', '--base', '--head'] as const;
+const COMBINE = ['never', 'no-read-tier'] as const;
 type ValueFlag = (typeof VALUE_FLAGS)[number];
 
 export function usage(): string {
   return [
     'Usage:',
-    '  airlock review <owner/name#n | pull URL> [--depth quick|standard|deep] [--packs a,b] [--model <id>] [--base <sha> --head <sha>] [--json <file>]',
+    '  airlock review <owner/name#n | pull URL> [--depth quick|standard|deep] [--packs a,b] [--model <id>] [--combine never|no-read-tier]',
+    '                 [--base <sha> --head <sha>] [--json <file>]',
     '  airlock help',
     '',
     'Options:',
     '  --depth quick|standard|deep   how thorough the review is (default standard)',
     '  --packs a,b                   use only these packs, by id',
     '  --model <id>                  model for the main, challenger and sweep stages together',
+    '  --combine never|no-read-tier  at standard and deep depth, one combined lens request for a group with no read-tier file (default never)',
     '  --base <sha>                  review from this commit (7 to 40 hex characters; needs --head)',
     '  --head <sha>                  review up to this commit (7 to 40 hex characters; needs --base)',
     '  --json <file>                 also write the review document to this file',
@@ -79,6 +85,11 @@ export function parseArgs(argv: string[]): CliArgs {
     result.packs = packs;
   }
   if (values['--model'] !== undefined) result.model = values['--model'];
+  const combine = values['--combine'];
+  if (combine !== undefined) {
+    if (!(COMBINE as readonly string[]).includes(combine)) fail(`--combine must be one of ${COMBINE.join(', ')}, got "${combine}".`);
+    result.combine = combine as (typeof COMBINE)[number];
+  }
   if (values['--json'] !== undefined) result.json = values['--json'];
   const base = values['--base'];
   const head = values['--head'];

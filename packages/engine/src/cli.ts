@@ -109,6 +109,7 @@ async function run(argv: string[], io: CliIo, overrides: CliOverrides = {}): Pro
   const request: ReviewRequest = { repo: target.repo, number: target.number, depth: args.depth, packsDir };
   if (args.packs !== undefined) request.packIds = args.packs;
   if (args.model !== undefined) request.models = { main: args.model, challenger: args.model, sweep: args.model };
+  if (args.combine !== undefined) request.combine = args.combine;
   if (args.base !== undefined && args.head !== undefined) request.explicit = { baseSha: args.base, headSha: args.head };
 
   const review = overrides.review ?? runReview;

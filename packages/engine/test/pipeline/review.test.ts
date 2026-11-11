@@ -132,15 +132,31 @@ describe('runReview', () => {
     expect(brief).toEqual({ type: 'brief', brief: { whatItDoes: ['Adds refunds and a pause job.'], claims: [] } });
   }, SLOW);
 
-  it('quick depth makes requests only for the mapper, the brief, the first lens of each pack and select', async () => {
-    const { doc, calls, events } = await review({ req: { depth: 'quick' } });
-    expect(new Set(roles(calls))).toEqual(new Set(['mapper', 'brief', 'lens:core/correctness', 'lens:raj-standard/boundary', 'select']));
-    expect(roles(calls).filter((r) => r.startsWith('lens:'))).toHaveLength(6); // three cohorts, two lenses
+  it('quick depth makes requests only for the mapper, the brief, one combined lens request per group and select', async () => {
+    const combined = (req: AgentRequest<unknown>) => (block(req.material, 'cohort')!.startsWith('Cohort: Money\n')
+      ? { candidates: [{ ...GOOD, lens: 'core/correctness' }], questions: [] } : { candidates: [], questions: [] });
+    const { doc, calls, events } = await review({ req: { depth: 'quick' }, script: scenarioScript({ 'lens:combined': combined }) });
+    expect(new Set(roles(calls))).toEqual(new Set(['mapper', 'brief', 'lens:combined', 'select']));
+    expect(roles(calls).filter((r) => r.startsWith('lens:'))).toHaveLength(3); // three groups, one request each
+    for (const id of ['core/correctness', 'core/naming', 'raj-standard/boundary']) {
+      expect(calls.find((c) => c.role === 'lens:combined')!.instructions).toContain(`### ${id}:`);
+    }
+    expect(doc.findings.map((f) => f.source)).toEqual([{ pack: 'core', lens: 'correctness', ruleId: null }]);
     expect(doc.findings.map((f) => f.checked)).toEqual(['not challenged (quick review)']);
     expect(doc.depth).toBe('quick');
     expect(starts(events)).toEqual(STANDARD_STAGES);
     const skipped = events.flatMap((e) => (e.type === 'stage' && e.status === 'done' && e.detail.startsWith('skipped') ? [e.stage] : []));
     expect(skipped).toEqual(['sweep', 'seams', 'merge', 'challenge']);
+  }, SLOW);
+
+  it('standard depth with combine no-read-tier sends one combined request for each group with no read-tier file', async () => {
+    // The fixture packs name no read-tier files, so every group here is one the setting combines.
+    const { calls } = await review({ req: { combine: 'no-read-tier' } });
+    const groupOf = (c: AgentRequest<unknown>): string => block(c.material, 'cohort')!.split('\n')[0]!;
+    const lensCalls = calls.filter((c) => c.role.startsWith('lens:'));
+    expect(lensCalls.map((c) => [c.role, groupOf(c)])).toEqual([
+      ['lens:combined', 'Cohort: Money'], ['lens:combined', 'Cohort: Jobs'], ['lens:combined', 'Cohort: Standalone changes'],
+    ]);
   }, SLOW);
 
   it('never runs more than the parallel limit at once', async () => {

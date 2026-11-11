@@ -75,6 +75,14 @@ describe('main', () => {
     expect(h.requests[0]).not.toHaveProperty('models');
   });
 
+  it('passes --combine to the review, and leaves it out when not given', async () => {
+    const h = harness();
+    await main(['review', 'acme/widgets#42', '--combine', 'no-read-tier'], h.io, h.overrides);
+    await main(['review', 'acme/widgets#42'], h.io, h.overrides);
+    expect(h.requests[0]!.combine).toBe('no-read-tier');
+    expect(h.requests[1]).not.toHaveProperty('combine');
+  });
+
   it('sets main, challenger and sweep from --model', async () => {
     const h = harness();
     await main(['review', 'acme/widgets#42', '--model', 'claude-x'], h.io, h.overrides);

@@ -25,6 +25,11 @@ describe('parseArgs', () => {
       expect(() => parseArgs(['review', 'a/b#1', '--base', bad, '--head', 'abcdef1'])).toThrow(/--base/);
     }
   });
+  it('reads --combine no-read-tier and refuses any other value', () => {
+    expect(parseArgs(['review', 'a/b#1', '--combine', 'no-read-tier'])).toMatchObject({ combine: 'no-read-tier' });
+    expect(parseArgs(['review', 'a/b#1', '--combine=never'])).toMatchObject({ combine: 'never' });
+    expect(() => parseArgs(['review', 'a/b#1', '--combine', 'always'])).toThrow(/^--combine must be one of never, no-read-tier, got "always"\./);
+  });
   it('splits --packs on commas and trims', () => {
     expect(parseArgs(['review', 'a/b#1', '--packs', 'core, web ,x'])).toMatchObject({ packs: ['core', 'web', 'x'] });
   });
@@ -75,9 +80,10 @@ describe('usage', () => {
   it('shows the usage line and one line per option', () => {
     const text = usage();
     expect(text).toContain(
-      'airlock review <owner/name#n | pull URL> [--depth quick|standard|deep] [--packs a,b] [--model <id>] [--base <sha> --head <sha>] [--json <file>]',
+      'airlock review <owner/name#n | pull URL> [--depth quick|standard|deep] [--packs a,b] [--model <id>] [--combine never|no-read-tier]\n'
+        + '                 [--base <sha> --head <sha>] [--json <file>]',
     );
-    for (const flag of ['--depth', '--packs', '--model', '--base', '--head', '--json']) {
+    for (const flag of ['--depth', '--packs', '--model', '--combine', '--base', '--head', '--json']) {
       expect(text.split('\n').filter((l) => l.trimStart().startsWith(flag))).toHaveLength(1);
     }
   });
