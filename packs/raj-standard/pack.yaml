@@ -1,0 +1,17 @@
+id: raj-standard
+title: Raj's standard
+repos:
+  - Moxie-Pest-Control-Phoenix/moxie-portal
+  - vigneshrs-moxie/moxie-portal-vrs
+appRoot: app
+stageRules:
+  - { base: staging, stage: pr2 }
+  - { base: main, stage: pr3 }
+  - { default: true, stage: pr1 }
+# No standards are listed here: the team's kit (profile.md, orbit.md, calibration.md)
+# is downloaded at review time and attached to this pack.
+lenses:
+  - { id: boundary-security, title: Boundary and security, file: lenses/boundary-security.md }
+  - { id: numbers-data, title: Numbers and data correctness, file: lenses/numbers-data.md }
+  - { id: scale-multi-office, title: Scale and multi-office, file: lenses/scale-multi-office.md }
+  - { id: release-safety, title: Release safety, file: lenses/release-safety.md }

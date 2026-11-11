@@ -1,0 +1,131 @@
+id: orbit-mine
+title: Your pack
+repos:
+  - Moxie-Pest-Control-Phoenix/moxie-portal
+  - vigneshrs-moxie/moxie-portal-vrs
+appRoot: app
+stageRules:
+  - { base: staging, stage: pr2 }
+  - { base: main, stage: pr3 }
+  - { default: true, stage: pr1 }
+
+# Read tier wins over trust, so the source globs below leave out unit and DB tests
+# (`*.test.ts`, `*.dbtest.ts`) and those stay in the built-in trust tier.
+tiers:
+  read:
+    - "app/prisma/**"
+    - "app/src/app/api/**/!(*.test|*.dbtest).ts"
+    - "app/src/lib/actions/**/!(*.test|*.dbtest).ts"
+    - "app/src/lib/scope!(*.test|*.dbtest).ts"
+    - "app/src/lib/scope*/**/!(*.test|*.dbtest).ts"
+    - "app/src/lib/{auth,auth-permissions,api-auth,view-as,entity-stamp,people-models,db}.ts"
+    - "app/src/lib/{feature-catalog,features,require-feature,runtime-flags,phase1,evaluator,sign-in-policy}.ts"
+    - "app/src/lib/**/access.ts"
+    - "app/src/auth.ts"
+    - "app/src/auth.config.ts"
+    - "app/src/middleware.ts"
+    - "app/vercel.json"
+    - "app/next.config.ts"
+    - "app/scripts/**"
+    - "app/src/env.ts"
+    - "app/src/lib/cache!(*.test).ts"
+    - "app/src/lib/email/client.ts"
+    - "app/src/lib/migrations/**/!(*.test).ts"
+    - "**/*.sql"
+    # The structural guard tests: an edit to one is a decision about what the guard
+    # allows, so they are read rather than trusted like other tests.
+    - "app/src/lib/{features-routes,no-hardcoded-offices,visible-ids-literal,team-side-consistency,people-models}.test.ts"
+    - "app/src/lib/{entities/operator-guards,announcements/release-guard,announcements/schema-sync,migrations/tracing,calls/dashboard-cache}.test.ts"
+    - "app/src/app/api/cron-methods.test.ts"
+    - "**/trufflehog-exclude.txt"
+
+# First match wins, so the most specific kind comes first. Orbit's crons are ordinary
+# route files with no shared folder; the cron glob matches the names in use on main
+# (warm, sync, sync-*, process, process-*, distribute, *-sweep, *-reminders, .../cron).
+siblings:
+  - id: cron route
+    glob: "app/src/app/api/{**/cron,cron/**,*/{warm,sync,process,distribute},*/{sync,process}-*,*/*-{sweep,reminders}}/route.ts"
+  - id: API route
+    glob: "app/src/app/api/**/route.ts"
+  - id: server action
+    glob: "app/src/lib/actions/!(*.test|*.dbtest).ts"
+  - id: migration
+    glob: "app/prisma/migrations/*/migration.sql"
+
+linkRules:
+  # Two hops from a migration to the code: the table to its model, then the model to its uses.
+  - id: migration-table-to-model
+    from: "app/prisma/migrations/*/migration.sql"
+    capture: 'CREATE TABLE (?:IF NOT EXISTS )?"?(\w+)"?'
+    transform: none
+    searchIn: ["app/prisma/schema.prisma"]
+    detail: "Model mapped to the table this migration creates"
+  - id: model-to-code
+    from: "app/prisma/schema.prisma"
+    capture: '^model (\w+)'
+    transform: camel
+    searchIn: ["app/src/**"]
+    detail: "Code that uses the Prisma model"
+  - id: feature-key-to-seed
+    from: "app/src/lib/feature-catalog.ts"
+    capture: '^\s+(\w+): "[^"]*",?\s*$'
+    transform: none
+    searchIn: ["app/prisma/migrations/**"]
+    detail: "Migration that seeds or mentions the feature key"
+  - id: feature-key-to-guard
+    from: "app/src/lib/feature-catalog.ts"
+    capture: '^\s+(\w+): "[^"]*",?\s*$'
+    transform: none
+    searchIn: ["app/src/app/**/layout.tsx"]
+    detail: "Layout that may guard the feature's routes"
+
+checks:
+  - id: migration-without-schema
+    kind: file-pair
+    paths: ["app/prisma/migrations/*/migration.sql"]
+    requires: [{ path: "app/prisma/schema.prisma" }]
+    message: "A migration changed but app/prisma/schema.prisma did not."
+  - id: feature-without-seed
+    kind: file-pair
+    paths: ["app/src/lib/feature-catalog.ts"]
+    requires: [{ path: "app/prisma/migrations/*/migration.sql" }]
+    message: "The feature catalogue changed and no migration in this pull request could seed entity_features for a new key."
+  - id: cron-missing-config
+    kind: new-file-requires
+    paths: ["app/src/app/api/{**/cron,cron/**,*/{warm,sync,process,distribute},*/{sync,process}-*,*/*-{sweep,reminders}}/route.ts"]
+    requires:
+      - { path: "{self}", pattern: 'maxDuration' }
+      - { path: "app/vercel.json", pattern: '/{parent}/{dir}"' }
+      - { path: "app/src/middleware.ts", pattern: '/{parent}/{dir}"' }
+    message: "A new route named like a cron job is missing maxDuration, its vercel.json schedule or its middleware allowlist entry."
+  - id: raw-unsafe
+    kind: added-line-matches
+    paths: ["app/**/*.{ts,tsx}"]
+    exceptPaths: ["**/*.test.{ts,tsx}", "**/*.dbtest.ts", "app/src/test/**"]
+    pattern: '\$(?:query|execute)RawUnsafe\b'
+    message: "An added line calls a Prisma raw query that takes a plain string instead of a tagged template."
+  - id: literal-all
+    kind: added-line-matches
+    paths: ["app/src/**/*.{ts,tsx}"]
+    exceptPaths: ["**/*.test.{ts,tsx}", "**/*.dbtest.ts"]
+    pattern: '[Vv]isible\w*\s*[!=]==?\s*["'']all["'']|["'']all["'']\s*[!=]==?\s*\w*[Vv]isible'
+    message: "An added line compares a set of visible people with the literal \"all\"."
+  - id: guard-test-edited
+    kind: file-touched
+    paths:
+      - "app/src/lib/features-routes.test.ts"
+      - "app/src/lib/no-hardcoded-offices.test.ts"
+      - "app/src/lib/visible-ids-literal.test.ts"
+      - "app/src/lib/team-side-consistency.test.ts"
+      - "app/src/lib/people-models.test.ts"
+      - "app/src/app/api/cron-methods.test.ts"
+      - "app/src/lib/entities/operator-guards.test.ts"
+      - "app/src/lib/announcements/release-guard.test.ts"
+      - "app/src/lib/announcements/schema-sync.test.ts"
+      - "app/src/lib/migrations/tracing.test.ts"
+      - "app/src/lib/calls/dashboard-cache.test.ts"
+      - "app/src/test/visibility/__baselines__/visibility.json"
+    message: "A structural guard test or the visibility baseline was edited."
+
+lenses:
+  - { id: sibling-check, title: Sibling check, file: lenses/sibling-check.md }

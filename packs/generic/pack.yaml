@@ -1,0 +1,9 @@
+id: generic
+title: Generic
+repos: []
+standards:
+  - { name: Standard, file: standards/standard.md, dated: false }
+lenses:
+  - { id: correctness, title: Correctness, file: lenses/correctness.md }
+  - { id: security-permissions, title: Security and permissions, file: lenses/security-permissions.md, onlyWhenAlone: true }
+  - { id: data-errors, title: Data and error handling, file: lenses/data-errors.md, onlyWhenAlone: true }

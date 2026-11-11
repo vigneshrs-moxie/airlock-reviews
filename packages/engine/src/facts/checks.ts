@@ -66,12 +66,16 @@ async function runOne(pack: Pack, check: CheckDef, files: FileDiff[], read: Read
     }
     case 'new-file-requires':
       for (const f of files.filter((x) => x.status === 'added' && matches(check.paths, x.path))) {
-        const dir = posix.basename(posix.dirname(f.path));
+        const folder = posix.dirname(f.path);
+        const dir = posix.basename(folder);
+        const above = posix.dirname(folder);
+        const parent = folder === '.' || above === '.' ? '' : posix.basename(above);
         for (const req of check.requires ?? []) {
-          const target = req.path.replaceAll('{self}', f.path).replaceAll('{dir}', dir);
+          const target = req.path.replaceAll('{self}', f.path).replaceAll('{parent}', parent).replaceAll('{dir}', dir);
           const text = await read(target);
           const wanted = req.pattern !== undefined
-            ? compile(pack, check, req.pattern.replaceAll('{dir}', escapeRegExp(dir))) : null;
+            ? compile(pack, check, req.pattern.replaceAll('{parent}', escapeRegExp(parent)).replaceAll('{dir}', escapeRegExp(dir)))
+            : null;
           if (text === null || (wanted !== null && !wanted.test(text))) {
             facts.push(fact(f.path, null, `${check.message} (missing in ${target})`));
           }
