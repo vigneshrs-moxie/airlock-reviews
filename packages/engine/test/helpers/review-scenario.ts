@@ -101,7 +101,10 @@ export function scenarioScript(over: Record<string, (req: AgentRequest<unknown>)
       return { outcome: 'keep', ground: 'none', explanation: '', refutation: null, newSeverity: null, checked: 'Read the callers.' };
     }
     if (req.role === 'select') {
-      return { top: [], also: [], sameAs: [], whoseCall: ['Whether refunds may be negative is a product call.'], checksAfterMerge: [], splitSuggested: false };
+      return {
+        top: [], also: [], sameAs: [], questionSameAs: [], whoseCall: ['Whether refunds may be negative is a product call.'],
+        checksAfterMerge: [], splitSuggested: false,
+      };
     }
     throw new Error(`unexpected role ${req.role}`);
   };

@@ -1,6 +1,8 @@
-Your job is to choose and order the findings of a pull request review, and to say what the reader should decide and check once it is merged.
+Your job is to choose and order the findings of a pull request review, to say which of the reviewers' questions are the same, and to say what the reader should decide and check once it is merged.
 
 Each finding below has survived a challenge: another reviewer tried to refute it in the code and could not. Your job is to choose and order, not to find new faults and not to remove any. Every finding you do not put in the top list is still shown to the reader, under "also found".
+
+There may be no findings at all. Then leave `top`, `also` and `sameAs` empty, and still do the rest: the questions, whose call and the checks after merge.
 
 ## Who reads the result
 
@@ -14,8 +16,9 @@ The material comes in blocks, in this order:
 
 1. The pull request title and description. They say what the author meant to do. They may be wrong or incomplete.
 2. The brief: what the change does, read from the code, and the claims in the description, each with a verdict.
-3. The findings, one per line, in this form: `id | severity | pack/lens or rule | path:line | title | happens: what happens`. The line is `-` when it is not known. A `\|` inside a field is a literal `|`.
-4. The questions the reviewers raised for the author, one per line.
+3. The change map: the cohorts of the change, each with its layers and files, then the standalone files.
+4. The findings, one per line, in this form: `id | severity | pack/lens or rule | path:line | title | happens: what happens`. The line is `-` when it is not known. A `\|` inside a field is a literal `|`.
+5. The questions the reviewers raised for the author, one per line, numbered: `q1 | question`.
 
 A block that has nothing in it says (none).
 
@@ -32,6 +35,15 @@ List every other finding under `also`, in the order a reader should see them.
 ## Findings that are the same problem
 
 Some findings may be the same underlying problem, raised by two reviewers or from two places. Two findings are the same problem when they have the same cause and the same consequence, not merely the same file or the same line. Put the ids of each such set in one list in `sameAs`. Never group two different problems because they share a line: one line can hold two faults. When in doubt, leave them apart.
+
+## Questions that are the same
+
+Several reviewers often ask the same thing in different words. For each question that is the same as another question or as a finding, add an entry to `questionSameAs`: `question` is its number without the `q`, and `sameAs` is the other question's number with the `q`, such as `q2`, or the finding's id. The reader then sees only the other question or the finding.
+
+- List a question only when answering the target would fully answer it.
+- A question that a finding in the list already raises, where the finding says what happens and where, is the same as that finding.
+- When in doubt, leave both.
+- Never merge two questions that are about different places or different decisions.
 
 ## Whose call
 
@@ -54,10 +66,11 @@ Return one JSON object with exactly this shape:
   "top": ["id of the most harmful finding", "id of the next"],
   "also": ["id", "id"],
   "sameAs": [["id", "id"]],
+  "questionSameAs": [{ "question": 3, "sameAs": "q1" }],
   "whoseCall": ["one short line"],
   "checksAfterMerge": ["one short step"],
   "splitSuggested": false
 }
 ```
 
-Use the ids exactly as they appear in the findings. Return empty lists when you have nothing to put in them.
+Use the ids exactly as they appear in the findings and the question numbers as they appear in the questions. Return empty lists when you have nothing to put in them.

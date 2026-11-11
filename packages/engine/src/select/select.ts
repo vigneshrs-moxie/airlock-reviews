@@ -6,7 +6,7 @@ import { asMaterial, fill, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner, AgentUsage } from '../agent/runner.js';
 import { fingerprint } from '../anchor/fingerprint.js';
 import type { KeptCandidate } from '../challenge/challenge.js';
-import { briefBlock, instructionsFor, prBlock, readerOf, sendRequest } from '../lenses/context.js';
+import { briefBlock, instructionsFor, mapBlock, prBlock, readerOf, sendRequest } from '../lenses/context.js';
 import type { LensContext } from '../lenses/context.js';
 import { SEVERITY_RANK } from '../rules/sweep.js';
 
@@ -23,6 +23,8 @@ export const SelectOutputSchema = z.object({
   top: z.array(z.string()),
   also: z.array(z.string()),
   sameAs: z.array(z.array(z.string())),
+  /** `question` is a 1-based position in the questions shown; `sameAs` is `q<m>` or the id of a finding shown. */
+  questionSameAs: z.array(z.object({ question: z.number(), sameAs: z.string() })),
   whoseCall: z.array(z.string()),
   checksAfterMerge: z.array(z.string()),
   splitSuggested: z.boolean(),
@@ -32,6 +34,8 @@ export type SelectOutput = z.infer<typeof SelectOutputSchema>;
 export interface SelectResult {
   findings: Finding[];
   dropped: Dropped[];
+  /** The questions that survived selection, in the order given. */
+  questions: Question[];
   verdict: Verdict;
   whoseCall: string[];
   checksAfterMerge: string[];
@@ -154,13 +158,75 @@ function findingLine(c: KeptCandidate): string {
   ].join(' | ');
 }
 
+/** The questions are numbered `q1`, `q2`, … so the model can name them in `questionSameAs`. */
 function selectMaterial(ctx: LensContext, items: KeptCandidate[], questions: Question[]): string {
+  const orNone = (lines: string[]): string => (lines.length === 0 ? '(none)' : lines.join('\n'));
   return [
     prBlock(ctx.pr),
     briefBlock(ctx.brief),
-    asMaterial('findings', items.map(findingLine).join('\n')),
-    asMaterial('questions', questions.length === 0 ? '(none)' : questions.map((q) => `- ${field(q.text)}`).join('\n')),
+    mapBlock(ctx.map),
+    asMaterial('findings', orNone(items.map(findingLine))),
+    asMaterial('questions', orNone(questions.map((q, i) => `q${i + 1} | ${field(q.text)}`))),
   ].join('\n\n');
+}
+
+// ---- Merging questions ----
+
+/** The questions with only the first of each text, comparing without letter case and with every run of whitespace as one space. */
+export function sameTextOnce(questions: readonly Question[]): Question[] {
+  const seen = new Set<string>();
+  return questions.filter((q) => {
+    const key = oneLine(q.text).toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** `q<m>` names the question at position m of the list the model was given. */
+const QUESTION_REF = /^q([1-9]\d*)$/;
+
+/**
+ * The questions left once the model's `questionSameAs` entries are applied, in the order given. An entry counts only when
+ * its `question` is a position in the list and its `sameAs` is another question of the list (`q<m>`) or the id of a finding
+ * shown to the model; anything else is ignored and the question stays. Every finding shown survives selection, in the
+ * result or as the survivor of a merge, so an entry that names one always applies. Chains are followed: a question goes
+ * when what it names goes on to a finding or to a question that stays. In a cycle the lowest position stays.
+ */
+function mergeQuestions(
+  questions: readonly Question[],
+  entries: readonly { question: number; sameAs: string }[],
+  findingIds: ReadonlySet<string>,
+): Question[] {
+  const n = questions.length;
+  const next: number[][] = questions.map(() => []);
+  const namesFinding = questions.map(() => false);
+  for (const { question, sameAs } of entries) {
+    if (!Number.isInteger(question) || question < 1 || question > n) continue;
+    const from = question - 1;
+    const ref = QUESTION_REF.exec(sameAs);
+    if (ref) {
+      const to = Number(ref[1]) - 1;
+      if (to < n && to !== from) next[from]!.push(to);
+    } else if (findingIds.has(sameAs)) {
+      namesFinding[from] = true;
+    }
+  }
+  // Every question reachable from each one through one entry or more.
+  const reach = questions.map((_, start) => {
+    const seen = new Set<number>();
+    const todo = [...next[start]!];
+    while (todo.length > 0) {
+      const i = todo.pop()!;
+      if (seen.has(i)) continue;
+      seen.add(i);
+      todo.push(...next[i]!);
+    }
+    return seen;
+  });
+  // A question stays when it leads to no finding, everything it leads to leads back to it, and it is the lowest of those.
+  return questions.filter((_, i) => !namesFinding[i]
+    && [...reach[i]!].every((j) => j >= i && !namesFinding[j] && reach[j]!.has(i)));
 }
 
 // ---- Ranking ----
@@ -268,9 +334,12 @@ function quotedTitle(title: string): string {
 /**
  * The verdict in words. Any stage error makes it `incomplete`. On the viewer's own pull request: `split-first` when a
  * split is suggested, `not-ready` with any block or fix, else `ready-for-pr2`. On someone else's: `request-changes` with
- * any block, `approve-after-fixes` with any fix, else `approve`. `counts` cover the top list and also found.
+ * any block, `approve-after-fixes` with any fix, else `approve`. `counts` cover the top list and also found; the sentence
+ * of a ready or approve verdict also counts the questions that survived selection (`questionCount`) with the `ask` findings.
  */
-export function decideVerdict(pr: PrInfo, findings: Finding[], stageErrors: StageError[], splitSuggested: boolean): Verdict {
+export function decideVerdict(
+  pr: PrInfo, findings: Finding[], stageErrors: StageError[], splitSuggested: boolean, questionCount: number,
+): Verdict {
   const counts = countOf(findings);
   const label = labelOf(pr, counts, stageErrors.length > 0, splitSuggested);
   const toFix = counts.block + counts.fix;
@@ -292,11 +361,13 @@ export function decideVerdict(pr: PrInfo, findings: Finding[], stageErrors: Stag
       sentence = `${plural(toFix, 'thing', 'things')} to fix, none of them blocking. The first: ${firstToFix(findings)}`;
       break;
     case 'ready-for-pr2':
-    case 'approve':
-      sentence = counts.ask > 0
-        ? `Nothing that needs fixing was found. ${plural(counts.ask, 'question', 'questions')} to settle.`
+    case 'approve': {
+      const toSettle = counts.ask + questionCount;
+      sentence = toSettle > 0
+        ? `Nothing that needs fixing was found. ${plural(toSettle, 'question', 'questions')} to settle.`
         : 'Nothing that needs fixing was found.';
       break;
+    }
   }
   return { label, sentence, counts };
 }
@@ -320,10 +391,14 @@ export function selfReviewText(pr: PrInfo, depth: Depth, packTitles: string[], v
 // ---- The stage ----
 
 /**
- * The selection stage. One request (none when nothing was kept) asks the model to choose and order; code then merges
- * duplicates, keeps at most MAX_TOP in the top list with every block in it where room allows, and puts every other
- * survivor under also found. When the request fails the findings are ranked by severity and a stage error is added.
- * Nothing is removed here except confirmed duplicates.
+ * The selection stage. One request asks the model to choose and order the findings, to say which questions are the same
+ * as another question or a finding, and to write whose call it is and what to check after merge; it is made even when
+ * nothing was kept. Code then merges duplicates, keeps at most MAX_TOP in the top list with every block in it where room
+ * allows, puts every other survivor under also found, and removes the questions the model named as the same. Questions
+ * with the same text are reduced to the first before anything else. When the request fails the findings are ranked by
+ * severity, no question is merged and a stage error is added. Nothing is removed here except confirmed duplicates.
+ * `skipModel` is set on a sync merge, where the model stages did not run: then no request is made when nothing was kept
+ * and there are no questions.
  */
 export async function select(
   runner: AgentRunner,
@@ -332,19 +407,21 @@ export async function select(
   questions: Question[],
   stageErrors: StageError[],
   depth: Depth = 'standard',
+  skipModel = false,
 ): Promise<SelectResult> {
   const errors: StageError[] = [];
   const usage: AgentUsage[] = [];
-  // Items with identical fingerprints are always merged, so the model sees each once.
+  // Items with identical fingerprints are always merged, and questions with the same text, so the model sees each once.
   const distinct = mergeDuplicates(kept);
+  const shown = sameTextOnce(questions);
   let answer: SelectOutput | null = null;
 
-  if (distinct.merged.length > 0) {
+  if (!(skipModel && distinct.merged.length === 0 && shown.length === 0)) {
     const template = await loadTemplate('select');
     const result = await sendRequest<SelectOutput>(runner, ctx, {
       role: 'select',
       instructions: instructionsFor(fill(template, { reader: readerOf(ctx.pr) }), ctx.packs, null),
-      material: selectMaterial(ctx, distinct.merged, questions),
+      material: selectMaterial(ctx, distinct.merged, shown),
       schema: SelectOutputSchema,
       cwd: ctx.headDir,
       extraDirs: [ctx.baseDir],
@@ -359,10 +436,12 @@ export async function select(
   const { merged, dropped } = answer ? mergeDuplicates(kept, answer.sameAs) : distinct;
   const { top, also } = rank(merged, answer);
   const findings = [...top.map((item, i) => toFinding(item, 'top', i + 1)), ...also.map((item) => toFinding(item, 'also', null))];
-  const verdict = decideVerdict(ctx.pr, findings, [...stageErrors, ...errors], answer?.splitSuggested ?? false);
+  const survivors = answer ? mergeQuestions(shown, answer.questionSameAs, new Set(distinct.merged.map((k) => k.id))) : shown;
+  const verdict = decideVerdict(ctx.pr, findings, [...stageErrors, ...errors], answer?.splitSuggested ?? false, survivors.length);
   return {
     findings,
     dropped,
+    questions: survivors,
     verdict,
     whoseCall: cleanLines(answer?.whoseCall ?? []),
     checksAfterMerge: cleanLines(answer?.checksAfterMerge ?? []),
