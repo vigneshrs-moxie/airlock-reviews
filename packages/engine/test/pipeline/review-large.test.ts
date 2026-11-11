@@ -65,6 +65,6 @@ describe('runReview on a large pull request', () => {
       expect(diff.match(/^## File: /gm)!.length).toBeLessThanOrEqual(MAX_BATCH_FILES);
     }
     for (const c of challenges) expect(lines(block(c.material, 'diff'))).toBeLessThanOrEqual(CHALLENGE_DIFF_LINE_BUDGET);
-  }, 20_000); // about 10 s alone, about 15 s under the full suite
+  }, 90_000); // about 10 s alone and 15 s in the full suite on a quiet machine; the limit is generous because this Mac often runs other work
 
 });
