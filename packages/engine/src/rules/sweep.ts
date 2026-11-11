@@ -118,7 +118,7 @@ export async function runSweep(runner: AgentRunner, ctx: LensContext): Promise<L
     const limits = cut === null ? [] : [diffCutSentence('sweep', `${title}, batch ${n}`, cut)];
     const result = await sendRequest<SweepOutput>(runner, ctx, {
       role: `sweep:${batch.cohortId}#${n}`,
-      instructions: instructionsFor(`${template.trimEnd()}\n\n${rulesText(batch.rules)}`, withoutStandards, null),
+      instructions: instructionsFor(`${template.trimEnd()}\n\n${rulesText(batch.rules)}`, withoutStandards, ctx.missingHelpers),
       material,
       schema: SweepOutputSchema,
       cwd: ctx.headDir,

@@ -20,7 +20,7 @@ Most rules will not be broken. Returning no candidates is the expected and corre
 
 ## What you are given
 
-After these instructions come the rules to check and, when there are any, what earlier reviews taught: things flagged before that were wrong, and product facts to respect.
+After these instructions come the rules to check. Before them, when there are any, comes what earlier reviews taught: things flagged before that were wrong, and product facts to respect.
 
 The material comes in blocks, in this order:
 

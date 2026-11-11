@@ -14,7 +14,7 @@ Each lens is listed under a heading with its id and title. Look at the cohort th
 
 ## What you are given
 
-After these instructions come the team's standards, what earlier reviews taught (things flagged before that were wrong, and product facts to respect) and, when there are any, helpers that no longer exist. That is the standard you hold the change to.
+Before these instructions come the team's standards, what earlier reviews taught (things flagged before that were wrong, and product facts to respect) and, when there are any, helpers that no longer exist. That is the standard you hold the change to.
 
 The material comes in blocks, in this order:
 

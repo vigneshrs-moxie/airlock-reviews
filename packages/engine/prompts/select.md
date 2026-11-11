@@ -10,7 +10,7 @@ There may be no findings at all. Then leave `top`, `also` and `sameAs` empty, an
 
 ## What you are given
 
-After these instructions come the team's standards and what earlier reviews taught: things flagged before that were wrong, and product facts to respect. Use them to judge which findings matter most.
+Before these instructions come the team's standards and what earlier reviews taught: things flagged before that were wrong, and product facts to respect. Use them to judge which findings matter most.
 
 The material comes in blocks, in this order:
 

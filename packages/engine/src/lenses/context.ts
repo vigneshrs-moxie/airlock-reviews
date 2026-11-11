@@ -2,7 +2,7 @@ import type {
   Brief, Candidate, ChangeMap, Cohort, Dropped, Fact, FileDiff, FileFact, ModelConfig, PrInfo, Question, Source,
   StageError, Tier,
 } from '@airlock/shared';
-import { asMaterial } from '../agent/prompt.js';
+import { asMaterial, PROMPT_BOUNDARY } from '../agent/prompt.js';
 import { UNKNOWN_USAGE } from '../agent/runner.js';
 import type { AgentRequest, AgentResult, AgentRunner, AgentUsage } from '../agent/runner.js';
 import type { Pack } from '../packs/types.js';
@@ -147,13 +147,18 @@ function helpersText(missing: string[]): string {
   ].join('\n');
 }
 
-/** The template, then the standards, the learned entries and (when given) the missing helpers. */
-export function instructionsFor(template: string, packs: Pack[], missingHelpers: string[] | null): string {
+/**
+ * The standards, the learned entries and the missing helpers first, then the boundary line, then the stage's template.
+ * Everything before the boundary is the same for every stage of a review that is given the same packs and helpers, so it
+ * is cached across its requests; nothing from the pull request may go there.
+ */
+export function instructionsFor(template: string, packs: Pack[], missingHelpers: string[]): string {
   return [
-    template.trimEnd(),
     section("The team's standards", standardDocuments(packs)),
     section('Learned from earlier reviews', learnedDocuments(packs)),
-    missingHelpers ? helpersText(missingHelpers) : '',
+    helpersText(missingHelpers),
+    PROMPT_BOUNDARY,
+    template.trim(),
   ]
     .filter((s) => s !== '')
     .join('\n\n');

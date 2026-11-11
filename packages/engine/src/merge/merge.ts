@@ -273,7 +273,7 @@ export async function mergeSameProblems(runner: AgentRunner, ctx: LensContext, i
   const clusters = proposeClusters(items);
   if (clusters.length === 0) return out;
 
-  const instructions = instructionsFor(await loadTemplate('merge'), ctx.packs, null);
+  const instructions = instructionsFor(await loadTemplate('merge'), ctx.packs, ctx.missingHelpers);
   const ask = (asked: Cluster[]) => sendRequest<MergeOutput>(runner, ctx, {
     role: 'merge',
     instructions,

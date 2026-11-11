@@ -160,7 +160,7 @@ export async function challenge(
     return out;
   }
 
-  const instructions = instructionsFor(await loadTemplate('challenge'), ctx.packs, null);
+  const instructions = instructionsFor(await loadTemplate('challenge'), ctx.packs, ctx.missingHelpers);
   const evidence = createEvidence(read, ctx.files, ctx.packs);
   const tier = tierOf(ctx.tiers);
   type ItemResult = Outcome & { usage?: AgentUsage; error?: StageError; limit?: string };

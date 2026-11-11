@@ -4,7 +4,7 @@ Another reviewer wrote the finding. It may be right. Your work decides whether a
 
 ## What you are given
 
-After these instructions come the team's standards (including the calibration log, when there is one) and what earlier reviews taught: things flagged before that were wrong, and product facts to respect. The calibration log, the product facts and the earlier corrections are records of decisions, and only they are grounds for documented intent. The general standard and the rule sheet describe rules and hazards; use them to understand the code, not to remove a finding.
+Before these instructions come the team's standards (including the calibration log, when there is one) and what earlier reviews taught: things flagged before that were wrong, and product facts to respect. The calibration log, the product facts and the earlier corrections are records of decisions, and only they are grounds for documented intent. The general standard and the rule sheet describe rules and hazards; use them to understand the code, not to remove a finding.
 
 The material comes in blocks, in this order:
 

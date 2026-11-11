@@ -2,6 +2,7 @@ import { copyFile, mkdir, readdir, stat, utimes, writeFile } from 'node:fs/promi
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { candidate, ReviewDocumentSchema, type Candidate, type ReviewEvent } from '@airlock/shared';
+import { PROMPT_BOUNDARY, splitInstructions } from '../../src/agent/prompt.js';
 import { type AgentRequest, withRetry } from '../../src/agent/runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
 import { withUniqueIds } from '../../src/pipeline/review.js';
@@ -157,6 +158,17 @@ describe('runReview', () => {
     expect(lensCalls.map((c) => [c.role, groupOf(c)])).toEqual([
       ['lens:combined', 'Cohort: Money'], ['lens:combined', 'Cohort: Jobs'], ['lens:combined', 'Cohort: Standalone changes'],
     ]);
+  }, SLOW);
+
+  it('every request that carries the standards starts its instructions with the same first part, once per request', async () => {
+    const { calls } = await review();
+    const withStandards = calls.filter((c) => !['mapper', 'brief'].includes(c.role) && !c.role.startsWith('sweep:'));
+    expect(new Set(withStandards.map((c) => c.role.split(':')[0]))).toEqual(new Set(['lens', 'seams', 'challenge', 'select']));
+    const firsts = new Set(withStandards.map((c) => splitInstructions(c.instructions).standing));
+    expect(firsts.size).toBe(1);
+    expect([...firsts][0]).toContain('# The team\'s standards');
+    for (const c of calls) expect(c.instructions.split(PROMPT_BOUNDARY).length).toBeLessThanOrEqual(2);
+    for (const marker of ['Add refunds', 'Refunds reuse formatMoney', 'src/money.ts']) expect([...firsts][0]).not.toContain(marker);
   }, SLOW);
 
   it('never runs more than the parallel limit at once', async () => {

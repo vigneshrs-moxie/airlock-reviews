@@ -466,7 +466,7 @@ export async function select(
     const template = await loadTemplate('select');
     const result = await sendRequest<SelectOutput>(runner, ctx, {
       role: 'select',
-      instructions: instructionsFor(fill(template, { reader: readerOf(ctx.pr) }), ctx.packs, null),
+      instructions: instructionsFor(fill(template, { reader: readerOf(ctx.pr) }), ctx.packs, ctx.missingHelpers),
       material: selectMaterial(ctx, distinct.merged, shown),
       schema: SelectOutputSchema,
       cwd: ctx.headDir,

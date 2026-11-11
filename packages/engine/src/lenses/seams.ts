@@ -27,6 +27,6 @@ export async function runSeams(runner: AgentRunner, ctx: LensContext, soFar: Can
   return runLensCall(runner, ctx, {
     role: 'seams', name: 'airlock/seams', stage: 'seams', source: { pack: 'airlock', lens: 'seams', ruleId: null },
     cohortId: null, material,
-    instructions: instructionsFor(fill(await loadTemplate('seams'), { reader: readerOf(ctx.pr) }), ctx.packs, null),
+    instructions: instructionsFor(fill(await loadTemplate('seams'), { reader: readerOf(ctx.pr) }), ctx.packs, ctx.missingHelpers),
   }, new Set(soFar.map((c) => c.id)));
 }

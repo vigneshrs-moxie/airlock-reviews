@@ -6,6 +6,8 @@ Several reviewers looked at this pull request at the same time, each through its
 
 The material holds one block per cluster, labelled with the cluster's id: `d1`, `d2`, and so on. Each finding in a cluster is listed with its id, who raised it (`pack/lens` or `pack/rule`), its title, what happens, why, the suggested change, its place (`path:line`) and the code it quotes.
 
+Before these instructions come the team's standards and what earlier reviews taught. They can help you judge whether two findings share a cause; you do not need to apply them otherwise.
+
 Your working directory is the head of the pull request, and the base branch is in the extra directory. You may read a file to settle a doubt, but you do not need to.
 
 ## How to decide

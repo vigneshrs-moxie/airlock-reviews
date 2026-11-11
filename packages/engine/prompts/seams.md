@@ -8,7 +8,7 @@ A cohort is one unit of behaviour, with its changed files ordered into layers. A
 
 ## What you are given
 
-After these instructions come the team's standards and what earlier reviews taught (things flagged before that were wrong, and product facts to respect). That is the standard you hold the change to.
+Before these instructions come the team's standards and what earlier reviews taught (things flagged before that were wrong, and product facts to respect). That is the standard you hold the change to.
 
 The material comes in blocks, in this order:
 
