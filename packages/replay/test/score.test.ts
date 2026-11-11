@@ -228,6 +228,60 @@ describe('summarise', () => {
     expect(s.totals).toEqual({ ms: 150, inputTokens: 15, outputTokens: 3, agentRuns: 3 });
   });
 
+  describe('how much of the dataset the run covers', () => {
+    const dataset = [
+      replayCase({ id: 'a', known: ['A1', 'A2'].map((id) => problem({ id })) }),
+      replayCase({ id: 'b', known: ['B1', 'B2', 'B3'].map((id) => problem({ id })) }),
+      replayCase({ id: 'c', known: ['C1'].map((id) => problem({ id })) }),
+      replayCase({ id: 's', kind: 'secondary', known: ['S1', 'S2'].map((id) => problem({ id })) }),
+      replayCase({ id: 'n', kind: 'negative', known: [] }),
+    ];
+    const pick = (...ids: string[]) => dataset.filter((c) => ids.includes(c.id));
+
+    it('a run with every positive case, all finished, answers yes or no', () => {
+      const yes = summarise('r', 'm', 'standard', [score({ caseId: 'a', known: 2, inTop: 2 }), score({ caseId: 'b', known: 3, inTop: 1 }), score({ caseId: 'c', known: 1 })], pick('a', 'b', 'c'), dataset);
+      expect(yes).toMatchObject({ datasetKnownTotal: 6, datasetPositives: 3, positivesNotRun: [], knownTotal: 6, inTopTotal: 3 });
+      expect(yes.meets.halfInTop).toBe(true);
+      const no = summarise('r', 'm', 'standard', [score({ caseId: 'a', known: 2, inTop: 1 }), score({ caseId: 'b', known: 3, inTop: 1 }), score({ caseId: 'c', known: 1 })], pick('a', 'b', 'c'), dataset);
+      expect(no.meets.halfInTop).toBe(false);
+    });
+
+    it('a partial run says so far and names the positive cases it did not run', () => {
+      const s = summarise('r', 'm', 'standard', [score({ caseId: 'a', known: 2, inTop: 2 }), score({ caseId: 'n', kind: 'negative' })], pick('a', 'n'), dataset);
+      expect(s).toMatchObject({ datasetKnownTotal: 6, datasetPositives: 3, positivesNotRun: ['b', 'c'], knownTotal: 2 });
+      expect(s.meets.halfInTop).toBe('yes so far');
+      const low = summarise('r', 'm', 'standard', [score({ caseId: 'b', known: 3, inTop: 1 })], pick('b'), dataset);
+      expect(low.meets.halfInTop).toBe('no so far');
+    });
+
+    it('a run with every positive case, one of which did not finish, still says so far', () => {
+      const s = summarise('r', 'm', 'standard', [
+        score({ caseId: 'a', known: 2, inTop: 2 }), score({ caseId: 'b', known: 3, inTop: 3 }), score({ caseId: 'c', known: 1, verdict: 'incomplete' }),
+      ], pick('a', 'b', 'c'), dataset);
+      expect(s.positivesNotRun).toEqual([]);
+      expect(s.meets.halfInTop).toBe('yes so far');
+    });
+
+    it('secondary cases are kept apart and change no headline number', () => {
+      const positives = [score({ caseId: 'a', known: 2, inTop: 1, shown: 1, sharedMatches: 0 })];
+      const secondary = score({ caseId: 's', kind: 'secondary', known: 2, knownDefects: 2, inTop: 2, shown: 2, defectsInTop: 2, crossFileKnown: 1, crossFileInTop: 1, sharedMatches: 2 });
+      const without = summarise('r', 'm', 'standard', positives, pick('a'), dataset);
+      const withSecondary = summarise('r', 'm', 'standard', [...positives, secondary], pick('a', 's'), dataset);
+      expect(withSecondary.secondary).toEqual([secondary]);
+      expect(without.secondary).toEqual([]);
+      for (const key of ['knownTotal', 'inTopTotal', 'recallTop', 'recallShown', 'recallTopDefects', 'crossFileRecallTop', 'sharedMatches',
+        'negativesWithBlockOrFix', 'positivesIncomplete', 'negativesIncomplete', 'datasetKnownTotal', 'datasetPositives', 'positivesNotRun', 'meets'] as const) {
+        expect(withSecondary[key], key).toEqual(without[key]);
+      }
+    });
+
+    it('without a dataset the cases in the run are the dataset', () => {
+      const s = summarise('r', 'm', 'standard', [score({ caseId: 'a', known: 2, inTop: 1 })], pick('a'));
+      expect(s).toMatchObject({ datasetKnownTotal: 2, datasetPositives: 1, positivesNotRun: [] });
+      expect(s.meets.halfInTop).toBe(true);
+    });
+  });
+
   it('takes the kind of each case from the dataset and refuses a score with no case', () => {
     expect(() => summarise('r', 'm', 'standard', [score({ caseId: 'ghost' })], [replayCase()])).toThrow(/ghost/);
   });

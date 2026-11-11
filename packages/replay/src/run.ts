@@ -474,13 +474,13 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
     return scoreOutcome(c, { kind: 'not-done', doc: null, reason: failureText('The case failed', r.reason) }, scoring);
   });
   const summary: RunSummary = {
-    ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases),
+    ...summarise(runId, run.model, run.depth, results.map((r) => r.score), opened.cases, opts.dataset ?? opts.cases),
     ...(limitReachedIn === null ? {} : {
       stopped: { reason: 'usage-limit', caseId: limitReachedIn, notStarted: opened.cases.filter((c) => notStarted.has(c.id)).map((c) => c.id) },
     }),
   };
   const details: RunDetails = Object.fromEntries(opened.cases.map((c, i) => [c.id, results[i]!.detail]));
-  await saveRunReport(runDir, summary, opened.cases, details);
+  await saveRunReport(runDir, summary, opts.dataset ?? opened.cases, details);
   return summary;
 }
 
@@ -498,7 +498,7 @@ export async function loadRun(runDir: string, cases: ReplayCase[]): Promise<{ su
   checkCases(selected);
   const scoring: RunInfo = { model: run.model, depth: run.depth, createdAt: run.startedAt };
   const results = await Promise.all(selected.map(async (c) => scoreOutcome(c, await readOutcome(join(runDir, c.id), c), scoring)));
-  const summary = summarise(run.runId, run.model, run.depth, results.map((r) => r.score), selected);
+  const summary = summarise(run.runId, run.model, run.depth, results.map((r) => r.score), selected, cases);
   const details: RunDetails = Object.fromEntries(selected.map((c, i) => [c.id, results[i]!.detail]));
   return { summary, details };
 }

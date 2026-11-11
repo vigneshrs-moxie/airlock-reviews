@@ -218,6 +218,51 @@ describe('renderReport', () => {
     expect(second).not.toMatch(/\bYes\b/);
   });
 
+  describe('coverage of the dataset and secondary cases', () => {
+    const positive = (n: number, known: number) =>
+      replayCase({ id: `pr${n}`, pr: n, title: `Case ${n}`, known: Array.from({ length: known }, (_, i) => problem({ id: `P${n}-${i}` })) });
+    const dataset = [positive(100, 5), positive(171, 9), positive(126, 2), positive(129, 3), positive(143, 4), positive(146, 3)];
+    const secondary = replayCase({ id: 'pr220', pr: 220, title: 'Fixes described in the body', kind: 'secondary', known: [problem({ id: 'S1', summary: 'The secondary problem.' })] });
+
+    function render(run: ReplayCase[], inTop: Record<string, number>, all: ReplayCase[] = dataset) {
+      const details: Record<string, { doc: ReviewDocument; matches: Match[] }> = {};
+      for (const c of run) {
+        const d = doc({ findings: [finding('f1', 'top')] });
+        details[c.id] = { doc: d, matches: c.known.map((k, i) => (i < (inTop[c.id] ?? 0) ? match(k.id, 'top', 'f1') : match(k.id, 'none', null))) };
+      }
+      const scores = run.map((c) => scoreCase(c, details[c.id]!.doc, details[c.id]!.matches));
+      const summary = summarise('r', 'm', 'standard', scores, run, all);
+      return { summary, text: renderReport(summary, all, details) };
+    }
+
+    it('a partial run says so far, how much of the dataset it covers and which pull requests were not run', () => {
+      const run = dataset.filter((c) => [129, 143, 146].includes(c.pr));
+      const { text } = render(run, { pr129: 3, pr143: 3, pr146: 1 });
+      const first = section(text, 'The two tests').split('\n').find((l) => l.startsWith('1. '))!;
+      expect(first).toBe('1. At least half of the known problems should be in the top five. 7 of 10 were (70%). ' +
+        "Yes so far: this run covers 10 of the dataset's 26 known problems; 3 pull requests were not run (#100, #126, #171).");
+    });
+
+    it('a run with every positive case answers Yes or No', () => {
+      const { text } = render(dataset, { pr100: 5, pr171: 9 });
+      const first = section(text, 'The two tests').split('\n').find((l) => l.startsWith('1. '))!;
+      expect(first).toBe('1. At least half of the known problems should be in the top five. 14 of 26 were (54%). Yes.');
+    });
+
+    it('secondary cases have their own section and appear in no headline', () => {
+      const run = [...dataset, secondary];
+      const { text, summary } = render(run, { pr100: 5, pr171: 9, pr220: 1 }, run);
+      expect(summary.knownTotal).toBe(26);
+      const own = section(text, 'Secondary cases (not counted)');
+      expect(own).toContain('| Pull request | Size (lines) | Known problems | In top five | Shown | Not shown |');
+      expect(own).toMatch(/\| #220 Fixes described in the body \| 120 \| 1 \| 1 \| 1 \| 0 \|/);
+      for (const heading of ['The two tests', 'Other numbers', 'Each pull request', 'What was missed']) {
+        expect(section(text, heading), heading).not.toContain('#220');
+      }
+      expect(render(dataset, { pr100: 5, pr171: 9 }).text).not.toContain('Secondary cases');
+    });
+  });
+
   it('lists a positive case with no details as details not available', () => {
     const c = replayCase({ id: 'a', pr: 10, title: 'Lost', known: [problem({ id: 'A1' })] });
     const summary = summarise('r', 'm', 'standard', [scoreCase(c, doc(), [])], [c]);

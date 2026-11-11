@@ -23,7 +23,6 @@ const SEVERITY_WORD = { block: 'Block', fix: 'Fix', ask: 'Ask', note: 'Note' } a
 
 const percent = (r: number): string => `${Math.round(r * 100)}%`;
 const count = (n: number): string => n.toLocaleString('en-US');
-const yesNo = (b: boolean): string => (b ? 'Yes' : 'No');
 const plural = (n: number, one: string, many: string): string => (n === 1 ? one : many);
 
 /** "A", "A and B", "A, B and C". */
@@ -118,7 +117,48 @@ const NOT_JUDGED = 'Not judged: this review did not finish; see Incomplete revie
 const notJudged = (s: CaseScore): boolean =>
   s.verdict === 'incomplete' && s.raised + Object.values(s.lostAt).reduce((n, x) => n + x, 0) < s.known;
 
-/** Renders a replay run as Markdown for a reader who is not an engineer by training. */
+/** The answer to the first test as a word: Yes, No, Yes so far, No so far or Not tested. */
+export function halfInTopWord(half: RunSummary['meets']['halfInTop']): string {
+  if (half === true) return 'Yes';
+  if (half === false) return 'No';
+  return half === 'not tested' ? 'Not tested' : half === 'yes so far' ? 'Yes so far' : 'No so far';
+}
+
+/**
+ * For an answer that holds only so far: how much of the dataset the run covers and which positive pull requests it did
+ * not run, e.g. "this run covers 10 of the dataset's 26 known problems; 3 pull requests were not run (#100, #126, #171)".
+ * Null when the answer is final or the test was not run. `cases` are looked up for pull request numbers.
+ */
+export function coverage(summary: RunSummary, cases: ReplayCase[]): string | null {
+  const half = summary.meets.halfInTop;
+  if (half !== 'yes so far' && half !== 'no so far') return null;
+  let text = `this run covers ${summary.knownTotal} of the dataset's ${summary.datasetKnownTotal} known problems`;
+  const notRun = summary.positivesNotRun;
+  if (notRun.length > 0) {
+    const caseById = new Map(cases.map((c) => [c.id, c]));
+    const numbers = notRun.map((id) => caseById.get(id)?.pr ?? null);
+    const names = numbers.every((n) => n !== null) ? [...numbers].sort((a, b) => a - b).map((n) => `#${n}`) : notRun;
+    text += `; ${notRun.length} ${plural(notRun.length, 'pull request was', 'pull requests were')} not run (${names.join(', ')})`;
+  }
+  return text;
+}
+
+/** The per-case table of known problems found: one row for each case. */
+function knownTable(scores: CaseScore[], caseById: Map<string, ReplayCase>): string[] {
+  return table(
+    ['Pull request', 'Size (lines)', 'Known problems', 'In top five', 'Shown', 'Not shown'],
+    scores.map((s) => {
+      const c = caseById.get(s.caseId);
+      const lines = c?.lines;
+      return [prName(c, s.caseId), lines == null ? 'unknown' : count(lines), String(s.known), String(s.inTop), String(s.shown), String(s.known - s.shown)];
+    }),
+  );
+}
+
+/**
+ * Renders a replay run as Markdown for a reader who is not an engineer by training. `cases` should be the whole
+ * dataset, so pull requests not run can be named.
+ */
 export function renderReport(summary: RunSummary, cases: ReplayCase[], details: Details): string {
   const caseById = new Map(cases.map((c) => [c.id, c]));
   const kindOf = (s: CaseScore): ReplayCase['kind'] => caseById.get(s.caseId)?.kind ?? s.kind;
@@ -138,7 +178,8 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
   if (half === 'not tested') {
     first += 'Not tested in this run: there were no pull requests with known problems.';
   } else {
-    first += `${summary.inTopTotal} of ${summary.knownTotal} were (${percent(summary.recallTop)}). ${yesNo(half)}.`;
+    const covered = coverage(summary, cases);
+    first += `${summary.inTopTotal} of ${summary.knownTotal} were (${percent(summary.recallTop)}). ${halfInTopWord(half)}${covered === null ? '' : `: ${md(covered)}`}.`;
     const failed = unfinished(positives);
     if (failed.length > 0) {
       first += ` ${plural(failed.length, 'The review', 'The reviews')} of ${failed.length} of these pull requests did not finish ` +
@@ -184,14 +225,14 @@ export function renderReport(summary: RunSummary, cases: ReplayCase[], details: 
 
   out.push('## Each pull request', '');
   if (positives.length === 0) out.push('There were no pull requests with known problems in this run.', '');
-  else out.push(...table(
-    ['Pull request', 'Size (lines)', 'Known problems', 'In top five', 'Shown', 'Not shown'],
-    positives.map((s) => {
-      const c = caseById.get(s.caseId);
-      const lines = c?.lines;
-      return [prName(c, s.caseId), lines == null ? 'unknown' : count(lines), String(s.known), String(s.inTop), String(s.shown), String(s.known - s.shown)];
-    }),
-  ), '');
+  else out.push(...knownTable(positives, caseById), '');
+
+  const secondary = summary.cases.filter((s) => kindOf(s) === 'secondary');
+  if (secondary.length > 0) {
+    out.push('## Secondary cases (not counted)', '');
+    out.push('These pull requests were reviewed off GitHub or are a revert, so their known problems are less certain. No number above counts them.', '');
+    out.push(...knownTable(secondary, caseById), '');
+  }
 
   const shared: string[] = [];
   for (const s of positives) {

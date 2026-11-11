@@ -143,7 +143,7 @@ describe('airlock-replay', () => {
     });
     expect(t.out).toEqual([
       join(runDir, 'report.md'),
-      'Half of the known problems in the top list: yes',
+      "Half of the known problems in the top list: yes so far: this run covers 1 of the dataset's 2 known problems; 1 pull request was not run (#2).",
       'Clean pull requests stay clean: yes',
     ]);
     expect(t.err).toContain('pr1: start');
@@ -209,8 +209,14 @@ describe('airlock-replay', () => {
     expect(err).toContain('no such commit');
     expect(err).toMatch(/1 case did not finish: pr2/);
     expect(t.out[0]).toBe(join(work, RUN_ID, 'report.md'));
-    expect(t.out[1]).toBe('Half of the known problems in the top list: yes');
+    // pr2 did not finish, so the answer holds only so far.
+    expect(t.out[1]).toBe("Half of the known problems in the top list: yes so far: this run covers 2 of the dataset's 2 known problems.");
     expect((await stat(join(work, RUN_ID, 'report.md'))).isFile()).toBe(true);
+
+    const complete = harness();
+    const u = io();
+    expect(await keepingEnv(() => main(['run', '--cases', 'all', '--out', join(work, 'complete')], u.io, complete.overrides))).toBe(0);
+    expect(u.out[1]).toBe('Half of the known problems in the top list: yes');
   });
 
   it('stops at a usage limit, says how to continue and returns 0', async () => {

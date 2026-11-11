@@ -39,7 +39,15 @@ export interface RunSummary {
   model: string;
   depth: Depth;
   cases: CaseScore[];
-  /** Over positive cases only, as are the recalls. */
+  /** Scores of the secondary cases in the run, also in `cases`; no headline figure counts them. */
+  secondary: CaseScore[];
+  /** Known problems of every positive case in the dataset, whether run or not. */
+  datasetKnownTotal: number;
+  /** Positive cases in the dataset. */
+  datasetPositives: number;
+  /** Ids of the dataset's positive cases that are not in this run, in dataset order. */
+  positivesNotRun: string[];
+  /** Over positive cases in the run only, as are the recalls. */
   knownTotal: number;
   inTopTotal: number;
   recallTop: number;
@@ -60,8 +68,11 @@ export interface RunSummary {
    */
   stopped?: { reason: 'usage-limit'; caseId: string; notStarted: string[] };
   meets: {
-    /** 'not tested' when the run has no positive cases. */
-    halfInTop: boolean | 'not tested';
+    /**
+     * 'not tested' when the run has no positive cases. true or false only when every positive case in the dataset is
+     * in the run and finished; otherwise 'yes so far' or 'no so far'.
+     */
+    halfInTop: boolean | 'yes so far' | 'no so far' | 'not tested';
     /**
      * 'not tested' with no negative cases; else 'needs a human look' when one shows a Block or Fix;
      * else 'incomplete' when one's review did not finish; else true.
@@ -154,9 +165,12 @@ function sum<T>(items: T[], pick: (item: T) => number): number {
 
 /**
  * Totals a run. Recalls are over positive cases only (0 when there are none); the kind of
- * each case is taken from `cases`, and a score with no case there is an error.
+ * each case is taken from `cases`, and a score with no case there is an error. `dataset` is the
+ * whole dataset (default `cases`): the summary says how much of it the run covers.
  */
-export function summarise(runId: string, model: string, depth: Depth, scores: CaseScore[], cases: ReplayCase[]): RunSummary {
+export function summarise(
+  runId: string, model: string, depth: Depth, scores: CaseScore[], cases: ReplayCase[], dataset: ReplayCase[] = cases,
+): RunSummary {
   const kindOf = new Map(cases.map((c) => [c.id, c.kind]));
   const kind = (s: CaseScore): ReplayCase['kind'] => {
     const k = kindOf.get(s.caseId);
@@ -172,8 +186,15 @@ export function summarise(runId: string, model: string, depth: Depth, scores: Ca
   const negativesWithBlockOrFix = negative.filter((s) => s.blockOrFixShown > 0).length;
   const incomplete = (s: CaseScore): boolean => s.verdict === 'incomplete';
   const negativesIncomplete = negative.filter(incomplete).length;
+  const datasetPositives = dataset.filter((c) => c.kind === 'positive');
+  const run = new Set(scores.map((s) => s.caseId));
+  const positivesNotRun = datasetPositives.filter((c) => !run.has(c.id)).map((c) => c.id);
+  const wholeDataset = positivesNotRun.length === 0 && !positive.some(incomplete);
+  const half = recallTop >= 0.5;
   return {
-    runId, model, depth, cases: scores, knownTotal, inTopTotal, recallTop,
+    runId, model, depth, cases: scores, secondary: scores.filter((s) => kind(s) === 'secondary'),
+    datasetKnownTotal: sum(datasetPositives, (c) => c.known.length), datasetPositives: datasetPositives.length, positivesNotRun,
+    knownTotal, inTopTotal, recallTop,
     recallShown: ratio(sum(positive, (s) => s.shown), knownTotal),
     recallTopDefects: ratio(sum(positive, (s) => s.defectsInTop), sum(positive, (s) => s.knownDefects)),
     crossFileRecallTop: ratio(sum(positive, (s) => s.crossFileInTop), sum(positive, (s) => s.crossFileKnown)),
@@ -187,7 +208,7 @@ export function summarise(runId: string, model: string, depth: Depth, scores: Ca
       outputTokens: sum(scores, (s) => s.outputTokens), agentRuns: sum(scores, (s) => s.agentRuns),
     },
     meets: {
-      halfInTop: positive.length === 0 ? 'not tested' : recallTop >= 0.5,
+      halfInTop: positive.length === 0 ? 'not tested' : wholeDataset ? half : half ? 'yes so far' : 'no so far',
       cleanControls: negative.length === 0 ? 'not tested'
         : negativesWithBlockOrFix > 0 ? 'needs a human look'
           : negativesIncomplete > 0 ? 'incomplete'
