@@ -23,11 +23,12 @@ export const REATTACH_IN_A_ROW = 5;
 export const REATTACH_IN_ALL = 20;
 /**
  * The pairing token out of whatever was pasted (the command prints npm's own lines first): the one run of exactly 64
- * hexadecimal characters that is not part of a longer run; null when there is none, or more than one.
+ * hexadecimal characters that is not part of a longer run, in lower case as the token is printed; null when there is
+ * none, or more than one.
  */
 export function tokenIn(pasted: string): string | null {
   const runs = (pasted.match(/[0-9a-fA-F]+/g) ?? []).filter((run) => run.length === 64);
-  return runs.length === 1 ? (runs[0] as string) : null;
+  return runs.length === 1 && /^[0-9a-f]{64}$/.test(runs[0] as string) ? (runs[0] as string) : null;
 }
 
 export interface PanelDeps {

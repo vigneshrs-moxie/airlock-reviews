@@ -171,6 +171,8 @@ describe('startPanel: loading', () => {
     ['a run inside a longer one', `x${'a'.repeat(65)}`],
     ['a run that is too short', 'a'.repeat(63)],
     ['no run at all', 'token please'],
+    ['an upper-case run', 'A'.repeat(64)],
+    ['a run with an upper-case letter', `${'a'.repeat(63)}F`],
   ])('refuses %s with the same sentence and sends nothing', async (_name, pasted) => {
     const h = harness({ token: OTHER_TOKEN });
     await until(h, 'unpaired');
