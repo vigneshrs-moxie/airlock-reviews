@@ -543,12 +543,34 @@ function isEntryPoint(): boolean {
   return self !== undefined && started === self;
 }
 
-if (isEntryPoint()) {
-  main(process.argv.slice(2), { out: (t) => { process.stdout.write(t); }, err: (t) => { process.stderr.write(t); } }).then(
-    (code) => { process.exitCode = code; },
-    (err: unknown) => {
-      process.stderr.write(`Airlock service failed: ${messageOf(err)}\n`);
-      process.exitCode = 1;
-    },
-  );
+export interface EntryDeps {
+  main?: (argv: string[], io: CliIo) => Promise<number>;
+  /** Waits until what was written to stdout and stderr has been handed on. */
+  flush?: () => Promise<void>;
+  exit?: (code: number) => void;
+  io?: CliIo;
 }
+
+const realIo: CliIo = { out: (t) => { process.stdout.write(t); }, err: (t) => { process.stderr.write(t); } };
+const flushStdio = (): Promise<void> =>
+  Promise.all([process.stdout, process.stderr].map((stream) => new Promise<void>((done) => { stream.write('', () => done()); })))
+    .then(() => undefined);
+
+/**
+ * Runs the command and then ends the process with its code. `start` has already waited (at most five seconds) for the
+ * reviews it stopped; ending here means one that ignored its signal cannot keep the process alive.
+ */
+export async function entry(argv: string[], deps: EntryDeps = {}): Promise<void> {
+  const io = deps.io ?? realIo;
+  let code: number;
+  try {
+    code = await (deps.main ?? main)(argv, io);
+  } catch (err) {
+    io.err(`Airlock service failed: ${messageOf(err)}\n`);
+    code = 1;
+  }
+  await (deps.flush ?? flushStdio)();
+  (deps.exit ?? ((c: number): void => { process.exit(c); }))(code);
+}
+
+if (isEntryPoint()) void entry(process.argv.slice(2));

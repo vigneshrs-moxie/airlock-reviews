@@ -5,7 +5,7 @@ import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EngineDeps, Exec } from '@airlock/engine';
-import { main, renderPlist, usage, type CliOverrides } from '../src/cli.js';
+import { entry, main, renderPlist, usage, type CliOverrides } from '../src/cli.js';
 import type { ServiceConfig } from '../src/config.js';
 import { createServer } from '../src/server.js';
 
@@ -811,5 +811,31 @@ describe('safety', () => {
     expect(source).not.toContain(`${real}/`);
     expect(source).not.toContain(['~', 'Library'].join('/'));
     expect(vi.mocked(engine.realExec)).not.toHaveBeenCalled();
+  });
+});
+
+describe('the command\'s entry (second round)', () => {
+  it('ends the process with the code once the command returns, so nothing left running keeps it alive', async () => {
+    for (const code of [0, 1]) {
+      const order: string[] = [];
+      const exit = vi.fn((c: number) => { order.push(`exit ${c}`); });
+      await entry(['start'], {
+        main: async (argv) => { order.push(`main ${argv.join(' ')}`); return code; },
+        flush: async () => { order.push('flush'); },
+        exit,
+        io: { out: () => undefined, err: () => undefined },
+      });
+      expect(order).toEqual(['main start', 'flush', `exit ${code}`]);
+    }
+  });
+
+  it('ends with 1 when the command throws, and says so', async () => {
+    const err: string[] = [];
+    const exit = vi.fn();
+    await entry(['start'], {
+      main: async () => { throw new Error('boom'); }, flush: async () => undefined, exit, io: { out: () => undefined, err: (t) => err.push(t) },
+    });
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(err.join('')).toBe('Airlock service failed: boom\n');
   });
 });
