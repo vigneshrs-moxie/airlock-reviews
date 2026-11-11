@@ -1,8 +1,10 @@
-import { choosePacks, fetchPr, findClaude, latestReview, runReview, type ReviewRequest } from '@airlock/engine';
+import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { airlockHome, choosePacks, fetchPr, findClaude, latestReview, repoSlug, runReview, type ReviewRequest } from '@airlock/engine';
 import {
-  ApiErrorSchema, DismissalSchema, DismissBodySchema, LatestReplySchema, PrNumberSchema, PrSummarySchema, RepoSchema, RestoreBodySchema, RestoreReplySchema, RunIdSchema, ServiceStatusSchema,
+  ApiErrorSchema, DismissalSchema, DismissBodySchema, LatestReplySchema, PrNumberSchema, PrSummarySchema, RepoSchema, RestoreBodySchema, RestoreReplySchema, ReviewIdSchema, RunIdSchema, ServiceStatusSchema,
   StartReviewBodySchema, StartReviewReplySchema, suggestedDepth, type DismissBody, type Dismissal, type LatestReply, type RestoreBody, type RestoreReply, type PrSummary,
-  type PrInfo, type ServiceStatus, type StartReviewBody,
+  type PrInfo, type ReviewDocument, type ServiceStatus, type StartReviewBody,
 } from '@airlock/shared';
 import { z, type ZodType } from 'zod';
 import { dismiss, DismissError, restore } from './dismissals.js';
@@ -53,11 +55,22 @@ export function engineRequest(body: StartReviewBody, packsDir: string): ReviewRe
 }
 
 /**
+ * Removes the file the engine's store wrote for this document (`<home>/reviews/<slug>/<number>/<head>-<id>.json`), so a
+ * review stopped at the ceiling never becomes the latest one. Names that could not be the store's are left alone.
+ */
+async function discardStored(document: ReviewDocument): Promise<void> {
+  const { repo, number, headSha } = document.pr;
+  if (!ReviewIdSchema.safeParse(document.id).success || !/^[0-9a-fA-F]{7,40}$/.test(headSha) || !Number.isSafeInteger(number)) return;
+  await rm(join(airlockHome(), 'reviews', repoSlug(repo), String(number), `${headSha}-${document.id}.json`), { force: true });
+}
+
+/**
  * Status, pull request summary, starting and following reviews, and the latest stored review. `stop` is called when the
- * server closes, and clears the registry's timers.
+ * server closes: it clears the registry's timers, stops the running reviews and resolves once they have settled (at most
+ * five seconds).
  */
 export function reviewRoutes(
-  deps: ServiceDeps & { dismissals: NonNullable<ServiceDeps['dismissals']> }, hidePaths: readonly string[]): { routes: Route[]; stop: () => void } {
+  deps: ServiceDeps & { dismissals: NonNullable<ServiceDeps['dismissals']> }, hidePaths: readonly string[]): { routes: Route[]; stop: () => Promise<void> } {
   const { config, engine } = deps;
   const timers = deps.timers ?? realTimers;
   const review = deps.review ?? runReview;
@@ -67,7 +80,8 @@ export function reviewRoutes(
     ...(deps.limits?.runMinutes === undefined ? {} : { runMinutes: deps.limits.runMinutes }),
     log: deps.log,
     failure: (e) => `Airlock could not review this pull request: ${plainMessage(e, hidePaths)}`,
-    launch: (body, emit) => review(engineRequest(body, config.packsDir), engine, emit),
+    launch: (body, emit, signal) => review(engineRequest(body, config.packsDir), { ...engine, signal }, emit),
+    discard: discardStored,
   });
 
   let tools: { at: number; claude: boolean; gh: boolean } | null = null;

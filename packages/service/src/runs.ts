@@ -27,6 +27,10 @@ export const MAX_ACTIVE = 2;
 export const FINISHED_KEEP_MS = 10 * 60_000;
 export const FINISHED_KEEP_MAX = 20;
 export const DEFAULT_RUN_MINUTES = 90;
+/** The longest ceiling a review can be given: one day. */
+export const MAX_RUN_MINUTES = 1_440;
+/** How long `close` waits for the stopped reviews to settle. */
+export const CLOSE_WAIT_MS = 5_000;
 
 /** Thrown by `start` when two other reviews are already running. */
 export class LimitError extends Error {
@@ -45,13 +49,18 @@ export interface RunEvents {
 }
 
 export interface RunsOptions {
-  /** Runs the review; every event it emits is kept and passed on, and its own `done` ends the run. */
-  launch: (body: StartReviewBody, emit: (e: ReviewEvent) => void) => Promise<ReviewDocument>;
+  /**
+   * Runs the review; every event it emits is kept and passed on, and its own `done` ends the run. `signal` is aborted when
+   * the review is to stop: at the ceiling, or when the registry closes.
+   */
+  launch: (body: StartReviewBody, emit: (e: ReviewEvent) => void, signal: AbortSignal) => Promise<ReviewDocument>;
+  /** Removes what a review stopped at the ceiling stored when it settled anyway. */
+  discard?: (document: ReviewDocument) => Promise<void>;
   /** The message of the `failed` event for an error the review ended with. */
   failure: (e: unknown) => string;
   timers: Timers;
   log?: (line: string) => void;
-  /** The most a review may run before it is stopped; 90 minutes by default. */
+  /** The most a review may run before it is stopped; 90 minutes by default, and never more than a day. */
   runMinutes?: number;
 }
 
@@ -66,6 +75,13 @@ interface Run {
   finished: boolean;
   /** Cancels the ceiling while the run is active, then the ten-minute expiry once it has ended. */
   cancelTimer: () => void;
+  /** Aborted to stop the review. */
+  stop: AbortController;
+  /** The run was ended at the ceiling: whatever its review produces afterwards is discarded. */
+  timedOut: boolean;
+  /** Settles when the review itself has settled, whatever the run's state. */
+  settled: Promise<void>;
+  reviewSettled: boolean;
 }
 
 /** The two events that end a run. */
@@ -83,10 +99,12 @@ export class Runs {
   private closed = false;
 
   constructor(private readonly opts: RunsOptions) {
-    this.runMinutes = opts.runMinutes ?? DEFAULT_RUN_MINUTES;
-    if (!Number.isFinite(this.runMinutes) || this.runMinutes <= 0) {
-      throw new RangeError(`runMinutes must be a positive number, got ${this.runMinutes}`);
+    const minutes = opts.runMinutes ?? DEFAULT_RUN_MINUTES;
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      throw new RangeError(`runMinutes must be a positive number, got ${minutes}`);
     }
+    // A timer longer than about 24.8 days fires at once, so the ceiling is held to a day.
+    this.runMinutes = Math.min(minutes, MAX_RUN_MINUTES);
   }
 
   /** Starts a review, or hands back the run of that pull request when one is running. Throws LimitError at the limit. */
@@ -100,31 +118,40 @@ export class Runs {
     do id = `run_${randomBytes(6).toString('hex')}`; while (this.runs.has(id));
     const run: Run = {
       id, repo: body.repo, key: repoKey(body.repo), number: body.number, events: [], listeners: new Set(), finished: false,
-      cancelTimer: () => undefined,
+      cancelTimer: () => undefined, stop: new AbortController(), timedOut: false, settled: Promise.resolve(), reviewSettled: false,
     };
     this.runs.set(id, run);
-    // A git, gh or model call can stall for ever; the ceiling frees the slot.
+    // A git, gh or model call can stall for ever; the ceiling stops the review and frees the slot.
     run.cancelTimer = this.opts.timers.setTimeout(() => {
       this.opts.log?.(`review ${id} of ${run.repo}#${run.number} ran past ${this.runMinutes} minutes and was stopped`);
+      run.timedOut = true;
+      run.stop.abort();
       this.finish(run, { type: 'failed', message: `Airlock stopped this review because it ran for more than ${this.runMinutes} minutes.` });
     }, this.runMinutes * 60_000);
 
     let review: Promise<ReviewDocument>;
     try {
-      review = this.opts.launch(body, (e) => this.append(run, e));
+      review = this.opts.launch(body, (e) => this.append(run, e), run.stop.signal);
     } catch (e) {
       review = Promise.reject(e);
     }
-    review.then(
-      // The engine sends done itself; this covers a review that returned without it.
-      (document) => { if (!run.finished) this.append(run, { type: 'done', document }); },
+    run.settled = review.then(
+      async (document) => {
+        if (run.timedOut) {
+          this.opts.log?.(`review ${id} of ${run.repo}#${run.number} finished after it was stopped; its review ${document.id} was discarded`);
+          await this.opts.discard?.(document);
+          return;
+        }
+        // The engine sends done itself; this covers a review that returned without it.
+        if (!run.finished) this.append(run, { type: 'done', document });
+      },
       (e: unknown) => {
         this.opts.log?.(`review ${id} of ${run.repo}#${run.number} failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
         if (!run.finished) this.finish(run, { type: 'failed', message: this.opts.failure(e) });
       },
     ).catch((e: unknown) => {
       this.opts.log?.(`review ${id} could not be ended: ${e instanceof Error ? e.message : String(e)}`);
-    });
+    }).finally(() => { run.reviewSettled = true; });
     return { runId: id, reused: false };
   }
 
@@ -158,15 +185,26 @@ export class Runs {
   }
 
   /**
-   * Stops the registry when the server closes: every timer is cleared and no review starts. Reviews already running are
-   * left to finish, and what they send goes nowhere.
+   * Stops the registry when the server closes: every timer is cleared, no review starts, and every review still running
+   * is stopped; what they send afterwards goes nowhere. Resolves when those reviews have settled (so their workspaces
+   * are disposed), or after CLOSE_WAIT_MS, whichever is first.
    */
-  close(): void {
+  async close(): Promise<void> {
     this.closed = true;
+    const waiting: Promise<void>[] = [];
     for (const run of this.runs.values()) {
       run.cancelTimer();
       run.listeners.clear();
+      if (!run.reviewSettled) {
+        run.stop.abort();
+        waiting.push(run.settled);
+      }
     }
+    if (waiting.length === 0) return;
+    let cancelBound = (): void => undefined;
+    const bound = new Promise<void>((resolve) => { cancelBound = this.opts.timers.setTimeout(resolve, CLOSE_WAIT_MS); });
+    await Promise.race([Promise.all(waiting).then(() => undefined), bound]);
+    cancelBound();
   }
 
   /** Keeps an event that matches the contract and passes it on; the engine's `done` ends the run. */

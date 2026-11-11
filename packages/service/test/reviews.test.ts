@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,7 +10,7 @@ import {
   StartReviewReplySchema, type Dismissal, type ReviewDocument, type ReviewEvent,
 } from '@airlock/shared';
 import { pair, readOrCreateToken } from '../src/config.js';
-import { FINISHED_KEEP_MS } from '../src/runs.js';
+import { CLOSE_WAIT_MS, FINISHED_KEEP_MS } from '../src/runs.js';
 import { createServer, type ServiceDeps } from '../src/server.js';
 import { RUN_GONE, runStream } from '../src/sse.js';
 import { FakeClock, openStream, send, until, type Reply, type Stream } from './helpers.js';
@@ -18,6 +19,8 @@ type ExecResult = { stdout: string; stderr: string; code: number };
 
 interface Launched {
   req: ReviewRequest;
+  /** The signal the service gave the review. */
+  signal: AbortSignal | undefined;
   emit: (e: ReviewEvent) => void;
   /** Saves the document through the engine's store, sends done, then resolves: what the engine does. */
   finish: (doc: ReviewDocument) => Promise<void>;
@@ -86,7 +89,11 @@ interface Rig {
   close(): Promise<void>;
 }
 
-async function startService(extra: Partial<ServiceDeps> = {}): Promise<Rig> {
+/**
+ * `ignoresStop`: the fake review goes on when its signal is aborted, like a review stuck where the signal cannot reach;
+ * otherwise it rejects as the engine does.
+ */
+async function startService(extra: Partial<ServiceDeps> = {}, { ignoresStop = false } = {}): Promise<Rig> {
   const home = await mkdtemp(join(tmpdir(), 'airlock-service-reviews-'));
   process.env.AIRLOCK_HOME = home;
   const packsDir = join(home, 'packs');
@@ -100,10 +107,12 @@ async function startService(extra: Partial<ServiceDeps> = {}): Promise<Rig> {
     ['gh auth status', { stdout: '', stderr: 'Logged in to github.com', code: 0 }],
   ]);
   const log: string[] = [];
-  const review: typeof runReview = (req, _deps, onEvent) => new Promise<ReviewDocument>((resolve, reject) => {
+  const review: typeof runReview = (req, given, onEvent) => new Promise<ReviewDocument>((resolve, reject) => {
     const emit = (e: ReviewEvent): void => onEvent?.(e);
+    const { signal } = given;
+    if (!ignoresStop) signal?.addEventListener('abort', () => reject(new Error('The review was stopped.')), { once: true });
     launched.push({
-      req, emit, reject,
+      req, signal, emit, reject,
       finish: async (doc) => { await saveReview(doc); emit({ type: 'done', document: doc }); resolve(doc); },
     });
   });
@@ -125,7 +134,13 @@ async function startService(extra: Partial<ServiceDeps> = {}): Promise<Rig> {
   });
   const { port } = await service.listen();
   const token = await readOrCreateToken(home);
-  cleanups.push(async () => { await service.close(); await rm(home, { recursive: true, force: true }); });
+  cleanups.push(async () => {
+    // A review that ignores its stop is waited for at most CLOSE_WAIT_MS, on the fake clock.
+    const closing = service.close();
+    clock.advance(CLOSE_WAIT_MS);
+    await closing;
+    await rm(home, { recursive: true, force: true });
+  });
   const auth = { Authorization: `Bearer ${token}` };
   const replies: Rig['replies'] = [];
   return {
@@ -515,12 +530,14 @@ describe('fix round 1', () => {
   const FOREIGN = `chrome-extension://${'b'.repeat(32)}`;
 
   it('a review that never settles ends as failed at the ceiling, and a new start is then accepted', async () => {
-    const s = await startService({ limits: { runMinutes: 5 } });
+    const s = await startService({ limits: { runMinutes: 5 } }, { ignoresStop: true });
     const runId = runIdOf(await start(s, 7));
     await start(s, 8);
     expect((await start(s, 9)).status).toBe(429);
     const stream = await s.stream(runId);
+    expect(s.launched[0]!.signal?.aborted).toBe(false);
     s.clock.advance(5 * 60_000);
+    expect(s.launched[0]!.signal?.aborted).toBe(true);
     await stream.end;
     expect(stream.events.at(-1)).toEqual({ type: 'failed', message: 'Airlock stopped this review because it ran for more than 5 minutes.' });
     expect((await s.call('GET', `/reviews/running?repo=${REPO}&number=7`)).status).toBe(404);
@@ -531,6 +548,29 @@ describe('fix round 1', () => {
     const replay = await s.stream(runId);
     await replay.end;
     expect(replay.events).toEqual(stream.events);
+  });
+
+  it('a review that resolves after its ceiling leaves no stored document', async () => {
+    const s = await startService({ limits: { runMinutes: 5 } }, { ignoresStop: true });
+    await start(s, 7);
+    s.clock.advance(5 * 60_000);
+    const late = doc('r_bbbbbbbbbb');
+    await s.launched[0]!.finish(late);
+    const file = join(s.home, 'reviews', 'acme__widgets', '7', `${late.pr.headSha}-${late.id}.json`);
+    await until(() => !existsSync(file) && s.log.some((l) => l.includes('r_bbbbbbbbbb was discarded')), 'the late document removed');
+    expect((await s.call('GET', `/reviews/latest?repo=${REPO}&number=7`)).status).toBe(404);
+  });
+
+  it('gives each review the signal that stops it, and close() stops every running review', async () => {
+    const s = await startService();
+    await start(s, 7);
+    await start(s, 8);
+    const [a, b] = s.launched;
+    expect(a!.signal).toBeInstanceOf(AbortSignal);
+    expect(a!.signal).not.toBe(b!.signal);
+    await s.close();
+    expect(a!.signal?.aborted).toBe(true);
+    expect(b!.signal?.aborted).toBe(true);
   });
 
   it('refuses a run ceiling that is not a positive number', async () => {
@@ -600,10 +640,10 @@ describe('fix round 1', () => {
     const runId = runIdOf(await start(s, 8));
     const stream = await s.stream(runId);
     await until(() => s.clock.pending === 3, 'expiry, ceiling and keep-alive timers');
+    // The running review is stopped and rejects, as the engine does, so close() does not wait.
     await s.close();
     await stream.end;
-    expect(s.clock.pending).toBe(0);
-    await s.launched[1]!.finish(doc('r_aaaaaaaaaa', 8));
+    expect(s.launched[1]!.signal?.aborted).toBe(true);
     expect(s.clock.pending).toBe(0);
   });
 

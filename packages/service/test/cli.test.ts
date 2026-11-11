@@ -77,6 +77,7 @@ function harness(options: { exists?: boolean; env?: Record<string, string>; boot
   };
   const chmodCalls: Array<{ path: string; mode: number }> = [];
   const createToken = vi.fn(async () => TOKEN);
+  const exits: number[] = [];
   const overrides: Required<CliOverrides> = {
     createServer: (deps) => { created.push(deps); return server; },
     engineDeps: () => ENGINE_DEPS,
@@ -102,11 +103,12 @@ function harness(options: { exists?: boolean; env?: Record<string, string>; boot
     cliPath,
     env,
     onSignal: (signal, handler) => { handlers.set(signal, handler); return () => { handlers.delete(signal); }; },
+    exit: (code) => { exits.push(code); },
     now: () => new Date('2026-11-11T09:00:00.000Z'),
   };
   const io = { out: (t: string) => out.push(t), err: (t: string) => err.push(t) };
   const plist = join(fakeHome, 'Library', 'LaunchAgents', 'com.airlock.service.plist');
-  return { root, airlockHome, fakeHome, repoRoot, cliPath, binDirs, out, err, calls, handlers, server, created, overrides, io, plist, config, createToken, chmodCalls };
+  return { root, airlockHome, fakeHome, repoRoot, cliPath, binDirs, out, err, calls, handlers, server, created, overrides, io, plist, config, createToken, chmodCalls, exits };
 }
 
 const all = (h: { out: string[]; err: string[] }): string => [...h.out, ...h.err].join('');
@@ -161,6 +163,27 @@ describe('start', () => {
     h.handlers.get('SIGTERM')?.();
     expect(await done).toBe(0);
     expect(h.server.close).toHaveBeenCalledTimes(1);
+    expect(h.handlers.size).toBe(0);
+  });
+
+  it('waits for the stopped reviews with its handlers in place, and a second signal then exits at once', async () => {
+    const h = harness();
+    let closed = (): void => undefined;
+    h.server.close.mockImplementation(() => new Promise<undefined>((resolve) => { closed = () => resolve(undefined); }));
+    let resolved = false;
+    const done = main(['start'], h.io, h.overrides).then((c) => { resolved = true; return c; });
+    await waitFor(() => h.handlers.has('SIGINT'));
+    h.handlers.get('SIGINT')?.();
+    await waitFor(() => h.server.close.mock.calls.length === 1);
+    expect(resolved).toBe(false);
+    expect([...h.handlers.keys()].sort()).toEqual(['SIGINT', 'SIGTERM']);
+    expect(h.exits).toEqual([]);
+    h.handlers.get('SIGINT')?.();
+    expect(h.exits).toEqual([130]);
+    h.handlers.get('SIGTERM')?.();
+    expect(h.exits).toEqual([130, 143]);
+    closed();
+    expect(await done).toBe(0);
     expect(h.handlers.size).toBe(0);
   });
 

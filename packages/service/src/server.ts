@@ -100,15 +100,18 @@ export function createServer(deps: ServiceDeps): { listen(): Promise<{ port: num
       created.on('error', (e) => deps.log(`server error: ${e.message}`));
       return { port: bound.port, address: bound.address, family: bound.family };
     },
+    /** Closes the port and stops every running review; resolves once they have settled, or after five seconds. */
     async close() {
-      reviews.stop();
+      const stopped = reviews.stop();
       const running = server;
       server = undefined;
-      if (running === undefined) return;
-      await new Promise<void>((resolve) => {
-        running.close(() => resolve());
-        running.closeAllConnections();
-      });
+      if (running !== undefined) {
+        await new Promise<void>((resolve) => {
+          running.close(() => resolve());
+          running.closeAllConnections();
+        });
+      }
+      await stopped;
     },
   };
 }

@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { minimalDocument, ServiceEventSchema, type ReviewDocument, type ReviewEvent, type ServiceEvent, type StartReviewBody } from '@airlock/shared';
-import { DEFAULT_RUN_MINUTES, FINISHED_KEEP_MAX, FINISHED_KEEP_MS, LimitError, Runs } from '../src/runs.js';
+import { CLOSE_WAIT_MS, DEFAULT_RUN_MINUTES, FINISHED_KEEP_MAX, FINISHED_KEEP_MS, LimitError, MAX_RUN_MINUTES, Runs } from '../src/runs.js';
 import { FakeClock } from './helpers.js';
 
 interface Launched {
   body: StartReviewBody;
   emit: (e: ReviewEvent) => void;
+  signal: AbortSignal;
   resolve: (doc: ReviewDocument) => void;
   reject: (e: unknown) => void;
 }
@@ -14,16 +15,18 @@ function rig(launch?: (body: StartReviewBody, emit: (e: ReviewEvent) => void) =>
   const clock = new FakeClock();
   const launched: Launched[] = [];
   const logged: string[] = [];
+  const discarded: ReviewDocument[] = [];
   const runs = new Runs({
     timers: clock.timers,
     ...(runMinutes === undefined ? {} : { runMinutes }),
     failure: (e) => `Airlock could not review this pull request: ${e instanceof Error ? e.message : String(e)}`,
     log: (line) => logged.push(line),
-    launch: launch ?? ((body, emit) => new Promise<ReviewDocument>((resolve, reject) => {
-      launched.push({ body, emit, resolve, reject });
+    discard: async (document) => { discarded.push(document); },
+    launch: launch ?? ((body, emit, signal) => new Promise<ReviewDocument>((resolve, reject) => {
+      launched.push({ body, emit, signal, resolve, reject });
     })),
   });
-  return { clock, launched, runs, logged };
+  return { clock, launched, runs, logged, discarded };
 }
 
 const doc = (id = 'r_0123456789'): ReviewDocument => ({ ...minimalDocument(), id });
@@ -165,7 +168,9 @@ describe('Runs', () => {
     launched[0]!.emit(stage('intake'));
     clock.advance(5 * 60_000 - 1);
     expect(runs.events(runId)!.finished).toBe(false);
+    expect(launched[0]!.signal.aborted).toBe(false);
     clock.advance(1);
+    expect(launched[0]!.signal.aborted).toBe(true);
     const ended = runs.events(runId)!;
     expect(ended.finished).toBe(true);
     expect(ended.past.at(-1)).toEqual({ type: 'failed', message: 'Airlock stopped this review because it ran for more than 5 minutes.' });
@@ -207,22 +212,105 @@ describe('Runs', () => {
     expect(launched).toHaveLength(1);
   });
 
-  it('close() clears every timer, refuses new starts, and sends later events nowhere', () => {
+  it('close() clears every run timer, refuses new starts, and sends later events nowhere', async () => {
     const { runs, launched, clock } = rig();
     const done = runs.start(pr(1));
     launched[0]!.emit({ type: 'done', document: doc() });
+    launched[0]!.resolve(doc());
+    await flush();
     const live = runs.start(pr(2));
     const seen: string[] = [];
     runs.events(live.runId)!.subscribe((e) => seen.push(e.type));
     expect(clock.pending).toBe(2);
-    runs.close();
-    expect(clock.pending).toBe(0);
+    const closed = runs.close();
+    // Only the bound on the wait for the running review is left.
+    expect(clock.pending).toBe(1);
     expect(() => runs.start(pr(3))).toThrow();
     launched[1]!.emit(stage('intake'));
     launched[1]!.emit({ type: 'done', document: doc() });
     expect(seen).toEqual([]);
+    launched[1]!.reject(new Error('The review was stopped.'));
+    await closed;
     expect(clock.pending).toBe(0);
     expect(done.runId).toMatch(/^run_/);
+  });
+
+  it('close() stops every running review and resolves once they have settled', async () => {
+    const { runs, launched, clock } = rig(undefined, 5);
+    runs.start(pr(1));
+    runs.start(pr(2));
+    launched[0]!.emit({ type: 'done', document: doc() });
+    launched[0]!.resolve(doc());
+    await flush();
+    // pr 2 is stopped at its ceiling, but its review has not settled yet; pr 3 is still running.
+    clock.advance(5 * 60_000);
+    const third = runs.start(pr(3));
+    expect(runs.events(third.runId)!.finished).toBe(false);
+    let resolved = false;
+    const closed = runs.close().then(() => { resolved = true; });
+    expect(launched[0]!.signal.aborted).toBe(false);
+    expect(launched[1]!.signal.aborted).toBe(true);
+    expect(launched[2]!.signal.aborted).toBe(true);
+    launched[1]!.reject(new Error('The review was stopped.'));
+    await flush();
+    expect(resolved).toBe(false);
+    launched[2]!.reject(new Error('The review was stopped.'));
+    await closed;
+    expect(resolved).toBe(true);
+    expect(clock.pending).toBe(0);
+  });
+
+  it('close() resolves after five seconds when a review does not settle', async () => {
+    const { runs, launched, clock } = rig();
+    runs.start(pr(1));
+    let resolved = false;
+    const closed = runs.close().then(() => { resolved = true; });
+    expect(launched[0]!.signal.aborted).toBe(true);
+    expect(CLOSE_WAIT_MS).toBe(5_000);
+    clock.advance(CLOSE_WAIT_MS - 1);
+    await flush();
+    expect(resolved).toBe(false);
+    clock.advance(1);
+    await closed;
+    expect(resolved).toBe(true);
+  });
+
+  it('close() with nothing running resolves at once', async () => {
+    const { runs, clock } = rig();
+    await runs.close();
+    expect(clock.pending).toBe(0);
+  });
+
+  it('a review that resolves after its ceiling is discarded and never becomes the run\'s result', async () => {
+    const { runs, launched, clock, discarded, logged } = rig(undefined, 5);
+    const { runId } = runs.start(pr(1));
+    clock.advance(5 * 60_000);
+    const late = doc('r_aaaaaaaaaa');
+    launched[0]!.emit({ type: 'done', document: late });
+    launched[0]!.resolve(late);
+    await flush();
+    expect(discarded).toEqual([late]);
+    expect(runs.events(runId)!.past.map((e) => e.type)).toEqual(['failed']);
+    expect(logged.some((l) => l.includes('r_aaaaaaaaaa') && l.includes('discarded'))).toBe(true);
+  });
+
+  it('a review that finishes in time is not discarded', async () => {
+    const { runs, launched, discarded } = rig(undefined, 5);
+    runs.start(pr(1));
+    launched[0]!.emit({ type: 'done', document: doc() });
+    launched[0]!.resolve(doc());
+    await flush();
+    expect(discarded).toEqual([]);
+  });
+
+  it('holds a ceiling above a day to a day', () => {
+    expect(MAX_RUN_MINUTES).toBe(1_440);
+    const { runs, clock } = rig(undefined, 100_000);
+    const { runId } = runs.start(pr(1));
+    clock.advance(1_440 * 60_000 - 1);
+    expect(runs.events(runId)!.finished).toBe(false);
+    clock.advance(1);
+    expect(runs.events(runId)!.past).toEqual([{ type: 'failed', message: 'Airlock stopped this review because it ran for more than 1440 minutes.' }]);
   });
 
   it('dropping keeps the finished order consistent even for a run already gone', () => {

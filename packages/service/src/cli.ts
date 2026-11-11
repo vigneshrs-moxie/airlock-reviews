@@ -42,6 +42,8 @@ export interface CliOverrides {
   cliPath?: string;
   /** Registers a handler for a stop signal and returns the function that removes it. */
   onSignal?: (signal: Signal, handler: () => void) => () => void;
+  /** Ends the process at once: a second stop signal while the running reviews are being stopped. */
+  exit?: (code: number) => void;
   env?: NodeJS.ProcessEnv;
   now?: () => Date;
 }
@@ -211,13 +213,24 @@ async function start(io: CliIo, o: CliOverrides): Promise<number> {
     io.out(`Airlock service is listening on 127.0.0.1:${config.port}.\n`);
     io.out(`Pair the extension with: ${START_HINT} -- token\n`);
 
+    // The first signal closes the port and stops the running reviews, waiting (at most five seconds) for them to dispose
+    // their workspaces. The handlers stay until then, so a second signal ends the process at once.
     const onSignal = o.onSignal ?? defaultSignals;
+    const exit = o.exit ?? ((code: number): void => { process.exit(code); });
     let removers: Array<() => void> = [];
-    await new Promise<void>((done) => {
-      removers = (['SIGINT', 'SIGTERM'] as const).map((signal) => onSignal(signal, done));
-    });
-    for (const remove of removers) remove();
-    await server.close();
+    let stopping = false;
+    try {
+      await new Promise<void>((done) => {
+        removers = (['SIGINT', 'SIGTERM'] as const).map((signal) => onSignal(signal, () => {
+          if (stopping) exit(signal === 'SIGINT' ? 130 : 143);
+          stopping = true;
+          done();
+        }));
+      });
+      await server.close();
+    } finally {
+      for (const remove of removers) remove();
+    }
     return 0;
   } finally {
     closeLog();
