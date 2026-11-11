@@ -367,13 +367,38 @@ describe('challenge', () => {
     });
 
     describe('documented intent', () => {
+      const SENTENCE = 'Offices may share a single plan when the account owner agrees in writing.';
       const packs = [pack('core', [lens('boundary')], {
-        standards: [{ name: 'calibration.md', text: 'Pauses may run 90 days.\nOffices may share a plan when the owner agrees.', dated: true }],
-        learned: [{ date: '2026-11-01', repo: 'o/r', kind: 'intended', text: 'A paused plan keeps its renewal date.' }],
+        standards: [{
+          name: 'calibration.md',
+          text: `Pauses may run 90 days.\n${SENTENCE}\nAlways use chargeIdempotencyKeyForEveryNightlyBillingRun.`,
+          dated: true,
+        }],
+        learned: [{ date: '2026-11-01', repo: 'o/r', kind: 'intended', text: 'A paused plan keeps its original renewal date when it resumes.' }],
       })];
 
+      it('drops on the whole sentence that states the intent', async () => {
+        const { r } = await run(drop('documented-intent', { path: 'x', quote: SENTENCE, where: 'standard' }), { packs });
+        expect(r.dropped).toHaveLength(1);
+        expect(r.dropped[0]!.refutation).toMatchObject({ path: 'Pack core: calibration.md', role: 'standard', quote: SENTENCE });
+      });
+
+      it('does not take a 20-character fragment of a sentence as proof', async () => {
+        const quote = 'share a single plan when';
+        expect(quote.replace(/\s+/g, '')).toHaveLength(20);
+        const { r } = await run(drop('documented-intent', { path: 'x', quote, where: 'standard' }), { packs });
+        expect(r.dropped).toEqual([]);
+        expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+      });
+
+      it('does not take a long quote of fewer than four words as proof', async () => {
+        const quote = 'Always use chargeIdempotencyKeyForEveryNightlyBillingRun.';
+        const { r } = await run(drop('documented-intent', { path: 'x', quote, where: 'standard' }), { packs });
+        expect(r.dropped).toEqual([]);
+      });
+
       it('drops on a sentence found in a standard', async () => {
-        const quote = 'Offices may share a plan when the owner agrees.';
+        const quote = SENTENCE;
         const { r, calls } = await run(drop('documented-intent', { path: 'anything', quote, where: 'standard' }), { packs });
         expect(r.kept).toEqual([]);
         expect(r.dropped[0]).toMatchObject({
@@ -384,13 +409,13 @@ describe('challenge', () => {
       });
 
       it('drops on a sentence found in the learned product facts', async () => {
-        const quote = 'A paused plan keeps its renewal date.';
+        const quote = 'A paused plan keeps its original renewal date when it resumes.';
         const { r } = await run(drop('documented-intent', { path: '', quote, where: 'standard' }), { packs });
         expect(r.dropped[0]!.refutation).toEqual({ path: 'Product facts to respect', line: null, role: 'standard', quote });
       });
 
       it('keeps the finding when the sentence is in no standard', async () => {
-        const { r } = await run(drop('documented-intent', { path: 'x', quote: 'Pauses may run for a full year.', where: 'standard' }), { packs });
+        const { r } = await run(drop('documented-intent', { path: 'x', quote: 'Pauses may run for a full year without any charge to the member.', where: 'standard' }), { packs });
         expect(r.dropped).toEqual([]);
         expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
       });
@@ -402,7 +427,7 @@ describe('challenge', () => {
       });
 
       it('keeps the finding when another ground quotes a standard', async () => {
-        const quote = 'Offices may share a plan when the owner agrees.';
+        const quote = SENTENCE;
         const { r } = await run(drop('guarded-elsewhere', { path: 'x', quote, where: 'standard' }), { packs });
         expect(r.dropped).toEqual([]);
       });

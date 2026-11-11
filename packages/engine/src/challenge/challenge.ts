@@ -126,6 +126,13 @@ const squash = (text: string): string => text.replace(/\s+/g, '');
 const hasSubstance = (quote: string): boolean =>
   quote.split('\n').map(squash).some((l) => l.length >= MIN_PROOF_CHARS && /[\p{L}\p{N}]/u.test(l));
 
+/** A quote from the standards proves intent only when it is a whole sentence: this long without whitespace, with this many words. */
+const MIN_SENTENCE_CHARS = 40;
+const MIN_SENTENCE_WORDS = 4;
+const isWholeSentence = (quote: string): boolean =>
+  squash(quote).length >= MIN_SENTENCE_CHARS
+  && quote.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length >= MIN_SENTENCE_WORDS;
+
 /** Text that ends a sentence, with a full stop added when it has none. */
 const asSentence = (text: string): string => (/[.!?]["')\]]*$/.test(text) ? text : `${text}.`);
 
@@ -137,15 +144,16 @@ type Proof = { place: Place } | { place: null; ownCode: boolean };
 const NO_PROOF: Proof = { place: null, ownCode: false };
 
 /**
- * The place a drop's refutation proves, if it does. Documented intent must quote the standards or learned entries the
- * challenger was given; every other ground must quote code, on the base side for a pre-existing fault. The whole quote
+ * The place a drop's refutation proves, if it does. Documented intent must quote a whole sentence of the standards or
+ * learned entries the challenger was given; every other ground must quote code, on the base side for a pre-existing
+ * fault. The whole quote
  * must be found, it must have substance, and on the head it must not be the finding's own lines.
  */
 async function proveDrop(item: Item, answer: ChallengeOutput, read: ReadFile, documents: StandardDocument[]): Promise<Proof> {
   const ref = answer.refutation;
   if (ref === null || !hasSubstance(ref.quote)) return NO_PROOF;
   if (answer.ground === 'documented-intent') {
-    if (ref.where !== 'standard') return NO_PROOF;
+    if (ref.where !== 'standard' || !isWholeSentence(ref.quote)) return NO_PROOF;
     const needle = squash(ref.quote);
     const doc = documents.find((d) => squash(d.text).includes(needle));
     return doc ? { place: { path: doc.name, line: null, role: 'standard', quote: ref.quote } } : NO_PROOF;
