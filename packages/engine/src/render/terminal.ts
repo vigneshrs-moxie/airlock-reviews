@@ -40,6 +40,24 @@ function wrap(text: string, prefix: string, hang: string = ' '.repeat(prefix.len
   return lines;
 }
 
+/**
+ * Makes a document string safe to print: runs of carriage returns, line feeds and tabs become one space,
+ * and every other control character (C0, DEL, C1) and the line and paragraph separators are removed.
+ */
+function clean(s: string): string {
+  return s.replace(/[\r\n\t]+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
+}
+
+/** Cleans every string in the document up front, so the renderer cannot forget a field. */
+function cleanAll<T>(value: T): T {
+  if (typeof value === 'string') return clean(value) as T;
+  if (Array.isArray(value)) return value.map(cleanAll) as T;
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, cleanAll(v)])) as T;
+  }
+  return value;
+}
+
 function paint(on: boolean, code: string, text: string): string {
   return on ? `\u001b[${code}m${text}\u001b[0m` : text;
 }
@@ -127,7 +145,8 @@ function timingTable(doc: ReviewDocument): string[] {
   return rows.map((r) => r.map((cell, c) => (c === 0 ? cell.padEnd(widths[c]!) : cell.padStart(widths[c]!))).join('  ').trimEnd());
 }
 
-export function renderReview(doc: ReviewDocument, opts: { color?: boolean } = {}): string {
+export function renderReview(input: ReviewDocument, opts: { color?: boolean } = {}): string {
+  const doc = cleanAll(input);
   const color = opts.color ?? false;
   const { pr, verdict } = doc;
   const stage = STAGE_WORDS[pr.stage];

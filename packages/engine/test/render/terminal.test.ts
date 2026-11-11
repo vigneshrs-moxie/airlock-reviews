@@ -227,4 +227,43 @@ describe('renderReview', () => {
     expect(withCost).toContain('Cost');
     expect(withCost.trimEnd().split('\n').at(-1)).toMatch(/0\.50$/);
   });
+
+  it('shows 5 files of a long standalone list past 40 files in total', () => {
+    const doc = minimalDocument();
+    doc.map = { cohorts: [], standalone: Array.from({ length: 45 }, (_, i) => `docs/d${i}.md`), links: [] };
+    const out = renderReview(doc);
+    expect(out).toContain('Standalone:\n     docs/d0.md\n     docs/d1.md\n     docs/d2.md\n     docs/d3.md\n     docs/d4.md\n     … 40 more');
+    expect(out).not.toContain('docs/d5.md');
+  });
+
+  describe('control characters', () => {
+    const evil = '\u001b[31m\u001b]0;x\u0007\r\n\u2028\u2029\u007f\u0085';
+    const dirty = (clean: string) => `${clean}${evil}${clean}`;
+    function build(wrapIn: (s: string) => string): ReviewDocument {
+      const doc = fullDocument();
+      doc.pr.title = wrapIn('Title');
+      doc.findings[0]!.title = wrapIn('Finding');
+      doc.findings[0]!.path = wrapIn('src/a.ts');
+      doc.findings[0]!.happens = wrapIn('happens');
+      doc.findings[0]!.connected[0]!.role = wrapIn('caller');
+      doc.stageErrors = [{ stage: 'lenses', cohortId: null, message: wrapIn('boom') }];
+      doc.map.cohorts[0]!.title = wrapIn('Cohort');
+      doc.dropped[0]!.reason = wrapIn('reason');
+      doc.packs = [{ id: wrapIn('core'), version: 'abcdef0123' }];
+      return doc;
+    }
+    const plain = renderReview(build((s) => `${s}${s}`));
+
+    it('leaves no control characters and forges no lines without colour', () => {
+      const out = renderReview(build(dirty), { color: false });
+      for (const bad of ['\u001b', '\u0007', '\r', '\u2028', '\u2029', '\u007f', '\u0085']) expect(out).not.toContain(bad);
+      expect(out.split('\n').length).toBe(plain.split('\n').length);
+    });
+
+    it('leaves only our own colour sequences with colour', () => {
+      const out = renderReview(build(dirty), { color: true });
+      expect(out.replace(/\u001b\[[0-9;]*m/g, '')).not.toContain('\u001b');
+      expect(out.split('\n').length).toBe(plain.split('\n').length);
+    });
+  });
 });
