@@ -24,8 +24,11 @@ const HEAD = 'b'.repeat(40);
 const REPO = 'acme/widgets';
 const NUMBER = 7;
 const FILES_URL = `https://github.com/${REPO}/pull/${NUMBER}/files`;
-/** Long enough for the panel to notice the service went or came back: its check every 5 seconds, then one hello. */
-const RETRY_WAIT = { timeout: 15_000 };
+/**
+ * Long enough for the panel to notice the service went or came back: it says Not running after two missed checks five
+ * seconds apart, and while offline it checks again every five seconds.
+ */
+const RETRY_WAIT = { timeout: 25_000 };
 
 const pr: PrSummary = PrSummarySchema.parse({
   repo: REPO, number: NUMBER, title: 'Let a person pause a subscription', author: 'alice', viewer: 'alice', isOwn: true,
@@ -350,7 +353,8 @@ test('9. the service starts again: the panel returns to the review by itself, th
   await expect(panel.getByText('Shown from before the service stopped.')).toHaveCount(0);
   await expect(panel.getByRole('heading', { name: verdictWords(document.verdict.label, document.pr.stage) })).toBeVisible();
   await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
-  await panel.getByRole('button', { name: 'Dismissed: 1' }).click();
+  // The Dismissed fold was left open in step 6, and the review is the same one on screen, so it is still open.
+  await expect(panel.getByRole('button', { name: 'Dismissed: 1' })).toHaveAttribute('aria-expanded', 'true');
   await expect(panel.getByText(top[1]!.title, { exact: true })).toBeVisible();
   await expect(panel.getByText('Wrong', { exact: true })).toBeVisible();
   await expect(panel.getByText(WRONG_LINE, { exact: true })).toBeVisible();
