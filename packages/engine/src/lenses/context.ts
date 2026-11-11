@@ -80,24 +80,32 @@ export function readerOf(pr: PrInfo): string {
     : 'The reader is a reviewer deciding whether to ask the author for changes, who will pass on what you find in their own words.';
 }
 
-/** A named piece of the instructions' standard: one pack standard, or one list of learned entries. */
+/**
+ * A named piece of the instructions' standard: one pack standard, or one list of learned entries. `dated` is true for a
+ * standard kept as dated entries (the corrections log).
+ */
 export interface StandardDocument {
   name: string;
   text: string;
+  dated: boolean;
 }
 
 /** Every standard of every pack, named `<pack title>: <standard name>`. */
 export function standardDocuments(packs: Pack[]): StandardDocument[] {
-  return packs.flatMap((p) => p.standards.map((s) => ({ name: `${p.title}: ${s.name}`, text: s.text.trim() })));
+  return packs.flatMap((p) => p.standards.map((s) => ({ name: `${p.title}: ${s.name}`, text: s.text.trim(), dated: s.dated })));
 }
+
+/** The heading each kind of learned entry is listed under. */
+export const learnedListName = (kind: 'wrong' | 'intended'): string =>
+  kind === 'wrong' ? 'Things flagged before that were wrong' : 'Product facts to respect';
 
 /** Learned entries of every pack as two lists, one entry per line; each list is left out when empty. */
 export function learnedDocuments(packs: Pack[]): StandardDocument[] {
-  const list = (name: string, kind: 'wrong' | 'intended'): StandardDocument[] => {
+  const list = (kind: 'wrong' | 'intended'): StandardDocument[] => {
     const lines = packs.flatMap((p) => p.learned.filter((e) => e.kind === kind).map((e) => `- ${oneLine(e.text)}`));
-    return lines.length === 0 ? [] : [{ name, text: lines.join('\n') }];
+    return lines.length === 0 ? [] : [{ name: learnedListName(kind), text: lines.join('\n'), dated: false }];
   };
-  return [...list('Things flagged before that were wrong', 'wrong'), ...list('Product facts to respect', 'intended')];
+  return [...list('wrong'), ...list('intended')];
 }
 
 const section = (title: string, docs: StandardDocument[]): string =>

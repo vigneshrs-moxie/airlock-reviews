@@ -4,10 +4,7 @@ import { z } from 'zod';
 import { asMaterial, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner, AgentUsage } from '../agent/runner.js';
 import { budgetedDiff } from '../lenses/cohort-lens.js';
-import {
-  cohortOutline, factsBlock, instructionsFor, learnedDocuments, prBlock, sendRequest, standaloneCohort, standardDocuments,
-  tierOf,
-} from '../lenses/context.js';
+import { cohortOutline, factsBlock, instructionsFor, prBlock, sendRequest, standaloneCohort, tierOf } from '../lenses/context.js';
 import type { LensContext } from '../lenses/context.js';
 import { SEVERITY_RANK } from '../rules/sweep.js';
 import { createEvidence, proveDrop } from './proof.js';
@@ -124,9 +121,7 @@ async function applyAnswer(item: Item, answer: ChallengeOutput, evidence: Eviden
         return { kept: { ...item, checked: `${asSentence(said)}${UNCONFIRMED}` } };
       }
       const { anchor: _anchor, ...candidate } = item;
-      const { path, line, role } = proof.place;
-      const where = role === 'standard' ? `a sentence in ${path}` : `${path}:${line} on the ${role}`;
-      const reason = `${answer.ground}: ${answer.explanation.trim()} (proof: ${where})`;
+      const reason = `${answer.ground}: ${answer.explanation.trim()} (proof: ${proof.source})`;
       return { dropped: { candidate, stage: 'challenge', reason, refutation: proof.place } };
     }
     case 'downgrade':
@@ -158,7 +153,7 @@ export async function challenge(
   }
 
   const instructions = instructionsFor(await loadTemplate('challenge'), ctx.packs, null);
-  const evidence = createEvidence(read, ctx.files, [...standardDocuments(ctx.packs), ...learnedDocuments(ctx.packs)]);
+  const evidence = createEvidence(read, ctx.files, ctx.packs);
   const tier = tierOf(ctx.tiers);
   type ItemResult = Outcome & { usage?: AgentUsage; error?: StageError };
   const failed = (item: Item, message: string, usage: AgentUsage | undefined): ItemResult => ({
