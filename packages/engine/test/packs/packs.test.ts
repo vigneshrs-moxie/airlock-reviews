@@ -35,7 +35,9 @@ describe('loadPack', () => {
     });
     expect(pack.rules[0]!.body.trim()).toBe('Always escape user output.');
     expect(pack.rules[1]).toMatchObject({ severityFloor: 'note', sourcePrs: [], origin: '' });
-    expect(pack.lenses).toEqual([{ id: 'security', title: 'Security', instructions: 'Look for security problems.\n' }]);
+    expect(pack.lenses).toEqual([
+      { id: 'security', title: 'Security', instructions: 'Look for security problems.\n', onlyWhenAlone: false },
+    ]);
     expect(pack.standards.map((s) => [s.name, s.dated])).toEqual([['Conventions', true], ['Style', false]]);
     expect(pack.standards[0]!.text).toContain('Intro line.');
     expect(pack.stageRules).toHaveLength(2);
@@ -118,6 +120,29 @@ describe('loadPack validation', () => {
     const dir = await withYaml(extra);
     await expect(loadPack(dir)).rejects.toThrow(new RegExp(`pack\\.yaml.*${section}`));
   });
+
+  it('reads onlyWhenAlone on a lens and defaults it to false', async () => {
+    const dir = await tmp();
+    await mkdir(join(dir, 'lenses'));
+    await writeFile(join(dir, 'lenses', 'q.md'), 'text');
+    await writeFile(join(dir, 'pack.yaml'), [
+      'id: v', 'title: V', 'lenses:',
+      '  - { id: alone, title: Alone, file: lenses/q.md, onlyWhenAlone: true }',
+      '  - { id: always, title: Always, file: lenses/q.md }',
+      '  - { id: off, title: Off, file: lenses/q.md, onlyWhenAlone: false }', '',
+    ].join('\n'));
+    const pack = await loadPack(dir);
+    expect(pack.lenses.map((l) => [l.id, l.onlyWhenAlone])).toEqual([['alone', true], ['always', false], ['off', false]]);
+  });
+
+  it.each([['yes', 'yes'], ['a string', '"true"'], ['a number', '1']])(
+    'rejects a lens whose onlyWhenAlone is %s', async (_n, value) => {
+      const dir = await tmp();
+      await mkdir(join(dir, 'lenses'));
+      await writeFile(join(dir, 'lenses', 'q.md'), 'text');
+      await writeFile(join(dir, 'pack.yaml'), `id: v\ntitle: V\nlenses:\n  - { id: q, title: Q, file: lenses/q.md, onlyWhenAlone: ${value} }\n`);
+      await expect(loadPack(dir)).rejects.toThrow(/pack\.yaml.*"onlyWhenAlone" must be true or false/);
+    });
 
   it('defaults a link rule transform to none', async () => {
     const dir = await withYaml('linkRules:\n  - { id: l, from: f, capture: c, searchIn: [a], detail: d }\n');

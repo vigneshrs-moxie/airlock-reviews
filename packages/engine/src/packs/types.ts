@@ -5,7 +5,8 @@ export interface Rule {
   id: string; title: string; paths: string[]; severityFloor: Severity; sourcePrs: number[];
   origin: string; body: string; packId: string;
 }
-export interface LensDef { id: string; title: string; instructions: string }
+/** `onlyWhenAlone`: the lens runs only when no other selected pack has a lens. */
+export interface LensDef { id: string; title: string; instructions: string; onlyWhenAlone?: boolean }
 export interface CheckDef {
   id: string; kind: 'added-line-matches' | 'file-pair' | 'new-file-requires' | 'file-touched';
   paths: string[]; pattern?: string; exceptPaths?: string[];
