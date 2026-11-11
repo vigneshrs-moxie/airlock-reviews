@@ -19,7 +19,7 @@ const CASES = [
 ];
 
 const judgeAnswer = () => ({
-  matches: ['K1', 'K2'].map((knownId) => ({ knownId, itemId: 'f1', partial: false, reason: 'Same cause.' })),
+  matches: ['K1', 'K2'].map((knownId) => ({ knownId, items: [{ itemId: 'f1', partial: false, reason: 'Same cause.' }], reason: 'Same cause.' })),
 });
 
 function reviewFor(req: ReviewRequest): ReviewDocument {
@@ -143,7 +143,7 @@ describe('airlock-replay', () => {
     });
     expect(t.out).toEqual([
       join(runDir, 'report.md'),
-      'Half of the known problems in the top list: yes',
+      "Half of the known problems in the top list: yes so far: this run covers 1 of the dataset's 2 known problems; 1 pull request was not run (#2).",
       'Clean pull requests stay clean: yes',
     ]);
     expect(t.err).toContain('pr1: start');
@@ -209,8 +209,30 @@ describe('airlock-replay', () => {
     expect(err).toContain('no such commit');
     expect(err).toMatch(/1 case did not finish: pr2/);
     expect(t.out[0]).toBe(join(work, RUN_ID, 'report.md'));
-    expect(t.out[1]).toBe('Half of the known problems in the top list: yes');
+    // pr2 did not finish, so the answer holds only so far.
+    expect(t.out[1]).toBe("Half of the known problems in the top list: yes so far: this run covers 2 of the dataset's 2 known problems.");
     expect((await stat(join(work, RUN_ID, 'report.md'))).isFile()).toBe(true);
+
+    const complete = harness();
+    const u = io();
+    expect(await keepingEnv(() => main(['run', '--cases', 'all', '--out', join(work, 'complete')], u.io, complete.overrides))).toBe(0);
+    expect(u.out[1]).toBe('Half of the known problems in the top list: yes');
+  });
+
+  it('stops at a usage limit, says how to continue and returns 0', async () => {
+    const h = harness({ review: (req) => (req.number === 1 ? {
+      ...reviewFor(req),
+      verdict: { label: 'incomplete', sentence: 's', counts: { block: 0, fix: 0, ask: 0, note: 1 } },
+      stageErrors: [{ stage: 'lenses', cohortId: null, message: 'limit', kind: 'usage-limit' }],
+    } : reviewFor(req)) });
+    const t = io();
+    const code = await keepingEnv(() => main(['run', '--cases', 'all', '--out', work], t.io, h.overrides));
+    expect(code).toBe(0);
+    expect(h.requests.map((r) => r.number)).toEqual([1]);
+    expect(t.err).toContain(
+      "Claude's usage limit was reached during pr1. The run stopped there; 2 cases were not started. Run the same command again later to continue.",
+    );
+    expect(t.out[0]).toBe(join(work, RUN_ID, 'report.md'));
   });
 
   it('prints text from outside without terminal control characters, each message on one line', async () => {

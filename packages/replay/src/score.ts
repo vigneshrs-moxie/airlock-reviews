@@ -27,7 +27,10 @@ export interface CaseScore {
   crossFileInTop: number;
   findingsShown: number;
   blockOrFixShown: number;
+  /** The review's elapsed time: from its start to its end when it records both, else the sum of its stages' times. */
   ms: number;
+  /** True when `ms` is the sum of stage times, which can overlap, so it is only about the time that passed. */
+  msSummed: boolean;
   inputTokens: number;
   outputTokens: number;
   agentRuns: number;
@@ -39,7 +42,15 @@ export interface RunSummary {
   model: string;
   depth: Depth;
   cases: CaseScore[];
-  /** Over positive cases only, as are the recalls. */
+  /** Scores of the secondary cases in the run, also in `cases`; no headline figure counts them. */
+  secondary: CaseScore[];
+  /** Known problems of every positive case in the dataset, whether run or not. */
+  datasetKnownTotal: number;
+  /** Positive cases in the dataset. */
+  datasetPositives: number;
+  /** Ids of the dataset's positive cases that are not in this run, in dataset order. */
+  positivesNotRun: string[];
+  /** Over positive cases in the run only, as are the recalls. */
   knownTotal: number;
   inTopTotal: number;
   recallTop: number;
@@ -53,10 +64,21 @@ export interface RunSummary {
   /** Positive cases whose review did not finish; their known problems stay in the recall denominator. */
   positivesIncomplete: number;
   negativesIncomplete: number;
-  totals: { ms: number; inputTokens: number; outputTokens: number; agentRuns: number };
+  /** From the first case start to the last case end of the run, over every call that worked on it; null when not known. */
+  wallClock: { startedAt: string; finishedAt: string } | null;
+  /** `ms` is the wall clock when there is one, else the sum of the cases' times (`msSummed`). */
+  totals: { ms: number; msSummed: boolean; inputTokens: number; outputTokens: number; agentRuns: number };
+  /**
+   * Present when the run stopped early because Claude's usage limit was reached during `caseId`: the cases in
+   * `notStarted` were left untouched. Only the run itself knows this; a summary rebuilt from the folder does not have it.
+   */
+  stopped?: { reason: 'usage-limit'; caseId: string; notStarted: string[] };
   meets: {
-    /** 'not tested' when the run has no positive cases. */
-    halfInTop: boolean | 'not tested';
+    /**
+     * 'not tested' when the run has no positive cases. true or false only when every positive case in the dataset is
+     * in the run and finished; otherwise 'yes so far' or 'no so far'.
+     */
+    halfInTop: boolean | 'yes so far' | 'no so far' | 'not tested';
     /**
      * 'not tested' with no negative cases; else 'needs a human look' when one shows a Block or Fix;
      * else 'incomplete' when one's review did not finish; else true.
@@ -98,6 +120,13 @@ export function sharedMatchItems(c: ReplayCase, matches: Match[]): Map<string, s
   return byItem;
 }
 
+/** Milliseconds from `startedAt` to `finishedAt`; null when either cannot be read or the end comes first. */
+function between(startedAt: string | undefined, finishedAt: string): number | null {
+  if (startedAt === undefined) return null;
+  const ms = Date.parse(finishedAt) - Date.parse(startedAt);
+  return Number.isFinite(ms) && ms >= 0 ? ms : null;
+}
+
 /** Scores one case from its review document and the judge's matches. */
 export function scoreCase(c: ReplayCase, doc: ReviewDocument, matches: Match[]): CaseScore {
   const byKnown = new Map(matches.map((m) => [m.knownId, m]));
@@ -108,10 +137,13 @@ export function scoreCase(c: ReplayCase, doc: ReviewDocument, matches: Match[]):
     lostAt: { lenses: 0, schema: 0, anchor: 0, merge: 0, challenge: 0, select: 0 },
     crossFileKnown: 0, crossFileInTop: 0, findingsShown: doc.findings.length,
     blockOrFixShown: doc.findings.filter((f) => f.severity === 'block' || f.severity === 'fix').length,
-    ms: 0, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: doc.verdict.label,
+    ms: 0, msSummed: false, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: doc.verdict.label,
   };
+  // `createdAt` is when the document was assembled, at the review's end, once the review records its start.
+  const elapsed = between(doc.startedAt, doc.createdAt);
+  s.ms = elapsed ?? sum(doc.timings, (t) => t.ms);
+  s.msSummed = elapsed === null;
   for (const t of doc.timings) {
-    s.ms += t.ms;
     s.inputTokens += t.inputTokens;
     s.outputTokens += t.outputTokens;
     s.agentRuns += t.agentRuns;
@@ -149,9 +181,13 @@ function sum<T>(items: T[], pick: (item: T) => number): number {
 
 /**
  * Totals a run. Recalls are over positive cases only (0 when there are none); the kind of
- * each case is taken from `cases`, and a score with no case there is an error.
+ * each case is taken from `cases`, and a score with no case there is an error. `dataset` is the
+ * whole dataset (default `cases`): the summary says how much of it the run covers.
  */
-export function summarise(runId: string, model: string, depth: Depth, scores: CaseScore[], cases: ReplayCase[]): RunSummary {
+export function summarise(
+  runId: string, model: string, depth: Depth, scores: CaseScore[], cases: ReplayCase[], dataset: ReplayCase[] = cases,
+  wallClock: RunSummary['wallClock'] = null,
+): RunSummary {
   const kindOf = new Map(cases.map((c) => [c.id, c.kind]));
   const kind = (s: CaseScore): ReplayCase['kind'] => {
     const k = kindOf.get(s.caseId);
@@ -167,8 +203,16 @@ export function summarise(runId: string, model: string, depth: Depth, scores: Ca
   const negativesWithBlockOrFix = negative.filter((s) => s.blockOrFixShown > 0).length;
   const incomplete = (s: CaseScore): boolean => s.verdict === 'incomplete';
   const negativesIncomplete = negative.filter(incomplete).length;
+  const datasetPositives = dataset.filter((c) => c.kind === 'positive');
+  const run = new Set(scores.map((s) => s.caseId));
+  const positivesNotRun = datasetPositives.filter((c) => !run.has(c.id)).map((c) => c.id);
+  const wholeDataset = positivesNotRun.length === 0 && !positive.some(incomplete);
+  const half = recallTop >= 0.5;
+  const wallMs = wallClock === null ? null : between(wallClock.startedAt, wallClock.finishedAt);
   return {
-    runId, model, depth, cases: scores, knownTotal, inTopTotal, recallTop,
+    runId, model, depth, cases: scores, secondary: scores.filter((s) => kind(s) === 'secondary'),
+    datasetKnownTotal: sum(datasetPositives, (c) => c.known.length), datasetPositives: datasetPositives.length, positivesNotRun,
+    knownTotal, inTopTotal, recallTop,
     recallShown: ratio(sum(positive, (s) => s.shown), knownTotal),
     recallTopDefects: ratio(sum(positive, (s) => s.defectsInTop), sum(positive, (s) => s.knownDefects)),
     crossFileRecallTop: ratio(sum(positive, (s) => s.crossFileInTop), sum(positive, (s) => s.crossFileKnown)),
@@ -177,12 +221,13 @@ export function summarise(runId: string, model: string, depth: Depth, scores: Ca
     incompleteCases: scores.filter(incomplete).map((s) => s.caseId),
     positivesIncomplete: positive.filter(incomplete).length,
     negativesIncomplete,
+    wallClock,
     totals: {
-      ms: sum(scores, (s) => s.ms), inputTokens: sum(scores, (s) => s.inputTokens),
+      ms: wallMs ?? sum(scores, (s) => s.ms), msSummed: wallMs === null, inputTokens: sum(scores, (s) => s.inputTokens),
       outputTokens: sum(scores, (s) => s.outputTokens), agentRuns: sum(scores, (s) => s.agentRuns),
     },
     meets: {
-      halfInTop: positive.length === 0 ? 'not tested' : recallTop >= 0.5,
+      halfInTop: positive.length === 0 ? 'not tested' : wholeDataset ? half : half ? 'yes so far' : 'no so far',
       cleanControls: negative.length === 0 ? 'not tested'
         : negativesWithBlockOrFix > 0 ? 'needs a human look'
           : negativesIncomplete > 0 ? 'incomplete'

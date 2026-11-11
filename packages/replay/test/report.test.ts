@@ -218,6 +218,96 @@ describe('renderReport', () => {
     expect(second).not.toMatch(/\bYes\b/);
   });
 
+  describe('coverage of the dataset and secondary cases', () => {
+    const positive = (n: number, known: number) =>
+      replayCase({ id: `pr${n}`, pr: n, title: `Case ${n}`, known: Array.from({ length: known }, (_, i) => problem({ id: `P${n}-${i}` })) });
+    const dataset = [positive(100, 5), positive(171, 9), positive(126, 2), positive(129, 3), positive(143, 4), positive(146, 3)];
+    const secondary = replayCase({ id: 'pr220', pr: 220, title: 'Fixes described in the body', kind: 'secondary', known: [problem({ id: 'S1', summary: 'The secondary problem.' })] });
+
+    function render(run: ReplayCase[], inTop: Record<string, number>, all: ReplayCase[] = dataset) {
+      const details: Record<string, { doc: ReviewDocument; matches: Match[] }> = {};
+      for (const c of run) {
+        const d = doc({ findings: [finding('f1', 'top')] });
+        details[c.id] = { doc: d, matches: c.known.map((k, i) => (i < (inTop[c.id] ?? 0) ? match(k.id, 'top', 'f1') : match(k.id, 'none', null))) };
+      }
+      const scores = run.map((c) => scoreCase(c, details[c.id]!.doc, details[c.id]!.matches));
+      const summary = summarise('r', 'm', 'standard', scores, run, all);
+      return { summary, text: renderReport(summary, all, details) };
+    }
+
+    it('a partial run says so far, how much of the dataset it covers and which pull requests were not run', () => {
+      const run = dataset.filter((c) => [129, 143, 146].includes(c.pr));
+      const { text } = render(run, { pr129: 3, pr143: 3, pr146: 1 });
+      const first = section(text, 'The two tests').split('\n').find((l) => l.startsWith('1. '))!;
+      expect(first).toBe('1. At least half of the known problems should be in the top five. 7 of 10 were (70%). ' +
+        "Yes so far: this run covers 10 of the dataset's 26 known problems; 3 pull requests were not run (#100, #126, #171).");
+    });
+
+    it('a run with every positive case answers Yes or No', () => {
+      const { text } = render(dataset, { pr100: 5, pr171: 9 });
+      const first = section(text, 'The two tests').split('\n').find((l) => l.startsWith('1. '))!;
+      expect(first).toBe('1. At least half of the known problems should be in the top five. 14 of 26 were (54%). Yes.');
+    });
+
+    it('secondary cases have their own section and appear in no headline', () => {
+      const run = [...dataset, secondary];
+      const { text, summary } = render(run, { pr100: 5, pr171: 9, pr220: 1 }, run);
+      expect(summary.knownTotal).toBe(26);
+      const own = section(text, 'Secondary cases (not counted)');
+      expect(own).toContain('| Pull request | Size (lines) | Known problems | In top five | Shown | Not shown |');
+      expect(own).toMatch(/\| #220 Fixes described in the body \| 120 \| 1 \| 1 \| 1 \| 0 \|/);
+      for (const heading of ['The two tests', 'Other numbers', 'Each pull request', 'What was missed']) {
+        expect(section(text, heading), heading).not.toContain('#220');
+      }
+      expect(render(dataset, { pr100: 5, pr171: 9 }).text).not.toContain('Secondary cases');
+    });
+  });
+
+  describe('the other items the judge named, and merges in words', () => {
+    const c = replayCase({ id: 'a', pr: 10, title: 'Others', known: ['A1', 'A2', 'A3'].map((id) => problem({ id, summary: `Summary of ${id}.` })) });
+    const d = doc({
+      findings: [finding('f1', 'top', { title: 'Rows stay claimed' }), finding('f2', 'also', { title: 'Second look' })],
+      dropped: [dropped('d1', 'challenge', 'Guarded.'), dropped('m1', 'merge', 'Merged with a finding that is gone.')],
+      questions: [{ text: 'Who reads this?', cohortId: null, source: { pack: 'core', lens: null, ruleId: null } }],
+      verdict: { label: 'incomplete', sentence: 's', counts: { block: 0, fix: 0, ask: 0, note: 0 } },
+      stageErrors: [{ stage: 'merge', cohortId: null, message: 'The merge request failed.' }],
+    });
+    const matches: Match[] = [
+      { ...match('A1', 'also', 'f2'), others: [{ itemId: 'q1', where: 'question', partial: false }, { itemId: 'd1', where: 'dropped', partial: true }] },
+      { ...match('A2', 'dropped', 'm1'), others: [] },
+      { ...match('A3', 'also', 'f2'), others: [{ itemId: 'd1', where: 'dropped', partial: false }] },
+    ];
+    const text = (): string => {
+      const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, matches)], [c]);
+      return renderReport(summary, [c], { a: { doc: d, matches } });
+    };
+
+    it('lists the other items under each missed problem, with where each ended up', () => {
+      const missed = section(text(), 'What was missed');
+      expect(missed).toContain('  - The judge also named: q1, returned as a question; d1 (a partial match), dropped by the challenge.');
+    });
+
+    it('lists the other items under each shared problem', () => {
+      const shared = section(text(), 'One finding matched to several known problems');
+      expect(shared).toContain('- #10 Others: f2 (Second look) matched A1 and A3.');
+      expect(shared).toContain('  - For A1 the judge also named: q1, returned as a question; d1 (a partial match), dropped by the challenge.');
+      expect(shared).toContain('  - For A3 the judge also named: d1, dropped by the challenge.');
+    });
+
+    it('says merge in words wherever a stage is named', () => {
+      const report = text();
+      expect(section(report, 'What was missed')).toContain('It was found, then merged into another finding. Its reason: Merged with a finding that is gone.');
+      expect(section(report, 'Incomplete reviews')).toContain('  - merged into another finding: The merge request failed.');
+      expect(report).not.toMatch(/\bmerge:/);
+    });
+
+    it('a match saved without others reads as having none', () => {
+      const old: Match[] = c.known.map((k) => match(k.id, 'none', null));
+      const summary = summarise('r', 'm', 'standard', [scoreCase(c, doc(), old)], [c]);
+      expect(section(renderReport(summary, [c], { a: { doc: doc(), matches: old } }), 'What was missed')).not.toContain('also named');
+    });
+  });
+
   it('lists a positive case with no details as details not available', () => {
     const c = replayCase({ id: 'a', pr: 10, title: 'Lost', known: [problem({ id: 'A1' })] });
     const summary = summarise('r', 'm', 'standard', [scoreCase(c, doc(), [])], [c]);
@@ -342,8 +432,20 @@ describe('renderReport', () => {
   it('gives time and tokens per case and in total', () => {
     const { text } = scenario();
     const time = section(text, 'Time and tokens');
-    expect(time).toMatch(/\| #100 Announcements \| 2 min 5 s \| 120,000 \| 8,000 \| 9 \|/);
-    expect(time).toMatch(/\| Total \| 3 min 6 s \| 170,100 \| 10,010 \| 15 \|/);
+    // These reviews do not record their start, so each time is the sum of its stages: about.
+    expect(time).toMatch(/\| #100 Announcements \| about 2 min 5 s \| 120,000 \| 8,000 \| 9 \|/);
+    expect(time).toMatch(/\| Total \| about 3 min 6 s \| 170,100 \| 10,010 \| 15 \|/);
+  });
+
+  it('gives elapsed time for a review that records its start, and the run\'s wall clock as the total', () => {
+    const c = replayCase({ id: 'a', pr: 10, title: 'Timed', known: [] , kind: 'negative' });
+    const d = doc({ startedAt: '2026-11-10T09:00:00.000Z', createdAt: '2026-11-10T09:07:10.000Z', timings: [timing(900_000, 1, 1, 1)] });
+    const wallClock = { startedAt: '2026-11-10T08:59:58.000Z', finishedAt: '2026-11-10T09:08:00.000Z' };
+    const summary = summarise('r', 'm', 'standard', [scoreCase(c, d, [])], [c], [c], wallClock);
+    const time = section(renderReport(summary, [c], { a: { doc: d, matches: [] } }), 'Time and tokens');
+    expect(time).toMatch(/\| #10 Timed \| 7 min 10 s \|/);
+    expect(time).toMatch(/\| Total \| 8 min 2 s \|/);
+    expect(time).toContain('The total is the time from the first case\'s start to the last case\'s end');
   });
 
   it('closes with how to read the numbers', () => {
@@ -352,5 +454,6 @@ describe('renderReport', () => {
     expect(how).toContain('withheld');
     expect(how).toContain('rule sheet');
     expect(how).toContain('next pull requests');
+    expect(how).toContain('title and description as they stood when the senior reviewer reviewed it');
   });
 });

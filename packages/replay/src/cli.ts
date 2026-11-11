@@ -7,6 +7,7 @@ import { abortOnExitSignals, cleanForTerminal, createSdkRunner, realExec, syncKi
 import { DepthSchema } from '@airlock/shared';
 import { loadCases, pickCases } from './dataset.js';
 import type { ReplayCase } from './dataset.js';
+import { coverage, halfInTopWord } from './report.js';
 import { checkRunId, HOME_FOLDER, loadRun, runReplay, saveRunReport } from './run.js';
 import type { CaseEvent, ReplayDeps } from './run.js';
 
@@ -151,8 +152,16 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
     const n = unfinished.length;
     io.err(`${n} ${n === 1 ? 'case' : 'cases'} did not finish: ${clean(unfinished.join(', '))}. The report lists ${n === 1 ? 'it' : 'them'}.`);
   }
+  if (summary.stopped) {
+    const n = summary.stopped.notStarted.length;
+    io.err(
+      `Claude's usage limit was reached during ${clean(summary.stopped.caseId)}. ` +
+        `The run stopped there; ${n} ${n === 1 ? 'case was' : 'cases were'} not started. Run the same command again later to continue.`,
+    );
+  }
   io.out(clean(join(opts.out, summary.runId, 'report.md')));
-  io.out(`Half of the known problems in the top list: ${word(summary.meets.halfInTop)}`);
+  const covered = coverage(summary, all);
+  io.out(`Half of the known problems in the top list: ${halfInTopWord(summary.meets.halfInTop).toLowerCase()}${covered === null ? '' : `: ${clean(covered)}.`}`);
   io.out(`Clean pull requests stay clean: ${word(summary.meets.cleanControls)}`);
   return 0;
 }
