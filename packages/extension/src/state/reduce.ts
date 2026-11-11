@@ -32,8 +32,8 @@ export interface Progress {
 export type PanelState =
   | { kind: 'loading' }
   | { kind: 'no-pr' }
-  /** `review` or `progress`: what was on screen when the service stopped answering, kept readable. */
-  | { kind: 'offline'; review?: ReviewView; progress?: Progress }
+  /** `review`, `ready` or `progress`: what was on screen when the service stopped answering, kept readable. */
+  | { kind: 'offline'; review?: ReviewView; ready?: PrSummary; progress?: Progress }
   /** `message`: the service's answer to a pairing attempt, or why the typed token was not sent. */
   | { kind: 'unpaired'; message?: string }
   /** `notice`: why the last action was refused. `busy`: an action is in flight. */
@@ -128,6 +128,7 @@ export function reduce(state: PanelState, action: Action): PanelState {
     case 'offline':
       if (state.kind === 'offline') return state;
       if (state.kind === 'review') return { kind: 'offline', review: { pr: state.pr, latest: state.latest, stale: state.stale } };
+      if (state.kind === 'ready') return { kind: 'offline', ready: state.pr };
       if (state.kind === 'running') {
         return { kind: 'offline', progress: { pr: state.pr, brief: state.brief, map: state.map, startedAt: action.startedAt ?? null } };
       }

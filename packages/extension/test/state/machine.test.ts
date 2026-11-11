@@ -222,6 +222,10 @@ describe('startPanel: noticing the service stop while nothing is running (Task 1
     expect(h.timers.delays()).toEqual([WATCH_MS]);
 
     h.svc.down = true;
+    // One unanswered check changes nothing; the second in a row goes offline.
+    h.timers.fire();
+    await settle();
+    expect(h.last()).toBe(shown);
     h.timers.fire();
     expect(await until(h, 'offline')).toEqual({ kind: 'offline', review: { pr: shown.pr, latest: shown.latest, stale: false } });
     expect(h.timers.delays()).toEqual([OFFLINE_RETRY_MS]);
@@ -233,12 +237,42 @@ describe('startPanel: noticing the service stop while nothing is running (Task 1
     expect(h.states.map((s) => s.kind)).toEqual(['loading', 'review', 'offline', 'review']);
   });
 
-  it('checks on Ready too', async () => {
+  it('checks on Ready too, and keeps the pull request Ready showed', async () => {
     const h = harness();
-    await until(h, 'ready');
+    const ready = await until(h, 'ready');
     h.svc.down = true;
     h.timers.fire();
-    expect(await until(h, 'offline')).toEqual({ kind: 'offline' });
+    await settle();
+    h.timers.fire();
+    expect(await until(h, 'offline')).toEqual({ kind: 'offline', ready: ready.pr });
+    h.svc.down = false;
+    h.timers.fire();
+    expect(await until(h, 'ready')).toEqual(ready);
+  });
+
+  it('goes offline only after two unanswered checks in a row: an answered one starts the count again', async () => {
+    const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary())) });
+    const shown = await until(h, 'review');
+    for (const down of [true, false, true, false, true]) {
+      h.svc.down = down;
+      h.timers.fire();
+      await settle();
+      expect(h.last()).toBe(shown);
+      expect(h.timers.delays()).toEqual([WATCH_MS]);
+    }
+    h.svc.down = true;
+    h.timers.fire();
+    await until(h, 'offline');
+    expect(h.states.map((s) => s.kind)).toEqual(['loading', 'review', 'offline']);
+  });
+
+  it('goes to the Pair screen when a check says the service is not paired', async () => {
+    const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary())) });
+    await until(h, 'review');
+    h.svc.paired = false;
+    h.timers.fire();
+    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired' });
+    expect(h.timers.delays()).toEqual([]);
   });
 
   it('checks once at a time, after a review that was started finishes too', async () => {

@@ -2,7 +2,7 @@ import type { Timers } from '../client/timers';
 import type { PanelState, UserAction } from '../state/reduce';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Frame, connectionOf, useAnnounce } from './Frame';
-import { Offline } from './Offline';
+import { KeptProgress, OfflineCard } from './Offline';
 import { Pair } from './Pair';
 import { Problem } from './Problem';
 import { Ready } from './Ready';
@@ -60,26 +60,52 @@ function knownOf(state: PanelState): { pr: PrSummary | null; packs: readonly Pac
     case 'review': return { pr: state.pr, packs: state.latest.document.packs };
     case 'offline':
       if (state.review !== undefined) return { pr: state.review.pr, packs: state.review.latest.document.packs };
-      return { pr: state.progress?.pr ?? null, packs: [] };
+      return { pr: state.ready ?? state.progress?.pr ?? null, packs: [] };
     default: return { pr: null, packs: [] };
   }
 }
 
-function Body({ state, dispatch, timers, onJump, onDismiss, defaultDepth }: Pick<PanelScreenProps, 'state' | 'dispatch' | 'timers' | 'onJump' | 'defaultDepth'> & { onDismiss: (finding: Finding) => void }) {
+/** Keyed so a different pull request or a new head starts with its own choices. */
+const readyKey = (pr: PrSummary): string => `${pr.repo}#${pr.number}@${pr.headSha}`;
+
+type BodyProps = Pick<PanelScreenProps, 'state' | 'dispatch' | 'timers' | 'onJump' | 'defaultDepth'> & { onDismiss: (finding: Finding) => void };
+
+/**
+ * The screen for the state. A review, or Ready, kept while the service is away is drawn by the same keyed element as
+ * when it is live, so its own state (the open finding, the ticks, the depth and pack choices) survives the flip.
+ */
+function screenFor({ state, dispatch, timers, onJump, onDismiss, defaultDepth }: BodyProps) {
   const t = timers ? { timers } : {};
   const review = { ...(onJump ? { onJump } : {}), onDismiss };
   switch (state.kind) {
     case 'loading': return <p className="muted">Looking at this pull request…</p>;
     case 'no-pr': return <p className="muted">Open a pull request on GitHub and Airlock will appear here.</p>;
-    case 'offline': return <Offline state={state} dispatch={dispatch} {...t} {...review} />;
+    case 'offline':
+      if (state.review !== undefined) {
+        return <Verdict key={state.review.latest.document.id} state={state.review} dispatch={dispatch} readOnly {...t} {...review} />;
+      }
+      if (state.ready !== undefined) {
+        return <Ready key={readyKey(state.ready)} state={{ kind: 'ready', pr: state.ready }} dispatch={dispatch} defaultDepth={defaultDepth ?? null} offline />;
+      }
+      return <KeptProgress progress={state.progress} />;
     case 'unpaired': return <Pair state={state} dispatch={dispatch} {...t} />;
-    // Keyed so a different pull request or a new head starts with its own choices.
-    case 'ready': return <Ready key={`${state.pr.repo}#${state.pr.number}@${state.pr.headSha}`} state={state} dispatch={dispatch} defaultDepth={defaultDepth ?? null} />;
+    case 'ready': return <Ready key={readyKey(state.pr)} state={state} dispatch={dispatch} defaultDepth={defaultDepth ?? null} />;
     case 'running': return <Running state={state} />;
     case 'problem': return <Problem state={state} dispatch={dispatch} />;
     // Keyed so a new review starts with nothing selected and nothing open.
     case 'review': return <Verdict key={state.latest.document.id} state={state} dispatch={dispatch} {...t} {...review} />;
   }
+}
+
+/** The offline card in the first place, when there is one, and the screen always in the second. */
+function Body(props: BodyProps) {
+  const { state, timers } = props;
+  return (
+    <>
+      {state.kind === 'offline' ? <OfflineCard state={state} {...(timers ? { timers } : {})} /> : null}
+      {screenFor(props)}
+    </>
+  );
 }
 
 /** Says a review has finished, once, when the panel moves from a running review to the finished one. */

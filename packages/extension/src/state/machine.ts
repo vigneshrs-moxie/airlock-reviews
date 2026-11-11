@@ -15,6 +15,8 @@ export const SHOWING_PROBLEM = 'Airlock had a problem showing this review.';
 export const OFFLINE_RETRY_MS = 5_000;
 /** While Ready or a review is on screen, how often the panel checks that the service still answers. */
 export const WATCH_MS = OFFLINE_RETRY_MS;
+/** Unanswered checks in a row before the panel says the service is not running: one missed beat changes nothing. */
+export const MISSED_CHECKS = 2;
 export const REATTACH_MS = 1_000;
 /** Re-attaches in a row that bring no new event, and re-attaches in all for one run, before giving up. */
 export const REATTACH_IN_A_ROW = 5;
@@ -124,14 +126,17 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
 
   /**
    * While Ready or a review is on screen nothing else asks the service anything, so this checks every few seconds that
-   * it still answers; no answer goes offline (keeping the review), and the offline retry brings it back. It skips a
-   * check while an action is in flight, and stops when the screen is neither, or a newer check or load replaces it.
+   * it still answers. MISSED_CHECKS unanswered checks in a row go offline (keeping the screen), and the offline retry
+   * brings it back; an answered check starts the count again, and an answer that says the service is not paired goes to
+   * the Pair screen. It skips a check while an action is in flight, and stops when the screen is neither, or a newer
+   * check or load replaces it.
    */
-  const watch = (g: number): void => {
+  const watch = (g: number, missed = 0): void => {
     const mine = ++watching;
     const settled = (): boolean => current(g) && mine === watching && (state.kind === 'ready' || state.kind === 'review');
     void sleep(WATCH_MS).then(async () => {
       if (!settled()) return;
+      let unanswered = missed;
       if (busy !== g) {
         let hello: Awaited<ReturnType<ServiceClient['hello']>> | null;
         try {
@@ -142,11 +147,20 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
         }
         if (!settled()) return;
         if (hello === 'offline') {
-          wentOffline(g);
-          return;
+          unanswered += 1;
+          if (unanswered >= MISSED_CHECKS) {
+            wentOffline(g);
+            return;
+          }
+        } else {
+          unanswered = 0;
+          if (hello !== null && !hello.paired) {
+            apply({ type: 'unpaired' });
+            return;
+          }
         }
       }
-      watch(g);
+      watch(g, unanswered);
     });
   };
 

@@ -283,6 +283,19 @@ describe('the sheet keeps the typed line (fix round 1)', () => {
     expect((radio('Intended') as HTMLInputElement).checked).toBe(true);
   });
 
+  it('forgets that it pressed Save when the service goes away during the save', () => {
+    const f = finding(1);
+    const { rerender } = open([f]);
+    fireEvent.click(radio('Not now'));
+    fireEvent.click(save());
+    rerender(offlineOf(reviewState([f], { busy: true })));
+    rerender(offlineOf(reviewState([f])));
+    // A dismissal made elsewhere meanwhile is not this sheet's result.
+    rerender(reviewState([f], { dismissals: [dismissal(f, { reason: 'not-now' })] }));
+    expect(dlg().queryByText('Hidden on this pull request.')).toBeNull();
+    expect(dlg().getByRole('alert').textContent).toBe('This finding was already dismissed, so this line cannot be saved to it.');
+  });
+
   it('is cleared by Cancel: the next sheet starts empty', () => {
     const { rerender } = open();
     fireEvent.click(radio('Intended'));

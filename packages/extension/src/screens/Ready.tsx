@@ -18,11 +18,13 @@ const DEPTHS: { depth: Depth; name: string; line: string }[] = [
   { depth: 'deep', name: 'Deep', line: 'Standard, plus a closer second pass over each layer.' },
 ];
 
-export function Ready({ state, dispatch, defaultDepth = null }: {
+export function Ready({ state, dispatch, defaultDepth = null, offline = false }: {
   state: Extract<PanelState, { kind: 'ready' }>;
   dispatch: (a: UserAction) => void;
   /** The depth stored in the Packs screen, when there is one; the pull request's suggestion otherwise. */
   defaultDepth?: Depth | null;
+  /** Kept from before the service stopped: the choices stay, and Review waits for the service. */
+  offline?: boolean;
 }) {
   const { pr } = state;
   // What the person picked here wins; then the stored default (which may arrive after the screen); then the suggestion.
@@ -78,7 +80,7 @@ export function Ready({ state, dispatch, defaultDepth = null }: {
           </label>
         ))}
       </fieldset>
-      <button type="button" className="btn primary wide" disabled={busy} onClick={start}>Review</button>
+      <button type="button" className="btn primary wide" disabled={busy || offline} onClick={start}>Review</button>
       {state.notice !== undefined && <p role="alert" className="notice">{state.notice}</p>}
     </>
   );

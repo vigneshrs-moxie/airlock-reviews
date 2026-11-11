@@ -110,8 +110,9 @@ describe('reduce', () => {
     expect(reduce(review, { type: 'restored', fingerprint: '0123456789abcdef', note: long })).toMatchObject({ notice: cut });
   });
 
-  it('going offline keeps a review, or the brief and map of a running one, readable', () => {
+  it('going offline keeps a review, Ready\'s pull request, or the brief and map of a running one, readable', () => {
     const latest = latestFor(pr);
+    expect(reduce({ kind: 'ready', pr, busy: true, notice: 'n' }, { type: 'offline' })).toEqual({ kind: 'offline', ready: pr });
     expect(reduce({ kind: 'review', pr, latest, stale: true, notice: 'n' }, { type: 'offline' })).toEqual({
       kind: 'offline', review: { pr, latest, stale: true },
     });

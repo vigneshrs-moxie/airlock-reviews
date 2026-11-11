@@ -112,14 +112,16 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
   const showing = !current ? 'stale' : foreign ? 'dismissed' : result === null ? 'form' : 'result';
   useEffect(() => { if (offline) announce(OFFLINE_KEPT); }, [announce, offline]);
 
-  // Pressing Save is only this sheet's own until it is refused or undone.
+  // Pressing Save is only this sheet's own until it is refused, undone or lost with the service: a save whose answer
+  // never came cannot claim a dismissal that appears later.
   const wasResult = useRef(showing === 'result');
   useEffect(() => {
     const undone = wasResult.current && showing === 'form';
     wasResult.current = showing === 'result';
     const refused = draft.submitted && dismissal === undefined && save.reply !== null;
-    if (draft.submitted && (undone || refused)) onDraft({ ...draft, submitted: false });
-  }, [showing, draft, dismissal, save.reply, onDraft]);
+    const lost = draft.submitted && dismissal === undefined && offline;
+    if (draft.submitted && (undone || refused || lost)) onDraft({ ...draft, submitted: false });
+  }, [showing, draft, dismissal, save.reply, offline, onDraft]);
 
   // The control that had focus is gone when the sheet changes between its form and its result; focus goes to its heading.
   // Out of sight the move waits and is not used up.
