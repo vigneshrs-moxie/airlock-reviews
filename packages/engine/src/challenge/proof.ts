@@ -2,21 +2,39 @@
 import type { Anchor, Candidate, FileDiff, Place } from '@airlock/shared';
 import { posix } from 'node:path';
 import { findQuote } from '../anchor/anchor.js';
-import type { StandardDocument } from '../lenses/context.js';
-import { isWholeUnits } from './standards-text.js';
+import { learnedListName, standardDocuments } from '../lenses/context.js';
+import { datedEntries } from '../packs/holdout.js';
+import type { Pack } from '../packs/types.js';
+import { isWholeEntry, isWholeUnits } from './standards-text.js';
 
 export type Ground = 'unreachable' | 'pre-existing' | 'guarded-elsewhere' | 'documented-intent' | 'smaller' | 'none';
 export interface Refutation { path: string; quote: string; where: 'head' | 'base' | 'standard' }
 export type ReadFile = (where: 'head' | 'base', path: string) => Promise<string | null>;
 
-/** The proved place, or none; `ownCode` says the quote was the finding's own lines on the head. */
-export type Proof = { place: Place } | { place: null; ownCode: boolean };
+/**
+ * The proved place and, in words, where it was found; or none, with `ownCode` saying the quote was the finding's own
+ * lines on the head.
+ */
+export type Proof = { place: Place; source: string } | { place: null; ownCode: boolean };
 
-/** What a refutation is checked against: files on either side, the diff, and the standards the challenger was given. */
+/**
+ * A recorded decision that can prove documented intent: one dated entry of a corrections log (quoted as whole
+ * sentences) or one learned entry (quoted whole). `path` and `source` name it precisely.
+ */
+interface DecisionRecord {
+  text: string;
+  quotedWhole: boolean;
+  path: string;
+  role: 'standard' | 'learned';
+  source: string;
+}
+
+/** What a refutation is checked against: files on either side, the diff, and the recorded decisions. */
 export interface Evidence {
   read: ReadFile;
+  /** The diff by path key (normalised, letter case ignored). */
   files: Map<string, FileDiff>;
-  documents: StandardDocument[];
+  records: DecisionRecord[];
 }
 
 type Item = Candidate & { anchor: Anchor };
@@ -39,9 +57,25 @@ function readOnce(read: ReadFile): ReadFile {
   };
 }
 
-/** The evidence for one run: `read` is called at most once per side and path, and the diff is looked up by normalised path. */
-export function createEvidence(read: ReadFile, files: FileDiff[], documents: StandardDocument[]): Evidence {
-  return { read: readOnce(read), files: new Map(files.map((f) => [posix.normalize(f.path), f])), documents };
+/**
+ * The decisions on record: each entry of a dated standard (split as the hold-out splits it) and each learned entry.
+ * Undated standards state rules and hazards, not decisions, so they are not records.
+ */
+function decisionRecords(packs: Pack[]): DecisionRecord[] {
+  const entries = standardDocuments(packs).filter((d) => d.dated).flatMap((d) => datedEntries(d.text).map((e) => ({
+    text: e.body, quotedWhole: false, path: `${d.name}#${e.date}`, role: 'standard' as const,
+    source: `the ${e.date} entry in ${d.name}`,
+  })));
+  const learned = packs.flatMap((p) => p.learned.map((e) => ({
+    text: e.text, quotedWhole: true, path: `${learnedListName(e.kind)}#${e.date}`, role: 'learned' as const,
+    source: `a recorded ${e.kind === 'intended' ? 'product fact' : 'earlier correction'} dated ${e.date}`,
+  })));
+  return [...entries, ...learned];
+}
+
+/** The evidence for one run: `read` is called at most once per side and path, and the diff is looked up by path key. */
+export function createEvidence(read: ReadFile, files: FileDiff[], packs: Pack[]): Evidence {
+  return { read: readOnce(read), files: new Map(files.map((f) => [pathKey(f.path), f])), records: decisionRecords(packs) };
 }
 
 /**
@@ -81,33 +115,56 @@ async function proveOnHead(item: Item, ref: Refutation, { read }: Evidence): Pro
   const found = findQuote(await read('head', path), ref.quote);
   if (found.length === 0) return NO_PROOF;
   if (samePath(path, item.path) && found.some((f) => overlaps(f, item.anchor))) return OWN_CODE;
-  return { place: { path, line: found[0]!.startLine, role: 'head', quote: ref.quote } };
+  const line = found[0]!.startLine;
+  return { place: { path, line, role: 'head', quote: ref.quote }, source: `${path}:${line} on the head` };
 }
 
+/** True when a place with a line sits in a file this pull request added, or inside a hunk of its file. */
+const changedHere = (files: Evidence['files'], path: string, lines: Lines): boolean => {
+  const file = files.get(pathKey(path));
+  return file !== undefined && (file.status === 'added' || insideHunk(file, lines));
+};
+
 /**
- * Ground 2: the base version of the finding's own file (or of its old path, when renamed) holds the finding's own quote,
- * and the finding's lines are outside every hunk of its file, so nothing this pull request changed sits beside them.
- * The record cites the finding's quote on the base, under the file's real path.
+ * Ground 2: the finding's own code is unchanged and was already there. All must hold: the refutation names the
+ * finding's own file (or its old path, when renamed) on the base; the finding's lines are outside every hunk of its
+ * file; no connected place with a line was changed by this pull request; the finding's whole quote is on the head at
+ * its anchored lines; and it is in that base file. The record cites the finding's quote on the base, under the file's
+ * real path.
  */
 async function provePreExisting(item: Item, ref: Refutation, { read, files }: Evidence): Promise<Proof> {
   const line = item.anchor.startLine;
   if (ref.where !== 'base' || !isSafePath(ref.path) || line === null) return NO_PROOF;
-  const file = files.get(posix.normalize(item.path));
-  const own = [posix.normalize(item.path), ...(file?.status === 'renamed' && file.oldPath ? [file.oldPath] : [])];
+  const end = item.anchor.endLine ?? line;
+  const headPath = posix.normalize(item.path);
+  const file = files.get(pathKey(item.path));
+  const own = [headPath, ...(file?.status === 'renamed' && file.oldPath ? [file.oldPath] : [])];
   const path = own.find((p) => samePath(p, ref.path));
   if (path === undefined) return NO_PROOF;
-  if (file !== undefined && insideHunk(file, { startLine: line, endLine: item.anchor.endLine ?? line })) return NO_PROOF;
+  if (file !== undefined && insideHunk(file, { startLine: line, endLine: end })) return NO_PROOF;
+  if (item.connected.some((p) => p.line !== null && changedHere(files, p.path, { startLine: p.line, endLine: p.line }))) {
+    return NO_PROOF;
+  }
+  const onHead = findQuote(await read('head', headPath), item.quote).some((f) => f.startLine === line && f.endLine === end);
+  if (!onHead) return NO_PROOF;
   const found = findQuote(await read('base', path), item.quote);
   if (found.length === 0) return NO_PROOF;
   const nearest = found.reduce((a, b) => (Math.abs(b.startLine - line) < Math.abs(a.startLine - line) ? b : a));
-  return { place: { path, line: nearest.startLine, role: 'base', quote: item.quote } };
+  return {
+    place: { path, line: nearest.startLine, role: 'base', quote: item.quote },
+    source: `${path}:${nearest.startLine} on the base`,
+  };
 }
 
-/** Ground 4: one or more whole consecutive sentences or entries of one standard or learned list the challenger was given. */
-function proveIntent(ref: Refutation, { documents }: Evidence): Proof {
+/**
+ * Ground 4: a recorded decision says so. The quote is a whole learned entry, or whole consecutive sentences inside one
+ * dated entry of a corrections log.
+ */
+function proveIntent(ref: Refutation, { records }: Evidence): Proof {
   if (ref.where !== 'standard') return NO_PROOF;
-  const doc = documents.find((d) => isWholeUnits(ref.quote, d.text));
-  return doc ? { place: { path: doc.name, line: null, role: 'standard', quote: ref.quote } } : NO_PROOF;
+  const record = records.find((r) => (r.quotedWhole ? isWholeEntry(ref.quote, r.text) : isWholeUnits(ref.quote, r.text)));
+  if (record === undefined) return NO_PROOF;
+  return { place: { path: record.path, line: null, role: record.role, quote: ref.quote }, source: record.source };
 }
 
 /** The place a drop's refutation proves, if it does; each ground is tied to the side and place that can prove it. */

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { applyHoldout } from '../../src/packs/holdout.js';
+import { applyHoldout, datedEntries } from '../../src/packs/holdout.js';
 import { appendLearned, parseLearned, removeLearned } from '../../src/packs/learned.js';
 import { loadPack } from '../../src/packs/load.js';
 import { selectPacks } from '../../src/packs/select.js';
@@ -189,6 +189,17 @@ describe('applyHoldout', () => {
     expect(out.learned.map((l) => l.date)).toEqual(['2026-10-19']);
     expect(pack.standards[0]!.text).toContain('Second convention');
     expect(pack.learned).toHaveLength(2);
+  });
+});
+
+describe('datedEntries', () => {
+  it('splits a dated standard into entries the way the hold-out does, without the date start', () => {
+    const text = '# H\nIntro.\n2026-10-29 · First\ncontinued\n\nLoose line\n2026-10-30 · Second\n2026-10-31 · Third\n';
+    expect(datedEntries(text)).toEqual([
+      { date: '2026-10-29', body: 'First\ncontinued' },
+      { date: '2026-10-30', body: 'Second' },
+      { date: '2026-10-31', body: 'Third' },
+    ]);
   });
 });
 

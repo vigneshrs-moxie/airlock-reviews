@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isWholeUnits, unitsOf } from '../../src/challenge/standards-text.js';
+import { isWholeEntry, isWholeUnits, unitsOf } from '../../src/challenge/standards-text.js';
 
 const NO_EVAL = 'No `eval`, `new Function`, `setTimeout("string")`, or scripts fetched from a URL.';
 const LEAD = 'Never do the following in a billing job:';
@@ -93,5 +93,20 @@ describe('isWholeUnits', () => {
 
   it('refuses a blank quote', () => {
     expect(isWholeUnits('   ', STANDARD)).toBe(false);
+  });
+});
+
+describe('isWholeEntry', () => {
+  const ENTRY = 'A paused plan keeps its original renewal date when it resumes. Staff may extend a pause once.';
+
+  it('accepts the whole entry, ignoring whitespace and a leading list marker', () => {
+    expect(isWholeEntry(ENTRY, ENTRY)).toBe(true);
+    expect(isWholeEntry(`- ${ENTRY.replace(' Staff', '\n  Staff')}`, ENTRY)).toBe(true);
+  });
+
+  it('refuses part of the entry, more than the entry, and a short entry', () => {
+    expect(isWholeEntry('A paused plan keeps its original renewal date when it resumes.', ENTRY)).toBe(false);
+    expect(isWholeEntry(`${ENTRY} And more.`, ENTRY)).toBe(false);
+    expect(isWholeEntry('Refunds are manual.', 'Refunds are manual.')).toBe(false);
   });
 });

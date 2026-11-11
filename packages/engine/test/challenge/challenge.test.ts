@@ -55,7 +55,7 @@ const UNCHANGED_FILES = [PAUSE_LINE_2_UNCHANGED, diff('src/charge.ts')];
 const unchangedCtx = () => ctx({ files: UNCHANGED_FILES });
 
 /** An in-memory `read` that records every call. */
-function memoryRead(files: Record<string, string> = { 'base:src/pause.ts': BASE_PAUSE, 'head:src/charge.ts': HEAD_CHARGE }) {
+function memoryRead(files: Record<string, string> = { 'base:src/pause.ts': BASE_PAUSE, 'head:src/pause.ts': HEAD_PAUSE, 'head:src/charge.ts': HEAD_CHARGE }) {
   const calls: string[] = [];
   const read = async (where: 'head' | 'base', path: string): Promise<string | null> => {
     calls.push(`${where}:${path}`);
@@ -408,6 +408,41 @@ describe('challenge', () => {
         expect(r.dropped[0]!.refutation).toEqual({ path: 'src/pause.ts', line: 3, role: 'base', quote: OWN });
       });
 
+      const connectedAt = (path: string, line: number | null) =>
+        ({ item: { connected: [{ path, line, role: 'the charge runs here', quote: 'charge(p);' }] } });
+
+      it('does not count a finding whose connected place falls inside a hunk of its own file', async () => {
+        const { r } = await run(drop('pre-existing', ALREADY), { files: [PAUSE_LINE_2_UNCHANGED, diff('src/charge.ts')] }, 'fix', connectedAt('src/charge.ts', 2));
+        expect(r.dropped).toEqual([]);
+        expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+      });
+
+      it('does not count a finding whose connected place sits in a file this pull request added', async () => {
+        const added = diff('src/new.ts', 3, { status: 'added' });
+        const { r } = await run(drop('pre-existing', ALREADY), { files: [PAUSE_LINE_2_UNCHANGED, added] }, 'fix', connectedAt('src/new.ts', 40));
+        expect(r.dropped).toEqual([]);
+      });
+
+      it('still honours a finding whose connected places are unchanged or have no line', async () => {
+        const files = [PAUSE_LINE_2_UNCHANGED, diff('src/charge.ts')];
+        expect((await run(drop('pre-existing', ALREADY), { files }, 'fix', connectedAt('src/charge.ts', 40))).r.dropped).toHaveLength(1);
+        expect((await run(drop('pre-existing', ALREADY), { files }, 'fix', connectedAt('src/charge.ts', null))).r.dropped).toHaveLength(1);
+      });
+
+      it('does not count a finding whose whole quote is not on the head at its anchored lines', async () => {
+        const quote = `${OWN}\n  audit(plan);`;
+        const base = `export function pause(plan) {\n  // already charged before this change\n  ${OWN}\n  audit(plan);\n}`;
+        const { r } = await run(drop('pre-existing', ALREADY), { files: UNCHANGED_FILES }, 'fix', {
+          item: { quote, anchor: { status: 'in-diff', startLine: 2, endLine: 2 } }, files: { 'base:src/pause.ts': base },
+        });
+        expect(r.dropped).toEqual([]);
+      });
+
+      it('looks up the finding\'s file in the diff ignoring letter case', async () => {
+        const { r } = await run(drop('pre-existing', ALREADY), { files: [{ ...PAUSE_GUARD_DELETED_ABOVE, path: 'SRC/Pause.ts' }] });
+        expect(r.dropped).toEqual([]);
+      });
+
       it('honours a file that is not in the diff at all', async () => {
         const { r } = await run(drop('pre-existing', ALREADY), { files: [diff('src/charge.ts')] });
         expect(r.dropped).toHaveLength(1);
@@ -499,138 +534,95 @@ describe('challenge', () => {
     describe('documented intent', () => {
       const SENTENCE = 'Offices may share a single plan when the account owner agrees in writing.';
       const MID_LINE = 'Members keep their original renewal date during any pause.';
+      const UNSAFE = 'It is unsafe to skip the idempotency key on nightly billing runs.';
+      const LEARNED = 'A paused plan keeps its original renewal date when it resumes. Staff may extend a pause once by thirty days.';
+      const CORRECTION = 'Raj does not want nightly retries flagged when the charge carries its idempotency key.';
+      const NO_EVAL = 'No `eval`, `new Function`, `setTimeout("string")`, or scripts fetched from a URL.';
+      const ROW = '| Shared charge helper for every nightly billing run | A hand-written retry loop |';
+      const FOOTGUN = 'Skipping the idempotency key on a retried nightly billing charge';
+      const AFTER_BLANK = 'Text after a blank line belongs to no entry and lets members pause for any length of time.';
       const packs = [pack('core', [lens('boundary')], {
-        standards: [{
-          name: 'calibration.md',
-          text: [
-            `Pauses may run 90 days. ${MID_LINE}`,
-            SENTENCE,
-            'Always use chargeIdempotencyKeyForEveryNightlyBillingRun.',
-            '1. It is unsafe to skip the idempotency key on nightly billing runs.',
-            'Offices may never share a plan across two regions without written approval.',
-          ].join('\n'),
-          dated: true,
-        }],
-        learned: [{ date: '2026-11-01', repo: 'o/r', kind: 'intended', text: 'A paused plan keeps its original renewal date when it resumes.' }],
+        standards: [
+          {
+            name: 'orbit.md',
+            dated: false,
+            text: [
+              '# Extensions', '',
+              'Code from strings is never allowed in an extension. No',
+              '`eval`, `new Function`, `setTimeout("string")`, or scripts fetched from a URL.', '',
+              '| Use | Not |', ROW, '',
+              '## Known footguns', `- ${FOOTGUN}`,
+            ].join('\n'),
+          },
+          {
+            name: 'calibration.md',
+            dated: true,
+            text: [
+              '# Calibration log', '',
+              `2026-10-30 · ${SENTENCE} Pauses may run 90 days.`,
+              MID_LINE,
+              `2026-10-31 · ${UNSAFE} Always use chargeIdempotencyKeyForEveryNightlyBillingRun.`,
+              '1. Offices may never share a plan across two regions without written approval.',
+              '',
+              AFTER_BLANK,
+            ].join('\n'),
+          },
+        ],
+        learned: [
+          { date: '2026-11-01', repo: 'o/r', kind: 'intended', text: LEARNED },
+          { date: '2026-11-02', repo: 'o/r', kind: 'wrong', text: CORRECTION },
+        ],
       })];
       const intent = (quote: string) => drop('documented-intent', { path: 'x', quote, where: 'standard' });
-
-      describe('in a hard-wrapped standard', () => {
-        const NO_EVAL = 'No `eval`, `new Function`, `setTimeout("string")`, or scripts fetched from a URL.';
-        const LEAD = 'Never do the following in a billing job:';
-        const wrapped = [pack('core', [lens('boundary')], {
-          standards: [{
-            name: 'orbit.md',
-            text: [
-              '# Extensions',
-              '',
-              'Code from strings is never allowed in an extension. No',
-              '`eval`, `new Function`, `setTimeout("string")`, or scripts fetched from a URL.',
-              '',
-              'Do not let members pause twice in one year, i.e. a second pause request within twelve months is refused.',
-              '',
-              LEAD,
-              '- retry a failed charge without the original idempotency key',
-              '- charge a plan that is paused or cancelled',
-              '',
-              '## Pauses',
-              'Members on a paused plan are never charged by the nightly billing job.',
-              '',
-              '| Office | Billing day must be the first of the month |',
-            ].join('\n'),
-            dated: false,
-          }],
-        })];
-        const check = async (quote: string) => (await run(intent(quote), { packs: wrapped })).r;
-
-        it.each([
-          ['a wrapped line whose negation is on the line above', NO_EVAL.slice('No '.length)],
-          ['the tail after "i.e."', 'a second pause request within twelve months is refused.'],
-          ['a list entry without its negating lead-in', 'retry a failed charge without the original idempotency key'],
-          ['a heading joined to the sentence under it', '## Pauses\nMembers on a paused plan are never charged by the nightly billing job.'],
-          ['one cell of a table row', 'Billing day must be the first of the month'],
-        ])('does not take %s as proof', async (_what, quote) => {
-          const r = await check(quote);
-          expect(r.dropped).toEqual([]);
-          expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
-        });
-
-        it.each([
-          ['the whole sentence joined across the wrap', NO_EVAL],
-          ['both sentences as wrapped in the file', `Code from strings is never allowed in an extension. No\n${NO_EVAL.slice('No '.length)}`],
-          ['the whole sentence with "i.e." in it', 'Do not let members pause twice in one year, i.e. a second pause request within twelve months is refused.'],
-          ['the lead-in with one entry', `${LEAD}\n- retry a failed charge without the original idempotency key`],
-          ['the lead-in with both entries', `${LEAD}\n- retry a failed charge without the original idempotency key\n- charge a plan that is paused or cancelled`],
-          ['the sentence under a heading, without the heading', 'Members on a paused plan are never charged by the nightly billing job.'],
-          ['a whole table row', '| Office | Billing day must be the first of the month |'],
-        ])('drops on %s', async (_what, quote) => {
-          const r = await check(quote);
-          expect(r.kept).toEqual([]);
-          expect(r.dropped[0]!.refutation).toMatchObject({ path: 'Pack core: orbit.md', role: 'standard' });
-        });
-      });
+      const check = async (quote: string) => (await run(intent(quote), { packs })).r;
 
       it.each([
-        'safe to skip the idempotency key on nightly billing runs.',
-        'share a plan across two regions without written approval.',
-      ])('does not take the fragment %j, which drops a negation, as proof', async (quote) => {
-        const { r } = await run(intent(quote), { packs });
+        ['a whole sentence from an undated standard', NO_EVAL],
+        ['a whole table row from an undated standard', ROW],
+        ['an entry under a heading in an undated standard', `- ${FOOTGUN}`],
+        ['a sentence in the dated standard that belongs to no entry', AFTER_BLANK],
+        ['two sentences from two different dated entries', `${MID_LINE}\n2026-10-31 · ${UNSAFE}`],
+        ['part of a learned entry', 'A paused plan keeps its original renewal date when it resumes.'],
+        ['a fragment that drops a negation', 'safe to skip the idempotency key on nightly billing runs.'],
+        ['a 20-character fragment of a sentence', 'share a single plan when'],
+        ['a whole unit of fewer than four words', 'Always use chargeIdempotencyKeyForEveryNightlyBillingRun.'],
+        ['a sentence in no record', 'Pauses may run for a full year without any charge to the member.'],
+      ])('does not take %s as proof', async (_what, quote) => {
+        const r = await check(quote);
         expect(r.dropped).toEqual([]);
         expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
       });
 
-      it.each([
-        ['a sentence that starts mid-line', MID_LINE],
-        ['a sentence after a numbered list marker', 'It is unsafe to skip the idempotency key on nightly billing runs.'],
-        ['two whole consecutive sentences across a line break', `${MID_LINE}\n${SENTENCE}`],
-        ['a learned entry copied with its list marker', '- A paused plan keeps its original renewal date when it resumes.'],
-      ])('drops on %s', async (_what, quote) => {
-        const { r } = await run(intent(quote), { packs });
-        expect(r.kept).toEqual([]);
-        expect(r.dropped).toHaveLength(1);
-      });
-
-      it('drops on the whole sentence that states the intent', async () => {
-        const { r } = await run(drop('documented-intent', { path: 'x', quote: SENTENCE, where: 'standard' }), { packs });
-        expect(r.dropped).toHaveLength(1);
-        expect(r.dropped[0]!.refutation).toMatchObject({ path: 'Pack core: calibration.md', role: 'standard', quote: SENTENCE });
-      });
-
-      it('does not take a 20-character fragment of a sentence as proof', async () => {
-        const quote = 'share a single plan when';
-        expect(quote.replace(/\s+/g, '')).toHaveLength(20);
-        const { r } = await run(drop('documented-intent', { path: 'x', quote, where: 'standard' }), { packs });
-        expect(r.dropped).toEqual([]);
-        expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
-      });
-
-      it('does not take a long quote of fewer than four words as proof', async () => {
-        const quote = 'Always use chargeIdempotencyKeyForEveryNightlyBillingRun.';
-        const { r } = await run(drop('documented-intent', { path: 'x', quote, where: 'standard' }), { packs });
-        expect(r.dropped).toEqual([]);
-      });
-
-      it('drops on a sentence found in a standard', async () => {
-        const quote = SENTENCE;
-        const { r, calls } = await run(drop('documented-intent', { path: 'anything', quote, where: 'standard' }), { packs });
+      it('drops on a whole sentence from a dated entry and names the entry by its date', async () => {
+        const { r, calls } = await run(intent(SENTENCE), { packs });
         expect(r.kept).toEqual([]);
         expect(r.dropped[0]).toMatchObject({
-          reason: 'documented-intent: EXPLANATION_MARKER the code shows it. (proof: a sentence in Pack core: calibration.md)',
-          refutation: { path: 'Pack core: calibration.md', line: null, role: 'standard', quote },
+          reason: 'documented-intent: EXPLANATION_MARKER the code shows it. (proof: the 2026-10-30 entry in Pack core: calibration.md)',
+          refutation: { path: 'Pack core: calibration.md#2026-10-30', line: null, role: 'standard', quote: SENTENCE },
         });
         expect(calls).toEqual([]);
       });
 
-      it('drops on a sentence found in the learned product facts', async () => {
-        const quote = 'A paused plan keeps its original renewal date when it resumes.';
-        const { r } = await run(drop('documented-intent', { path: '', quote, where: 'standard' }), { packs });
-        expect(r.dropped[0]!.refutation).toEqual({ path: 'Product facts to respect', line: null, role: 'standard', quote });
+      it.each([
+        ['two consecutive sentences of one entry', `${SENTENCE} Pauses may run 90 days.`],
+        ['a sentence on a continuation line of an entry', MID_LINE],
+        ['an entry\'s numbered list item', 'Offices may never share a plan across two regions without written approval.'],
+      ])('drops on %s', async (_what, quote) => {
+        const r = await check(quote);
+        expect(r.kept).toEqual([]);
+        expect(r.dropped).toHaveLength(1);
       });
 
-      it('keeps the finding when the sentence is in no standard', async () => {
-        const { r } = await run(drop('documented-intent', { path: 'x', quote: 'Pauses may run for a full year without any charge to the member.', where: 'standard' }), { packs });
-        expect(r.dropped).toEqual([]);
-        expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+      it.each([
+        ['a whole product fact', LEARNED, 'a recorded product fact dated 2026-11-01', 'Product facts to respect#2026-11-01'],
+        ['a whole product fact copied with its list marker', `- ${LEARNED}`, 'a recorded product fact dated 2026-11-01', 'Product facts to respect#2026-11-01'],
+        ['a whole earlier correction', CORRECTION, 'a recorded earlier correction dated 2026-11-02', 'Things flagged before that were wrong#2026-11-02'],
+      ])('drops on %s and names it by its date', async (_what, quote, source, path) => {
+        const r = await check(quote);
+        expect(r.dropped[0]).toMatchObject({
+          reason: `documented-intent: EXPLANATION_MARKER the code shows it. (proof: ${source})`,
+          refutation: { path, line: null, role: 'learned', quote },
+        });
       });
 
       it('keeps the finding when documented intent quotes code', async () => {
@@ -639,9 +631,8 @@ describe('challenge', () => {
         expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
       });
 
-      it('keeps the finding when another ground quotes a standard', async () => {
-        const quote = SENTENCE;
-        const { r } = await run(drop('guarded-elsewhere', { path: 'x', quote, where: 'standard' }), { packs });
+      it('keeps the finding when another ground quotes a recorded decision', async () => {
+        const { r } = await run(drop('guarded-elsewhere', { path: 'x', quote: SENTENCE, where: 'standard' }), { packs });
         expect(r.dropped).toEqual([]);
       });
     });

@@ -97,3 +97,11 @@ const isLongEnough = (quote: string): boolean =>
 export function isWholeUnits(quote: string, text: string): boolean {
   return isLongEnough(quote) && hasRun(unitsOf(text), unitsOf(quote));
 }
+
+/**
+ * True when `quote` is the whole of `entry` (whitespace ignored, a leading list marker allowed) and is at least 40
+ * characters without whitespace and four words long.
+ */
+export function isWholeEntry(quote: string, entry: string): boolean {
+  return isLongEnough(quote) && squash(quote.replace(LIST_MARKER, '')) === squash(entry);
+}
