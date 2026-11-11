@@ -15,13 +15,18 @@
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>{{LOG}}</string>
+  <string>{{LAUNCHD_LOG}}</string>
   <key>StandardErrorPath</key>
-  <string>{{LOG}}</string>
+  <string>{{LAUNCHD_LOG}}</string>
   <key>EnvironmentVariables</key>
   <dict>
 {{ENVIRONMENT}}
