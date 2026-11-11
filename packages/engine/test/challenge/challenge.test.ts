@@ -423,10 +423,33 @@ describe('challenge', () => {
         expect(r.dropped).toEqual([]);
       });
 
-      it('still honours a finding whose connected places are unchanged or have no line', async () => {
+      it('still honours a finding whose connected place is on an unchanged line of a changed file', async () => {
         const files = [PAUSE_LINE_2_UNCHANGED, diff('src/charge.ts')];
         expect((await run(drop('pre-existing', ALREADY), { files }, 'fix', connectedAt('src/charge.ts', 40))).r.dropped).toHaveLength(1);
-        expect((await run(drop('pre-existing', ALREADY), { files }, 'fix', connectedAt('src/charge.ts', null))).r.dropped).toHaveLength(1);
+      });
+
+      it('does not count a finding whose connected place is in a file this pull request deleted', async () => {
+        const deleted = diff('src/guard.ts', 0, { status: 'deleted' });
+        const { r } = await run(drop('pre-existing', ALREADY), { files: [PAUSE_LINE_2_UNCHANGED, deleted] }, 'fix', connectedAt('src/guard.ts', null));
+        expect(r.dropped).toEqual([]);
+        expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
+      });
+
+      it('does not count a finding whose connected place has no line in a changed file', async () => {
+        const files = [PAUSE_LINE_2_UNCHANGED, diff('src/charge.ts')];
+        const { r } = await run(drop('pre-existing', ALREADY), { files }, 'fix', connectedAt('src/charge.ts', null));
+        expect(r.dropped).toEqual([]);
+      });
+
+      it('still honours a finding whose connected place has no line in a file outside the diff', async () => {
+        const { r } = await run(drop('pre-existing', ALREADY), { files: [PAUSE_LINE_2_UNCHANGED] }, 'fix', connectedAt('src/other.ts', null));
+        expect(r.dropped).toHaveLength(1);
+      });
+
+      it('does not count a finding in a file whose path the diff holds twice in different letter case', async () => {
+        const twin = diff('SRC/PAUSE.ts', 0);
+        expect((await run(drop('pre-existing', ALREADY), { files: [PAUSE_LINE_2_UNCHANGED, twin] })).r.dropped).toEqual([]);
+        expect((await run(drop('pre-existing', ALREADY), { files: [twin, PAUSE_LINE_2_UNCHANGED] })).r.dropped).toEqual([]);
       });
 
       it('does not count a finding whose whole quote is not on the head at its anchored lines', async () => {
@@ -535,6 +558,13 @@ describe('challenge', () => {
       const SENTENCE = 'Offices may share a single plan when the account owner agrees in writing.';
       const MID_LINE = 'Members keep their original renewal date during any pause.';
       const UNSAFE = 'It is unsafe to skip the idempotency key on nightly billing runs.';
+      /** The 10-30 entry as stored: it continues onto a second line. */
+      const ENTRY_1030 = `${SENTENCE} Pauses may run 90 days.\n${MID_LINE}`;
+      const SLA_FIRST = 'Orbit · contact-center SLA definitions are owned and defined by CC leadership.';
+      const SLA = `${SLA_FIRST} Don't raise "who signed off on SLA". Do flag it if the code's SLA differs from their definition.`;
+      const SHORT = 'Always use chargeIdempotencyKeyForEveryNightlyBillingRunToday.';
+      const SAME_DAY_1 = 'First same-day decision says pauses may run ninety days at most.';
+      const SAME_DAY_2 = 'Second same-day decision says staff may extend a pause once by thirty days.';
       const LEARNED = 'A paused plan keeps its original renewal date when it resumes. Staff may extend a pause once by thirty days.';
       const CORRECTION = 'Raj does not want nightly retries flagged when the charge carries its idempotency key.';
       const NO_EVAL = 'No `eval`, `new Function`, `setTimeout("string")`, or scripts fetched from a URL.';
@@ -562,7 +592,10 @@ describe('challenge', () => {
               `2026-10-30 · ${SENTENCE} Pauses may run 90 days.`,
               MID_LINE,
               `2026-10-31 · ${UNSAFE} Always use chargeIdempotencyKeyForEveryNightlyBillingRun.`,
-              '1. Offices may never share a plan across two regions without written approval.',
+              `2026-11-03 · ${SLA}`,
+              `2026-11-04 · ${SHORT}`,
+              `2026-11-05 · ${SAME_DAY_1}`,
+              `2026-11-05 · ${SAME_DAY_2}`,
               '',
               AFTER_BLANK,
             ].join('\n'),
@@ -575,17 +608,24 @@ describe('challenge', () => {
       })];
       const intent = (quote: string) => drop('documented-intent', { path: 'x', quote, where: 'standard' });
       const check = async (quote: string) => (await run(intent(quote), { packs })).r;
+      const fromLog = (date: string) => ({
+        reason: `documented-intent: EXPLANATION_MARKER the code shows it. (proof: the ${date} entry in Pack core: calibration.md)`,
+        path: `Pack core: calibration.md#${date}`,
+      });
 
       it.each([
         ['a whole sentence from an undated standard', NO_EVAL],
         ['a whole table row from an undated standard', ROW],
         ['an entry under a heading in an undated standard', `- ${FOOTGUN}`],
         ['a sentence in the dated standard that belongs to no entry', AFTER_BLANK],
+        ['only the first sentence of a dated entry whose later sentence says to flag it', SLA_FIRST],
+        ['one whole sentence inside a dated entry', SENTENCE],
         ['two sentences from two different dated entries', `${MID_LINE}\n2026-10-31 · ${UNSAFE}`],
+        ['a whole entry plus the first words of the next entry', `${ENTRY_1030} It is unsafe to skip`],
+        ['an entry shorter than the minimum, quoted whole with a list marker', `1. ${SHORT}`],
         ['part of a learned entry', 'A paused plan keeps its original renewal date when it resumes.'],
         ['a fragment that drops a negation', 'safe to skip the idempotency key on nightly billing runs.'],
         ['a 20-character fragment of a sentence', 'share a single plan when'],
-        ['a whole unit of fewer than four words', 'Always use chargeIdempotencyKeyForEveryNightlyBillingRun.'],
         ['a sentence in no record', 'Pauses may run for a full year without any charge to the member.'],
       ])('does not take %s as proof', async (_what, quote) => {
         const r = await check(quote);
@@ -593,35 +633,34 @@ describe('challenge', () => {
         expect(r.kept[0]!.checked.endsWith(UNCONFIRMED)).toBe(true);
       });
 
-      it('drops on a whole sentence from a dated entry and names the entry by its date', async () => {
-        const { r, calls } = await run(intent(SENTENCE), { packs });
+      it('drops on the whole SLA entry and records the entry as stored', async () => {
+        const { r, calls } = await run(intent(SLA.replace(' Do flag', '\n  Do flag')), { packs });
         expect(r.kept).toEqual([]);
-        expect(r.dropped[0]).toMatchObject({
-          reason: 'documented-intent: EXPLANATION_MARKER the code shows it. (proof: the 2026-10-30 entry in Pack core: calibration.md)',
-          refutation: { path: 'Pack core: calibration.md#2026-10-30', line: null, role: 'standard', quote: SENTENCE },
-        });
+        const { reason, path } = fromLog('2026-11-03');
+        expect(r.dropped[0]).toMatchObject({ reason, refutation: { path, line: null, role: 'standard', quote: SLA } });
         expect(calls).toEqual([]);
       });
 
-      it.each([
-        ['two consecutive sentences of one entry', `${SENTENCE} Pauses may run 90 days.`],
-        ['a sentence on a continuation line of an entry', MID_LINE],
-        ['an entry\'s numbered list item', 'Offices may never share a plan across two regions without written approval.'],
-      ])('drops on %s', async (_what, quote) => {
-        const r = await check(quote);
-        expect(r.kept).toEqual([]);
-        expect(r.dropped).toHaveLength(1);
+      it('drops on a whole entry that spans two lines when it is quoted on one line', async () => {
+        const r = await check(`${SENTENCE} Pauses may run 90 days. ${MID_LINE}`);
+        const { reason, path } = fromLog('2026-10-30');
+        expect(r.dropped[0]).toMatchObject({ reason, refutation: { path, role: 'standard', quote: ENTRY_1030 } });
+      });
+
+      it('records the entry that was quoted when two entries share a date', async () => {
+        const r = await check(SAME_DAY_2.replace(' staff', '   staff'));
+        expect(r.dropped[0]!.refutation).toEqual({ path: fromLog('2026-11-05').path, line: null, role: 'standard', quote: SAME_DAY_2 });
       });
 
       it.each([
-        ['a whole product fact', LEARNED, 'a recorded product fact dated 2026-11-01', 'Product facts to respect#2026-11-01'],
-        ['a whole product fact copied with its list marker', `- ${LEARNED}`, 'a recorded product fact dated 2026-11-01', 'Product facts to respect#2026-11-01'],
-        ['a whole earlier correction', CORRECTION, 'a recorded earlier correction dated 2026-11-02', 'Things flagged before that were wrong#2026-11-02'],
-      ])('drops on %s and names it by its date', async (_what, quote, source, path) => {
+        ['a whole product fact', LEARNED, LEARNED, 'a recorded product fact dated 2026-11-01', 'Product facts to respect#2026-11-01'],
+        ['a whole product fact copied with its list marker', `- ${LEARNED}`, LEARNED, 'a recorded product fact dated 2026-11-01', 'Product facts to respect#2026-11-01'],
+        ['a whole earlier correction', CORRECTION, CORRECTION, 'a recorded earlier correction dated 2026-11-02', 'Things flagged before that were wrong#2026-11-02'],
+      ])('drops on %s, names it by its date and records it as stored', async (_what, quote, stored, source, path) => {
         const r = await check(quote);
         expect(r.dropped[0]).toMatchObject({
           reason: `documented-intent: EXPLANATION_MARKER the code shows it. (proof: ${source})`,
-          refutation: { path, line: null, role: 'learned', quote },
+          refutation: { path, line: null, role: 'learned', quote: stored },
         });
       });
 
@@ -632,7 +671,7 @@ describe('challenge', () => {
       });
 
       it('keeps the finding when another ground quotes a recorded decision', async () => {
-        const { r } = await run(drop('guarded-elsewhere', { path: 'x', quote: SENTENCE, where: 'standard' }), { packs });
+        const { r } = await run(drop('guarded-elsewhere', { path: 'x', quote: SLA, where: 'standard' }), { packs });
         expect(r.dropped).toEqual([]);
       });
     });
