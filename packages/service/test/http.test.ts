@@ -59,6 +59,7 @@ async function routerRig(extra: { pairedOrigin?: string | null } = {}): Promise<
     { method: 'POST', path: '/things', body: z.object({ name: z.string() }), handler: ok },
     { method: 'POST', path: '/pairing', pairing: true, handler: ok },
     { method: 'GET', path: '/boom', handler: async () => { throw new Error('secret detail'); } },
+    { method: 'GET', path: '/long', handler: async () => { throw new Error(`one\ntwo\r\n${'é'.repeat(400)}`); } },
     { method: 'GET', path: '/enoent', handler: async () => { throw new Error(`ENOENT: no such file or directory, open '${homedir()}/.airlock/service/token'`); } },
     {
       method: 'GET', path: '/stream-fails',
@@ -604,6 +605,20 @@ describe('fix round 1: errors', () => {
     const { port } = await routerRig();
     const r = await send(port, 'GET', '/stream-fails', { headers: bearer });
     expect(r.text).toBe('data: {"n":1}\n\ndata: {"type":"failed","message":"Airlock had a problem: went wrong"}\n\n');
+  });
+});
+
+describe('task 4 fix round 1: bounded error text', () => {
+  it('collapses line breaks and cuts the 500 message to 280 characters', async () => {
+    const { port, log } = await routerRig();
+    const r = await send(port, 'GET', '/long', { headers: bearer });
+    expect(r.status).toBe(500);
+    const message = (r.json as { error: string }).error.slice('Airlock had a problem: '.length);
+    expect(message.startsWith('one two é')).toBe(true);
+    expect([...message]).toHaveLength(280);
+    expect(message.endsWith('…')).toBe(true);
+    // The log keeps the whole message.
+    expect(log.some((l) => l.includes('é'.repeat(400)))).toBe(true);
   });
 });
 

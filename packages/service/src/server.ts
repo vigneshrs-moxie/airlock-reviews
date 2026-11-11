@@ -16,8 +16,11 @@ export interface ServiceDeps {
   review?: typeof runReview;
   now: () => Date;
   log: (line: string) => void;
-  /** Shorter limits for tests; the defaults are 30 s and 15 s. */
-  limits?: { requestTimeoutMs: number; headersTimeoutMs: number };
+  /**
+   * Request limits (30 s and 15 s by default; shorter in tests) and the most a review may run, in minutes (a positive
+   * number, 90 by default).
+   */
+  limits?: { requestTimeoutMs?: number; headersTimeoutMs?: number; runMinutes?: number };
   /** The keep-alive and the dropping of finished runs; real timers by default. */
   timers?: Timers;
   /** The dismissals recorded for a pull request; none by default. */
@@ -41,7 +44,7 @@ export const LISTEN_HOST = '127.0.0.1';
 const PAIRED_ELSEWHERE =
   'Airlock is already paired with another copy of the extension. Run "airlock-service unpair" and pair again.';
 
-function routesFor(deps: ServiceDeps, hidePaths: readonly string[]): Route[] {
+function frontRoutes(deps: ServiceDeps): Route[] {
   const { home, version } = deps.config;
   return [
     {
@@ -61,18 +64,24 @@ function routesFor(deps: ServiceDeps, hidePaths: readonly string[]): Route[] {
         return { status: 200, json: reply };
       },
     },
-    ...reviewRoutes(deps, hidePaths),
   ];
 }
 
+/** Throws a RangeError for a run limit that is not a positive number. */
 export function createServer(deps: ServiceDeps): { listen(): Promise<{ port: number; address: string; family: string }>; close(): Promise<void> } {
+  const runMinutes = deps.limits?.runMinutes;
+  if (runMinutes !== undefined && !(Number.isFinite(runMinutes) && runMinutes > 0)) {
+    throw new RangeError(`limits.runMinutes must be a positive number, got ${runMinutes}`);
+  }
+  const hidePaths = [deps.config.home, homedir()];
+  const reviews = reviewRoutes(deps, hidePaths);
   let server: http.Server | undefined;
   return {
     async listen() {
       const token = await readOrCreateToken(deps.config.home);
       const auth: Auth = { token, port: deps.config.port, pairedOrigin: () => pairedOrigin(deps.config.home) };
-      const hidePaths = [deps.config.home, homedir()];
-      const created = http.createServer({ connectionsCheckingInterval: 5_000 }, createRouter(routesFor(deps, hidePaths), auth, deps.log, { hidePaths }));
+      const routes = [...frontRoutes(deps), ...reviews.routes];
+      const created = http.createServer({ connectionsCheckingInterval: 5_000 }, createRouter(routes, auth, deps.log, { hidePaths }));
       created.requestTimeout = deps.limits?.requestTimeoutMs ?? 30_000;
       created.headersTimeout = deps.limits?.headersTimeoutMs ?? 15_000;
       created.keepAliveTimeout = 5_000;
@@ -90,6 +99,7 @@ export function createServer(deps: ServiceDeps): { listen(): Promise<{ port: num
       return { port: bound.port, address: bound.address, family: bound.family };
     },
     async close() {
+      reviews.stop();
       const running = server;
       server = undefined;
       if (running === undefined) return;

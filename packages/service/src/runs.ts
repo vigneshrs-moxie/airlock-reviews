@@ -26,6 +26,7 @@ export const realTimers: Timers = {
 export const MAX_ACTIVE = 2;
 export const FINISHED_KEEP_MS = 10 * 60_000;
 export const FINISHED_KEEP_MAX = 20;
+export const DEFAULT_RUN_MINUTES = 90;
 
 /** Thrown by `start` when two other reviews are already running. */
 export class LimitError extends Error {
@@ -50,30 +51,47 @@ export interface RunsOptions {
   failure: (e: unknown) => string;
   timers: Timers;
   log?: (line: string) => void;
+  /** The most a review may run before it is stopped; 90 minutes by default. */
+  runMinutes?: number;
 }
 
 interface Run {
   id: string;
+  /** As first given; `key` is what runs are matched on. */
   repo: string;
+  key: string;
   number: number;
   events: ServiceEvent[];
   listeners: Set<(e: ServiceEvent) => void>;
   finished: boolean;
-  cancelExpiry: () => void;
+  /** Cancels the ceiling while the run is active, then the ten-minute expiry once it has ended. */
+  cancelTimer: () => void;
 }
 
-const isLast = (e: ServiceEvent): boolean => e.type === 'done' || e.type === 'failed';
+/** The two events that end a run. */
+export const isLast = (e: ServiceEvent): boolean => e.type === 'done' || e.type === 'failed';
+
+/** GitHub treats repository names without regard to letter case, so runs are matched that way too. */
+const repoKey = (repo: string): string => repo.toLowerCase();
 
 /** The reviews the service is running or has just finished, in memory only. */
 export class Runs {
   private readonly runs = new Map<string, Run>();
   /** Finished run ids, oldest first. */
   private readonly finishedOrder: string[] = [];
+  private readonly runMinutes: number;
+  private closed = false;
 
-  constructor(private readonly opts: RunsOptions) {}
+  constructor(private readonly opts: RunsOptions) {
+    this.runMinutes = opts.runMinutes ?? DEFAULT_RUN_MINUTES;
+    if (!Number.isFinite(this.runMinutes) || this.runMinutes <= 0) {
+      throw new RangeError(`runMinutes must be a positive number, got ${this.runMinutes}`);
+    }
+  }
 
   /** Starts a review, or hands back the run of that pull request when one is running. Throws LimitError at the limit. */
   start(body: StartReviewBody): { runId: string; reused: boolean } {
+    if (this.closed) throw new Error('Airlock is shutting down and does not start reviews now.');
     const existing = this.running(body.repo, body.number);
     if (existing !== null) return { runId: existing, reused: true };
     if (this.active().length >= MAX_ACTIVE) throw new LimitError();
@@ -81,9 +99,15 @@ export class Runs {
     let id: string;
     do id = `run_${randomBytes(6).toString('hex')}`; while (this.runs.has(id));
     const run: Run = {
-      id, repo: body.repo, number: body.number, events: [], listeners: new Set(), finished: false, cancelExpiry: () => undefined,
+      id, repo: body.repo, key: repoKey(body.repo), number: body.number, events: [], listeners: new Set(), finished: false,
+      cancelTimer: () => undefined,
     };
     this.runs.set(id, run);
+    // A git, gh or model call can stall for ever; the ceiling frees the slot.
+    run.cancelTimer = this.opts.timers.setTimeout(() => {
+      this.opts.log?.(`review ${id} of ${run.repo}#${run.number} ran past ${this.runMinutes} minutes and was stopped`);
+      this.finish(run, { type: 'failed', message: `Airlock stopped this review because it ran for more than ${this.runMinutes} minutes.` });
+    }, this.runMinutes * 60_000);
 
     let review: Promise<ReviewDocument>;
     try {
@@ -106,8 +130,9 @@ export class Runs {
 
   /** The id of the run reviewing this pull request now, or null. */
   running(repo: string, number: number): string | null {
+    const key = repoKey(repo);
     for (const run of this.runs.values()) {
-      if (!run.finished && run.repo === repo && run.number === number) return run.id;
+      if (!run.finished && run.key === key && run.number === number) return run.id;
     }
     return null;
   }
@@ -132,9 +157,21 @@ export class Runs {
     };
   }
 
+  /**
+   * Stops the registry when the server closes: every timer is cleared and no review starts. Reviews already running are
+   * left to finish, and what they send goes nowhere.
+   */
+  close(): void {
+    this.closed = true;
+    for (const run of this.runs.values()) {
+      run.cancelTimer();
+      run.listeners.clear();
+    }
+  }
+
   /** Keeps an event that matches the contract and passes it on; the engine's `done` ends the run. */
   private append(run: Run, e: ReviewEvent): void {
-    if (run.finished) return;
+    if (run.finished || this.closed) return;
     const parsed = ServiceEventSchema.safeParse(e);
     if (!parsed.success) {
       const type = typeof (e as { type?: unknown }).type === 'string' ? (e as { type: string }).type : 'unknown';
@@ -159,21 +196,25 @@ export class Runs {
     }
   }
 
+  /** Ends the run once: the last event, then the ten-minute expiry in place of the ceiling. */
   private finish(run: Run, last: ServiceEvent): void {
+    if (run.finished || this.closed) return;
     run.finished = true;
+    run.cancelTimer();
     this.deliver(run, last);
     run.listeners.clear();
-    run.cancelExpiry = this.opts.timers.setTimeout(() => this.drop(run.id), FINISHED_KEEP_MS);
+    run.cancelTimer = this.opts.timers.setTimeout(() => this.drop(run.id), FINISHED_KEEP_MS);
     this.finishedOrder.push(run.id);
     while (this.finishedOrder.length > FINISHED_KEEP_MAX) this.drop(this.finishedOrder[0] as string);
   }
 
   private drop(runId: string): void {
-    const run = this.runs.get(runId);
-    if (run === undefined) return;
-    run.cancelExpiry();
-    this.runs.delete(runId);
+    // Out of the order first, so the cap loop always shortens it.
     const at = this.finishedOrder.indexOf(runId);
     if (at !== -1) this.finishedOrder.splice(at, 1);
+    const run = this.runs.get(runId);
+    if (run === undefined) return;
+    run.cancelTimer();
+    this.runs.delete(runId);
   }
 }

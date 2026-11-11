@@ -8,9 +8,10 @@ import {
   ApiErrorSchema, LatestReplySchema, minimalDocument, PrSummarySchema, ServiceEventSchema, ServiceStatusSchema,
   StartReviewReplySchema, type Dismissal, type ReviewDocument, type ReviewEvent,
 } from '@airlock/shared';
-import { readOrCreateToken } from '../src/config.js';
+import { pair, readOrCreateToken } from '../src/config.js';
 import { FINISHED_KEEP_MS } from '../src/runs.js';
 import { createServer, type ServiceDeps } from '../src/server.js';
+import { RUN_GONE, runStream } from '../src/sse.js';
 import { FakeClock, openStream, send, until, type Reply, type Stream } from './helpers.js';
 
 type ExecResult = { stdout: string; stderr: string; code: number };
@@ -72,8 +73,10 @@ interface Rig {
   log: string[];
   /** Every reply the tests received, to check against the contract. */
   replies: Array<{ route: string; reply: Reply }>;
+  token: string;
   call(method: string, path: string, body?: unknown): Promise<Reply>;
   stream(runId: string): Promise<Stream>;
+  close(): Promise<void>;
 }
 
 async function startService(extra: Partial<ServiceDeps> = {}): Promise<Rig> {
@@ -119,7 +122,8 @@ async function startService(extra: Partial<ServiceDeps> = {}): Promise<Rig> {
   const auth = { Authorization: `Bearer ${token}` };
   const replies: Rig['replies'] = [];
   return {
-    port, home, clock, launched, execCalls, exec, log, replies,
+    port, home, clock, launched, execCalls, exec, log, replies, token,
+    close: () => service.close(),
     async call(method, path, body) {
       const reply = await send(port, method, path, body === undefined
         ? { headers: auth }
@@ -498,3 +502,146 @@ describe('the contract', () => {
     expect(runId).toMatch(/^run_/);
   });
 });
+
+describe('fix round 1', () => {
+  const ORIGIN = `chrome-extension://${'a'.repeat(32)}`;
+  const FOREIGN = `chrome-extension://${'b'.repeat(32)}`;
+
+  it('a review that never settles ends as failed at the ceiling, and a new start is then accepted', async () => {
+    const s = await startService({ limits: { runMinutes: 5 } });
+    const runId = runIdOf(await start(s, 7));
+    await start(s, 8);
+    expect((await start(s, 9)).status).toBe(429);
+    const stream = await s.stream(runId);
+    s.clock.advance(5 * 60_000);
+    await stream.end;
+    expect(stream.events.at(-1)).toEqual({ type: 'failed', message: 'Airlock stopped this review because it ran for more than 5 minutes.' });
+    expect((await s.call('GET', `/reviews/running?repo=${REPO}&number=7`)).status).toBe(404);
+    const accepted = await start(s, 9);
+    expect(accepted.status).toBe(200);
+    // What the stopped review sends afterwards changes nothing.
+    await s.launched[0]!.finish(doc());
+    const replay = await s.stream(runId);
+    await replay.end;
+    expect(replay.events).toEqual(stream.events);
+  });
+
+  it('refuses a run ceiling that is not a positive number', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'airlock-service-limits-'));
+    cleanups.push(() => rm(home, { recursive: true, force: true }));
+    for (const runMinutes of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => createServer({
+        config: { port: 0, home, packsDir: home, version: '0' }, engine: {} as unknown as EngineDeps, now: () => new Date(),
+        log: () => undefined, limits: { runMinutes },
+      }), String(runMinutes)).toThrow(RangeError);
+    }
+  });
+
+  it('one pull request has one run whatever the letter case of the repository', async () => {
+    const s = await startService();
+    const first = await s.call('POST', '/reviews', { repo: 'Acme/Widgets', number: 7 });
+    const second = await s.call('POST', '/reviews', { repo: 'acme/widgets', number: 7 });
+    expect(second.json).toEqual({ runId: runIdOf(first), reused: true });
+    expect((await s.call('GET', '/reviews/running?repo=ACME/widgets&number=7')).json).toEqual({ runId: runIdOf(first) });
+    expect(s.launched).toHaveLength(1);
+  });
+
+  it('bounds error text: line breaks collapse and long messages are cut to 280 characters', async () => {
+    const s = await startService();
+    const long = `first line\n${'😀'.repeat(300)}\r\nlast line HTTP 500`;
+    s.exec.set(`gh api repos/${REPO}/pulls/9`, { stdout: '', stderr: long, code: 1 });
+    const down = await s.call('GET', `/pr?repo=${REPO}&number=9`);
+    expect(down.status).toBe(502);
+    const error = (down.json as { error: string }).error;
+    expect(error.startsWith('GitHub did not answer: gh api pulls/9: first line 😀')).toBe(true);
+    const message = error.slice('GitHub did not answer: '.length);
+    expect([...message]).toHaveLength(280);
+    expect(message.endsWith('…')).toBe(true);
+    expect(error).not.toMatch(/[\r\n]/);
+
+    const runId = runIdOf(await start(s));
+    s.launched[0]!.reject(new Error(long));
+    const stream = await s.stream(runId);
+    await stream.end;
+    const failed = stream.events.at(-1) as { type: string; message: string };
+    const reason = failed.message.slice('Airlock could not review this pull request: '.length);
+    expect([...reason]).toHaveLength(280);
+    expect(reason).not.toMatch(/[\r\n]/);
+  });
+
+  it('still answers 404 for a GitHub 404 whose text is long', async () => {
+    const s = await startService();
+    s.exec.set(`gh api repos/${REPO}/pulls/8`, { stdout: '', stderr: `${'x'.repeat(400)}\ngh: Not Found (HTTP 404)`, code: 1 });
+    expect((await s.call('GET', `/pr?repo=${REPO}&number=8`)).status).toBe(404);
+  });
+
+  it('a run that is gone when its stream starts gets one failed event with the run-gone sentence', async () => {
+    const clock = new FakeClock();
+    const res = runStream(() => null, clock.timers);
+    if (!('stream' in res)) throw new Error('expected a stream');
+    const sent: unknown[] = [];
+    await res.stream((e) => sent.push(e), new AbortController().signal, () => undefined);
+    expect(sent).toEqual([{ type: 'failed', message: RUN_GONE }]);
+    expect(RUN_GONE).toBe('Airlock no longer has that review run. Open the latest review instead.');
+    expect(clock.pending).toBe(0);
+  });
+
+  it('close() leaves no timer pending', async () => {
+    const s = await startService();
+    await start(s, 7);
+    await s.launched[0]!.finish(doc());
+    const runId = runIdOf(await start(s, 8));
+    const stream = await s.stream(runId);
+    await until(() => s.clock.pending === 3, 'expiry, ceiling and keep-alive timers');
+    await s.close();
+    await stream.end;
+    expect(s.clock.pending).toBe(0);
+    await s.launched[1]!.finish(doc('r_aaaaaaaaaa', 8));
+    expect(s.clock.pending).toBe(0);
+  });
+
+  it('the event stream needs the token and refuses a foreign Origin', async () => {
+    const s = await startService();
+    const runId = runIdOf(await start(s));
+    const anonymous = await send(s.port, 'GET', `/reviews/${runId}/events`);
+    expect(anonymous.status).toBe(401);
+    await pair(s.home, ORIGIN);
+    const foreign = await send(s.port, 'GET', `/reviews/${runId}/events`, { headers: { Authorization: `Bearer ${s.token}`, Origin: FOREIGN } });
+    expect(foreign.status).toBe(403);
+    const web = await send(s.port, 'GET', `/reviews/${runId}/events`, { headers: { Authorization: `Bearer ${s.token}`, Origin: 'https://evil.example' } });
+    expect(web.status).toBe(403);
+  });
+
+  it('two starts for the same pull request sent together give one run and one reused', async () => {
+    const s = await startService();
+    const [a, b] = await Promise.all([start(s), start(s)]);
+    expect(runIdOf(a)).toBe(runIdOf(b));
+    expect([(a.json as { reused: boolean }).reused, (b.json as { reused: boolean }).reused].sort()).toEqual([false, true]);
+    expect(s.launched).toHaveLength(1);
+  });
+
+  it('a review that sends done and then rejects ends the stream once with done', async () => {
+    const s = await startService();
+    const runId = runIdOf(await start(s));
+    const stream = await s.stream(runId);
+    s.launched[0]!.emit({ type: 'done', document: doc() });
+    s.launched[0]!.reject(new Error('after done'));
+    await stream.end;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(stream.events.map((e) => e.type)).toEqual(['done']);
+    const replay = await s.stream(runId);
+    await replay.end;
+    expect(replay.events.map((e) => e.type)).toEqual(['done']);
+  });
+
+  it('a review that sends done twice ends the stream once with done', async () => {
+    const s = await startService();
+    const runId = runIdOf(await start(s));
+    const stream = await s.stream(runId);
+    s.launched[0]!.emit({ type: 'done', document: doc('r_0000000001') });
+    s.launched[0]!.emit({ type: 'done', document: doc('r_0000000002') });
+    await stream.end;
+    expect(stream.events).toEqual([{ type: 'done', document: doc('r_0000000001') }]);
+  });
+});
+

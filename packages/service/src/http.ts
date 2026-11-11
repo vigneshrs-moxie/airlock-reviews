@@ -161,14 +161,20 @@ async function writeStream(
   }
 }
 
-/** An error message made safe to send: absolute paths under the given folders become `<path>`. */
+export const MAX_MESSAGE_CHARS = 280;
+
+/**
+ * An error message made safe to send: absolute paths under the given folders become `<path>`, line breaks become one
+ * space, and anything past 280 characters (code points) is cut, ending in `…`. The log keeps the whole message.
+ */
 export function plainMessage(e: unknown, hidePaths: readonly string[]): string {
   let message = e instanceof Error ? e.message : String(e);
   for (const folder of hidePaths) {
     if (folder === '') continue;
     message = message.replace(new RegExp(`${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\s'"\`]*`, 'g'), '<path>');
   }
-  return message;
+  const chars = [...message.replace(/[ \t]*[\r\n]+[ \t]*/g, ' ')];
+  return chars.length <= MAX_MESSAGE_CHARS ? chars.join('') : `${chars.slice(0, MAX_MESSAGE_CHARS - 1).join('')}…`;
 }
 
 export interface RouterOptions {

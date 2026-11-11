@@ -8,11 +8,10 @@ import { z, type ZodType } from 'zod';
 import { plainMessage, type Req, type Res, type Route } from './http.js';
 import { LimitError, realTimers, Runs } from './runs.js';
 import type { ServiceDeps } from './server.js';
-import { runStream } from './sse.js';
+import { RUN_GONE, runStream } from './sse.js';
 
 export const STATUS_CACHE_MS = 60_000;
 
-const RUN_GONE = 'Airlock no longer has that review run. Open the latest review instead.';
 const NOTHING_HERE = 'Airlock has nothing at this address.';
 const NOT_RUNNING = 'Airlock is not reviewing this pull request now.';
 const NO_REVIEW = 'Airlock has no review of this pull request yet.';
@@ -52,14 +51,18 @@ export function engineRequest(body: StartReviewBody, packsDir: string): ReviewRe
   };
 }
 
-/** Status, pull request summary, starting and following reviews, and the latest stored review. */
-export function reviewRoutes(deps: ServiceDeps, hidePaths: readonly string[]): Route[] {
+/**
+ * Status, pull request summary, starting and following reviews, and the latest stored review. `stop` is called when the
+ * server closes, and clears the registry's timers.
+ */
+export function reviewRoutes(deps: ServiceDeps, hidePaths: readonly string[]): { routes: Route[]; stop: () => void } {
   const { config, engine } = deps;
   const timers = deps.timers ?? realTimers;
   const review = deps.review ?? runReview;
   const dismissals = deps.dismissals ?? (async (): Promise<Dismissal[]> => []);
   const runs = new Runs({
     timers,
+    ...(deps.limits?.runMinutes === undefined ? {} : { runMinutes: deps.limits.runMinutes }),
     log: deps.log,
     failure: (e) => `Airlock could not review this pull request: ${plainMessage(e, hidePaths)}`,
     launch: (body, emit) => review(engineRequest(body, config.packsDir), engine, emit),
@@ -77,7 +80,7 @@ export function reviewRoutes(deps: ServiceDeps, hidePaths: readonly string[]): R
     return tools;
   };
 
-  return [
+  const routes: Route[] = [
     {
       method: 'GET', path: '/status',
       handler: async () => {
@@ -99,9 +102,9 @@ export function reviewRoutes(deps: ServiceDeps, hidePaths: readonly string[]): R
         try {
           pr = await fetchPr(engine.exec, repo, number, rules);
         } catch (e) {
-          const message = plainMessage(e, hidePaths);
-          if (/HTTP 404/.test(message)) return refuse(404, NO_SUCH_PR);
-          return refuse(502, `GitHub did not answer: ${message}`);
+          // Judged on the whole message: the bounded one may have lost gh's status at its end.
+          if (/HTTP 404/.test(e instanceof Error ? e.message : String(e))) return refuse(404, NO_SUCH_PR);
+          return refuse(502, `GitHub did not answer: ${plainMessage(e, hidePaths)}`);
         }
         return reply<PrSummary>(PrSummarySchema, 200, {
           repo, number, title: pr.title, author: pr.author, viewer: pr.viewer, isOwn: pr.author === pr.viewer,
@@ -149,4 +152,5 @@ export function reviewRoutes(deps: ServiceDeps, hidePaths: readonly string[]): R
       },
     },
   ];
+  return { routes, stop: () => runs.close() };
 }
