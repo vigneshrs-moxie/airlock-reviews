@@ -217,7 +217,7 @@ describe('airlock-replay', () => {
     expect(code).toBe(0);
     expect(t.out).toEqual([
       join(runDir, 'report.md'),
-      "Half of the known problems in the top list: yes so far: this run covers 2 of the dataset's 2 known problems.",
+      "Half of the known problems in the top list: yes so far: this run covers 2 of the dataset's 2 known problems; 1 did not finish (#2).",
       'Clean pull requests stay clean: yes',
     ]);
     expect(await readFile(join(runDir, 'report.md'), 'utf8')).toBe(before);
@@ -270,7 +270,7 @@ describe('airlock-replay', () => {
     expect(err).toMatch(/1 case did not finish: pr2/);
     expect(t.out[0]).toBe(join(work, RUN_ID, 'report.md'));
     // pr2 did not finish, so the answer holds only so far.
-    expect(t.out[1]).toBe("Half of the known problems in the top list: yes so far: this run covers 2 of the dataset's 2 known problems.");
+    expect(t.out[1]).toBe("Half of the known problems in the top list: yes so far: this run covers 2 of the dataset's 2 known problems; 1 did not finish (#2).");
     expect((await stat(join(work, RUN_ID, 'report.md'))).isFile()).toBe(true);
 
     const complete = harness();

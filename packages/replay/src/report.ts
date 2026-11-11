@@ -180,21 +180,29 @@ export function halfInTopWord(half: RunSummary['meets']['halfInTop']): string {
 }
 
 /**
- * For an answer that holds only so far: how much of the dataset the run covers and which positive pull requests it did
- * not run, e.g. "this run covers 10 of the dataset's 26 known problems; 3 pull requests were not run (#100, #126, #171)".
- * Null when the answer is final or the test was not run. `cases` are looked up for pull request numbers.
+ * For an answer that holds only so far: how much of the dataset the run covers, which positive pull requests it did
+ * not run and which in the run did not finish, e.g. "this run covers 10 of the dataset's 26 known problems; 3 pull
+ * requests were not run (#100, #126, #171); 1 did not finish (#146)". Null when the answer is final or the test was not
+ * run. `cases` are looked up for pull request numbers and kinds.
  */
 export function coverage(summary: RunSummary, cases: ReplayCase[]): string | null {
   const half = summary.meets.halfInTop;
   if (half !== 'yes so far' && half !== 'no so far') return null;
+  const caseById = new Map(cases.map((c) => [c.id, c]));
+  /** "#100, #126" in pull request order, or the case ids when a number is not known. */
+  const numbered = (ids: string[]): string => {
+    const numbers = ids.map((id) => caseById.get(id)?.pr ?? null);
+    return (numbers.every((n) => n !== null) ? [...numbers].sort((a, b) => a - b).map((n) => `#${n}`) : ids).join(', ');
+  };
   let text = `this run covers ${summary.knownTotal} of the dataset's ${summary.datasetKnownTotal} known problems`;
   const notRun = summary.positivesNotRun;
   if (notRun.length > 0) {
-    const caseById = new Map(cases.map((c) => [c.id, c]));
-    const numbers = notRun.map((id) => caseById.get(id)?.pr ?? null);
-    const names = numbers.every((n) => n !== null) ? [...numbers].sort((a, b) => a - b).map((n) => `#${n}`) : notRun;
-    text += `; ${notRun.length} ${plural(notRun.length, 'pull request was', 'pull requests were')} not run (${names.join(', ')})`;
+    text += `; ${notRun.length} ${plural(notRun.length, 'pull request was', 'pull requests were')} not run (${numbered(notRun)})`;
   }
+  const unfinished = summary.cases
+    .filter((s) => (caseById.get(s.caseId)?.kind ?? s.kind) === 'positive' && s.verdict === 'incomplete')
+    .map((s) => s.caseId);
+  if (unfinished.length > 0) text += `; ${unfinished.length} did not finish (${numbered(unfinished)})`;
   return text;
 }
 

@@ -224,10 +224,13 @@ describe('renderReport', () => {
     const dataset = [positive(100, 5), positive(171, 9), positive(126, 2), positive(129, 3), positive(143, 4), positive(146, 3)];
     const secondary = replayCase({ id: 'pr220', pr: 220, title: 'Fixes described in the body', kind: 'secondary', known: [problem({ id: 'S1', summary: 'The secondary problem.' })] });
 
-    function render(run: ReplayCase[], inTop: Record<string, number>, all: ReplayCase[] = dataset) {
+    function render(run: ReplayCase[], inTop: Record<string, number>, all: ReplayCase[] = dataset, unfinished: string[] = []) {
       const details: Record<string, { doc: ReviewDocument; matches: Match[] }> = {};
       for (const c of run) {
-        const d = doc({ findings: [finding('f1', 'top')] });
+        const d = doc({
+          findings: [finding('f1', 'top')],
+          ...(unfinished.includes(c.id) ? { verdict: { label: 'incomplete', sentence: 's', counts: { block: 0, fix: 0, ask: 0, note: 0 } } } : {}),
+        });
         details[c.id] = { doc: d, matches: c.known.map((k, i) => (i < (inTop[c.id] ?? 0) ? match(k.id, 'top', 'f1') : match(k.id, 'none', null))) };
       }
       const scores = run.map((c) => scoreCase(c, details[c.id]!.doc, details[c.id]!.matches));
@@ -241,6 +244,19 @@ describe('renderReport', () => {
       const first = section(text, 'The two tests').split('\n').find((l) => l.startsWith('1. '))!;
       expect(first).toBe('1. At least half of the known problems should be in the top five. 7 of 10 were (70%). ' +
         "Yes so far: this run covers 10 of the dataset's 26 known problems; 3 pull requests were not run (#100, #126, #171).");
+    });
+
+    it('so far also says which positive pull requests in the run did not finish', () => {
+      const every = render(dataset, { pr100: 5, pr171: 9 }, dataset, ['pr143', 'pr129']);
+      const first = section(every.text, 'The two tests').split('\n').find((l) => l.startsWith('1. '))!;
+      expect(first).toBe('1. At least half of the known problems should be in the top five. 14 of 26 were (54%). ' +
+        "Yes so far: this run covers 26 of the dataset's 26 known problems; 2 did not finish (#129, #143). " +
+        'The reviews of 2 of these pull requests did not finish (#129 Case 129, #143 Case 143); their known problems are counted as missed.');
+
+      const partial = render(dataset.filter((c) => [129, 143, 146].includes(c.pr)), { pr129: 3, pr143: 3, pr146: 1 }, dataset, ['pr146']);
+      expect(section(partial.text, 'The two tests')).toContain(
+        "Yes so far: this run covers 10 of the dataset's 26 known problems; 3 pull requests were not run (#100, #126, #171); 1 did not finish (#146).",
+      );
     });
 
     it('a run with every positive case answers Yes or No', () => {
