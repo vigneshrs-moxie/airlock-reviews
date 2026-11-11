@@ -3,6 +3,7 @@ import type { Finding, ReviewDocument, Severity, VerdictLabel } from '@airlock/s
 const WIDTH = 100;
 const FILES_PER_LAYER_WHEN_LONG = 5;
 const LONG_MAP_FILES = 40;
+const CODE_QUOTE_LIMIT = 160;
 
 const VERDICT_WORDS: Record<VerdictLabel, string> = {
   'not-ready': 'Not ready',
@@ -44,13 +45,13 @@ function wrap(text: string, prefix: string, hang: string = ' '.repeat(prefix.len
  * Makes a document string safe to print: runs of carriage returns, line feeds and tabs become one space,
  * and every other control character (C0, DEL, C1) and the line and paragraph separators are removed.
  */
-function clean(s: string): string {
+export function cleanForTerminal(s: string): string {
   return s.replace(/[\r\n\t]+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
 }
 
 /** Cleans every string in the document up front, so the renderer cannot forget a field. */
 function cleanAll<T>(value: T): T {
-  if (typeof value === 'string') return clean(value) as T;
+  if (typeof value === 'string') return cleanForTerminal(value) as T;
   if (Array.isArray(value)) return value.map(cleanAll) as T;
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, cleanAll(v)])) as T;
@@ -99,6 +100,18 @@ function renderFinding(f: Finding, n: number, color: boolean): string[] {
 
 function bullets(items: string[]): string[] {
   return items.flatMap((t) => wrap(t, '- ', '  '));
+}
+
+function droppedItem(d: ReviewDocument['dropped'][number]): string[] {
+  const head = `- ${d.candidate.title} (${d.stage}: ${d.reason})`;
+  const r = d.refutation;
+  if (r === null) return [head];
+  const place = `${r.path}${r.line === null ? '' : `:${r.line}`} (${r.role})`;
+  if (r.role === 'head' || r.role === 'base') {
+    const quote = r.quote.length > CODE_QUOTE_LIMIT ? `${r.quote.slice(0, CODE_QUOTE_LIMIT)}…` : r.quote;
+    return [head, `  proof: ${place} "${quote}"`];
+  }
+  return [head, ...wrap(`proof: ${place} "${r.quote}"`, '  ', '    ')];
 }
 
 function countsLine(doc: ReviewDocument): string {
@@ -179,7 +192,7 @@ export function renderReview(input: ReviewDocument, opts: { color?: boolean } = 
     section('Whose call', bullets(doc.whoseCall)),
     section('Check after merge', doc.checksAfterMerge.flatMap((t, i) => wrap(t, `${i + 1}. `))),
     section('Change map', changeMap(doc)),
-    section(`Dropped: ${doc.dropped.length}`, doc.dropped.map((d) => `- ${d.candidate.title} (${d.stage}: ${d.reason})`)),
+    section(`Dropped: ${doc.dropped.length}`, doc.dropped.flatMap(droppedItem)),
     section('Stage errors', doc.stageErrors.map((e) => `- ${e.stage}${e.cohortId === null ? '' : `, cohort ${e.cohortId}`}: ${e.message}`)),
     section('Timing', timingTable(doc)),
   ];

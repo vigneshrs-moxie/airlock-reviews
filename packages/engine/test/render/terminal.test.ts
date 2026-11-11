@@ -266,4 +266,49 @@ describe('renderReview', () => {
       expect(out.split('\n').length).toBe(plain.split('\n').length);
     });
   });
+
+  describe('proof under a dropped item', () => {
+    const withRefutation = (refutation: { path: string; line: number | null; role: string; quote: string } | null): ReviewDocument => {
+      const doc = fullDocument();
+      doc.dropped = [{ candidate: { ...candidate(), title: 'Naming nit' }, stage: 'challenge', reason: 'refuted', refutation }];
+      return doc;
+    };
+    const droppedLines = (out: string): string[] => {
+      const lines = out.split('\n');
+      const i = lines.findIndex((l) => l.startsWith('Dropped:'));
+      return lines.slice(i + 2, lines.findIndex((l, j) => j > i + 2 && l === ''));
+    };
+
+    it('prints the proof under a dropped item that has a refutation', () => {
+      const out = renderReview(withRefutation({ path: 'src/a.ts', line: 7, role: 'head', quote: 'return 1;' }));
+      expect(droppedLines(out)).toEqual(['- Naming nit (challenge: refuted)', '  proof: src/a.ts:7 (head) "return 1;"']);
+    });
+
+    it('prints no proof line when the refutation is null', () => {
+      expect(droppedLines(renderReview(withRefutation(null)))).toEqual(['- Naming nit (challenge: refuted)']);
+    });
+
+    it('omits the line number when the refutation has none', () => {
+      const out = renderReview(withRefutation({ path: 'src/a.ts', line: null, role: 'base', quote: 'x' }));
+      expect(out).toContain('  proof: src/a.ts (base) "x"');
+    });
+
+    it('cuts a long code quote but prints a recorded decision in full', () => {
+      const long = 'word '.repeat(60).trim();
+      const code = renderReview(withRefutation({ path: 'a.ts', line: 1, role: 'head', quote: long }));
+      expect(code).toContain(`"${long.slice(0, 160)}…"`);
+      expect(code).not.toContain(long);
+      const record = renderReview(withRefutation({ path: 'log.md', line: 2, role: 'standard', quote: long }));
+      const proof = droppedLines(record).slice(1);
+      expect(proof.length).toBeGreaterThan(1);
+      expect(proof.every((l) => l.length <= 100)).toBe(true);
+      expect(proof.join(' ').replace(/\s+/g, ' ')).toContain(`"${long}"`);
+    });
+
+    it('cleans control characters out of the proof line', () => {
+      const out = renderReview(withRefutation({ path: 'a\u001b[31m.ts', line: 1, role: 'he\u0007ad', quote: 'x\r\ny\u2028z' }));
+      expect(out).toContain('  proof: a[31m.ts:1 (head) "x yz"');
+      for (const bad of ['\u001b', '\u0007', '\r', '\u2028']) expect(out).not.toContain(bad);
+    });
+  });
 });
