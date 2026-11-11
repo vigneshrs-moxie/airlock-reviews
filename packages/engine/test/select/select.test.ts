@@ -53,7 +53,7 @@ describe('mergeDuplicates', () => {
     expect(ids(r.merged)).toEqual(['b']);
     expect(r.merged[0]!.severity).toBe('block');
     expect(r.dropped).toEqual([{
-      candidate: expect.objectContaining({ id: 'a' }), stage: 'select', reason: 'same problem as b', refutation: null,
+      candidate: expect.objectContaining({ id: 'a' }), stage: 'select', reason: 'same problem as b', refutation: null, mergedInto: 'b',
     }]);
     expect(r.dropped[0]!.candidate).not.toHaveProperty('anchor');
     expect(r.dropped[0]!.candidate).not.toHaveProperty('checked');
@@ -108,10 +108,49 @@ describe('mergeDuplicates', () => {
     expect(ids(mergeDuplicates([a, b, c], [['b', 'c'], ['a', 'b']]).merged)).toEqual(['a', 'b']);
   });
 
-  it('ignores a group of more than four ids, even on one file', () => {
-    const five = ['a', 'b', 'c', 'd', 'e'].map((id) => item(id, 'fix', { path: 'src/one.ts' }));
-    expect(ids(mergeDuplicates(five, [['a', 'b', 'c', 'd', 'e']]).merged)).toEqual(['a', 'b', 'c', 'd', 'e']);
-    expect(ids(mergeDuplicates(five, [['a', 'b', 'c', 'd']]).merged)).toEqual(['a', 'e']);
+  it('accepts a group of any size whose findings sit near each other in one file', () => {
+    const six = ['a', 'b', 'c', 'd', 'e', 'f'].map((id, i) => item(id, 'fix', {
+      path: 'src/one.ts', anchor: { status: 'in-diff', startLine: 10 + 2 * i, endLine: 10 + 2 * i },
+    }));
+    const r = mergeDuplicates(six, [['a', 'b', 'c', 'd', 'e', 'f']]);
+    expect(ids(r.merged)).toEqual(['a']);
+    expect(r.dropped.map((d) => [d.candidate.id, d.mergedInto])).toEqual([['b', 'a'], ['c', 'a'], ['d', 'a'], ['e', 'a'], ['f', 'a']]);
+    expect(r.notes).toEqual([]);
+  });
+
+  it('ignores a group of more than four that spans files, or lines far apart, and says so in a note', () => {
+    const names = ['a', 'b', 'c', 'd', 'e'];
+    const crossFile = names.map((id) => item(id, 'fix', {
+      path: `src/${id}.ts`, connected: names.filter((o) => o !== id).map((o) => ({ path: `src/${o}.ts`, line: 1, role: 'r', quote: `${o}();` })),
+    }));
+    const five = mergeDuplicates(crossFile, [names]);
+    expect(ids(five.merged)).toEqual(names);
+    expect(five.notes).toEqual([
+      'Selection named 5 findings as one problem; they were not merged because more than four are merged at once only when '
+        + 'they all sit near each other in one file: "Finding a", "Finding b", "Finding c", "Finding d", "Finding e"',
+    ]);
+    expect(ids(mergeDuplicates(crossFile, [names.slice(0, 4)]).merged)).toEqual(['a', 'e']);
+
+    const farApart = names.map((id, i) => item(id, 'fix', { path: 'src/one.ts', anchor: { status: 'in-diff', startLine: 10 * (i + 1), endLine: 10 * (i + 1) } }));
+    const far = mergeDuplicates(farApart, [names]);
+    expect(ids(far.merged)).toEqual(names);
+    expect(far.notes).toHaveLength(1);
+  });
+
+  it('notes a group whose findings do not all share a file', () => {
+    const a = item('a', 'fix', { path: 'src/a.ts', title: 'One' });
+    const b = item('b', 'fix', { path: 'src/b.ts', title: 'Two' });
+    expect(mergeDuplicates([a, b], [['a', 'b', 'ghost']]).notes).toEqual([
+      'Selection named 2 findings as one problem; they were not merged because they do not all share a file: "One", "Two"',
+    ]);
+  });
+
+  it('a merge carries the sources and fingerprints of what it absorbs into the kept item', () => {
+    const a = item('a', 'block', { path: 'src/x.ts', alsoRaisedBy: [{ pack: 'core', lens: 'scale', ruleId: null }], aliases: ['f00'] });
+    const b = item('b', 'fix', { path: 'src/x.ts', source: { pack: 'orbit', lens: null, ruleId: 'R1' } });
+    const r = mergeDuplicates([a, b], [['a', 'b']]);
+    expect(r.merged[0]!.alsoRaisedBy).toEqual([{ pack: 'core', lens: 'scale', ruleId: null }, { pack: 'orbit', lens: null, ruleId: 'R1' }]);
+    expect(r.merged[0]!.aliases).toEqual(['f00', fingerprint(b)]);
   });
 
   it('does not merge two different problems on the same line without a group', () => {
@@ -225,12 +264,37 @@ describe('select', () => {
     expect(r.dropped).toEqual([]);
   });
 
-  it('ignores a group listing every id of a one-file pull request', async () => {
-    const kept = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => item(id, 'fix', { path: 'src/one.ts' }));
+  it('applies a group of six on one line of one file, and carries what it absorbed into the finding', async () => {
+    const kept = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => item(id, 'fix', { path: 'src/one.ts', source: { pack: 'core', lens: id, ruleId: null } }));
     const runner = createFakeRunner(() => answer({ top: ['a'], sameAs: [['a', 'b', 'c', 'd', 'e', 'f']] }));
     const r = await select(runner, ctx(), kept, [], []);
-    expect(r.findings).toHaveLength(6);
-    expect(r.dropped).toEqual([]);
+    expect(ids(r.findings)).toEqual(['a']);
+    expect(r.findings[0]!.alsoRaisedBy!.map((s) => s.lens)).toEqual(['b', 'c', 'd', 'e', 'f']);
+    expect(r.findings[0]!.aliases).toEqual(kept.slice(1).map(fingerprint));
+    expect(r.dropped.map((d) => d.mergedInto)).toEqual(['a', 'a', 'a', 'a', 'a']);
+    expect(r.notes).toEqual([]);
+  });
+
+  it('writes a cross-file group of five it did not apply to the notes', async () => {
+    const names = ['a', 'b', 'c', 'd', 'e'];
+    const kept = names.map((id) => item(id, 'fix', {
+      path: `src/${id}.ts`, connected: names.filter((o) => o !== id).map((o) => ({ path: `src/${o}.ts`, line: 1, role: 'r', quote: `${o}();` })),
+    }));
+    const r = await select(createFakeRunner(() => answer({ sameAs: [names] })), ctx(), kept, [], []);
+    expect(r.findings).toHaveLength(5);
+    expect(r.notes).toEqual([expect.stringMatching(/^Selection named 5 findings as one problem; they were not merged because /)]);
+  });
+
+  it('writes each merged question to the notes with what it was merged into', async () => {
+    const questions = [ask('Is 60 days the limit?'), ask('Can a pause last 90 days?'), ask('Is b on purpose?')];
+    const runner = createFakeRunner(() => answer({
+      top: ['b'], questionSameAs: [{ question: 2, sameAs: 'q1' }, { question: 3, sameAs: 'b' }],
+    }));
+    const r = await select(runner, ctx(), [item('b', 'fix', { title: 'The b total is wrong' })], questions, []);
+    expect(r.notes).toEqual([
+      'A question was merged into the question "Is 60 days the limit?": "Can a pause last 90 days?"',
+      'A question was merged into the finding "The b total is wrong": "Is b on purpose?"',
+    ]);
   });
 
   it('never loses an item, whatever the answer', async () => {
@@ -383,8 +447,9 @@ describe('select', () => {
       learned: [{ date: '2026-11-01', repo: 'acme/widgets', kind: 'intended', text: 'LEARNED_MARKER pauses last 60 days.' }],
     })];
     const kept = [
-      item('a', 'block', { title: 'Totals | taxes are wrong', happens: 'The invoice\nshows the wrong total.' }),
       item('b', 'note', { source: { pack: 'orbit', lens: null, ruleId: 'R7' }, anchor: { status: 'not-found', startLine: null, endLine: null } }),
+      item('a', 'block', { title: 'Totals | taxes are wrong', happens: 'The invoice\nshows the wrong total.', why: 'Tax is\nadded twice.' }),
+      item('a2', 'fix', { path: 'src/a.ts', anchor: { status: 'in-diff', startLine: 1, endLine: 1 } }),
     ];
     const questions = [{ text: 'Is 60 the\nright | limit?', cohortId: 'k1', source: { pack: 'core', lens: 'boundary', ruleId: null } }];
     const runner = createFakeRunner(() => answer({ top: ['a'] }));
@@ -400,9 +465,11 @@ describe('select', () => {
     expect(labels(req.material)).toEqual(['pull request', 'brief', 'change map', 'findings', 'questions']);
     expect(block(req.material, 'pull request')).toContain('PR_BODY_MARKER');
     expect(block(req.material, 'brief')).toContain('Pauses are limited to 60 days');
+    // Sorted by file and line, each with its cause.
     expect(block(req.material, 'findings')!.split('\n')).toEqual([
-      'a | block | core/boundary | src/a.ts:2 | Totals \\| taxes are wrong | happens: The invoice shows the wrong total.',
-      'b | note | orbit/R7 | src/b.ts:- | Finding b | happens: A member is hurt by b.',
+      'a2 | fix | core/boundary | src/a.ts:1 | Finding a2 | happens: A member is hurt by a2. | why: Because.',
+      'a | block | core/boundary | src/a.ts:2 | Totals \\| taxes are wrong | happens: The invoice shows the wrong total. | why: Tax is added twice.',
+      'b | note | orbit/R7 | src/b.ts:- | Finding b | happens: A member is hurt by b. | why: Because.',
     ]);
     expect(block(req.material, 'questions')!.split('\n')).toEqual(['q1 | Is 60 the right \\| limit?']);
     expect(r.usage).toHaveLength(1);

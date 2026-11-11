@@ -17,7 +17,7 @@ The material comes in blocks, in this order:
 1. The pull request title and description. They say what the author meant to do. They may be wrong or incomplete.
 2. The brief: what the change does, read from the code, and the claims in the description, each with a verdict.
 3. The change map: the cohorts of the change, each with its layers and files, then the standalone files.
-4. The findings, one per line, in this form: `id | severity | pack/lens or rule | path:line | title | happens: what happens`. The line is `-` when it is not known. A `\|` inside a field is a literal `|`.
+4. The findings, one per line, sorted by file and line, in this form: `id | severity | pack/lens or rule | path:line | title | happens: what happens | why: what the code does that causes it`. The line is `-` when it is not known. A `\|` inside a field is a literal `|`.
 5. The questions the reviewers raised for the author, one per line, numbered: `q1 | question`.
 
 A block that has nothing in it says (none).
@@ -34,7 +34,7 @@ List every other finding under `also`, in the order a reader should see them.
 
 ## Findings that are the same problem
 
-Some findings may be the same underlying problem, raised by two reviewers or from two places. Two findings are the same problem when they have the same cause and the same consequence, not merely the same file or the same line. Put the ids of each such set in one list in `sameAs`. Never group two different problems because they share a line: one line can hold two faults. When in doubt, leave them apart.
+Some findings may be the same underlying problem, raised by two reviewers or from two places. Findings at the same place have usually been compared already, so look most for the same problem raised from two places, such as the code that causes it and the code that shows it. Two findings are the same problem when they have the same cause and the same consequence, not merely the same file or the same line: compare their `why` as well as what happens. Put the ids of each such set in one list in `sameAs`. Never group two different problems because they share a line: one line can hold two faults. When in doubt, leave them apart.
 
 ## Questions that are the same
 

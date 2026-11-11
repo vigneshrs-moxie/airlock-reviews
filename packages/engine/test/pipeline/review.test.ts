@@ -140,7 +140,7 @@ describe('runReview', () => {
     expect(doc.depth).toBe('quick');
     expect(starts(events)).toEqual(STANDARD_STAGES);
     const skipped = events.flatMap((e) => (e.type === 'stage' && e.status === 'done' && e.detail.startsWith('skipped') ? [e.stage] : []));
-    expect(skipped).toEqual(['sweep', 'seams', 'challenge']);
+    expect(skipped).toEqual(['sweep', 'seams', 'merge', 'challenge']);
   }, SLOW);
 
   it('never runs more than the parallel limit at once', async () => {
@@ -257,7 +257,7 @@ describe('runReview', () => {
     expect(events).toContainEqual({ type: 'brief', brief: doc.brief });
     expect(events.findIndex((e) => e.type === 'map')).toBeLessThan(events.findIndex((e) => e.type === 'brief'));
     const skipped = events.flatMap((e) => (e.type === 'stage' && e.status === 'done' && e.detail.startsWith('skipped') ? [e.stage] : []));
-    expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'challenge']);
+    expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge']);
   }, SLOW);
 
   it('a sync merge that changes no files has no stage error and its brief says it changes no files', async () => {
@@ -340,12 +340,12 @@ describe('runReview', () => {
     expect(added.cohortId).toBe('k1');
     expect(doc.findings.map((f) => f.title)).toContain(DEEP_NEW.title);
     expect(roles(calls)).toContain(`challenge:${added.id}`);
-    expect(starts(events)).toEqual([...STANDARD_STAGES.slice(0, 11), 'lenses-deep', 'select', 'store']);
+    expect(starts(events)).toEqual([...STANDARD_STAGES.slice(0, 12), 'lenses-deep', 'select', 'store']);
   }, SLOW);
 
   it('timings add up: one entry per stage, agent runs equal to the requests of that stage', async () => {
     const { doc, calls } = await review({ req: { depth: 'deep' } });
-    expect(doc.timings.map((t) => t.stage)).toEqual([...STANDARD_STAGES.slice(0, 11), 'lenses-deep', 'select', 'store']);
+    expect(doc.timings.map((t) => t.stage)).toEqual([...STANDARD_STAGES.slice(0, 12), 'lenses-deep', 'select', 'store']);
     const isDeep = (c: AgentRequest<unknown>): boolean => c.instructions.includes(DEEP_SENTENCE);
     const deepIds = new Set(doc.candidates.filter((c) => c.title === DEEP_NEW.title).map((c) => c.id));
     const isDeepChallenge = (c: AgentRequest<unknown>): boolean => deepIds.has(c.role.replace('challenge:', ''));
@@ -357,6 +357,7 @@ describe('runReview', () => {
       lenses: count((c) => c.role.startsWith('lens:') && !isDeep(c)),
       sweep: count((c) => c.role.startsWith('sweep:')),
       seams: count((c) => c.role === 'seams'),
+      merge: count((c) => c.role === 'merge'),
       challenge: count((c) => c.role.startsWith('challenge:') && !isDeepChallenge(c)),
       'lenses-deep': count((c) => isDeep(c) || (c.role.startsWith('challenge:') && isDeepChallenge(c))),
       select: count((c) => c.role === 'select'),

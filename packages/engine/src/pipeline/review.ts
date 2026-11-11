@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { ReviewDocumentSchema } from '@airlock/shared';
 import type {
-  Anchor, Brief, Candidate, ChangeMap, Depth, Dropped, Fact, FileDiff, FileFact, Finding, Link, ModelConfig, Neighbour, PrInfo,
+  Brief, Candidate, ChangeMap, Depth, Dropped, Fact, FileDiff, FileFact, Finding, Link, ModelConfig, Neighbour, PrInfo,
   Question, ReviewDocument, ReviewEvent, ReviewRange, StageError,
 } from '@airlock/shared';
 import { UNKNOWN_USAGE } from '../agent/runner.js';
@@ -26,6 +26,7 @@ import { placeablePaths } from '../map/check.js';
 import { findLinks } from '../map/links.js';
 import { fallbackMap, buildChangeMap } from '../map/mapper.js';
 import { findNeighbours } from '../map/neighbours.js';
+import { mergeSameProblems, withMergedCount, type AnchoredCandidate } from '../merge/merge.js';
 import type { Holdout, Pack } from '../packs/types.js';
 import { runSweep } from '../rules/sweep.js';
 import { decideVerdict, sameTextOnce, select, selfReviewText, type SelectResult } from '../select/select.js';
@@ -178,7 +179,7 @@ function fallbackSelection(
   const verdict = decideVerdict(pr, findings, log.errors, false, left.length);
   return {
     findings, dropped: [], questions: left, verdict, whoseCall: [], checksAfterMerge: [],
-    selfReviewText: selfReviewText(pr, depth, packs.map((p) => p.title), verdict), errors: [], usage: [],
+    selfReviewText: selfReviewText(pr, depth, packs.map((p) => p.title), verdict), notes: [], errors: [], usage: [],
   };
 }
 
@@ -331,13 +332,30 @@ async function reviewInWorkspace(
   const candidates = withUniqueIds([...lensR.candidates, ...sweepR.candidates, ...seamsR.candidates], usedIds);
   const schemaDropped = [...lensR.dropped, ...sweepR.dropped, ...seamsR.dropped];
 
-  let anchored: (Candidate & { anchor: Anchor })[] = [];
+  let anchored: AnchoredCandidate[] = [];
   const anchorDropped: Dropped[] = [];
   if (sync) log.skip('anchor', skipWhy);
   else {
     const r = await log.run('anchor', () => anchorCandidates(candidates, files, readHead));
     anchored = r?.anchored ?? [];
     anchorDropped.push(...(r?.dropped ?? []));
+  }
+
+  // Code proposes clusters at the same place and the model says which are the same problem; only then are they merged,
+  // before the challenge, so each problem is challenged once.
+  const mergeDropped: Dropped[] = [];
+  if (sync || quick) log.skip('merge', skipWhy);
+  else if (!(await limitedOut('merge'))) {
+    const r = await log.run('merge', async (rec) => {
+      const out = await mergeSameProblems(runner, ctx, anchored);
+      rec.usage(out.usage);
+      rec.error(...out.errors);
+      return out;
+    });
+    if (r !== undefined) {
+      anchored = r.items;
+      mergeDropped.push(...r.dropped);
+    }
   }
 
   let kept: KeptCandidate[];
@@ -356,11 +374,11 @@ async function reviewInWorkspace(
       return out;
     });
     kept = r?.kept ?? anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED }));
-    challengeDropped.push(...(r?.dropped ?? []));
+    challengeDropped.push(...withMergedCount(r?.dropped ?? [], mergeDropped));
   }
 
   if (depth === 'deep' && !sync && !(await limitedOut('lenses-deep'))) {
-    const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...challengeDropped].map((d) => d.candidate)];
+    const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped].map((d) => d.candidate)];
     await log.run('lenses-deep', (rec) => deepPass(rec, {
       runner, ctx, seen: new Set(known.map(fingerprint)), uniqueIds: (c) => withUniqueIds(c, usedIds), readHead, readBoth,
     }, { candidates, questions, schemaDropped, anchorDropped, challengeDropped, kept, limits }));
@@ -377,7 +395,7 @@ async function reviewInWorkspace(
 
   return {
     range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
-    dropped: [...schemaDropped, ...anchorDropped, ...challengeDropped, ...selection.dropped], limits,
+    dropped: [...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
   };
 }
 
@@ -450,7 +468,7 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
     files: reviewed.tiers, facts: reviewed.facts, map: reviewed.map, brief: reviewed.brief, verdict: selection.verdict,
     findings: selection.findings, questions: reviewed.questions, dropped: reviewed.dropped, candidates: reviewed.candidates,
     whoseCall: selection.whoseCall, checksAfterMerge: selection.checksAfterMerge, selfReviewText: selection.selfReviewText,
-    stageErrors: [...log.errors], timings: log.timings(), limits: reviewed.limits,
+    stageErrors: [...log.errors], timings: log.timings(), limits: reviewed.limits, notes: selection.notes,
   });
   // A draft that fails the schema is the engine's own fault, so it rejects rather than becoming a stage error.
   const engineFault: { error: Error | null } = { error: null };

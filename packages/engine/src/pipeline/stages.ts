@@ -4,7 +4,7 @@ import type { AgentUsage } from '../agent/runner.js';
 
 /** Stage names in the order they run and are listed. `lenses-deep` runs only at deep depth. */
 export const STAGES = [
-  'intake', 'packs', 'shape', 'facts', 'map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'challenge', 'lenses-deep',
+  'intake', 'packs', 'shape', 'facts', 'map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge', 'lenses-deep',
   'select', 'store',
 ] as const;
 export type StageName = (typeof STAGES)[number];

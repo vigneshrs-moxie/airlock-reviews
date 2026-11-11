@@ -20,7 +20,7 @@ export const NOW = new Date('2026-11-11T09:30:00.000Z');
 export const DEEP_SENTENCE = 'This is a second, closer pass over one layer: read every non-test file in it in full.';
 
 export const STANDARD_STAGES = [
-  'intake', 'packs', 'shape', 'facts', 'map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'challenge', 'select', 'store',
+  'intake', 'packs', 'shape', 'facts', 'map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge', 'select', 'store',
 ];
 
 export const BASE_FILES: Record<string, string> = {

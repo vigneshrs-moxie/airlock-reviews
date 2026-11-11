@@ -28,6 +28,7 @@ const ROLE_LIMITS: Record<string, { timeoutMs: number; maxTurns: number }> = {
   seams: { timeoutMs: 15 * MINUTE, maxTurns: 40 },
   brief: { timeoutMs: 5 * MINUTE, maxTurns: 25 },
   select: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
+  merge: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
   judge: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
 };
 const OTHER_LIMITS = { timeoutMs: 10 * MINUTE, maxTurns: 40 };

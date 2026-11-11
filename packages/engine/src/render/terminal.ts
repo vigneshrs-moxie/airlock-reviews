@@ -86,8 +86,18 @@ function renderFinding(f: Finding, n: number, color: boolean): string[] {
     for (const p of f.connected) out.push(`     ${p.path}:${p.line ?? '?'}  ${p.role}`);
   }
   if (f.checked.trim() !== '') field('Checked:', f.checked);
-  out.push(`   From: ${f.source.pack} · ${f.source.ruleId ?? f.source.lens ?? 'unknown'}`);
+  out.push(`   From: ${sourceWords(f.source)}`);
+  const also = alsoRaisedBy(f);
+  if (also !== null) out.push(...wrap(also, '   '));
   return out;
+}
+
+const sourceWords = (s: Finding['source']): string => `${s.pack} · ${s.ruleId ?? s.lens ?? 'unknown'}`;
+
+/** `Also raised by: <pack · lens or rule>, …` for a finding that absorbed duplicates, else null. */
+function alsoRaisedBy(f: Finding): string | null {
+  const sources = f.alsoRaisedBy ?? [];
+  return sources.length === 0 ? null : `Also raised by: ${sources.map(sourceWords).join(', ')}`;
 }
 
 function bullets(items: string[]): string[] {
@@ -185,9 +195,11 @@ export function renderReview(input: ReviewDocument, opts: { color?: boolean } = 
     section('What this does', bullets(doc.brief.whatItDoes)),
     section('Claims', bullets(claims.map((c) => `${c.verdict === 'unclear' ? 'Unclear' : 'Not supported'}: ${c.text} (${c.evidence})`))),
     section('Findings', top.flatMap((f, i) => [...(i > 0 ? [''] : []), ...renderFinding(f, i + 1, color)])),
-    section('Also found', also.map((f) => {
+    section('Also found', also.flatMap((f) => {
       const line = f.anchor.startLine ?? f.lineHint;
-      return `- [${paint(color, SEVERITY_COLORS[f.severity], SEVERITY_WORDS[f.severity])}] ${f.title}  (${f.path}${line === null ? '' : `:${line}`})`;
+      const head = `- [${paint(color, SEVERITY_COLORS[f.severity], SEVERITY_WORDS[f.severity])}] ${f.title}  (${f.path}${line === null ? '' : `:${line}`})`;
+      const others = alsoRaisedBy(f);
+      return others === null ? [head] : [head, ...wrap(others, '  ')];
     })),
     section('Questions', bullets(doc.questions.map((q) => q.text))),
     section('Whose call', bullets(doc.whoseCall)),
@@ -195,6 +207,7 @@ export function renderReview(input: ReviewDocument, opts: { color?: boolean } = 
     section('Change map', changeMap(doc)),
     section('Not reviewed', doc.files.filter((f) => f.tier === 'ignored').map((f) => `- ${f.path}: ${f.reason}`)),
     section('Not shown to the reviewer', bullets(doc.limits ?? [])),
+    section('Notes', bullets(doc.notes ?? [])),
     section(`Dropped: ${doc.dropped.length}`, doc.dropped.flatMap(droppedItem)),
     section('Stage errors', doc.stageErrors.map((e) => `- ${e.stage}${e.cohortId === null ? '' : `, cohort ${e.cohortId}`}: ${e.message}`)),
     section('Timing', timingTable(doc)),

@@ -1,9 +1,10 @@
-import type { Anchor, Candidate, Dropped, Severity, StageError, StageErrorKind, Tier } from '@airlock/shared';
+import type { Dropped, Severity, StageError, StageErrorKind, Tier } from '@airlock/shared';
 import { SeveritySchema } from '@airlock/shared';
 import { z } from 'zod';
 import { asMaterial, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner, AgentUsage } from '../agent/runner.js';
 import { budgetedDiff } from '../lenses/cohort-lens.js';
+import { plainCandidate, type AnchoredCandidate } from '../merge/merge.js';
 import {
   cohortOutline, diffCutSentence, factsBlock, instructionsFor, prBlock, sendRequest, standaloneCohort, tierOf,
 } from '../lenses/context.js';
@@ -28,7 +29,7 @@ export const ChallengeOutputSchema = z.object({
 export type ChallengeOutput = z.infer<typeof ChallengeOutputSchema>;
 
 /** A candidate that survived the challenge, with one or two sentences on what the challenger looked at. */
-export type KeptCandidate = Candidate & { anchor: Anchor; checked: string };
+export type KeptCandidate = AnchoredCandidate & { checked: string };
 
 export interface ChallengeResult {
   kept: KeptCandidate[];
@@ -39,7 +40,7 @@ export interface ChallengeResult {
   limits: string[];
 }
 
-type Item = Candidate & { anchor: Anchor };
+type Item = AnchoredCandidate;
 type Outcome = { kept: KeptCandidate } | { dropped: Dropped };
 
 const NOT_CHALLENGED = 'not challenged';
@@ -126,7 +127,7 @@ async function applyAnswer(item: Item, answer: ChallengeOutput, evidence: Eviden
         const said = proof.ownCode && explanation !== '' ? `${asSentence(checked)} ${explanation}` : checked;
         return { kept: { ...item, checked: `${asSentence(said)}${UNCONFIRMED}` } };
       }
-      const { anchor: _anchor, ...candidate } = item;
+      const candidate = plainCandidate(item);
       const note = proof.added === true ? ' (the proof is code this pull request added)' : '';
       const reason = `${answer.ground}: ${answer.explanation.trim()} (proof: ${proof.source})${note}`;
       return { dropped: { candidate, stage: 'challenge', reason, refutation: proof.place } };

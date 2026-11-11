@@ -192,6 +192,8 @@ export const ReviewDocumentSchema = z.object({
   timings: z.array(StageTimingSchema),
   /** Plain sentences saying what a model was not shown because of a size limit (a diff cut short, rule files left out). */
   limits: z.array(z.string()).optional(),
+  /** Plain sentences about what the engine did that a reader may want to know (a group it did not merge, a merged question). */
+  notes: z.array(z.string()).optional(),
   /** When the review started (ISO time). `createdAt` is when the document was assembled, at the end of the review. */
   startedAt: z.string().optional(),
 });
