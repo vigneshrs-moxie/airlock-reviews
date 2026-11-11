@@ -1,3 +1,5 @@
+import { symlink } from 'node:fs/promises';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createFakeRunner } from '../../src/agent/fake-runner.js';
 import type { AgentRequest } from '../../src/agent/runner.js';
@@ -133,5 +135,19 @@ describe('the request is checked before anything runs', () => {
       expect(c.material, c.role).not.toContain('Refunds reuse formatMoney.');
       if (c.material.includes('<material label="pull request">')) expect(block(c.material, 'pull request'), c.role).toContain('BODY_AT_REVIEW');
     }
+  }, SLOW);
+});
+
+describe('a symbolic link in the pull request', () => {
+  it('is trusted, and the facts say where it points', async () => {
+    const s = await scenario({ 'docs/rules.md': 'rules\n', 'src/a.ts': 'export const a = 1;\n' }, {});
+    await symlink('../docs/rules.md', join(s.remote.dir, 'src/rules.md'));
+    await s.remote.write('src/a.ts', 'export const a = 2;\n');
+    const head = await s.remote.commit('add a link');
+    const { doc } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: head }) });
+    expect(doc.files).toContainEqual({ path: 'src/rules.md', tier: 'trust', reason: 'symbolic link' });
+    expect(doc.facts).toContainEqual({
+      checkId: 'symbolic-link', path: 'src/rules.md', line: null, message: 'src/rules.md is a symbolic link to ../docs/rules.md',
+    });
   }, SLOW);
 });

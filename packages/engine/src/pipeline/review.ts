@@ -12,7 +12,7 @@ import { fingerprint } from '../anchor/fingerprint.js';
 import { buildBrief } from '../brief/brief.js';
 import { challenge, type KeptCandidate } from '../challenge/challenge.js';
 import type { ReadFile } from '../challenge/proof.js';
-import { loadDiff, recheckBinary } from '../diff/parse.js';
+import { linkFacts, loadDiff, recheckBinary } from '../diff/parse.js';
 import { runChecks } from '../facts/checks.js';
 import { classifyFiles } from '../facts/classify.js';
 import { fetchPr } from '../intake/pr.js';
@@ -433,7 +433,7 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
         await loadDiff(exec, ws.gitDir, ws.range),
         (path, bytes) => safeRead(ws.headDir, path, { firstBytes: bytes }),
       ), { files: [] as FileDiff[], facts: [] as Fact[] });
-      return { pr, ws, files: loaded.files, diffFacts: loaded.facts };
+      return { pr, ws, files: loaded.files, diffFacts: [...loaded.facts, ...linkFacts(loaded.files)] };
     }, { rethrow: true }))!;
     reviewed = await reviewInWorkspace(
       req, deps, log, settings, intake.pr, intake.ws, intake.files, intake.diffFacts, { ...chosen, ms: choiceMs },
