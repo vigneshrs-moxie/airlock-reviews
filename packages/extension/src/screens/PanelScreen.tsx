@@ -54,7 +54,7 @@ function FinishedAnnouncer({ kind }: { kind: PanelState['kind'] }) {
 /** The frame and the screen for one state. */
 export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, onDismiss }: PanelScreenProps) {
   return (
-    <Frame status={connectionOf(state)} onOpenPacks={onOpenPacks}>
+    <Frame status={connectionOf(state)} onOpenPacks={onOpenPacks} {...(timers ? { timers } : {})}>
       <FinishedAnnouncer kind={state.kind} />
       <Body state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={onDismiss} />
     </Frame>

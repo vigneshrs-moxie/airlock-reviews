@@ -6,13 +6,17 @@ function Proof({ refutation }: { refutation: NonNullable<Dropped['refutation']> 
   // A recorded decision is shown in full; a quote of code is cut.
   const decision = refutation.role !== 'head' && refutation.role !== 'base';
   const [all, setAll] = useState(false);
+  const quote = useRef<HTMLPreElement>(null);
+  const shown = useRef(false);
+  // Pressing Show all removes the button that had focus, so focus moves to the quote it revealed.
+  useEffect(() => { if (all && !shown.current) { shown.current = true; quote.current?.focus(); } }, [all]);
   const clipped = !decision && clipQuote(refutation.quote) !== refutation.quote;
   return (
     <div className="proof">
       <span className="label">Proof</span>{' '}
       <code className="path">{placeText(refutation.path, refutation.line)}</code>{' · '}
       <span>{proofSide(refutation.role)}</span>
-      <pre className="quote"><code>{decision || all ? refutation.quote : clipQuote(refutation.quote)}</code></pre>
+      <pre className="quote" tabIndex={-1} ref={quote}><code>{decision || all ? refutation.quote : clipQuote(refutation.quote)}</code></pre>
       {clipped && !all && <button type="button" className="btn small" onClick={() => setAll(true)}>Show all</button>}
     </div>
   );
@@ -26,11 +30,21 @@ export function DroppedSheet({ dropped, onClose }: { dropped: readonly Dropped[]
 
   useEffect(() => {
     heading.current?.focus();
+    const inside = (node: EventTarget | null): boolean => node instanceof Node && sheet.current?.contains(node) === true;
+    const closeButton = (): HTMLElement | null | undefined => sheet.current?.querySelector('button');
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') onClose();
+      // A Tab pressed while focus is on the page behind (or nowhere) goes into the sheet.
+      else if (event.key === 'Tab' && !inside(document.activeElement)) { event.preventDefault(); closeButton()?.focus(); }
     };
+    // Focus never rests outside the sheet while it is open.
+    const onFocusIn = (event: FocusEvent): void => { if (!inside(event.target)) closeButton()?.focus(); };
     document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    document.addEventListener('focusin', onFocusIn);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('focusin', onFocusIn);
+    };
   }, [onClose]);
 
   // Tab and Shift+Tab go round the sheet's buttons and never leave it.

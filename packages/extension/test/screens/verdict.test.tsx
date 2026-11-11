@@ -634,6 +634,57 @@ describe('selection and the dropped sheet, second look', () => {
   });
 });
 
+describe('focus stays in the dropped sheet', () => {
+  const drop = { candidate: finding(9), stage: 'challenge' as const, reason: 'Held.', refutation: { path: 'src/base.ts', line: 3, role: 'head', quote: 'q'.repeat(300) } };
+  const open = () => {
+    const view = review([finding(1)], { doc: { dropped: [drop] } });
+    fireEvent.click(button('Dropped: 1'));
+    return view;
+  };
+  it('moves focus to the revealed quote after Show all', () => {
+    open();
+    fireEvent.click(button('Show all'));
+    expect(document.activeElement).toBe(screen.getByText('q'.repeat(300)).closest('pre'));
+  });
+  it('catches a Tab pressed while focus is on the body', () => {
+    open();
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+    fireEvent.keyDown(document.body, { key: 'Tab' });
+    expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
+  });
+  it('sends focus back into the sheet when something behind it is focused, until it closes', () => {
+    open();
+    const dialog = screen.getByRole('dialog');
+    const behind = button('Packs');
+    behind.focus();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    behind.focus();
+    expect(document.activeElement).toBe(behind);
+  });
+});
+
+describe('the live region', () => {
+  it('changes twice when the same sentence is announced twice', async () => {
+    clipboard(vi.fn().mockResolvedValue(undefined));
+    const timers = new FakeTimers();
+    render(<PanelScreen state={reviewState([finding(1)])} dispatch={vi.fn()} onOpenPacks={() => undefined} timers={timers} />);
+    const region = document.querySelector('[aria-live="polite"]')!;
+    tick('Problem 1');
+    act(() => timers.fire());
+    fireEvent.click(button('Copy fix prompt for 1 selected'));
+    await screen.findByRole('button', { name: 'Copied' });
+    act(() => timers.fire());
+    expect(region.textContent).toBe('Copied');
+    fireEvent.click(button('Copy fix prompt for 1 selected'));
+    await screen.findByRole('button', { name: 'Copied' });
+    expect(region.textContent).toBe('');
+    act(() => timers.fire());
+    expect(region.textContent).toBe('Copied');
+  });
+});
+
 describe('collapsible sections', () => {
   it('points aria-controls only at an element that exists, and hides the arrow from assistive technology', () => {
     review([finding(1), also(2)]);
