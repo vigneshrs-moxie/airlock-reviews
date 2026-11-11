@@ -38,7 +38,9 @@ describe('runReview on a large pull request', () => {
       if (req.role.startsWith('challenge:')) {
         return { outcome: 'keep', ground: 'none', explanation: '', refutation: null, newSeverity: null, checked: 'Looked.' };
       }
-      if (req.role === 'select') return { top: [], also: [], sameAs: [], whoseCall: [], checksAfterMerge: [], splitSuggested: false };
+      if (req.role === 'select') {
+        return { top: [], also: [], sameAs: [], questionSameAs: [], whoseCall: [], checksAfterMerge: [], splitSuggested: false };
+      }
       return { candidates: [], questions: [] };
     };
     let probe!: ReturnType<typeof concurrencyProbe>;

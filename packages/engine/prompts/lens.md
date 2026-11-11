@@ -56,13 +56,17 @@ Each candidate needs all of these:
 - `wouldBeWrongIf`: the one thing that, if true, would make the finding false.
 - `severity`, `title` and `confidence`, described below.
 
-If you cannot give an exact quote, a concrete consequence and what would prove it wrong, it is not a finding. Put it in `questions` instead, as one sentence the author can answer.
+If you cannot give an exact quote, a concrete consequence and what would prove it wrong, it is not a finding.
+
+A doubt that has a place in the code is a finding. When you can quote the exact code and say what goes wrong for a real person if the answer turns out to be "no", it is a finding with severity `ask`, even though only the author or the business can say whether it is right. Give it the quote, the consequence and what would prove it wrong, like any other finding.
+
+`questions` is only for a doubt that has no place in the code: a product decision the diff cannot show, or a piece of context that is missing. Write each as one sentence the author can answer. Never put the same doubt in both a finding and `questions`.
 
 ## Severity
 
 - `block`: shipping this causes harm. Data crosses a boundary it should not, numbers are silently wrong, data is lost, there is a security hole, or something writes to production that nobody meant to.
 - `fix`: a real defect whose blast radius is contained.
-- `ask`: only the author or the business can say whether it is right.
+- `ask`: the code is quoted and what goes wrong is clear if the answer is "no", but only the author or the business can say whether it is right.
 - `note`: worth knowing, but it does not change the decision.
 
 `title` is one short sentence a reader understands without the code. `confidence` is `high`, `medium` or `low`: how sure you are after reading the code.

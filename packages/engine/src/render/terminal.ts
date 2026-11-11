@@ -1,3 +1,4 @@
+import { verdictWords } from '@airlock/shared';
 import type { Finding, ReviewDocument, Severity, VerdictLabel } from '@airlock/shared';
 
 const WIDTH = 100;
@@ -5,15 +6,6 @@ const FILES_PER_LAYER_WHEN_LONG = 5;
 const LONG_MAP_FILES = 40;
 const CODE_QUOTE_LIMIT = 160;
 
-const VERDICT_WORDS: Record<VerdictLabel, string> = {
-  'not-ready': 'Not ready',
-  'ready-for-pr2': 'Ready for PR #2',
-  'split-first': 'Split first',
-  'request-changes': 'Request changes',
-  'approve-after-fixes': 'Approve after fixes',
-  approve: 'Approve',
-  incomplete: 'Incomplete',
-};
 const SEVERITY_WORDS: Record<Severity, string> = { block: 'Block', fix: 'Fix', ask: 'Ask', note: 'Note' };
 const SEVERITY_COLORS: Record<Severity, string> = { block: '31', fix: '33', ask: '36', note: '2' };
 const VERDICT_COLORS: Record<VerdictLabel, string> = {
@@ -169,7 +161,7 @@ export function renderReview(input: ReviewDocument, opts: { color?: boolean } = 
     [...(stage === '' ? [] : [stage]), doc.depth, `reviewed ${pr.headSha.slice(0, 7)}`, `packs: ${packs}`].join(' · '),
   ];
   const verdictBlock = [
-    paint(color, VERDICT_COLORS[verdict.label], VERDICT_WORDS[verdict.label]),
+    paint(color, VERDICT_COLORS[verdict.label], verdictWords(verdict.label, pr.stage)),
     ...wrap(verdict.sentence, ''),
     ...(countsLine(doc) === '' ? [] : [countsLine(doc)]),
   ];

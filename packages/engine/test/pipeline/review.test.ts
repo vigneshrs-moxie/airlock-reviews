@@ -67,6 +67,17 @@ const roles = (calls: AgentRequest<unknown>[]): string[] => calls.map((c) => c.r
 const everything = (calls: AgentRequest<unknown>[]): string => calls.map((c) => `${c.instructions}\n${c.material}`).join('\n');
 const exists = (p: string): Promise<boolean> => stat(p).then(() => true, () => false);
 
+const STALE_KIT_QUESTION = 'The team standard could not be refreshed; the copy from 2026-03-04 was used.';
+/** Puts a copy of the kit dated 2026-03-04 in the cache, so a review without `kitDir` uses it and says it is stale. */
+async function cacheStaleKit(): Promise<string> {
+  const sha = 'f'.repeat(40);
+  const cached = join(home(), 'kit', sha);
+  await mkdir(cached, { recursive: true });
+  for (const name of ['profile.md', 'orbit.md', 'calibration.md', 'SKILL.md']) await copyFile(join(KIT_DIR, name), join(cached, name));
+  await utimes(cached, new Date('2026-03-04T12:00:00Z'), new Date('2026-03-04T12:00:00Z'));
+  return sha;
+}
+
 describe('runReview', () => {
   it('runs the stages in order and returns a valid document', async () => {
     const { doc, events, calls, s } = await review();
@@ -261,19 +272,44 @@ describe('runReview', () => {
   }, SLOW);
 
   it('a stale kit adds a question with the date of the cached copy', async () => {
-    const sha = 'f'.repeat(40);
-    const cached = join(home(), 'kit', sha);
-    await mkdir(cached, { recursive: true });
-    for (const name of ['profile.md', 'orbit.md', 'calibration.md', 'SKILL.md']) await copyFile(join(KIT_DIR, name), join(cached, name));
-    await utimes(cached, new Date('2026-03-04T12:00:00Z'), new Date('2026-03-04T12:00:00Z'));
+    const sha = await cacheStaleKit();
     const { doc, calls } = await review({ req: { kitDir: undefined } });
-    expect(doc.questions[0]).toEqual({
-      text: 'The team standard could not be refreshed; the copy from 2026-03-04 was used.',
-      cohortId: null, source: { pack: 'airlock', lens: null, ruleId: null },
+    expect(doc.questions.at(-1)).toEqual({
+      text: STALE_KIT_QUESTION, cohortId: null, source: { pack: 'airlock', lens: null, ruleId: null },
     });
     expect(doc.packs).toContainEqual({ id: 'raj-standard', version: sha });
     expect(doc.stageErrors).toEqual([]);
     expect(everything(calls)).toContain('CAL_EARLY_MARKER');
+  }, SLOW);
+
+  it('the document holds the questions that survived selection plus the engine\'s own', async () => {
+    await cacheStaleKit();
+    const base = scenarioScript();
+    const { doc, calls } = await review({
+      req: { kitDir: undefined },
+      script: scenarioScript({ select: (req) => ({ ...(base(req) as object), questionSameAs: [{ question: 2, sameAs: 'q1' }] }) }),
+    });
+    const shown = block(calls.find((c) => c.role === 'select')!.material, 'questions')!;
+    expect(shown.split('\n')).toEqual(['q1 | Is rounding half up intended?', 'q2 | Does a refund need a ledger entry?']);
+    expect(doc.questions.map((q) => q.text)).toEqual(['Is rounding half up intended?', STALE_KIT_QUESTION]);
+    expect(doc.stageErrors).toEqual([]);
+  }, SLOW);
+
+  it('a clean review still has checks after merge', async () => {
+    const nothing = (): unknown => ({ candidates: [], questions: [] });
+    const check = 'Refund an order on the test environment as a manager; the receipt shows the refund as a negative amount.';
+    const base = scenarioScript();
+    const { doc, calls } = await review({
+      script: scenarioScript({
+        'lens:': nothing, 'sweep:': nothing, seams: nothing,
+        select: (req) => ({ ...(base(req) as object), checksAfterMerge: [check] }),
+      }),
+    });
+    expect(doc.findings).toEqual([]);
+    expect(roles(calls).filter((r) => r === 'select')).toHaveLength(1);
+    expect(doc.checksAfterMerge).toEqual([check]);
+    expect(doc.whoseCall).toEqual(['Whether refunds may be negative is a product call.']);
+    expect(doc.verdict.label).toBe('approve');
   }, SLOW);
 
   it('deep depth makes second-pass requests only for cohorts with more than one layer and discards a repeated fingerprint', async () => {

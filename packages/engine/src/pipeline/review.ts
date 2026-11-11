@@ -24,7 +24,7 @@ import { fallbackMap, buildChangeMap } from '../map/mapper.js';
 import { findNeighbours } from '../map/neighbours.js';
 import type { Holdout, Pack } from '../packs/types.js';
 import { runSweep } from '../rules/sweep.js';
-import { decideVerdict, select, selfReviewText, type SelectResult } from '../select/select.js';
+import { decideVerdict, sameTextOnce, select, selfReviewText, type SelectResult } from '../select/select.js';
 import { isSyncMerge } from '../shape/detect.js';
 import { saveReview } from '../store/store.js';
 import type { Exec } from '../util/exec.js';
@@ -111,12 +111,18 @@ function lensStage(log: StageLog, stage: StageName, fn: () => Promise<LensStageR
   }).then((r) => r ?? emptyResult());
 }
 
-/** Findings when the select stage itself threw: every kept item under also found, and a verdict from the errors. */
-function fallbackSelection(pr: PrInfo, depth: Depth, packs: Pack[], kept: KeptCandidate[], log: StageLog): SelectResult {
+/**
+ * Findings when the select stage itself threw: every kept item under also found, the questions with the same text reduced
+ * to one, and a verdict from the errors.
+ */
+function fallbackSelection(
+  pr: PrInfo, depth: Depth, packs: Pack[], kept: KeptCandidate[], questions: Question[], log: StageLog,
+): SelectResult {
   const findings: Finding[] = kept.map((k) => ({ ...k, fingerprint: fingerprint(k), bucket: 'also', rank: null, status: null }));
-  const verdict = decideVerdict(pr, findings, log.errors, false);
+  const left = sameTextOnce(questions);
+  const verdict = decideVerdict(pr, findings, log.errors, false, left.length);
   return {
-    findings, dropped: [], verdict, whoseCall: [], checksAfterMerge: [],
+    findings, dropped: [], questions: left, verdict, whoseCall: [], checksAfterMerge: [],
     selfReviewText: selfReviewText(pr, depth, packs.map((p) => p.title), verdict), errors: [], usage: [],
   };
 }
@@ -143,7 +149,9 @@ async function reviewInWorkspace(
   const capped: AgentRunner = { run: <T>(r: AgentRequest<T>) => run(() => runner.run(r)) };
   const readHead = (path: string): Promise<string | null> => safeRead(ws.headDir, path);
   const readBoth: ReadFile = (where, path) => safeRead(where === 'head' ? ws.headDir : ws.baseDir, path);
+  // The stages' questions go through selection, which merges repeats; the engine's own are added after it, unmerged.
   const questions: Question[] = [];
+  const engineQuestions: Question[] = [];
 
   const prepared = (await log.run('packs', async (rec) => {
     rec.error(...chosen.errors);
@@ -154,7 +162,7 @@ async function reviewInWorkspace(
     return p;
   }, { extraMs: chosen.ms })) ?? NO_PACKS;
   const { packs } = prepared;
-  questions.push(...prepared.questions);
+  engineQuestions.push(...prepared.questions);
 
   const sync = (await log.run('shape', async (rec) => {
     const merged = await isSyncMerge(exec, ws.headDir, ws.range, null);
@@ -172,7 +180,7 @@ async function reviewInWorkspace(
   })) ?? { tiers: [], facts: [], links: [], neighbours: [], skippedNames: 0 };
   const { tiers, facts } = gathered;
   if (gathered.skippedNames > 0) {
-    questions.push(question(`${gathered.skippedNames} changed names were not searched for callers because the pull request is very large.`));
+    engineQuestions.push(question(`${gathered.skippedNames} changed names were not searched for callers because the pull request is very large.`));
   }
 
   const skipWhy = sync ? 'sync merge' : 'quick depth';
@@ -259,16 +267,16 @@ async function reviewInWorkspace(
     }, { candidates, questions, schemaDropped, anchorDropped, challengeDropped, kept }));
   }
 
-  // Select always runs, so the document has a verdict; it is told every error so far.
+  // Select always runs, so the document has a verdict; it is told every error so far. On a sync merge it asks no model.
   const selection = (await log.run('select', async (rec) => {
-    const r = await select(runner, ctx, kept, questions, [...log.errors], depth);
+    const r = await select(runner, ctx, kept, questions, [...log.errors], depth, sync);
     rec.usage(r.usage);
     rec.error(...r.errors);
     return r;
-  })) ?? fallbackSelection(pr, depth, packs, kept, log);
+  })) ?? fallbackSelection(pr, depth, packs, kept, questions, log);
 
   return {
-    range, packs, tiers, facts, map, brief, questions, candidates, selection,
+    range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
     dropped: [...schemaDropped, ...anchorDropped, ...challengeDropped, ...selection.dropped],
   };
 }
@@ -334,7 +342,7 @@ export async function runReview(req: ReviewRequest, deps: EngineDeps, onEvent?: 
   if (document === undefined) {
     // Not saved: the review is returned, but never as a complete one, and its self-review text says so.
     const doc = draft();
-    const verdict = decideVerdict(doc.pr, doc.findings, doc.stageErrors, false);
+    const verdict = decideVerdict(doc.pr, doc.findings, doc.stageErrors, false, selection.questions.length);
     const text = selfReviewText(doc.pr, doc.depth, reviewed.packs.map((p) => p.title), verdict);
     document = checked({ ...doc, verdict, selfReviewText: text });
   }

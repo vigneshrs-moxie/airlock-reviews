@@ -88,7 +88,7 @@ describe('renderReview', () => {
     doc.verdict = { label: 'incomplete', sentence: 'A stage failed.', counts: { block: 0, fix: 0, ask: 0, note: 0 } };
     doc.stageErrors = [{ stage: 'lenses', cohortId: 'k1', message: 'timed out' }, { stage: 'brief', cohortId: null, message: 'bad json' }];
     const out = renderReview(doc);
-    expect(out).toContain('Incomplete');
+    expect(out.split('\n')).toContain('Review incomplete');
     expect(out).toContain('Stage errors\n\n- lenses, cohort k1: timed out\n- brief: bad json');
   });
 
@@ -96,13 +96,23 @@ describe('renderReview', () => {
     const words = {
       'not-ready': 'Not ready', 'ready-for-pr2': 'Ready for PR #2', 'split-first': 'Split first',
       'request-changes': 'Request changes', 'approve-after-fixes': 'Approve after fixes', approve: 'Approve',
-      incomplete: 'Incomplete',
+      incomplete: 'Review incomplete',
     } as const;
     for (const [label, word] of Object.entries(words)) {
       const doc = minimalDocument();
+      expect(doc.pr.stage).toBe('pr1');
       doc.verdict.label = label as keyof typeof words;
       expect(renderReview(doc).split('\n')).toContain(word);
     }
+  });
+
+  it('prints Ready to merge for a ready verdict at stage pr2', () => {
+    const doc = minimalDocument();
+    doc.pr.stage = 'pr2';
+    doc.verdict.label = 'ready-for-pr2';
+    const lines = renderReview(doc).split('\n');
+    expect(lines).toContain('Ready to merge');
+    expect(lines.join('\n')).not.toContain('Ready for PR #2');
   });
 
   it('has no escape characters without colour, and colours only the verdict and severity words with it', () => {
