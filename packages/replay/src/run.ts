@@ -355,7 +355,7 @@ export async function runReplay(opts: ReplayOptions, deps: ReplayDeps, onCase?: 
   const scoring: RunInfo = { model: run.model, depth: run.depth, createdAt: run.startedAt };
 
   const review = deps.review ?? runReview;
-  const engineDeps: EngineDeps = { exec: deps.exec, runner: deps.runner, now: deps.now };
+  const engineDeps: EngineDeps = { exec: deps.exec, runner: deps.runner, now: deps.now, ...(deps.signal ? { signal: deps.signal } : {}) };
   const emit = (e: CaseEvent): void => {
     try { onCase?.(e); } catch { /* a listener's failure is not the case's */ }
   };

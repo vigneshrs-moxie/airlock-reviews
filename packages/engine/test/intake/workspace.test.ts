@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -210,6 +210,22 @@ describe('prepareWorkspace', () => {
     const ws = await prepareWorkspace(exec, { repo: 'acme/app', remoteUrl: r.dir, pr: { number: 7, baseRef: 'main', headSha: head }, reviewId: 'b2' });
     expect(seen.find((a) => a.includes('merge-base'))).toContain('refs/heads/main');
     expect(ws.range.baseSha).toBe(root);
+    await ws.dispose();
+  });
+
+  it('removes review folders left under work for more than a day, and keeps newer ones', async () => {
+    const r = await remote();
+    await r.write('a.txt', '1');
+    const sha = await r.commit('one');
+    const old = join(home, 'work', 'r_old');
+    const fresh = join(home, 'work', 'r_fresh');
+    await mkdir(join(old, 'head'), { recursive: true });
+    await mkdir(fresh, { recursive: true });
+    const twoDaysAgo = new Date(Date.now() - 48 * 3600 * 1000);
+    await utimes(old, twoDaysAgo, twoDaysAgo);
+    const ws = await prepareWorkspace(realExec, { repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: sha, headSha: sha }, reviewId: 'r_now' });
+    expect(await exists(old)).toBe(false);
+    expect(await exists(fresh)).toBe(true);
     await ws.dispose();
   });
 });

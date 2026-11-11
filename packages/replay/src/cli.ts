@@ -3,7 +3,7 @@ import { realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { cleanForTerminal, createSdkRunner, realExec, syncKit, withRetry } from '@airlock/engine';
+import { abortOnExitSignals, cleanForTerminal, createSdkRunner, realExec, syncKit, withRetry } from '@airlock/engine';
 import { DepthSchema } from '@airlock/shared';
 import { loadCases, pickCases } from './dataset.js';
 import type { ReplayCase } from './dataset.js';
@@ -46,7 +46,9 @@ const messageOf = (err: unknown): string => (err instanceof Error ? err.message 
 /** Text from outside (errors, case ids, paths) as one line with no terminal control characters. */
 const clean = cleanForTerminal;
 
-const defaultDeps = (): ReplayDeps => ({ exec: realExec, runner: withRetry(createSdkRunner(), 1), now: () => new Date() });
+const defaultDeps = (): ReplayDeps => ({
+  exec: realExec, runner: withRetry(createSdkRunner(), 1), now: () => new Date(), signal: abortOnExitSignals(),
+});
 
 /** `true` as yes, `false` as no, anything else as it is. */
 const word = (value: unknown): string => (value === true ? 'yes' : value === false ? 'no' : String(value));

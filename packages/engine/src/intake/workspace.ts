@@ -1,4 +1,4 @@
-import { mkdir, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ReviewRange } from '@airlock/shared';
 import { must, SLOW_EXEC_TIMEOUT_MS, TIMED_OUT, type Exec } from '../util/exec.js';
@@ -30,6 +30,20 @@ function serialised<T>(key: string, job: () => Promise<T>): Promise<T> {
 }
 
 const exists = (p: string) => stat(p).then(() => true, () => false);
+
+/** A review folder older than this was left by a review that crashed or was killed. */
+const STALE_WORK_MS = 24 * 60 * 60 * 1000;
+
+/** Removes folders under `work` not changed for STALE_WORK_MS; the caller then prunes the mirror's worktree list. */
+async function removeStaleWork(work: string): Promise<void> {
+  const names = await readdir(work).catch(() => [] as string[]);
+  const cutoff = Date.now() - STALE_WORK_MS;
+  await Promise.all(names.map(async (name) => {
+    const dir = join(work, name);
+    const info = await stat(dir).catch(() => null);
+    if (info?.isDirectory() && info.mtimeMs < cutoff) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }));
+}
 
 async function ensureMirror(exec: Exec, mirror: string, remoteUrl: string): Promise<void> {
   if (await exists(mirror)) {
@@ -85,7 +99,9 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   const reviewDir = join(home, 'work', req.reviewId);
   const headDir = join(reviewDir, 'head');
   const baseDir = join(reviewDir, 'base');
-  // A leftover folder from an earlier run would block the name; clear it and any stale registration.
+  // Folders left by a review that crashed or was killed more than a day ago go; so does a leftover folder with this
+  // review's name. The prune below then clears their registrations in this mirror.
+  await removeStaleWork(join(home, 'work'));
   await rm(reviewDir, { recursive: true, force: true });
   await exec('git', ['--git-dir', mirror, 'worktree', 'prune']);
   await mkdir(reviewDir, { recursive: true });
