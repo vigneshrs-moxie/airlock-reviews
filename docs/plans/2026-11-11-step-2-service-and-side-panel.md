@@ -72,8 +72,7 @@ Done before this plan was dispatched. What it found, and what the plan does abou
 - The classic Files changed view is confirmed: container id is `diff-` plus the SHA-256 of the path, the new-side line cell is `td#diff-<hash>R<n>`, and setting the address fragment to `#diff-<hash>R<n>` scrolls to the line and marks it.
 - The newer view could not be inspected (the Chrome profile available to the build is not signed in to GitHub). Its selectors come from other extensions' source. Task 12 therefore jumps through GitHub's own address fragment first and treats its own row lookup as an extra.
 
-- [ ] **Step 1:** Move `.superpowers/drafts/chrome-notes.md` to `docs/reference/chrome-notes.md`; copy the prototype's `gen.py` and build brief into `docs/design/prototype/`; write `packages/extension/e2e/fixtures/files-classic.html` from the structure in the notes (two files, each with a hunk row, context, added and deleted rows, placeholder code text) and `files-react.html` from the selectors in the notes, with a comment at its top saying it is unconfirmed.
-- [ ] **Step 2: Commit:** `Record what Chrome and GitHub's page really do`.
+- [x] The notes are at `docs/reference/chrome-notes.md`; the prototype's screen source and build brief are in `docs/design/prototype/`; the page fixtures are `packages/extension/e2e/fixtures/files-classic.html` (confirmed structure) and `files-react.html` (unconfirmed, says so at its top). Both fixtures hold the files `src/pause.ts` and `src/guard.ts` with placeholder code.
 
 ### Task 2: The contract between service and panel
 
@@ -97,6 +96,9 @@ DismissReason    = 'wrong' | 'intended' | 'not-now'
 Dismissal        { fingerprint: string; findingId: string; reviewId: string; reason: DismissReason; text: string; at: string;
                    learned: { packId: string; kind: 'wrong' | 'intended'; date: string } | null }
 DismissBody      { repo: string; number: number; reviewId: string; findingId: string; reason: DismissReason; text: string }
+RestoreBody      { repo: string; number: number; fingerprint: string }
+RestoreReply     { restored: boolean; note: string | null }   // note: set when the learned line was no longer there to remove
+PairReply        { paired: true; extension: 'new' | 'same' }
 LatestReply      { document: ReviewDocument; dismissals: Dismissal[] }
 ApiError         { error: string }                       // every non-2xx body
 const SMALL_PR_LINES = 150
@@ -114,6 +116,8 @@ function fixPrompt(doc: ReviewDocument, findings: Finding[]): string
 
 `repo` is validated everywhere as `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`, `number` as a positive integer, `text` in `DismissBody` as one line of 1 to 500 characters without control characters (required to be at least 10 characters for `wrong` and `intended`, may be empty for `not-now`).
 
+Nothing in `@airlock/shared` may import from `node:` or use a Node-only global: the extension bundles this package for the browser.
+
 `fixPrompt` writes plain text for a coding agent working in a checkout of the pull request's branch: one opening paragraph (repository, pull request number and title, head branch, "these problems were found in review"), then one numbered block per finding in the order given: title; severity word; `path:line` or `path` with "outside the changed lines"; the quoted code in a fenced block (a fence longer than any run of backticks in the quote); `What happens`, `Why`, `Suggested change`; `Also involves` with one line per connected place; `Check first` with the finding's `wouldBeWrongIf` when it is not empty. It closes with: fix each at its cause; keep each change small; add or update a test that would have caught it; change nothing unrelated; if an item turns out to be wrong, say why instead of changing code; finish with one line per item saying what was changed.
 
 - [ ] **Step 1: Write the failing tests**
@@ -129,6 +133,7 @@ it('fixPrompt fences a quote that itself contains three backticks', () => {});
 it('fixPrompt says outside the changed lines for an outside-diff anchor', () => {});
 it('a dismissal of kind wrong needs at least 10 characters and one line', () => {});
 it('ServiceEvent accepts every ReviewEvent and the failed event', () => {});
+it('no source file of the shared package imports from node:', async () => {});   // read the files under packages/shared/src and search them
 ```
 
 - [ ] **Step 2:** Run. Expected: FAIL (modules missing).
@@ -157,11 +162,13 @@ type Handler = (req: Req) => Promise<Res>
 interface Req { method: string; path: string; query: URLSearchParams; params: Record<string, string>; body: unknown; origin: string | null }
 type Res = { status: number; json: unknown } | { status: 200; stream: (send: (e: unknown) => void, closed: AbortSignal) => Promise<void> }
 function createRouter(routes: { method: string; path: string; open?: boolean; handler: Handler }[], auth: Auth): http.RequestListener
+interface Auth { token: string; port: number; pairedOrigin: () => Promise<string | null> }
 // server.ts
+interface ServiceDeps { config: ServiceConfig; engine: EngineDeps; review?: typeof runReview; now: () => Date; log: (line: string) => void }   // EngineDeps and runReview from @airlock/engine
 function createServer(deps: ServiceDeps): { listen(): Promise<{ port: number }>; close(): Promise<void> }
 ```
 
-Rules for the router: bodies are JSON only (`Content-Type: application/json`), at most 64 KB, parsed then validated by the route's schema; an unknown route is 404, a wrong method 405, a bad body 400 with the first problem in words; an exception in a handler is 500 with `{ error: 'Airlock had a problem: <message>' }` and the stack goes to the log only; every response has `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. `GET /hello` is the only open route and returns only `Hello`. `POST /pair` requires the token and an `Origin` header; it records the origin when none is recorded (`paired`), accepts the same one again (`already`), and refuses a different one with 409 and the words `Airlock is already paired with another copy of the extension. Run "airlock-service unpair" and pair again.`
+Rules for the router: bodies are JSON only (`Content-Type: application/json`), at most 64 KB, parsed then validated by the route's schema; an unknown route is 404, a wrong method 405, a bad body 400 with the first problem in words; an exception in a handler is 500 with `{ error: 'Airlock had a problem: <message>' }` and the stack goes to the log only; every response has `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. `GET /hello` is the only open route and returns only `Hello`. `POST /pair` requires the token and an `Origin` header; it records the origin when none is recorded (`paired`), accepts the same one again (`already`), replying with `PairReply` in both cases, and refuses a different one with 409 and the words `Airlock is already paired with another copy of the extension. Run "airlock-service unpair" and pair again.`
 
 - [ ] **Step 1: Write the failing tests** (real server on port 0, temporary home)
 
@@ -192,7 +199,7 @@ it('a handler that throws gives 500 without a stack in the body', async () => {}
 - Produces:
 
 ```ts
-interface ServiceDeps { config: ServiceConfig; engine: EngineDeps; review?: typeof runReview; now: () => Date; log: (line: string) => void }
+// ServiceDeps is Task 3's
 class Runs {            // in memory
   start(body: StartReviewBody): { runId: string; reused: boolean }       // throws LimitError when two other runs are active
   running(repo: string, number: number): string | null
@@ -233,11 +240,11 @@ it('status reports whether claude and gh were found', async () => {});
 ```ts
 function learnedTarget(packs: Pack[]): Pack           // the first selected pack that is neither 'raj-standard' nor 'generic'; when there is none, 'generic'
 function dismiss(deps, body: DismissBody): Promise<Dismissal>
-function restore(deps, repo: string, number: number, fingerprint: string): Promise<boolean>
+function restore(deps, body: RestoreBody): Promise<RestoreReply>
 function dismissalsFor(home: string, repo: string, number: number): Promise<Dismissal[]>
 ```
 
-Routes: `POST /dismissals` → `Dismissal`; `POST /dismissals/restore` `{ repo, number, fingerprint }` → `{ restored: boolean }`.
+Routes: `POST /dismissals` → `Dismissal`; `POST /dismissals/restore` `RestoreBody` → `RestoreReply`.
 
 Rules: dismissals are stored per pull request at `<home>/dismissals/<repo slug>/<number>.json`, one per fingerprint (a new one replaces the old), written atomically. `dismiss` loads the stored review by `reviewId`, and the finding must be in it (404 otherwise). `not-now` writes nothing else. `wrong` and `intended` append one learned entry to the target pack through the engine's `appendLearned` (`date` is today's local date, `repo` the pull request's, `text` exactly the body's `text`) and record in the dismissal which pack and file it went to. `restore` removes the dismissal and, when it wrote a learned entry, removes that exact entry through `removeLearned`; if the entry is no longer there (edited by hand), the dismissal is still removed and the reply says so in a `note`. The team kit's pack is never written to.
 
@@ -301,11 +308,11 @@ Background: `setPanelBehavior({ openPanelOnActionClick: true })`; on tab update 
 ```ts
 // client
 class ServiceClient { constructor(base: string, token: () => Promise<string | null>, fetchFn?: typeof fetch)
-  hello(): Promise<Hello | 'offline'>;  pair(token: string): Promise<'paired' | { error: string }>;
+  hello(): Promise<Hello | 'offline'>;  pair(token: string): Promise<PairReply | { error: string }>;  status(): Promise<ServiceStatus>;
   pr(repo, number): Promise<PrSummary>;  start(body: StartReviewBody): Promise<StartReviewReply>;
   running(repo, number): Promise<string | null>;  latest(repo, number): Promise<LatestReply | null>;
   events(runId: string, onEvent: (e: ServiceEvent) => void, signal: AbortSignal): Promise<'ended' | 'lost'>;
-  dismiss(body: DismissBody): Promise<Dismissal>;  restore(repo, number, fingerprint): Promise<boolean>; }
+  dismiss(body: DismissBody): Promise<Dismissal>;  restore(body: RestoreBody): Promise<RestoreReply>; }
 function readEventStream(body: ReadableStream<Uint8Array>, onEvent: (data: unknown) => void): Promise<void>   // handles events split across chunks, comments and CRLF
 // state
 type PanelState =
@@ -314,7 +321,9 @@ type PanelState =
   | { kind: 'running'; pr: PrSummary; stages: StageLine[]; brief: Brief | null; map: ChangeMap | null }
   | { kind: 'review'; pr: PrSummary; latest: LatestReply; stale: boolean }      // stale: the pull request's head moved since
   | { kind: 'problem'; pr: PrSummary | null; message: string }
-function reduce(state: PanelState, action: Action): PanelState                 // pure
+type UserAction = { type: 'pair'; token: string } | { type: 'start'; depth: Depth; packIds?: string[] } | { type: 'show-earlier' }
+  | { type: 'dismiss'; body: DismissBody } | { type: 'restore'; fingerprint: string } | { type: 'retry' }
+function reduce(state: PanelState, action: Action): PanelState                 // pure; Action = UserAction results and service events
 function startPanel(deps: { client: ServiceClient; tab: TabWatcher; onState: (s: PanelState) => void }): { dispatch(a: UserAction): void; stop(): void }
 ```
 
@@ -361,7 +370,7 @@ it('a stage that failed is shown as failed with its message', () => {});
 
 **Files:** `packages/extension/src/screens/{Verdict,FindingCard,FindingDetail,AlsoFound,DroppedSheet,StageErrors}.tsx`, `src/state/selection.ts`, component tests
 
-Verdict screen, in this order: the verdict label in words and its sentence; when `stale`, "The pull request has new commits since this review" (re-review comes in step 3: the button here starts a full review); stage errors when the verdict is incomplete, above everything else; the top findings as cards (severity word, title, `path:line`, the pack's title); Also found, collapsed, one line each; Questions; Whose call; Check after merge; the brief (with the self-review text and a Copy button); the change map; "Dropped: n" opening a sheet that lists each with its stage, reason and, when there is one, its proof (path, line, side and quoted text, a recorded decision in full); Dismissed, collapsed, with Restore. Finding detail: What happens, Why, Suggested change, the quoted code, Also involves (each place a button that jumps to it), what the challenger checked, the source; actions Jump to line, Copy fix prompt, Dismiss; Previous and Next. Cards have a checkbox; "Copy fix prompt for n selected" appears when any is ticked. Copying uses `navigator.clipboard.writeText` inside the click handler, and on rejection shows the text in a selectable box.
+Verdict screen, in this order: the verdict label in words and its sentence; when `stale`, "The pull request has new commits since this review" (re-review comes in step 3: the button here starts a full review); stage errors when the verdict is incomplete, above everything else; the top findings as cards (severity word, title, `path:line`, the pack's title); Also found, collapsed, one line each; Questions; Whose call; Check after merge; the brief (with the self-review text and a Copy button); the change map; "Dropped: n" opening a sheet that lists each with its stage, reason and, when there is one, its proof (path, line, side and quoted text, a recorded decision in full); Dismissed, collapsed, with Restore. Finding detail: What happens, Why, Suggested change, the quoted code, Also involves (each place a button that jumps to it), what the challenger checked, the source; actions Jump to line, Copy fix prompt, Dismiss; Previous and Next. Cards have a checkbox; "Copy fix prompt for n selected" appears when any is ticked. Jump buttons call an `onJump(place: { path: string; line: number | null })` prop and show the sentence it resolves to under the button; Task 12 supplies the real function, and until then the prop's default says "Jumping is not connected yet". Copying uses `navigator.clipboard.writeText` inside the click handler, and on rejection shows the text in a selectable box.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -417,7 +426,7 @@ function mark(rows: HTMLElement[]): void                      // one class, remo
 function jumpTo(tabId: number, pr: { repo: string; number: number; headSha: string }, place: { path: string; line: number | null; inDiff: boolean }): Promise<string>   // the sentence to show
 ```
 
-Behaviour of `jumpTo`, in order: (1) a place that is not in the pull request's files opens `blobUrl(repo, headSha, path, line)` in a new tab: "Opened <path> in a new tab; it is not part of this pull request." (2) When the tab is not on the Files changed page, or no content script answers: navigate the tab to `filesUrl(repo, number, anchorId, line)` and wait for it to finish loading. (3) Send the request. The content script first sets the page's address fragment to `#<anchorId>R<line>` (or `#<anchorId>` when there is no line): this is GitHub's own permalink form and makes GitHub scroll and mark the line in both views. It then looks for the row for up to three seconds to add Airlock's mark. Row found: "Showing <path>:<line>." File found but not the row, for a line outside the changed lines: "Showing <path>; that line is outside the changed lines." File found, row expected but not found: "Asked GitHub to show <path>:<line>." File container not on the page: "GitHub has not loaded <path> on this page yet. Scroll to it, then try again." (4) Neither view recognised: the fragment is still set, and the sentence is "Asked GitHub to show <path>:<line>. Airlock does not recognise this version of the page." with the names of the selectors that found nothing, which the Packs screen also lists. The content script handles only this one message type, checks that the sender is this extension, and never navigates anywhere except by setting the hash on the same page. It re-reads the view after GitHub's soft navigations (Task 1's notes name the events).
+Behaviour of `jumpTo`, in order: (1) a place whose path is not among the review document's `files` opens `blobUrl(repo, headSha, path, line)` in a new tab: "Opened <path> in a new tab; it is not part of this pull request." (2) When the tab is not on the Files changed page, or no content script answers: navigate the tab to `filesUrl(repo, number, anchorId, line)` and wait for it to finish loading. (3) Send the request. The content script first sets the page's address fragment to `#<anchorId>R<line>` (or `#<anchorId>` when there is no line): this is GitHub's own permalink form and makes GitHub scroll and mark the line in both views. It then looks for the row for up to three seconds to add Airlock's mark. Row found: "Showing <path>:<line>." File found but not the row, for a line outside the changed lines: "Showing <path>; that line is outside the changed lines." File found, row expected but not found: "Asked GitHub to show <path>:<line>." File container not on the page: "GitHub has not loaded <path> on this page yet. Scroll to it, then try again." (4) Neither view recognised: the fragment is still set, and the sentence is "Asked GitHub to show <path>:<line>. Airlock does not recognise this version of the page." with the names of the selectors that found nothing, which the Packs screen also lists. The content script handles only this one message type, checks that the sender is this extension, and never navigates anywhere except by setting the hash on the same page. It re-reads the view after GitHub's soft navigations (Task 1's notes name the events).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -450,4 +459,4 @@ it('clicking Jump to line in the panel scrolls the fixture page to the row and m
 
 ## Order and lanes
 
-Task 1 is done apart from moving its notes into the repository. Task 2 next (both lanes depend on it). Then two lanes in their own worktrees: service (3, 4, 5, 6) and extension (7, 8, 9, 10, 11, 12). Task 13 after both merge.
+Task 1 is done. Task 2 next (both lanes depend on it). Then two lanes: extension (7, 8, 9, 10, 11, 12), which needs only the shared package, and service (3, 4, 5, 6), which needs step 1's `runReview` and so starts once step 1's pipeline is merged into this branch. Task 13 after both.
