@@ -4,6 +4,9 @@ import { visibleText } from './visible-text.js';
 const SEVERITY_WORD: Record<Severity, string> = { block: 'Block', fix: 'Fix', ask: 'Ask', note: 'Note' };
 const LINE_BREAK = /\r\n|[\n\r\u0085\u2028\u2029]/;
 const INDENT = '   ';
+const LINE_BREAK_ALL = /\r\n|[\r\u0085\u2028\u2029]/g;
+/** Letters that show as nothing: the Hangul fillers, the braille blank and the combining grapheme joiner. */
+const BLANK_LETTERS = /[\u115F\u1160\u3164\uFFA0\u2800\u034F]/g;
 
 /**
  * Every string taken from the review document passes through `one`, `many` or `fenced`, which first drop the characters
@@ -13,9 +16,12 @@ class Writer {
   removed = 0;
 
   private seen(value: string): string {
-    const { text, removed } = visibleText(value);
-    this.removed += removed;
-    return text;
+    // Every kind of line break is first a line feed, which is kept and not counted.
+    const { text, removed } = visibleText(value.replace(LINE_BREAK_ALL, '\n'));
+    let blank = 0;
+    const kept = text.replace(BLANK_LETTERS, () => { blank += 1; return ''; });
+    this.removed += removed + blank;
+    return kept;
   }
 
   /** A single-line field: every run of whitespace, line breaks included, becomes one space. */
