@@ -9,5 +9,6 @@
       "@airlock/replay": ["./packages/replay/src/index.ts"]
     }
   },
-  "include": ["packages/*/src", "packages/*/test", "vitest.config.ts"]
+  "include": ["packages/*/src", "packages/*/test", "vitest.config.ts"],
+  "exclude": ["packages/extension"]
 }

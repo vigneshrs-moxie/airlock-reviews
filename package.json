@@ -10,9 +10,10 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b && tsc -p tsconfig.tests.json",
+    "typecheck": "tsc -b && tsc -p tsconfig.tests.json && npm run typecheck -w @airlock/extension",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run test"
+    "check": "npm run typecheck && npm run test",
+    "e2e": "npm run build:e2e -w @airlock/extension && playwright test -c packages/extension/e2e"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
