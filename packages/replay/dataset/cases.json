@@ -1,0 +1,595 @@
+[
+  {
+    "id": "pr100",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 100,
+    "title": "Announcements: V1 + redesign (audience fix, editor, scheduling, rich text, notify, engagement) (ORBIT-280)",
+    "kind": "positive",
+    "reviewedAt": "2026-10-29T23:32:37Z",
+    "baseSha": "1f2c9ab17fc3c1da9581febf9797a3c253444122",
+    "headSha": "77afa95ea1b984c23e1d72abe7ac2729ec3a0bf6",
+    "lines": 17945,
+    "known": [
+      {
+        "id": "C2",
+        "path": "app/src/lib/announcements/email.ts",
+        "line": 31,
+        "summary": "Recipient rows left in the `claimed` email state by an interrupted send are never re-queued by the drain and still count as pending, so those people silently never get the email; and the PATCH route that runs the same notify drain has no `maxDuration` (the confirm route has 300), so its drain can be cut off mid-send.",
+        "comment": "a row left `claimed` is never picked up again and the record page counts it as pending, so if a send gets cut off that person just never gets it and nobody knows. how does it get retried? the idempotency key makes re-queuing claims older than 15 min safe. also the PATCH route runs the same 50s notify drain but has no maxDuration, confirm has 300",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C3",
+        "path": "app/src/lib/announcements/admin.ts",
+        "line": 513,
+        "summary": "The notify path resets every recipient with a separate update inside one transaction on the default 5-second timeout (publish was given 30 seconds), so at a large office the notify rolls back and nobody is notified; and it locks the announcement before the recipient rows, the opposite order to `stamp()`, so recipients opening the announcement during a notify can deadlock.",
+        "comment": "notify updates every recipient one by one inside a transaction on the default 5s timeout. publish got 30s for a few thousand rows, this didn't. at DFW size the notify rolls back and nobody's notified. can this be one set-based update? it also locks announcement then recipient, opposite to stamp(), so opens during a notify can deadlock",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C4",
+        "path": "app/prisma/migrations/0137_announcements/migration.sql",
+        "line": 203,
+        "summary": "The announcements seeding migration enables the feature for every entity and `V1_DEFAULTS.announcements` is true, so the feature switches on for every existing entity and every future one, unlike the staged per-entity rollout the earlier seeding migration used.",
+        "comment": "this should be on for Arizona only for now, off for every other entity. same shape as 0121 (`e.name = 'Arizona Operations'`) so every entity still gets a row. and V1_DEFAULTS.announcements should be false so new entities start off",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C5",
+        "path": "app/src/lib/announcements/email.ts",
+        "line": 37,
+        "summary": "The email drain sends one message per request, paced to one per second against an unverified 2-per-second Resend team limit that signature and invite emails share without retrying, so a full-office announcement takes minutes and can push those other emails into rate-limit failures.",
+        "comment": "one send per second means a full Arizona announcement takes minutes and sits right at the 2/s team limit, which signature and invite emails share and don't retry. can the drain use Resend's batch send (up to 100 per request) instead? that's a few requests per announcement instead of hundreds. note batch takes one idempotency key per request, not per email, so the double-send protection needs rethinking for it. also the 2/s here is still marked \"to be verified\": can you check our actual Resend plan, rate limit and current daily/monthly usage before release (dashboard usage page, or the ratelimit headers on any API call) and put the numbers in the PR? staging uses the prod key too, so staging tests count against the same limit",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C6",
+        "path": "app/src/lib/announcements/scheduler.ts",
+        "line": 81,
+        "summary": "The scheduler publishes and emails every scheduled announcement whose `publishAt` is in the past with no limit on lateness, so after an entity's announcements are switched off and back on, time-bound notices go out days late.",
+        "comment": "if an entity's announcements are switched off and back on, the cron publishes and emails everything with publishAt in the past, however late. a \"closed Monday\" notice could go out Thursday. can overdue ones be held instead (e.g. anything more than ~15 min past publishAt goes back to draft/needs-review for the admin) rather than auto-sending?",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      }
+    ]
+  },
+  {
+    "id": "pr171",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 171,
+    "title": "feat(feedback): ORBIT-493 Portal Feedback update into staging – tickets v2, follow-ups, API/MCP, GitHub and ClickUp sync",
+    "kind": "positive",
+    "reviewedAt": "2026-10-30T00:01:26Z",
+    "baseSha": "ea708e2d040736753338dc94201d130026906aac",
+    "headSha": "75d5e9e6f73cbf4003cd6749b3fb24807ff5e269",
+    "lines": null,
+    "known": [
+      {
+        "id": "C16",
+        "path": "app/src/lib/feedback/access.ts",
+        "line": 150,
+        "summary": "Ticket access counts every review request naming the viewer regardless of its state, so anyone ever named as a reviewer, including superseded or wrongly picked ones, keeps permanent read access to the shared thread and screenshots with no way to remove it.",
+        "comment": "this counts every review request regardless of state, so anyone ever named as reviewer keeps access forever, superseded included, and there's no way to remove one. pick the wrong person from the picker and they can read the shared thread and the screenshots for good. can access only count open requests or ones that person decided, and same in participantAccessWhere and the SQL twin?",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      },
+      {
+        "id": "C17",
+        "path": "app/src/app/api/feedback/[id]/reviews/[reviewId]/decision/route.ts",
+        "line": 26,
+        "summary": "Feedback write routes such as the review decision record the action as the effective employee during view-as, so an admin viewing as someone can approve reviews, comment or grant mentions in that person's name with no trace of the real actor.",
+        "comment": "under view-as this records the decision as the person being viewed, so an admin can approve someone's review in their name with no trace. same for comments and mention grants. token creation already refuses view-as, can feedback writes do the same?",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C18",
+        "path": "app/src/lib/integrations/clickup/comments.ts",
+        "line": 76,
+        "summary": "With ClickUp writes on, internal comments and the reporter's attachments are copied into ClickUp, where they persist after deletion in Orbit; and the global sync run lock acknowledges and drops webhooks that arrive during a sync while Sync now bypasses it, so a link can sync twice and post comments twice.",
+        "comment": "with writes on, internal notes and the reporter's screenshots (customer names, phones) get copied into ClickUp and stay there even if deleted here. let's only send shared comments and no attachments unless we decide otherwise. also before webhooks go on: the global run lock drops webhooks that arrive during any sync (answers 200 so ClickUp won't resend) and Sync now skips it, so a link can sync twice and double-post. per-link lock?",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C19",
+        "path": "app/src/app/api/feedback/tokens/route.ts",
+        "line": 30,
+        "summary": "API tokens can be created with no expiry and only their owner can revoke one, so a token that reads every ticket including internal notes stays valid indefinitely after a device is lost unless tokens are switched off for everyone.",
+        "comment": "a tech token sees every ticket incl. internal notes, and \"never expires\" plus owner-only revoke means a lost laptop is only fixed by turning tokens off for everyone. can we cap at 90 days, drop never, and give admins a revoke?",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C20",
+        "path": "app/src/lib/feedback/timeline.ts",
+        "line": 85,
+        "summary": "The participant timeline strips only `previous` from `comment_edited` events and passes every other shared event's data through whole, so reporters receive internal link labels, release notes, other reviewers' decision comments and evidence, and raw resolution text in History and the timeline JSON.",
+        "comment": "participants get every shared event's full data, and only comment_edited.previous is stripped. so reporters see internal link labels in History (\"replacing <internal label>\" from reference_canonical), and the timeline JSON carries release notes, other reviewers' decision comments and evidence, and raw resolution text with the PR numbers we strip on the page. a link shared then made internal also stays in History and on the reviewer's card. can eventData allowlist each kind's fields for participants, and replacedLabel only be set when the replaced link was shared?",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C21",
+        "path": "app/src/lib/integrations/clickup/planner.ts",
+        "line": 250,
+        "summary": "The ClickUp sync plan treats a link with no baseline as a first sync that pushes Orbit's values outward, so the first unattended run on a manually linked task overwrites its name and description, and clears its assignees when the ticket is unassigned; and the sent-comment ledgers are keyed on the link id, so unlinking and relinking reposts every comment and file.",
+        "comment": "a manually linked task has no baseline, so the first sync (overnight, nobody watching) overwrites its name and description with the reporter's text and clears assignees if the ticket is unassigned. a spec someone wrote in ClickUp is just gone. can the first sync of a manual link only run from Sync now after the preview? also unlink + relink re-posts every comment and file because the sent-ledgers are per link id, can they key on ticket + task?",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C22",
+        "path": "app/src/lib/feedback/ticket-markdown.ts",
+        "line": 145,
+        "summary": "The copied ticket summary, labelled as holding only what a reporter or reviewer may read, includes the raw resolution with PR numbers, every reviewer's decision and evidence, and release notes, so internal data leaves under a participant-safe label.",
+        "comment": "the button says \"only what a reporter or reviewer may read\" but this includes the raw resolution with PR numbers, every reviewer's decision and evidence, and release notes. can it use the same stripped data the participant page gets?",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C23",
+        "path": "app/src/lib/feedback/mentions.ts",
+        "line": 52,
+        "summary": "The mention picker lists the ticket's reporter, labelled Reporter, to reviewers and anyone the ticket is shared with, while the rest of the feedback code hides who reported a ticket from non-reporters, so the picker discloses the reporter's identity.",
+        "comment": "this shows the reporter, labelled Reporter, to reviewers and anyone the ticket's shared with, but the rest of the code hides who reported a ticket from non-reporters. intended?",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C24",
+        "path": "app/src/lib/feedback/releases.ts",
+        "line": 104,
+        "summary": "Release story points sum every ticket linked to a release under any link role and include both parent stories and their subtasks, so a ticket targeted at one release and shipped in another counts in both and the same work is counted twice.",
+        "comment": "release points add up every link role, so a ticket targeted at 1.4 that shipped in 1.5 counts in both, and a story's points plus its subtasks' points count the same work twice. should this be target links only (actual once shipped), and subtasks instead of the parent when they have points?",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      }
+    ]
+  },
+  {
+    "id": "pr126",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 126,
+    "title": "Feature/productivity filters",
+    "kind": "positive",
+    "reviewedAt": "2026-10-19T22:00:26Z",
+    "baseSha": "85b24c55ae3470004dc96c6ad65d7d6d99963b2f",
+    "headSha": "8411cec8cc811533741396a2af979ed6bdf0e56e",
+    "lines": 13208,
+    "known": [
+      {
+        "id": "C7",
+        "path": "app/src/lib/productivity-report/fetch.ts",
+        "line": 33,
+        "summary": "A failed SLA query is caught and the queue snapshot is still returned and saved as a normal daily result with zero SLA counts, so SLA figures stay blank until the next day's refresh with no retry and no note on the page.",
+        "comment": "What happens if the fetch here fails? It will not refresh until the next day and we will have a full day of no SLA reporting.",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C8",
+        "path": "app/src/app/(authenticated)/call-activity/layout.tsx",
+        "line": 34,
+        "summary": "The call-activity layout awaits the Power BI source-version lookup with no time limit, so a slow or hanging lookup stalls every productivity tab rendered beneath that layout.",
+        "comment": "if the power bi refresh lookup is slow or hangs, does every productivity tab hang with it? can we put a timeout on it and fall back to the generic line",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      }
+    ]
+  },
+  {
+    "id": "pr129",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 129,
+    "title": "feat(field-ops): show collection rate beside reservice",
+    "kind": "positive",
+    "reviewedAt": "2026-10-20T19:08:39Z",
+    "baseSha": "60fe7198a9f9d81ae9e3277ba05624c89acf2421",
+    "headSha": "eea48e55ce5279474b60fcb2f4b6f3c1ed0873be",
+    "lines": 1103,
+    "known": [
+      {
+        "id": "C10",
+        "path": "app/src/lib/actions/field-dashboard.ts",
+        "line": 952,
+        "summary": "The team collection rate is a simple mean of each person's rate while the Power BI report pools numerators and denominators across people, so the Orbit tile shows a different figure from the report managers already use.",
+        "comment": "1. [ASK] The top Collection tile will say 9.75% while the Power BI report says 12.73% for roughly the same team, and nobody in ops chose the method behind the gap.\n- Orbit takes a simple average of each person's rate. Power BI recalculates the rate over everyone's combined numbers.\n- The averaging method alone accounts for about 1 point of the gap (11.82 vs 12.73 for the same 28 people).\n- Managers will compare this tile with the report on day one. This is a metric definition, so it's field ops' call, not the engineer's.\n- Fix: if field ops want it to match the report, have the query return the measure's numerator and denominator per person and add them up for the team.\n\nCan we review this.",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      },
+      {
+        "id": "C11",
+        "path": "app/src/lib/queries/field-collection-rate.ts",
+        "line": 197,
+        "summary": "The no-figures warning for collection rates checks the whole national result while the query reads the Arizona dataset through an office-stage filter, so when another office goes live all of its people can show a blank rate with no warning logged, including after the last-month fallback.",
+        "comment": "[FIX BEFORE MERGE] When the next office goes live, Collection can show \"—\" for every one of its people, and no alert fires.\n- The \"no collection figures\" warning checks whether anyone in the whole country has a figure, so Arizona's figures keep it quiet.\n- JSD would show all \"—\" if it isn't marked New or Veteran in Power BI's office-stage field (:26, :97). The same happens if JSD isn't in this dataset at all; the constant is named ARIZONA_DATASET.\n- The fallback to last month then finds nothing for JSD and also stays silent.\n- The PR's own staging check (\"if every figure is —, check the logs\") therefore only works for Arizona.\n- Fix: run the warning over the office's own people, include the office in the log line, and confirm JSD's office stage before switching Field Ops on for them.\n\nIt won't go live right now or be an issue. But do we need to do anything right now for when new entities come in. Or do we work on this when we do make it live for JSD",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      },
+      {
+        "id": "C12",
+        "path": "app/src/lib/queries/field-collection-rate.ts",
+        "line": 258,
+        "summary": "A failed or timed-out Power BI collection read is stored in the page cache like a normal result, so one hiccup during cache warm-up shows a blank rate for the whole office for 30 minutes with no retry.",
+        "comment": "[NOTE] A Power BI hiccup during the cache warm-up gives the whole office 30 minutes of \"—\", with no retry.\n- A failed or timed-out read is stored in the page cache like a normal result.",
+        "reviewerSeverity": "note",
+        "crossFile": false
+      }
+    ]
+  },
+  {
+    "id": "pr143",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 143,
+    "title": "feat(talent): ORBIT-465 freeze team talent ratings",
+    "kind": "positive",
+    "reviewedAt": "2026-10-29T19:03:27Z",
+    "baseSha": "556a8214d9e2b9e7d3e6bbc3fafc1c6d3cec20c7",
+    "headSha": "04043cdb59d2197ab4b933d07cc8b86e6c19e5c9",
+    "lines": 2913,
+    "known": [
+      {
+        "id": "C13",
+        "path": "app/src/lib/actions/talent-rating-freeze.ts",
+        "line": 127,
+        "summary": "The ratings freeze is stored and shown under the acting admin's own entity while the rating save guard checks the rated person's entity, so a freeze set by an admin in a parent entity such as Moxie Corporate shows as frozen but does not stop leads in child offices from rating.",
+        "comment": "the freeze is keyed on the admin's own entity but the save guard keys on the rated person's. an admin in Moxie Corporate freezes, sees Frozen, and every Arizona lead keeps rating. let's make the freeze pick its entities: own, everything beneath, or specific ones (one row each, checked on the server against the admin's subtree, one transaction), and have the page lock follow each rated person's entity. this replaces D-020",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      }
+    ]
+  },
+  {
+    "id": "pr146",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 146,
+    "title": "fix(talent): ORBIT-468 remove duplicate team filter on overview",
+    "kind": "positive",
+    "reviewedAt": "2026-10-26T17:18:58Z",
+    "baseSha": "556a8214d9e2b9e7d3e6bbc3fafc1c6d3cec20c7",
+    "headSha": "bf7369773dde48448e30a218c3d41a5d5019ae40",
+    "lines": 42,
+    "known": [
+      {
+        "id": "C14",
+        "path": "app/src/app/(authenticated)/talent/overview/page.tsx",
+        "line": 26,
+        "summary": "Removing the header team switch left the detailed-scores table's field and office buttons without the switch's rule of hiding when only one side has rated people, so an all-field or all-office entity shows an empty office or field button with a count of 0.",
+        "comment": "keeping the table buttons is fine, but they need the check the header switch had. the header one hid itself when only one side had rated people; the table buttons show whenever scope is all, so on an all-field or all-office entity you get an empty \"office 0\" or \"field 0\" button. can we make it `scope === 'all' && counts.field > 0 && counts.office > 0` in detailed-scores-table.tsx:169?",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "C15",
+        "path": "app/src/app/(authenticated)/talent/overview/page.tsx",
+        "line": 18,
+        "summary": "The overview page moved the field or office choice from the `team` URL query parameter to in-page state, unlike the summaries and ratings-history pages, so the choice is lost from the URL and the sibling pages behave differently.",
+        "comment": "summaries and ratings history keep the header switch and ?team=. this page now does it differently and the choice isn't in the url. also, does field stay selected when you change the month?",
+        "reviewerSeverity": "question",
+        "crossFile": true,
+        "defect": false
+      }
+    ]
+  },
+  {
+    "id": "pr128",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 128,
+    "title": "Field ops damage popup: show what was damaged and the case status",
+    "kind": "positive",
+    "reviewedAt": "2026-10-19T23:37:01Z",
+    "baseSha": "bf48ff057c7fb704013aa82ddb695f257931d140",
+    "headSha": "addd11e8384a9df5301f0f7390d74e4d0ba6b06d",
+    "lines": 318,
+    "known": [
+      {
+        "id": "C9",
+        "path": "app/src/components/dashboard/damage-list-dialog.tsx",
+        "line": 224,
+        "summary": "The damage status badge compares the incident status with one closed-status string, but the status comes from a spreadsheet-fed lakehouse field that may not be a fixed set of values, so a closed case recorded with another spelling would be shown as open.",
+        "comment": "Can we confirm this incident response comes in from a fixed set of responses available? I think this is linked to a spreadsheet input which feeds into the central lakehouse.",
+        "reviewerSeverity": "question",
+        "crossFile": true,
+        "defect": false
+      }
+    ]
+  },
+  {
+    "id": "pr94",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 94,
+    "title": "feat(scorecards): copy role templates",
+    "kind": "positive",
+    "reviewedAt": "2026-10-16T17:34:52Z",
+    "baseSha": "67e48f8eee383aa127811cc34fe8859feb71f981",
+    "headSha": "6ea8d76a3545956b91cf7f528041c8a22c9d91e4",
+    "lines": 1285,
+    "known": [
+      {
+        "id": "C1",
+        "path": "app/src/app/(authenticated)/admin/templates/[id]/page.tsx",
+        "line": 260,
+        "summary": "The five-outcome limit check was rewritten from `nextPosition > 5` to `outcomes.length >= 5`, which reads as refusing at five outcomes, so the intended boundary of the limit is not evident from the change, although the behaviour is unchanged.",
+        "comment": "Why does it give the error out at length = 5 as well?",
+        "reviewerSeverity": "question",
+        "crossFile": false,
+        "defect": false
+      }
+    ]
+  },
+  {
+    "id": "pr59",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 59,
+    "title": "Allow Mission and Joshua Google sign-in",
+    "kind": "positive",
+    "reviewedAt": "2026-10-07T17:25:57Z",
+    "baseSha": "8bd99dff7f9cbbba3e79f434c91217c17b2cc0a1",
+    "headSha": "017ba4347cade529c396666a635d17fe77d89227",
+    "lines": 806,
+    "known": [
+      {
+        "id": "pr59-1",
+        "path": null,
+        "line": null,
+        "summary": "The sign-in wording on the login page, the welcome email and the help FAQ names the company Joshua rather than Joshua's, which misnames the company and disagrees with the Add Team Member error message in the same change.",
+        "comment": "Please add joshuas instead of joshua, and double check the invite flow",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "pr59-2",
+        "path": null,
+        "line": null,
+        "summary": "The change alters who may sign in (approved Mission and Joshua's domains, a matching Workspace domain and an existing active profile) and which addresses Add Team Member accepts, so the path from inviting a person to their first sign-in depends on both and was not shown to work for the new domains.",
+        "comment": "Please add joshuas instead of joshua, and double check the invite flow",
+        "reviewerSeverity": "question",
+        "crossFile": true,
+        "defect": false
+      }
+    ]
+  },
+  {
+    "id": "pr14",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 14,
+    "title": "Feature/sidebar addition",
+    "kind": "secondary",
+    "reviewedAt": "2026-09-11T18:16:42Z",
+    "baseSha": "e1104fa0e8f5946656c36927c50cd6b6af24f83c",
+    "headSha": "b28314758412661c16eab86c64cbfbe8c2d75e89",
+    "lines": 72,
+    "known": [
+      {
+        "id": "R-c",
+        "path": "app/src/components/layout/sidebar.tsx",
+        "line": null,
+        "summary": "The new Marketing section is added to the sidebar and routes, but `/marketing` is missing from the phase-1 allowed paths that the middleware and the sidebar's phase-1 filter apply, so Marketing department users fail the existing access checks and cannot reach the section built for them.",
+        "comment": "Bug found that Marketing department does not pass the checks in place right now.",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      }
+    ]
+  },
+  {
+    "id": "pr170",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 170,
+    "title": "Keep unsent Team Talent ratings through a refresh or deploy",
+    "kind": "secondary",
+    "reviewedAt": "2026-11-02T03:49:45Z",
+    "baseSha": "79640a51022a7f3f5eee95c961a81273160abb9e",
+    "headSha": "1b4658e4b55115d2e4fcec9c5f8f6f5924bcc46a",
+    "lines": 294,
+    "known": [
+      {
+        "id": "pr170-1",
+        "path": "app/src/lib/talents/draft.ts",
+        "line": null,
+        "summary": "Restoring a browser draft adds cards for people who are no longer on the rater's list, which the page does not render, so the hidden entries are still submitted, failing the whole submit when the person is outside the rater's scope or saving a rating for a deactivated person the page no longer shows.",
+        "comment": "a restored draft for someone no longer on the rater's list is dropped instead of becoming a hidden card that blocks Submit",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "pr170-2",
+        "path": "app/src/lib/talents/draft.ts",
+        "line": null,
+        "summary": "A restored draft carries no record of the saved ratings it started from, so a draft written before the person was submitted from another tab or device is laid back over the newer saved ratings and writes old values back.",
+        "comment": "a draft whose saved values changed since it was written (submitted from another tab or device) is dropped instead of writing old ratings back",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      },
+      {
+        "id": "pr170-3",
+        "path": "app/src/app/(authenticated)/forms/talent-ratings/page.tsx",
+        "line": null,
+        "summary": "Each tab writes its own unsent cards as the whole stored draft for the rater and month, so two tabs open on the same month overwrite each other's unsent ratings.",
+        "comment": "two tabs on the same month no longer overwrite each other's draft",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      }
+    ]
+  },
+  {
+    "id": "pr193",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 193,
+    "title": "Task distribution: hold the overnight backlog until the team is in",
+    "kind": "secondary",
+    "reviewedAt": "2026-11-02T05:26:14Z",
+    "baseSha": "2317eb106f4482ee25c05c75cdc507d95909f40a",
+    "headSha": "28b35e4edd82da6f60398ace786af686927c271f",
+    "lines": 1382,
+    "known": [
+      {
+        "id": "pr193-1",
+        "path": "app/src/lib/task-distribution/hold-settings.ts",
+        "line": null,
+        "summary": "A failed read of the morning hold settings returns null, which callers treat as the hold being off, so one database error before the release time lets a sweep hand the whole overnight backlog to whoever is logged in.",
+        "comment": "A failed settings read keeps the last good settings instead of turning the hold off for that sweep. Before any good read (table missing) it is still off.",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      },
+      {
+        "id": "pr193-2",
+        "path": "app/src/components/task-distribution/morning-hold-control.tsx",
+        "line": null,
+        "summary": "The morning hold status line is read once when the page loads and changes only after a save, so an open page keeps saying the hold is on after the release time has passed.",
+        "comment": "The status line re-reads on the page's 2-minute poll, so it no longer says the hold is on after release. The form fields stay local, so a poll never overwrites an edit.",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      }
+    ]
+  },
+  {
+    "id": "pr220",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 220,
+    "title": "Store recruiting queue calls (ORBIT-503)",
+    "kind": "secondary",
+    "reviewedAt": "2026-11-05T04:07:01Z",
+    "baseSha": "3b4f9b1457c5876df55384d5b9e498951ad241d4",
+    "headSha": "489dd605942f5a909cadbff1f400e27c59f8dd58",
+    "lines": 399,
+    "known": [
+      {
+        "id": "pr220-1",
+        "path": "app/src/lib/calls/match-department.ts",
+        "line": null,
+        "summary": "The recruiting ring-group routing rule also matches on the handling agent's group membership, so People Relations attendance-line and az_peoplerelations calls taken by staff who belong to the recruiting group are filed as recruiting calls.",
+        "comment": "the recruiting rule matches only calls that rang the queue, never by group membership, so People Relations attendance and az_peoplerelations calls stay out.",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      },
+      {
+        "id": "pr220-2",
+        "path": "app/scripts/backfill-recruiting-calls.ts",
+        "line": null,
+        "summary": "The backfill re-selects every recruiting job that still has no stored call row, so jobs that legitimately store nothing are released and re-transcribed on every run and can stall the backfill at the front of the queue.",
+        "comment": "The backfill releases each job once.",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      },
+      {
+        "id": "pr220-3",
+        "path": "app/src/lib/calls/validate-call.ts",
+        "line": null,
+        "summary": "The internal-contact check matches the `office` fragment anywhere in the contact name, so recruiting candidates labelled `(office candidate)` are dropped as internal calls.",
+        "comment": "Contacts labelled as candidates are not dropped as internal.",
+        "reviewerSeverity": "change",
+        "crossFile": false
+      },
+      {
+        "id": "pr220-4",
+        "path": "app/src/lib/calls/process.ts",
+        "line": null,
+        "summary": "A short call is given the observation rubric's unscored result even on a pipeline configured with no scoring, so a short recruiting call is shown with the customer observation rubric card.",
+        "comment": "Short calls stay unscored",
+        "reviewerSeverity": "change",
+        "crossFile": true
+      }
+    ]
+  },
+  {
+    "id": "pr198",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 198,
+    "title": "feat(announcements): ORBIT-280 follow-ups into staging: staging schedules, formatting, email-style screens, bell",
+    "kind": "negative",
+    "reviewedAt": "2026-11-03T04:53:23Z",
+    "baseSha": "50a4138f5789d353231a215af81ccab1bdcdd38a",
+    "headSha": "1d296b40691267712c85118ee246b1239666a174",
+    "lines": 2754,
+    "known": []
+  },
+  {
+    "id": "pr207",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 207,
+    "title": "feat(announcements): ORBIT-280 follow-ups into staging: fuller previews, Seen filter, pop-up restyle",
+    "kind": "negative",
+    "reviewedAt": "2026-11-03T23:25:56Z",
+    "baseSha": "ea4c6593c95fa69147374c341752f198a5fd0315",
+    "headSha": "59174827d33cafd35ed1414e126f099c01263aef",
+    "lines": 364,
+    "known": []
+  },
+  {
+    "id": "pr209",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 209,
+    "title": "fix(nav): ORBIT-452 into staging: make Field Operations an expansion-only group",
+    "kind": "negative",
+    "reviewedAt": "2026-11-04T17:42:57Z",
+    "baseSha": "2bf55ee59c313ace1cbdebd6d64fba14062d2c1b",
+    "headSha": "5bcb10b79d55a9f993153e7750c849c3a33ffb13",
+    "lines": 428,
+    "known": []
+  },
+  {
+    "id": "pr225",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 225,
+    "title": "feat(announcements): ORBIT-280 engagement filtered by Field or Office into staging",
+    "kind": "negative",
+    "reviewedAt": "2026-11-05T21:27:26Z",
+    "baseSha": "afc786ef28abef9eb87c8ca3d8ce4ea80c58a919",
+    "headSha": "2191a6a2d7e0328d056d2bd736d95a31a396a1b9",
+    "lines": 126,
+    "known": []
+  },
+  {
+    "id": "pr232",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 232,
+    "title": "feat(announcements): ORBIT-280 image auto-save, image alignment and engagement refresh into staging",
+    "kind": "negative",
+    "reviewedAt": "2026-11-06T23:10:36Z",
+    "baseSha": "4f0c6216f384065a8b091f0770385f37863306a1",
+    "headSha": "b857f56017452f5c9a28b4acbad1d2fc2d1aba75",
+    "lines": 300,
+    "known": []
+  },
+  {
+    "id": "pr133",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 133,
+    "title": "Role templates: grey out Delete when in use, add Save & Duplicate",
+    "kind": "negative",
+    "reviewedAt": "2026-10-20T23:15:55Z",
+    "baseSha": "d2b46c6c52622de765e6df1ed7c2fe33bafe93f0",
+    "headSha": "3e90f196399e38fb62986bbcf4e4af41102d7af2",
+    "lines": 421,
+    "known": []
+  },
+  {
+    "id": "pr136",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 136,
+    "title": "feat(field-ops): link the damage popup to the Property Damage spreadsheet",
+    "kind": "negative",
+    "reviewedAt": "2026-10-20T23:28:43Z",
+    "baseSha": "addd11e8384a9df5301f0f7390d74e4d0ba6b06d",
+    "headSha": "e519599d623385616ef860b8cbbc38fbde91d711",
+    "lines": 40,
+    "known": []
+  },
+  {
+    "id": "pr125",
+    "repo": "Moxie-Pest-Control-Phoenix/moxie-portal",
+    "pr": 125,
+    "title": "Oct 19 batch into staging: field ops damage list, warnings fixes, talent history filter, annual inspection, role templates",
+    "kind": "negative",
+    "reviewedAt": "2026-10-19T20:24:59Z",
+    "baseSha": "6ea8d76a3545956b91cf7f528041c8a22c9d91e4",
+    "headSha": "08d1b16928752ddb59092b773bd198b7e40daae6",
+    "lines": 2753,
+    "known": []
+  }
+]
