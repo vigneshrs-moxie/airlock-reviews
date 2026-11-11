@@ -1,19 +1,17 @@
 import type { Stage, VerdictLabel } from './review.js';
 
-const READY: Record<Stage, string> = {
-  pr1: 'Ready for PR #2', pr2: 'Ready for PR #3', pr3: 'Ready to release', other: 'Ready',
-};
-
-const WORDS: Record<Exclude<VerdictLabel, 'ready-for-pr2'>, string> = {
+const VERDICT_WORDS: Record<VerdictLabel, string> = {
   'not-ready': 'Not ready',
+  'ready-for-pr2': 'Ready for PR #2',
   'split-first': 'Split first',
   'request-changes': 'Request changes',
   'approve-after-fixes': 'Approve after fixes',
   approve: 'Approve',
-  incomplete: 'Incomplete',
+  incomplete: 'Review incomplete',
 };
 
-/** A verdict label in the prototype's words; `ready-for-pr2` names the stage the pull request moves to next. */
+/** The verdict as the reader sees it. A pull request past PR #1 that is ready is ready to merge, not ready for PR #2. */
 export function verdictWords(label: VerdictLabel, stage: Stage): string {
-  return label === 'ready-for-pr2' ? READY[stage] : WORDS[label];
+  if (label === 'ready-for-pr2' && stage !== 'pr1') return 'Ready to merge';
+  return VERDICT_WORDS[label];
 }

@@ -1,4 +1,4 @@
-import type { Anchor, Finding, PrInfo, Severity, StageError } from '@airlock/shared';
+import type { Anchor, Finding, PrInfo, Question, Severity, StageError } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
 import { createFakeRunner } from '../../src/agent/fake-runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
@@ -18,8 +18,11 @@ function item(id: string, severity: Severity, over: Partial<KeptCandidate> = {})
 }
 
 const answer = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-  top: [], also: [], sameAs: [], whoseCall: [], checksAfterMerge: [], splitSuggested: false, ...over,
+  top: [], also: [], sameAs: [], questionSameAs: [], whoseCall: [], checksAfterMerge: [], splitSuggested: false, ...over,
 });
+
+const ask = (text: string): Question => ({ text, cohortId: 'k1', source: { pack: 'core', lens: 'boundary', ruleId: null } });
+const texts = (qs: Question[]): string[] => qs.map((q) => q.text);
 
 function finding(id: string, severity: Severity, bucket: 'top' | 'also' = 'top', rank: number | null = 1): Finding {
   const k = item(id, severity);
@@ -271,16 +274,107 @@ describe('select', () => {
     expect(alsoIds(r.findings)).toEqual(['n2', 'f1', 'f2', 'a1', 'n1']);
   });
 
-  it('makes no request when nothing was kept', async () => {
-    const runner = createFakeRunner(() => answer());
+  it('makes its request when nothing was kept and returns whoseCall and checksAfterMerge', async () => {
+    const runner = createFakeRunner(() => answer({ whoseCall: ['The 60-day limit'], checksAfterMerge: ['Pause a plan as a manager'] }));
     const r = await select(runner, ctx({ pr: own }), [], [], []);
-    expect(runner.calls).toHaveLength(0);
+    expect(runner.calls).toHaveLength(1);
+    expect(block(runner.calls[0]!.material, 'findings')).toBe('(none)');
     expect(r.findings).toEqual([]);
-    expect(r.usage).toEqual([]);
+    expect(r.usage).toHaveLength(1);
     expect(r.errors).toEqual([]);
     expect(r.verdict.label).toBe('ready-for-pr2');
+    expect(r.whoseCall).toEqual(['The 60-day limit']);
+    expect(r.checksAfterMerge).toEqual(['Pause a plan as a manager']);
+  });
+
+  it('makes no request when nothing was kept and there are no questions on a sync merge', async () => {
+    const runner = createFakeRunner(() => answer({ checksAfterMerge: ['never asked'] }));
+    const r = await select(runner, ctx({ pr: own }), [], [], [stageError('shape')], 'standard', true);
+    expect(runner.calls).toHaveLength(0);
+    expect(r.findings).toEqual([]);
+    expect(r.questions).toEqual([]);
+    expect(r.usage).toEqual([]);
+    expect(r.errors).toEqual([]);
+    expect(r.verdict.label).toBe('incomplete');
     expect(r.whoseCall).toEqual([]);
     expect(r.checksAfterMerge).toEqual([]);
+  });
+
+  it('the model sees the brief and the change map when nothing was kept', async () => {
+    const runner = createFakeRunner(() => answer());
+    await select(runner, ctx(), [], [ask('Who decided the 60-day limit?')], []);
+    const { material } = runner.calls[0]!;
+    expect(labels(material)).toEqual(['pull request', 'brief', 'change map', 'findings', 'questions']);
+    expect(block(material, 'brief')).toContain('Pauses are limited to 60 days');
+    expect(block(material, 'change map')).toContain('Cohort: Pausing a plan');
+    expect(block(material, 'change map')).toContain('src/pause.ts');
+    expect(block(material, 'findings')).toBe('(none)');
+    expect(block(material, 'questions')).toBe('q1 | Who decided the 60-day limit?');
+  });
+
+  it('removes a question the model says is the same as an earlier question', async () => {
+    const questions = [ask('Is 60 days the limit?'), ask('Can a pause last longer than 60 days?'), ask('Who signs off pauses?')];
+    const runner = createFakeRunner(() => answer({ questionSameAs: [{ question: 2, sameAs: 'q1' }] }));
+    const r = await select(runner, ctx({ pr: theirs }), [], questions, []);
+    expect(block(runner.calls[0]!.material, 'questions')!.split('\n')).toEqual([
+      'q1 | Is 60 days the limit?', 'q2 | Can a pause last longer than 60 days?', 'q3 | Who signs off pauses?',
+    ]);
+    expect(r.questions).toEqual([questions[0], questions[2]]);
+    expect(r.verdict.sentence).toBe('Nothing that needs fixing was found. 2 questions to settle.');
+  });
+
+  it('removes a question the model says is the same as a finding in the result', async () => {
+    const kept = [item('a', 'fix', { path: 'src/x.ts' }), item('b', 'ask', { path: 'src/x.ts' }), item('c', 'note')];
+    const questions = [ask('Is c intended?'), ask('Is b intended?'), ask('Who owns the report?')];
+    const runner = createFakeRunner(() => answer({
+      top: ['a'], sameAs: [['a', 'b']], questionSameAs: [{ question: 1, sameAs: 'c' }, { question: 2, sameAs: 'b' }],
+    }));
+    const r = await select(runner, ctx(), kept, questions, []);
+    expect(ids(r.findings)).toEqual(['a', 'c']); // b was merged into a, so q2 counts as the same as a
+    expect(r.questions).toEqual([questions[2]]);
+  });
+
+  it('keeps a question whose target does not exist, is itself, or was dropped', async () => {
+    const questions = ['one', 'two', 'three', 'four', 'five'].map((t) => ask(`Question ${t}?`));
+    const runner = createFakeRunner(() => answer({
+      top: ['a'],
+      questionSameAs: [
+        { question: 1, sameAs: 'ghost' }, // no such finding
+        { question: 2, sameAs: 'q2' }, // itself
+        { question: 3, sameAs: 'q9' }, // no such question
+        { question: 4, sameAs: 'gone' }, // a finding dropped before selection
+        { question: 5, sameAs: 'Q1' }, // not written as shown
+        { question: 0, sameAs: 'q1' }, { question: 6, sameAs: 'q1' }, { question: 1.5, sameAs: 'q2' }, // no such position
+      ],
+    }));
+    const r = await select(runner, ctx(), [item('a', 'fix')], questions, []);
+    expect(r.questions).toEqual(questions);
+  });
+
+  it('follows a chain and keeps the lowest position of a cycle', async () => {
+    const questions = ['1', '2', '3', '4', '5', '6', '7'].map((t) => ask(`Question ${t}?`));
+    const runner = createFakeRunner(() => answer({
+      top: ['a'],
+      questionSameAs: [
+        { question: 3, sameAs: 'q2' }, { question: 2, sameAs: 'q1' }, // chain: 3 and 2 go
+        { question: 4, sameAs: 'q6' }, { question: 6, sameAs: 'q5' }, { question: 5, sameAs: 'q4' }, // cycle: 4 stays
+        { question: 7, sameAs: 'q5' }, // into the cycle: 7 goes
+      ],
+    }));
+    const r = await select(runner, ctx(), [item('a', 'fix')], questions, []);
+    expect(texts(r.questions)).toEqual(['Question 1?', 'Question 4?']);
+  });
+
+  it('reduces questions with the same text to one without asking, also when the request fails', async () => {
+    const questions = [ask('Is 60 the limit?'), ask('Who decides?'), { ...ask('  is 60\n the   LIMIT? '), cohortId: 'k2' }];
+    const ok = createFakeRunner(() => answer());
+    const asked = await select(ok, ctx(), [], questions, []);
+    expect(block(ok.calls[0]!.material, 'questions')!.split('\n')).toEqual(['q1 | Is 60 the limit?', 'q2 | Who decides?']);
+    expect(asked.questions).toEqual([questions[0], questions[1]]);
+
+    const failed = await select(createFakeRunner(() => new Error('down')), ctx(), [item('a', 'fix')], questions, []);
+    expect(failed.errors).toEqual([{ stage: 'select', cohortId: null, message: 'down' }]);
+    expect(failed.questions).toEqual([questions[0], questions[1]]);
   });
 
   it('sends one select request with the standards in the instructions and the pull request and findings in the material', async () => {
@@ -303,14 +397,14 @@ describe('select', () => {
     expect(req.instructions).toContain('LEARNED_MARKER');
     expect(req.instructions).toContain('The reader is a reviewer');
     expect(req.instructions).not.toMatch(/\{\{/);
-    expect(labels(req.material)).toEqual(['pull request', 'brief', 'findings', 'questions']);
+    expect(labels(req.material)).toEqual(['pull request', 'brief', 'change map', 'findings', 'questions']);
     expect(block(req.material, 'pull request')).toContain('PR_BODY_MARKER');
     expect(block(req.material, 'brief')).toContain('Pauses are limited to 60 days');
     expect(block(req.material, 'findings')!.split('\n')).toEqual([
       'a | block | core/boundary | src/a.ts:2 | Totals \\| taxes are wrong | happens: The invoice shows the wrong total.',
       'b | note | orbit/R7 | src/b.ts:- | Finding b | happens: A member is hurt by b.',
     ]);
-    expect(block(req.material, 'questions')!.split('\n')).toEqual(['- Is 60 the right \\| limit?']);
+    expect(block(req.material, 'questions')!.split('\n')).toEqual(['q1 | Is 60 the right \\| limit?']);
     expect(r.usage).toHaveLength(1);
   });
 
@@ -390,7 +484,7 @@ describe('select', () => {
 
 describe('decideVerdict', () => {
   it('own pull request with a fix is not-ready', () => {
-    const v = decideVerdict(own, [finding('f', 'fix', 'top', 1), finding('n', 'note', 'also', null)], [], false);
+    const v = decideVerdict(own, [finding('f', 'fix', 'top', 1), finding('n', 'note', 'also', null)], [], false, 0);
     expect(v).toEqual({
       label: 'not-ready', sentence: '1 thing to fix before this merges. The first: Finding f.',
       counts: { block: 0, fix: 1, ask: 0, note: 1 },
@@ -398,20 +492,20 @@ describe('decideVerdict', () => {
   });
 
   it('own pull request with only notes is ready-for-pr2', () => {
-    const v = decideVerdict(own, [finding('n', 'note')], [], false);
+    const v = decideVerdict(own, [finding('n', 'note')], [], false, 0);
     expect(v.label).toBe('ready-for-pr2');
     expect(v.sentence).toBe('Nothing that needs fixing was found.');
   });
 
   it('own pull request that should be split is split-first', () => {
-    const v = decideVerdict(own, [finding('b', 'block')], [], true);
+    const v = decideVerdict(own, [finding('b', 'block')], [], true, 0);
     expect(v.label).toBe('split-first');
     expect(v.sentence).toBe('This pull request is too large or mixed to review well in one go. Split it, then review the parts.');
   });
 
   it('someone else\'s pull request with a block is request-changes', () => {
     const findings = [finding('f', 'fix', 'top', 1), finding('b', 'block', 'top', 2), finding('f2', 'fix', 'also', null)];
-    const v = decideVerdict(theirs, findings, [], true);
+    const v = decideVerdict(theirs, findings, [], true, 0);
     expect(v.label).toBe('request-changes');
     expect(v.sentence).toBe('3 things to fix before this merges. The first: Finding f.');
     expect(v.counts).toEqual({ block: 1, fix: 2, ask: 0, note: 0 });
@@ -419,35 +513,47 @@ describe('decideVerdict', () => {
 
   it('names the highest-ranked block or fix, whatever the order of the list', () => {
     const findings = [finding('n', 'note', 'also', null), finding('f2', 'fix', 'top', 3), finding('f1', 'fix', 'top', 2), finding('q', 'ask', 'top', 1)];
-    expect(decideVerdict(own, findings, [], false).sentence).toBe('2 things to fix before this merges. The first: Finding f1.');
+    expect(decideVerdict(own, findings, [], false, 0).sentence).toBe('2 things to fix before this merges. The first: Finding f1.');
   });
 
   it('someone else\'s pull request with a fix is approve-after-fixes', () => {
-    const one = decideVerdict(theirs, [finding('f', 'fix')], [], false);
+    const one = decideVerdict(theirs, [finding('f', 'fix')], [], false, 0);
     expect(one.label).toBe('approve-after-fixes');
     expect(one.sentence).toBe('1 thing to fix, none of them blocking. The first: Finding f.');
-    const two = decideVerdict(theirs, [finding('f', 'fix', 'top', 1), finding('g', 'fix', 'top', 2)], [], false);
+    const two = decideVerdict(theirs, [finding('f', 'fix', 'top', 1), finding('g', 'fix', 'top', 2)], [], false, 0);
     expect(two.sentence).toBe('2 things to fix, none of them blocking. The first: Finding f.');
   });
 
   it('someone else\'s pull request with only questions and notes is approve and counts the questions', () => {
-    const one = decideVerdict(theirs, [finding('q', 'ask'), finding('n', 'note', 'also', null)], [], false);
+    const one = decideVerdict(theirs, [finding('q', 'ask'), finding('n', 'note', 'also', null)], [], false, 0);
     expect(one.label).toBe('approve');
     expect(one.sentence).toBe('Nothing that needs fixing was found. 1 question to settle.');
-    const two = decideVerdict(theirs, [finding('q', 'ask', 'top', 1), finding('r', 'ask', 'top', 2)], [], false);
+    const two = decideVerdict(theirs, [finding('q', 'ask', 'top', 1), finding('r', 'ask', 'top', 2)], [], false, 0);
     expect(two.sentence).toBe('Nothing that needs fixing was found. 2 questions to settle.');
-    expect(decideVerdict(theirs, [], [], false)).toEqual({
+    expect(decideVerdict(theirs, [], [], false, 0)).toEqual({
       label: 'approve', sentence: 'Nothing that needs fixing was found.', counts: { block: 0, fix: 0, ask: 0, note: 0 },
     });
   });
 
+  it('the sentence counts ask findings and surviving questions together', () => {
+    const v = decideVerdict(theirs, [finding('q', 'ask'), finding('n', 'note', 'also', null)], [], false, 2);
+    expect(v).toEqual({
+      label: 'approve', sentence: 'Nothing that needs fixing was found. 3 questions to settle.', counts: { block: 0, fix: 0, ask: 1, note: 1 },
+    });
+    const one = decideVerdict(own, [], [], false, 1);
+    expect(one.label).toBe('ready-for-pr2');
+    expect(one.sentence).toBe('Nothing that needs fixing was found. 1 question to settle.');
+    expect(one.counts).toEqual({ block: 0, fix: 0, ask: 0, note: 0 });
+    expect(decideVerdict(own, [finding('f', 'fix')], [], false, 4).sentence).toBe('1 thing to fix before this merges. The first: Finding f.');
+  });
+
   it('does not add a second full stop after a title that has one', () => {
     const f = { ...finding('f', 'fix'), title: 'The total is wrong.' };
-    expect(decideVerdict(own, [f], [], false).sentence).toBe('1 thing to fix before this merges. The first: The total is wrong.');
+    expect(decideVerdict(own, [f], [], false, 0).sentence).toBe('1 thing to fix before this merges. The first: The total is wrong.');
   });
 
   it('strips trailing punctuation and ellipses from the title before the full stop', () => {
-    const sentence = (title: string): string => decideVerdict(own, [{ ...finding('f', 'fix'), title }], [], false).sentence;
+    const sentence = (title: string): string => decideVerdict(own, [{ ...finding('f', 'fix'), title }], [], false, 0).sentence;
     const expected = '1 thing to fix before this merges. The first: Totals are wrong.';
     expect(sentence('Totals are wrong:')).toBe(expected);
     expect(sentence('Totals are wrong;')).toBe(expected);
@@ -459,23 +565,23 @@ describe('decideVerdict', () => {
 
   it('cuts a long title at a word boundary, within 120 characters, ending with an ellipsis', () => {
     const words = Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ');
-    const { sentence } = decideVerdict(own, [{ ...finding('f', 'fix'), title: words }], [], false);
+    const { sentence } = decideVerdict(own, [{ ...finding('f', 'fix'), title: words }], [], false, 0);
     const quoted = sentence.slice(sentence.indexOf('The first: ') + 'The first: '.length);
     expect(quoted.length).toBeLessThanOrEqual(120);
     expect(quoted.endsWith('…')).toBe(true);
     expect(words.startsWith(quoted.slice(0, -1))).toBe(true);
     expect(words[quoted.length - 1]).toBe(' ');
     const exact = 'x'.repeat(120);
-    expect(decideVerdict(own, [{ ...finding('f', 'fix'), title: exact }], [], false).sentence.endsWith(`${exact}.`)).toBe(true);
+    expect(decideVerdict(own, [{ ...finding('f', 'fix'), title: exact }], [], false, 0).sentence.endsWith(`${exact}.`)).toBe(true);
   });
 
   it('any stage error makes the verdict incomplete and names the stage', () => {
     const errors = [stageError('lenses'), stageError('challenge'), stageError('lenses')];
-    const v = decideVerdict(own, [finding('n', 'note')], errors, true);
+    const v = decideVerdict(own, [finding('n', 'note')], errors, true, 0);
     expect(v.label).toBe('incomplete');
     expect(v.sentence).toBe(
       'The review did not finish (lenses, challenge). What was found is listed below, but this is not a complete review.',
     );
-    expect(decideVerdict(theirs, [], [stageError('select')], false).label).toBe('incomplete');
+    expect(decideVerdict(theirs, [], [stageError('select')], false, 0).label).toBe('incomplete');
   });
 });

@@ -1,5 +1,6 @@
 export * from './review.js';
 export * from './events.js';
+export * from './words.js';
 export { candidate, minimalDocument } from './testing.js';
 export * from './api.js';
 export * from './diff-anchor.js';
