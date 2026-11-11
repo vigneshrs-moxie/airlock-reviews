@@ -41,6 +41,8 @@ export interface ReviewRequest {
   packIds?: string[];
   models?: Partial<ModelConfig>;
   explicit?: { baseSha: string; headSha: string };
+  /** The pull request's title and description as they were when it was reviewed, in place of today's (the replay). */
+  prText?: { title: string; body: string };
   holdout?: Holdout;
   packsDir: string;
   remoteUrl?: string;

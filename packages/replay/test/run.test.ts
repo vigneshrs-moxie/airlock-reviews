@@ -191,7 +191,7 @@ describe('runReplay', () => {
     const failed = summary.cases.find((s) => s.caseId === 'pr2')!;
     expect(failed).toMatchObject({ known: 1, inTop: 0, shown: 0, raised: 0, findingsShown: 0, verdict: 'incomplete' });
     // Not judged, so not lost anywhere: the problem still counts as known and as not found.
-    expect(Object.values(failed.lostAt)).toEqual([0, 0, 0, 0, 0]);
+    expect(Object.values(failed.lostAt).every((n) => n === 0)).toBe(true);
     expect(summary.incompleteCases).toEqual(['pr2']);
     expect(summary.cases.find((s) => s.caseId === 'pr1')).toMatchObject({ inTop: 1, verdict: 'approve' });
 
@@ -213,7 +213,7 @@ describe('runReplay', () => {
 
     expect(failing.calls.filter((r) => isFor(r, 'K1'))).toHaveLength(1); // deps.runner is used as it is: no second retry
     expect(summary.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 0, raised: 0, findingsShown: 1, verdict: 'incomplete' });
-    expect(Object.values(summary.cases[0]!.lostAt)).toEqual([0, 0, 0, 0, 0]);
+    expect(Object.values(summary.cases[0]!.lostAt).every((n) => n === 0)).toBe(true);
     expect(summary.incompleteCases).toEqual(['pr1']);
     expect((await readdir(caseDir('pr1'))).sort()).toEqual(['error.txt', 'review.json']);
     // The saved review stays the real one.

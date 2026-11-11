@@ -176,7 +176,7 @@ describe('renderReport', () => {
     const failedDoc = doc({ verdict: { label: 'incomplete', sentence: 's', counts: { block: 0, fix: 0, ask: 0, note: 0 } } });
     const none = [match('B1', 'none', null, 'Not judged.'), match('B2', 'none', null, 'Not judged.')];
     // How the runner scores a case it could not judge: incomplete, and not lost at any stage.
-    const lostAt = { lenses: 0, schema: 0, anchor: 0, challenge: 0, select: 0 };
+    const lostAt = { lenses: 0, schema: 0, anchor: 0, merge: 0, challenge: 0, select: 0 };
     const scores = [{ ...scoreCase(failed, failedDoc, none), lostAt }, scoreCase(clean, failedDoc, [])];
     const details = { b: { doc: failedDoc, matches: none }, n: { doc: failedDoc, matches: [] } };
     const text = renderReport(summarise('r', 'm', 'standard', scores, [failed, clean]), [failed, clean], details);
