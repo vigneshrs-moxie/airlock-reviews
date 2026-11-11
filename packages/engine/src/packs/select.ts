@@ -1,5 +1,11 @@
 import type { Pack } from './types.js';
 
+/** The pack selected for every repository, under the ones named for it. */
+const EVERY_REPO_PACK = 'generic';
+
+/** True for the pack that is selected for every repository. */
+export const appliesToEveryRepo = (pack: Pack): boolean => pack.id === EVERY_REPO_PACK;
+
 export function selectPacks(all: Pack[], repo: string, override?: string[]): Pack[] {
   if (override) {
     return override.map((id) => {
@@ -8,7 +14,7 @@ export function selectPacks(all: Pack[], repo: string, override?: string[]): Pac
       return pack;
     });
   }
-  const matched = all.filter((p) => p.id !== 'generic' && p.repos.includes(repo));
-  const generic = all.find((p) => p.id === 'generic');
+  const matched = all.filter((p) => !appliesToEveryRepo(p) && p.repos.includes(repo));
+  const generic = all.find(appliesToEveryRepo);
   return generic ? [...matched, generic] : matched;
 }

@@ -58,4 +58,4 @@ Airlock never writes to GitHub. It posts nothing, approves nothing and merges no
 | A jump says "Asked GitHub to show…" and nothing is marked | GitHub's page changed in a way Airlock does not recognise yet. The Packs screen lists which parts it could not find. |
 | The service will not start: port in use | Another copy is running. `npm run service -- status` shows it. |
 
-Where things are kept: `~/.airlock` (reviews, dismissals, the pairing token, the service log). Learned lines are plain text under `packs/<your pack>/learned/` in this repository, so you can read, edit or delete them.
+Where things are kept: `~/.airlock` (reviews, dismissals, the pairing token, the service log). Learned lines are plain text under `packs/<your pack>/learned/` in this repository, so you can read, edit or delete them. A line saved on a repository with no pack of its own is kept in `packs/generic/learned/` and applies to that repository only.

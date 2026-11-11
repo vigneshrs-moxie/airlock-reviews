@@ -1,13 +1,13 @@
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Question, Source, StageError } from '@airlock/shared';
+import { isRepo, type Question, type Source, type StageError } from '@airlock/shared';
 import type { StageRule } from '../intake/pr.js';
 import { missingHelpers, namedHelpers } from '../packs/helpers-check.js';
 import { applyHoldout } from '../packs/holdout.js';
 import { attachKit, syncKit, type SyncedKit } from '../packs/kit-sync.js';
 import { loadPack } from '../packs/load.js';
 import { loadRepoRules } from '../packs/repo-rules.js';
-import { selectPacks } from '../packs/select.js';
+import { appliesToEveryRepo, selectPacks } from '../packs/select.js';
 import type { Holdout, Pack } from '../packs/types.js';
 import type { Exec } from '../util/exec.js';
 import { messageOf } from './stages.js';
@@ -21,9 +21,20 @@ const packsError = (message: string): StageError => ({ stage: 'packs', cohortId:
 const question = (text: string): Question => ({ text, cohortId: null, source: ENGINE_SOURCE });
 
 /**
+ * A pack selected for every repository keeps only the learned lines saved on this repository (letter case ignored) and
+ * the lines with no repository recorded (written by hand); a line saved on another repository is not given to this
+ * review. A named pack's lines apply to every repository the pack is selected for, so they are left alone.
+ */
+function learnedFor(pack: Pack, repo: string): Pack {
+  if (!appliesToEveryRepo(pack)) return pack;
+  const here = repo.toLowerCase();
+  return { ...pack, learned: pack.learned.filter((e) => !isRepo(e.repo) || e.repo.toLowerCase() === here) };
+}
+
+/**
  * Loads every folder directly under `packsDir` that has a `pack.yaml` and selects the packs for the repository (or the
- * ones named in `packIds`). A pack that does not load, or a selection that fails, is a stage error; the rest carry on.
- * Makes no model call and no network call.
+ * ones named in `packIds`), each with only the learned lines that apply to the repository. A pack that does not load, or
+ * a selection that fails, is a stage error; the rest carry on. Makes no model call and no network call.
  */
 export async function choosePacks(packsDir: string, repo: string, packIds?: string[]): Promise<{ packs: Pack[]; errors: StageError[] }> {
   const errors: StageError[] = [];
@@ -44,7 +55,7 @@ export async function choosePacks(packsDir: string, repo: string, packIds?: stri
     }
   }
   try {
-    return { packs: selectPacks(all, repo, packIds), errors };
+    return { packs: selectPacks(all, repo, packIds).map((p) => learnedFor(p, repo)), errors };
   } catch (err) {
     errors.push(packsError(messageOf(err)));
     return { packs: [], errors };
