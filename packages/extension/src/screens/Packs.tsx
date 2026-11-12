@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { Timers } from '../client/timers';
 import { pageWords, type PageReport } from '../state/jump';
 import { CommandBox } from './CommandBox';
+import { useAnnounce } from './Frame';
 import { LearnedList, LearnedStatus, useLearned } from './LearnedList';
 
 export const UNREACHABLE = 'Airlock could not reach its service.';
@@ -78,7 +79,28 @@ export function Packs({ pr, packVersions, paired, fetchStatus, fetchLearned, rem
   const heading = useRef<HTMLHeadingElement>(null);
   const depthName = useId();
   useEffect(() => { heading.current?.focus(); }, []);
-  const learned = useLearned(pr === null ? null : pr.repo, fetchLearned);
+  const learned = useLearned(pr === null ? null : pr.repo, fetchLearned, removeLearned);
+  const announce = useAnnounce();
+  const noteAt = learned.result?.at;
+  // After a removal: the service's note is said, and focus goes to the heading of the pack the line was in.
+  useEffect(() => {
+    const done = learned.result;
+    if (done === null) return;
+    announce(done.note);
+    (document.getElementById(`pack-title-${done.pack}`) ?? heading.current)?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [noteAt]);
+  // Lines of a pack the pull request does not list are shown under that pack's own title, after the others.
+  const shown = pr === null ? [] : pr.packs;
+  const extra = learned.view.kind === 'ok'
+    ? [...new Map(learned.view.reply.lines.filter((l) => !shown.some((p) => p.id === l.pack)).map((l) => [l.pack, l.packTitle])).entries()].map(([id, title]) => ({ id, title }))
+    : [];
+  const list = (id: string) => learned.view.kind === 'ok' && (
+    <LearnedList
+      packId={id} reply={learned.view.reply} blocked={removeBlocked} busy={learned.removing}
+      refusal={learned.refusal} onRemove={learned.remove}
+    />
+  );
 
   return (
     <div className="packs-screen">
@@ -88,18 +110,17 @@ export function Packs({ pr, packVersions, paired, fetchStatus, fetchLearned, rem
       </div>
       <section className="card" aria-labelledby="packs-list">
         <h3 className="label" id="packs-list">Packs for this repository</h3>
+        {learned.result !== null && <p className="notice">{learned.result.note}</p>}
         {pr !== null && <LearnedStatus view={learned.view} reload={() => { void learned.reload(); }} />}
         {pr === null ? <p className="muted">Open a pull request to see its packs.</p> : (
           <ul className="plain">
-            {pr.packs.map((p) => {
+            {[...pr.packs, ...extra].map((p) => {
               const version = packVersions.find((v) => v.id === p.id)?.version;
               return (
                 <li key={p.id}>
-                  <div>{p.title}</div>
+                  <div id={`pack-title-${p.id}`} tabIndex={-1}>{p.title}</div>
                   {version !== undefined && <div className="muted">{`version ${versionWords(version)}`}</div>}
-                  {learned.view.kind === 'ok' && (
-                    <LearnedList repo={pr.repo} packId={p.id} reply={learned.view.reply} blocked={removeBlocked} remove={removeLearned} reload={learned.reload} />
-                  )}
+                  {list(p.id)}
                 </li>
               );
             })}

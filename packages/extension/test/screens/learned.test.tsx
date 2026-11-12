@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { StrictMode } from 'react';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import type { LearnedLine, LearnedReply, RemoveLearnedReply } from '@airlock/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -87,7 +88,7 @@ describe('learned lines under Packs', () => {
     expect(fetchLearned).toHaveBeenCalledTimes(2);
     expect(generic.queryByText('Learned line 1.')).toBeNull();
     expect(generic.getByText('Learned line 2.')).toBeTruthy();
-    expect(generic.getByText('Removed. It stops from the next review.')).toBeTruthy();
+    expect(document.querySelector('.packs-screen .notice')?.textContent).toBe('Removed. It stops from the next review.');
   });
 
   it('shows the note when the line was no longer there, and the empty state after the last line goes', async () => {
@@ -97,7 +98,7 @@ describe('learned lines under Packs', () => {
     const generic = pack('Generic');
     await click(generic.getByRole('button', { name: 'Remove' }));
     await click(generic.getByRole('button', { name: 'Remove' }));
-    expect(generic.getByText('That line was edited by hand, so it was left alone.')).toBeTruthy();
+    expect(document.querySelector('.packs-screen .notice')?.textContent).toBe('That line was edited by hand, so it was left alone.');
     expect(generic.getByText('Nothing learned yet.')).toBeTruthy();
   });
 
@@ -131,7 +132,7 @@ describe('learned lines under Packs', () => {
   it('says it is loading, then says in words when the list could not be read, and loads again on request', async () => {
     let release: (r: LearnedReply) => void = () => undefined;
     const slow = new Promise<LearnedReply>((r) => { release = r; });
-    const fetchLearned = vi.fn<(repo: string) => Promise<LearnedReply>>().mockReturnValueOnce(slow).mockRejectedValueOnce(new Error('down')).mockResolvedValue(reply([line(1)]));
+    const fetchLearned = vi.fn<(repo: string) => Promise<LearnedReply>>().mockReturnValueOnce(slow);
     render(
       <PanelScreen state={READY} dispatch={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))} fetchLearned={fetchLearned} />,
     );
@@ -139,7 +140,6 @@ describe('learned lines under Packs', () => {
     expect(screen.getByText('Loading what Airlock has learned…')).toBeTruthy();
     await act(async () => { release(reply([])); await slow; });
     expect(screen.queryByText('Loading what Airlock has learned…')).toBeNull();
-    // A removal reload that fails keeps the lines and says so.
     cleanup();
     fetchLearned.mockReset().mockRejectedValueOnce(new ServiceError('problem', 'The pack folder is unreadable.')).mockResolvedValue(reply([line(1)]));
     render(<PanelScreen state={READY} dispatch={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))} fetchLearned={fetchLearned} />);
@@ -170,5 +170,118 @@ describe('learned lines under Packs', () => {
     expect(remove.disabled).toBe(true);
     expect(screen.getByText('Removing a line needs the Airlock service, which is not answering.')).toBeTruthy();
     expect(remove.getAttribute('aria-describedby')).toBeTruthy();
+  });
+
+  it('under StrictMode a removal shows its note and Remove works again', async () => {
+    const fetchLearned = vi.fn<(repo: string) => Promise<LearnedReply>>().mockResolvedValue(reply([line(1), line(2)]));
+    const removeLearned = vi.fn<NonNullable<PanelScreenProps['removeLearned']>>().mockResolvedValue({ removed: true, note: 'Gone.' });
+    render(
+      <StrictMode>
+        <PanelScreen state={READY} dispatch={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))} fetchLearned={fetchLearned} removeLearned={removeLearned} />
+      </StrictMode>,
+    );
+    await click(screen.getByRole('button', { name: 'Packs' }));
+    fetchLearned.mockResolvedValue(reply([line(2)]));
+    const generic = pack('Generic');
+    await click(generic.getAllByRole('button', { name: 'Remove' })[0]!);
+    await click(generic.getAllByRole('button', { name: 'Remove' })[0]!);
+    expect(document.querySelector('.packs-screen .notice')?.textContent).toBe('Gone.');
+    expect((generic.getByRole('button', { name: 'Remove' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a removal that went through keeps its note when the list cannot be read again, with the reason and no stale lines', async () => {
+    const { fetchLearned } = await show(reply([line(1)]));
+    fetchLearned.mockRejectedValue(new ServiceError('problem', 'The pack folder is unreadable.'));
+    const generic = pack('Generic');
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    expect(document.querySelector('.packs-screen .notice')?.textContent).toBe('Removed. It stops from the next review.');
+    expect(screen.getByText('The pack folder is unreadable.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Load again' })).toBeTruthy();
+    expect(screen.queryByText('Learned line 1.')).toBeNull();
+  });
+
+  it('says Removed. when the service sent no note', async () => {
+    const { removeLearned } = await show(reply([line(1)]));
+    removeLearned.mockResolvedValue({ removed: true, note: null });
+    const generic = pack('Generic');
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    expect(document.querySelector('.packs-screen .notice')?.textContent).toBe('Removed.');
+  });
+
+  it('a double press on the question\'s Remove sends once', async () => {
+    const { removeLearned } = await show(reply([line(1)]));
+    const generic = pack('Generic');
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    const confirm = generic.getByRole('button', { name: 'Remove' });
+    await act(async () => { fireEvent.click(confirm); fireEvent.click(confirm); });
+    expect(removeLearned).toHaveBeenCalledTimes(1);
+  });
+
+  it('focus: the question takes it, Keep gives it back, a refusal returns it to Remove, a removal moves it to the pack heading; each is announced', async () => {
+    const { removeLearned } = await show(reply([line(1)]));
+    const generic = pack('Generic');
+    const live = () => document.querySelector('[aria-live]')!.textContent;
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    expect(document.activeElement?.textContent).toBe('Remove this line? The reviewer stops following it from the next review.');
+    expect(live()).toBe('Remove this line? The reviewer stops following it from the next review.');
+    await click(generic.getByRole('button', { name: 'Keep' }));
+    expect(document.activeElement).toBe(generic.getByRole('button', { name: 'Remove' }));
+    removeLearned.mockRejectedValueOnce(new ServiceError('problem', 'Refused for now.'));
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    expect(document.activeElement).toBe(generic.getByRole('button', { name: 'Remove' }));
+    expect(live()).toBe('Refused for now.');
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    expect(document.activeElement?.textContent).toBe('Generic');
+    expect(live()).toBe('Removed. It stops from the next review.');
+  });
+
+  it('the question\'s Remove has its reason when the panel goes offline while it is open', async () => {
+    const view = await show(reply([line(1)]));
+    await click(within(document.querySelector<HTMLElement>('.packs-screen')!).getByRole('button', { name: 'Remove' }));
+    view.rerender(
+      <PanelScreen state={{ kind: 'offline', ready: prSummary() }} dispatch={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))}
+        fetchLearned={view.fetchLearned} removeLearned={view.removeLearned} />,
+    );
+    const confirm = screen.getByRole('button', { name: 'Remove' }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    expect(document.getElementById(confirm.getAttribute('aria-describedby')!)?.textContent).toBe('Removing a line needs the Airlock service, which is not answering.');
+  });
+
+  it('a refusal shows only under the line with the same pack, kind and key', async () => {
+    const { removeLearned } = await show(reply([line(1), line(1, { kind: 'product-knowledge' })]));
+    removeLearned.mockRejectedValue(new ServiceError('problem', 'Refused.'));
+    const generic = pack('Generic');
+    await click(generic.getAllByRole('button', { name: 'Remove' })[0]!);
+    await click(generic.getAllByRole('button', { name: 'Remove' })[0]!);
+    expect(generic.getAllByRole('alert')).toHaveLength(1);
+  });
+
+  it('lines of a pack the pull request does not list are shown under their own pack title', async () => {
+    await show(reply([line(1), line(2, { pack: 'extra', packTitle: 'Extra pack', text: 'From elsewhere.' })]));
+    expect(pack('Extra pack').getByText('From elsewhere.')).toBeTruthy();
+  });
+
+  it('says it could not reach the service when the read gets no answer', async () => {
+    await show(new ServiceError('offline', 'The Airlock service is not answering.'));
+    expect(screen.getByText('Airlock could not reach its service to read what it has learned.')).toBeTruthy();
+  });
+
+  it('a different pull request drops the old lines at once and loads the new ones', async () => {
+    const view = await show(reply([line(1)]));
+    let release: (r: LearnedReply) => void = () => undefined;
+    view.fetchLearned.mockReturnValue(new Promise<LearnedReply>((r) => { release = r; }));
+    view.rerender(
+      <PanelScreen state={{ kind: 'ready', pr: prSummary({ repo: 'acme/other' }) }} dispatch={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))}
+        fetchLearned={view.fetchLearned} removeLearned={view.removeLearned} />,
+    );
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByText('Learned line 1.')).toBeNull();
+    expect(view.fetchLearned).toHaveBeenLastCalledWith('acme/other');
+    await act(async () => { release(reply([line(2)])); });
+    expect(screen.getByText('Learned line 2.')).toBeTruthy();
   });
 });

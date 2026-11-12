@@ -49,10 +49,12 @@ const NOT_FOUND = 'Airlock cannot find that finding in the stored review.';
 const PAIRED_ELSEWHERE =
   'Airlock is already paired with another copy of the extension. In the airlock-reviews folder, run: npm run service -- unpair, then pair again.';
 const KIT_PACK = 'raj-standard';
-// The sentences of the learned routes: a line that is no longer there, and the team's kit.
-const LEARNED_GONE = 'That line was already gone; it may have been edited by hand.';
-const LEARNED_REMOVED = 'Removed. The reviewer stops following it from the next review.';
-const KIT_KEPT = 'This line belongs to the team kit, which is not edited here.';
+// The sentences of the learned routes (packages/service/src/learned.ts): the removal's order is pack not chosen (404), kit
+// (403), then the line itself; a removal that went through carries no note.
+const NOT_CHOSEN = 'Airlock does not use that pack for this repository.';
+const KIT_KEPT = 'Lines of the team standard cannot be removed here.';
+const goneFrom = (title: string, kind: string): string =>
+  `That line was no longer in ${title}'s ${kind === 'wrong' ? 'wrong.md' : 'product-knowledge.md'}; nothing was removed.`;
 const LEARNED_CAP = 300;
 // The post sentences of packages/service/src/posts/{preview,records}.ts.
 const NO_REVIEW_HERE = 'Airlock cannot find that review of this pull request.';
@@ -200,7 +202,8 @@ const today = (now: Date): string =>
  * event stream, written step by step from the pull request's script), `GET /reviews/latest`, `POST /dismissals`,
  * `POST /dismissals/restore`, and the post routes `POST /posts/preview`, `POST /posts` and `POST /posts/forget` (which
  * require an Origin, and whose GitHub is in memory: it records what it is sent and answers as `answerNextPost` says), and the learned
- * routes `GET /learned` and `POST /learned/remove` (which requires an Origin and refuses a kit line). Request bodies and query values are checked with the shared schemas, and every reply is
+ * routes `GET /learned` (for the repository asked, newest first) and `POST /learned/remove` (which requires an Origin and
+ * answers in the real service's order: 404 for a pack not chosen, 403 for the kit, then the line). Request bodies and query values are checked with the shared schemas, and every reply is
  * checked against its schema before it is sent; a reply that does not match is answered with a 500 and recorded in
  * `problems`. It remembers every request, and can be stopped and started again on the same port.
  */
@@ -462,13 +465,35 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     reply(res, ForgetReplySchema, 200, { forgotten: true });
   }
 
+  /** The packs chosen for a repository: those of its pull requests in the fake, and the pack ids the held lines belong to. */
+  const chosenFor = (repo: string): Map<string, string> => {
+    const packs = new Map<string, string>();
+    const known = pulls.filter((p) => p.pr.repo === repo);
+    if (known.length === 0) return packs;
+    for (const p of known) for (const pack of p.pr.packs) packs.set(pack.id, pack.title);
+    for (const l of learned) if (!packs.has(l.pack)) packs.set(l.pack, l.packTitle);
+    return packs;
+  };
+
+  function listLearned(res: ServerResponse, repo: string): void {
+    const chosen = chosenFor(repo);
+    const lines = learned
+      .filter((l) => chosen.has(l.pack))
+      .map((l) => ({ ...l, appliesHere: l.repo === null || l.repo === repo ? l.appliesHere : false }));
+    // Newest first; Array.prototype.sort is stable, as the real service's is.
+    lines.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+    reply(res, LearnedReplySchema, 200, { lines, cap: LEARNED_CAP });
+  }
+
   function removeLearned(res: ServerResponse, body: unknown): void {
     const asked = bodyOf(RemoveLearnedBodySchema, body);
+    const title = chosenFor(asked.repo).get(asked.pack);
+    if (title === undefined) throw new Refusal(404, NOT_CHOSEN);
+    if (asked.pack === KIT_PACK) throw new Refusal(403, KIT_KEPT);
     const at = learned.findIndex((l) => l.pack === asked.pack && l.kind === asked.kind && l.key === asked.key);
-    if (at === -1) { reply(res, RemoveLearnedReplySchema, 200, { removed: false, note: LEARNED_GONE }); return; }
-    if (learned[at]?.removable !== true || asked.pack === KIT_PACK) throw new Refusal(403, KIT_KEPT);
+    if (at === -1) { reply(res, RemoveLearnedReplySchema, 200, { removed: false, note: goneFrom(title, asked.kind) }); return; }
     learned.splice(at, 1);
-    reply(res, RemoveLearnedReplySchema, 200, { removed: true, note: LEARNED_REMOVED });
+    reply(res, RemoveLearnedReplySchema, 200, { removed: true, note: null });
   }
 
   function start(res: ServerResponse, body: unknown): void {
@@ -549,8 +574,9 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       if (method === 'POST' && url.pathname === '/posts/forget') { forget(res, body); return; }
       if (method === 'POST' && url.pathname === '/learned/remove') { removeLearned(res, body); return; }
       if (method === 'GET' && url.pathname === '/learned') {
-        if ((url.searchParams.get('repo') ?? '') === '') throw new Refusal(400, 'repo: not a repository name');
-        reply(res, LearnedReplySchema, 200, { lines: [...learned], cap: LEARNED_CAP });
+        const repo = url.searchParams.get('repo') ?? '';
+        if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Refusal(400, 'repo: not a repository name');
+        listLearned(res, repo);
         return;
       }
       if (method === 'GET' && ['/pr', '/reviews/running', '/reviews/latest'].includes(url.pathname)) {

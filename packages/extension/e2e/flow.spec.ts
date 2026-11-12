@@ -591,7 +591,7 @@ test('15. Packs shows the learned lines under their packs; Remove asks, removes 
   await second.getByRole('button', { name: 'Remove' }).click();
   await expect(second.getByText('Remove this line? The reviewer stops following it from the next review.')).toBeVisible();
   await second.getByRole('button', { name: 'Remove' }).click();
-  await expect(generic.getByText('Removed. The reviewer stops following it from the next review.')).toBeVisible();
+  await expect(panel.locator('.packs-screen .notice').first()).toHaveText('Removed.');
   await expect(generic.locator('.learned-line')).toHaveCount(1);
   expect(RemoveLearnedBodySchema.parse(bodiesOf('POST', '/learned/remove').at(-1))).toEqual({ repo: REPO, pack: 'generic', kind: 'wrong', key: '0000000000000002' });
 
@@ -600,7 +600,7 @@ test('15. Packs shows the learned lines under their packs; Remove asks, removes 
   const last = generic.locator('.learned-line');
   await last.getByRole('button', { name: 'Remove' }).click();
   await last.getByRole('button', { name: 'Remove' }).click();
-  await expect(generic.getByText('That line was already gone; it may have been edited by hand.')).toBeVisible();
+  await expect(panel.locator('.packs-screen .notice').first()).toHaveText("That line was no longer in Generic's product-knowledge.md; nothing was removed.");
   await expect(generic.getByText('Nothing learned yet.')).toBeVisible();
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
 });

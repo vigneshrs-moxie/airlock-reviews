@@ -1,5 +1,5 @@
 import type { LearnedKind, LearnedLine, LearnedReply, RemoveLearnedBody, RemoveLearnedReply } from '@airlock/shared';
-import { Fragment, useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { ServiceError } from '../client/service';
 import { useAnnounce } from './Frame';
 import { Reason, WAIT } from './PostedMark';
@@ -32,17 +32,40 @@ const whereWords = (line: LearnedLine): string =>
 export const failureWords = (error: unknown): string =>
   error instanceof ServiceError && error.kind !== 'offline' ? error.message : LEARNED_UNREACHABLE;
 
+export interface Refusal { pack: string; kind: LearnedKind; key: string; message: string }
+
 /**
- * The learned lines of the packs chosen for `repo`, read when the screen opens and again on `reload`. While a read is
- * under way after the first, the lines already shown stay. Only the latest read counts.
+ * The learned lines of the packs chosen for `repo`, read when the screen opens and again after a removal, and the
+ * removal itself. Only the latest read counts. A different repository drops the old lines at once. The result of a
+ * removal (`result`) and a refusal live here, not in the lists, so they outlast a re-read that fails.
  */
-export function useLearned(repo: string | null, fetchLearned: (repo: string) => Promise<LearnedReply>): { view: LearnedView; reload: () => Promise<void> } {
+export function useLearned(
+  repo: string | null,
+  fetchLearned: (repo: string) => Promise<LearnedReply>,
+  removeLearned: (body: RemoveLearnedBody) => Promise<RemoveLearnedReply>,
+): {
+  view: LearnedView;
+  reload: () => Promise<void>;
+  removing: boolean;
+  /** The service's note on the last removal that went through (or `Removed.`), and the pack it was in. */
+  result: { note: string; pack: string; at: number } | null;
+  refusal: (Refusal & { at: number }) | null;
+  remove: (line: LearnedLine) => void;
+} {
   const [view, setView] = useState<LearnedView>({ kind: 'loading' });
+  const [removing, setRemoving] = useState(false);
+  const [result, setResult] = useState<{ note: string; pack: string; at: number } | null>(null);
+  const [refusal, setRefusal] = useState<(Refusal & { at: number }) | null>(null);
   const latest = useRef(0);
-  const reload = useCallback(async (): Promise<void> => {
+  const inFlight = useRef(false);
+  const alive = useRef(false);
+  const counter = useRef(0);
+  // Set false in the body: under StrictMode the cleanup runs once and the effect runs again.
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const read = useCallback(async (keep: boolean): Promise<void> => {
     if (repo === null) return;
     const mine = ++latest.current;
-    setView((was) => (was.kind === 'ok' ? was : { kind: 'loading' }));
+    setView((was) => (keep && was.kind === 'ok' ? was : { kind: 'loading' }));
     try {
       const reply = await fetchLearned(repo);
       if (latest.current === mine) setView({ kind: 'ok', reply });
@@ -51,10 +74,36 @@ export function useLearned(repo: string | null, fetchLearned: (repo: string) => 
     }
   }, [repo, fetchLearned]);
   useEffect(() => {
-    void reload();
+    setResult(null);
+    setRefusal(null);
+    void read(false);
     return () => { latest.current++; };
-  }, [reload]);
-  return { view, reload };
+  }, [read]);
+  const reload = useCallback(() => read(false), [read]);
+  const remove = (line: LearnedLine): void => {
+    if (repo === null || inFlight.current) return;
+    inFlight.current = true;
+    setRemoving(true);
+    setResult(null);
+    setRefusal(null);
+    const stamp = ++counter.current;
+    removeLearned({ repo, pack: line.pack, kind: line.kind, key: line.key }).then(
+      async (done) => {
+        const note = done.note ?? REMOVED;
+        if (alive.current) setResult({ note, pack: line.pack, at: stamp });
+        await read(true);
+        inFlight.current = false;
+        if (alive.current) setRemoving(false);
+      },
+      (error: unknown) => {
+        inFlight.current = false;
+        if (!alive.current) return;
+        setRemoving(false);
+        setRefusal({ pack: line.pack, kind: line.kind, key: line.key, message: failureWords(error), at: stamp });
+      },
+    );
+  };
+  return { view, reload, removing, result, refusal, remove };
 }
 
 /** Under the pack list's heading: that the lines are loading, or why they could not be read, with a way to read again. */
@@ -69,11 +118,13 @@ export function LearnedStatus({ view, reload }: { view: LearnedView; reload: () 
   );
 }
 
-function Line({ line, blocked, busy, onRemove }: {
+function Line({ line, blocked, busy, refusal, onRemove }: {
   line: LearnedLine;
   /** Why Remove cannot be pressed now; null when it can. */
   blocked: string | null;
   busy: boolean;
+  /** The refusal of this line's own removal, if any. */
+  refusal: (Refusal & { at: number }) | null;
   onRemove: (line: LearnedLine) => void;
 }) {
   const [asking, setAsking] = useState(false);
@@ -88,6 +139,14 @@ function Line({ line, blocked, busy, onRemove }: {
     if (asking) { question.current?.focus(); announce(REMOVE_ASK); }
     else if (keep.current) { keep.current = false; remove.current?.focus(); }
   }, [asking, announce]);
+  const stamp = refusal?.at;
+  useEffect(() => {
+    if (refusal === null) return;
+    announce(refusal.message);
+    remove.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stamp]);
+  const described = why === null ? {} : { 'aria-describedby': whyId };
   return (
     <li className="learned-line">
       <div>
@@ -101,9 +160,10 @@ function Line({ line, blocked, busy, onRemove }: {
         <>
           <p tabIndex={-1} ref={question}>{REMOVE_ASK}</p>
           <div className="actions">
-            <button type="button" className="btn small" disabled={why !== null} onClick={() => { setAsking(false); onRemove(line); }}>Remove</button>
+            <button type="button" className="btn small" disabled={why !== null} {...described} onClick={() => { setAsking(false); onRemove(line); }}>Remove</button>
             <button type="button" className="btn small" onClick={() => { keep.current = true; setAsking(false); }}>Keep</button>
           </div>
+          {why !== null && <Reason id={whyId} text={why} />}
         </>
       ) : (
         <>
@@ -116,58 +176,28 @@ function Line({ line, blocked, busy, onRemove }: {
           {why !== null && <Reason id={whyId} text={why} />}
         </>
       ))}
+      {refusal !== null && <p role="alert" className="notice">{refusal.message}</p>}
     </li>
   );
 }
 
 /** One pack's learned lines, newest first as the service sent them, grouped by the pack's id. */
-export function LearnedList({ repo, packId, reply, blocked, remove, reload }: {
-  /** The repository the panel is on, which the service checks the removal against. */
-  repo: string;
+export function LearnedList({ packId, reply, blocked, busy, refusal, onRemove }: {
   packId: string;
   reply: LearnedReply;
   blocked: string | null;
-  remove: (body: RemoveLearnedBody) => Promise<RemoveLearnedReply>;
-  reload: () => Promise<void>;
+  /** A removal is in flight. */
+  busy: boolean;
+  refusal: (Refusal & { at: number }) | null;
+  onRemove: (line: LearnedLine) => void;
 }) {
   const lines = reply.lines.filter((l) => l.pack === packId);
   const managed = packId === KIT_PACK || lines.some((l) => !l.removable);
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
-  const [refusal, setRefusal] = useState<{ key: string; message: string } | null>(null);
-  const noteRef = useRef<HTMLParagraphElement>(null);
-  const announce = useAnnounce();
-  const gone = useRef(false);
-  useEffect(() => () => { gone.current = true; }, []);
-  useEffect(() => { if (note !== null) { announce(note); noteRef.current?.focus(); } }, [note, announce]);
-
-  const onRemove = (line: LearnedLine): void => {
-    if (busy || blocked !== null) return;
-    setBusy(true);
-    setNote(null);
-    setRefusal(null);
-    remove({ repo, pack: line.pack, kind: line.kind, key: line.key }).then(
-      async (done) => {
-        await reload();
-        if (gone.current) return;
-        setBusy(false);
-        setNote(done.note ?? REMOVED);
-      },
-      (error: unknown) => {
-        if (gone.current) return;
-        setBusy(false);
-        setRefusal({ key: line.key, message: failureWords(error) });
-      },
-    );
-  };
-
   const counts = (['wrong', 'product-knowledge'] as const)
     .map((kind) => ({ kind, n: lines.filter((l) => l.kind === kind).length }))
     .filter((c) => c.n > COUNT_SHOWN_OVER);
-
   return (
     <div className="learned">
-      {note !== null && <p className="notice" tabIndex={-1} ref={noteRef}>{note}</p>}
       {managed && <p className="muted">{MANAGED}</p>}
       {lines.length === 0 && !managed && <p className="muted">{NOTHING_LEARNED}</p>}
       {counts.map((c) => (
@@ -176,10 +206,10 @@ export function LearnedList({ repo, packId, reply, blocked, remove, reload }: {
       {lines.length > 0 && (
         <ul className="plain">
           {lines.map((l) => (
-            <Fragment key={`${l.kind}:${l.key}`}>
-              <Line line={l} blocked={blocked} busy={busy} onRemove={onRemove} />
-              {refusal !== null && refusal.key === l.key && <p role="alert" className="notice">{refusal.message}</p>}
-            </Fragment>
+            <Line
+              key={`${l.kind}:${l.key}`} line={l} blocked={blocked} busy={busy} onRemove={onRemove}
+              refusal={refusal !== null && refusal.pack === l.pack && refusal.kind === l.kind && refusal.key === l.key ? refusal : null}
+            />
           ))}
         </ul>
       )}
