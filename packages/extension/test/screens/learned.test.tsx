@@ -70,6 +70,32 @@ describe('learned lines under Packs', () => {
     expect(kit.queryByRole('button', { name: 'Remove' })).toBeNull();
   });
 
+  it('on an extension repository the Extensions pack lists its lines with Remove, and no pack there is managed by the team', async () => {
+    const repo = 'Moxie-Pest-Control-Phoenix/scheduling-tool-suite';
+    const state: PanelState = { kind: 'ready', pr: prSummary({
+      repo, stage: 'other', packs: [{ id: 'extensions', title: 'Extensions' }, { id: 'generic', title: 'Generic' }],
+    }) };
+    // As the service answers /learned for it: the Extensions pack names a kit, and its lines are still the person's own.
+    const own = line(1, { pack: 'extensions', packTitle: 'Extensions', repo, text: 'The popup reads the active tab on purpose.' });
+    const fact = line(2, { pack: 'extensions', packTitle: 'Extensions', repo, kind: 'product-knowledge', text: 'Routes are sent to the office sheet.' });
+    const { fetchLearned, removeLearned } = await show(reply([own, fact]), {}, state);
+    expect(fetchLearned).toHaveBeenCalledExactlyOnceWith(repo);
+    const extensions = pack('Extensions');
+    expect(extensions.getAllByRole('listitem').map((i) => i.textContent)).toEqual([
+      expect.stringContaining(own.text), expect.stringContaining(fact.text),
+    ]);
+    expect(extensions.getAllByRole('button', { name: 'Remove' })).toHaveLength(2);
+    expect(pack('Generic').getByText('Nothing learned yet.')).toBeTruthy();
+    expect(screen.queryByText('Managed by the team; not edited here.')).toBeNull();
+
+    fetchLearned.mockResolvedValue(reply([fact]));
+    await click(extensions.getAllByRole('button', { name: 'Remove' })[0]!);
+    await click(extensions.getAllByRole('button', { name: 'Remove' })[0]!);
+    expect(removeLearned).toHaveBeenCalledExactlyOnceWith({ repo, pack: 'extensions', kind: 'wrong', key: own.key });
+    expect(extensions.queryByText(own.text)).toBeNull();
+    expect(extensions.getByText(fact.text)).toBeTruthy();
+  });
+
   it('Remove asks in place, then removes and shows the note', async () => {
     const first = reply([line(1), line(2)]);
     const second = reply([line(2)]);

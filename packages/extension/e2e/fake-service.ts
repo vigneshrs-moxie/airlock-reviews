@@ -137,6 +137,20 @@ export type RunStep =
   | { pause: number }
   | { until: Promise<void> };
 
+/**
+ * The run the real service streams when a pack's review kit can be had neither from GitHub nor from the cache: the engine
+ * fails its packs stage with syncKit's sentence (packages/engine/src/packs/kit-sync.ts) and rejects before any model call,
+ * and the service ends the run with that sentence after its own lead (`failure` in packages/service/src/routes.ts).
+ */
+export function kitUnavailable(kit: string, why: string): RunStep[] {
+  const sentence = `The review kit could not be fetched from ${kit} and none is cached: ${why}`;
+  const stage = (name: string, status: 'start' | 'done' | 'error', detail = ''): RunStep => ({ event: { type: 'stage', stage: name, status, detail } });
+  return [
+    stage('intake', 'start'), stage('intake', 'done'), stage('packs', 'start'), { pause: 150 }, stage('packs', 'error', sentence),
+    { event: { type: 'failed', message: fit(`Airlock could not review this pull request: ${sentence}`) } },
+  ];
+}
+
 /** A promise the spec resolves when it is ready for a script to go on. */
 export interface Signal { promise: Promise<void>; open(): void }
 
@@ -603,13 +617,15 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     reply(res, ForgetReplySchema, 200, { forgotten: true });
   }
 
-  /** The packs chosen for a repository: those of its pull requests in the fake, and the pack ids the held lines belong to. */
+  /**
+   * The packs chosen for a repository, as the service chooses them by its name whatever its letter case: those of its
+   * pull requests in the fake. A held line of another pack is not listed for it.
+   */
   const chosenFor = (repo: string): Map<string, string> => {
     const packs = new Map<string, string>();
-    const known = pulls.filter((p) => p.pr.repo === repo);
-    if (known.length === 0) return packs;
-    for (const p of known) for (const pack of p.pr.packs) packs.set(pack.id, pack.title);
-    for (const l of learned) if (!packs.has(l.pack)) packs.set(l.pack, l.packTitle);
+    for (const p of pulls.filter((p) => p.pr.repo.toLowerCase() === repo.toLowerCase())) {
+      for (const pack of p.pr.packs) packs.set(pack.id, pack.title);
+    }
     return packs;
   };
 

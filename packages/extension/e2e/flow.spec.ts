@@ -8,7 +8,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { signal, startFakeService, type FakeService, type RunStep } from './fake-service';
+import { kitUnavailable, signal, startFakeService, type FakeService, type RunStep } from './fake-service';
 import { clickNode, insideNotes, otherPages, type OtherPage } from './note-dom';
 import { E2E_PORT } from './port';
 
@@ -16,8 +16,9 @@ import { E2E_PORT } from './port';
 // fake service: pair, Ready, a running review whose brief arrives early, the verdict and its notes on the Files changed
 // page, a finding, the fix prompt, dismiss and restore, the service stopping and coming back, the notes setting and
 // Open in Airlock on a note, and posting: a preview, an edit, the post and its mark, a refusal, a post whose outcome is
-// not known and the ways it is settled, a push and its re-review, the learned lines on Packs, merge reviews, and a
-// preview that expired. Each step is its own test; they share one browser and run in order.
+// not known and the ways it is settled, a push and its re-review, the learned lines on Packs, merge reviews, a preview
+// that expired, and a Chrome extension repository whose review kit cannot be had and whose own pack's lines can be
+// removed. Each step is its own test; they share one browser and run in order.
 test.describe.configure({ mode: 'serial' });
 
 const EXTENSION_ID = 'nbcmjckbkploiemllhkmhegjimgeimoa';
@@ -973,4 +974,56 @@ test('23. a preview that really expired: the panel checks for 20 seconds, finds 
   await expect(sheet.getByText('Checking whether this post already went through…')).toHaveCount(0);
   expect(svc().sent).toHaveLength(before);
   expect(svc().posts(REPO, number)).toHaveLength(1);
+});
+
+const EXT_REPO = 'Moxie-Pest-Control-Phoenix/scheduling-tool-suite';
+const EXT_KIT = 'Moxie-Pest-Control-Phoenix/moxie-ext-review-kit';
+const EXT_NUMBER = 3;
+const EXT_FILES = `https://github.com/${EXT_REPO}/pull/${EXT_NUMBER}/files`;
+const NO_KIT = `Airlock could not review this pull request: The review kit could not be fetched from ${EXT_KIT} and none is cached: gh: Not Found (HTTP 404)`;
+
+test('24. an extension repository whose review kit cannot be had: Extensions and Generic are chosen, and the review stops with the sentence that names the kit', async () => {
+  if (context === undefined) throw new Error('no browser');
+  const ext = PrSummarySchema.parse({
+    ...pr, repo: EXT_REPO, number: EXT_NUMBER, title: 'Ask for the tabs permission', stage: 'other',
+    packs: [{ id: 'extensions', title: 'Extensions' }, { id: 'generic', title: 'Generic' }],
+  });
+  svc().addPull({ pr: ext, script: kitUnavailable(EXT_KIT, 'gh: Not Found (HTTP 404)') });
+  const classic = await readFile(join(FIXTURES, 'files-classic.html'), 'utf8');
+  await context.route(EXT_FILES, (route) => route.fulfill({ contentType: 'text/html', body: classic }));
+  await github.goto(EXT_FILES);
+  await activate(EXT_FILES);
+  await expect(panel.getByRole('heading', { name: ext.title })).toBeVisible();
+  await expect(panel.getByRole('switch', { name: 'Extensions' })).toBeChecked();
+  await expect(panel.getByRole('switch', { name: 'Generic' })).toBeChecked();
+  await expect(panel.getByRole('switch')).toHaveCount(2);
+
+  await panel.getByRole('button', { name: 'Review', exact: true }).click();
+  await expect.poll(() => bodiesOf('POST', '/reviews').length).toBe(3);
+  expect(StartReviewBodySchema.parse(bodiesOf('POST', '/reviews').at(-1))).toMatchObject({ repo: EXT_REPO, number: EXT_NUMBER });
+  // The person reads the service's sentence, naming the kit, with Retry; nothing else stands in for it.
+  await expect(panel.getByRole('alert')).toHaveText(NO_KIT);
+  await expect(frameStatus()).toHaveText('Problem');
+  await expect(panel.getByRole('button', { name: 'Retry' })).toBeVisible();
+  expect(svc().runs.at(-1)?.written.at(-1)).toEqual({ type: 'failed', message: NO_KIT });
+  // No review came of it, so no note was placed.
+  await expect(noteRows()).toHaveCount(0);
+});
+
+test('25. Packs on that repository: the Extensions pack\'s learned line has Remove, no pack there is managed by the team, and Remove takes it out', async () => {
+  const line = learnedLine(4, { pack: 'extensions', packTitle: 'Extensions', repo: EXT_REPO, text: 'The popup reads the active tab on purpose.' });
+  svc().learned.push(line);
+  await panel.getByRole('button', { name: 'Packs' }).click();
+  const extensions = panel.locator('.packs-screen li').filter({ hasText: 'Extensions' });
+  await expect(extensions.locator('.learned-line')).toHaveCount(1);
+  await expect(extensions.locator('.learned-line')).toContainText(line.text);
+  await expect(panel.getByText('Managed by the team; not edited here.')).toHaveCount(0);
+  // The line of Orbit's pack held for another repository is not listed here.
+  await expect(panel.getByText('<b>not bold</b>')).toHaveCount(0);
+  await extensions.getByRole('button', { name: 'Remove' }).click();
+  await extensions.getByRole('button', { name: 'Remove' }).click();
+  await expect(panel.locator('.packs-screen .notice').first()).toHaveText('Removed.');
+  await expect(extensions.getByText('Nothing learned yet.')).toBeVisible();
+  expect(RemoveLearnedBodySchema.parse(bodiesOf('POST', '/learned/remove').at(-1))).toEqual({ repo: EXT_REPO, pack: 'extensions', kind: 'wrong', key: line.key });
+  await panel.getByRole('button', { name: 'Back', exact: true }).click();
 });
