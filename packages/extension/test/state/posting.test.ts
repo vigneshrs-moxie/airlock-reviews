@@ -564,7 +564,7 @@ describe('the panel posts through the service', () => {
     await reviewShown(h);
     h.panel.dispatch({ type: 'forget-post', ticket: 28, id: unknown.id });
     await until(h, () => read.asked());
-    // The read after the forget is held: the review is still busy, so Post comment says to wait, and has no answer yet.
+    // The read after the forget is held: the review is still busy, so Comment on GitHub says to wait, and has no answer yet.
     expect(h.last()).toMatchObject({ kind: 'review', busy: true });
     expect((h.last() as Review).post).toBeUndefined();
     read.release(json({ ...h.latest, posts: [] }));

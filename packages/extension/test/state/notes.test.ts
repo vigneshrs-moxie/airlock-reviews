@@ -514,7 +514,7 @@ describe('the notes the panel sends: follow-ups', () => {
       await settle();
     }
     expect(n.timers.delays()).toEqual([]);
-    expect(n.lines.at(-1)?.text).toBe("Notes cannot be shown on this version of GitHub's page (classic-file, react-file, react-toolbar). Jump to line still works.");
+    expect(n.lines.at(-1)?.text).toBe("Notes cannot be shown on this version of GitHub's page (classic-file, react-file, react-toolbar). Show in diff still works.");
   });
 
   it('a recognised view whose rows are not found: the cannot-be-shown sentence waits for the end of the minute', async () => {
@@ -529,7 +529,7 @@ describe('the notes the panel sends: follow-ups', () => {
       h.timers.fire();
       await settle();
     }
-    expect(h.lines.at(-1)?.text).toBe("Notes cannot be shown on this version of GitHub's page (react-row). Jump to line still works.");
+    expect(h.lines.at(-1)?.text).toBe("Notes cannot be shown on this version of GitHub's page (react-row). Show in diff still works.");
   });
 
   it('gives what the page recognised to the panel\'s state, for the Packs screen, and not a clear message\'s answer', async () => {
@@ -783,7 +783,7 @@ describe('the line under the verdict', () => {
     // A view recognised with its files container missing still places notes: the counts are what matters.
     expect(notesLine(shown(2, 0, 'react', ['react-files']), 0)).toEqual({ text: '2 notes shown in the diff', reload: false });
     expect(notesLine(shown(0, 2, null, ['classic-file', 'react-file', 'react-toolbar']), 0)).toEqual({
-      text: "Notes cannot be shown on this version of GitHub's page (classic-file, react-file, react-toolbar). Jump to line still works.",
+      text: "Notes cannot be shown on this version of GitHub's page (classic-file, react-file, react-toolbar). Show in diff still works.",
       reload: false,
     });
     // A page still being asked whether it has a view: its notes wait.
@@ -792,10 +792,10 @@ describe('the line under the verdict', () => {
     });
     // A recognised view whose rows are not found: nothing can be placed, and the selectors are named.
     expect(notesLine(shown(0, 2, 'react', ['react-row']), 0)).toEqual({
-      text: "Notes cannot be shown on this version of GitHub's page (react-row). Jump to line still works.", reload: false,
+      text: "Notes cannot be shown on this version of GitHub's page (react-row). Show in diff still works.", reload: false,
     });
     expect(notesLine(shown(0, 2, 'react', ['react-files', 'react-row', 'react-line-number']), 0)).toEqual({
-      text: "Notes cannot be shown on this version of GitHub's page (react-row, react-line-number). Jump to line still works.", reload: false,
+      text: "Notes cannot be shown on this version of GitHub's page (react-row, react-line-number). Show in diff still works.", reload: false,
     });
     // Only the files container missing, only the toolbar (it recognises the view and places nothing), or a note placed:
     // the counts.
@@ -804,7 +804,7 @@ describe('the line under the verdict', () => {
     // Still being asked within the minute: waiting, not the sentence.
     expect(notesLine(shown(0, 2, 'react', ['react-row']), 0, true)).toEqual({ text: '0 shown, 2 waiting for their lines to load', reload: false });
     expect(notesLine(shown(0, 2, 'classic', ['classic-new-line-number']), 0)).toEqual({
-      text: "Notes cannot be shown on this version of GitHub's page (classic-new-line-number). Jump to line still works.", reload: false,
+      text: "Notes cannot be shown on this version of GitHub's page (classic-new-line-number). Show in diff still works.", reload: false,
     });
     expect(notesLine(shown(1, 1, 'react', ['react-row']), 0)).toEqual({ text: '1 shown, 1 waiting for their lines to load', reload: false });
     // No notes to show, or the page was not the Files changed view: no line.

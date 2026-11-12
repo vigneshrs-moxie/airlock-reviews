@@ -78,7 +78,7 @@ export function notesLine(result: NotesResult, left: number, pending = false): N
     case 'shown': {
       const { placed, waiting, view, missing } = result;
       const cannot = (names: string[]): NotesLine =>
-        said(`Notes cannot be shown on this version of GitHub's page (${names.join(', ')}). Jump to line still works.`);
+        said(`Notes cannot be shown on this version of GitHub's page (${names.join(', ')}). Show in diff still works.`);
       if (view === null && missing.length === 0) return null;
       if (placed + waiting === 0) return null;
       if (view === null && !pending) return cannot(missing);
@@ -94,7 +94,7 @@ export function notesLine(result: NotesResult, left: number, pending = false): N
 
 /**
  * `on`: the setting, null until it is read. `failed`: the last change of it could not be stored, and was undone. `page`:
- * what the page last said it recognised when sent notes, for the Packs screen; absent until it has said.
+ * what the page last said it recognised when sent notes, for the Service screen; absent until it has said.
  */
 export interface NotesState { on: boolean | null; line: NotesLine | null; failed: boolean; page?: PageReport }
 

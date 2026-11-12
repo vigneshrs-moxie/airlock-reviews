@@ -1,5 +1,5 @@
 // Every selector Airlock uses on GitHub's Files changed page, each with a name. A selector that finds nothing is named in
-// the jump's reply, so the panel's Packs screen and the console show it.
+// the jump's reply, so the panel's Service screen (under Settings) and the console show it.
 //
 // The classic view was checked on a live page on 2026-11-11 (docs/reference/chrome-notes.md). The newer view was NOT
 // checked: its selectors come from the source of two other extensions, which match parts of generated class names.

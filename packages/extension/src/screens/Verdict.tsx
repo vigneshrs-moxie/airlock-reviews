@@ -227,7 +227,7 @@ export function Verdict({
     shownDetail.current = null;
   }, [detailId, folds, lists, visible, tab]);
 
-  // A record forgotten from a mark: say so, and put focus on the finding's Post comment, or the Findings tab. One that
+  // A record forgotten from a mark: say so, and put focus on the finding's Comment on GitHub, or the Findings tab. One that
   // GitHub has after all (found): its sentence is shown and has focus, and the finding's mark now says Posted.
   const reply = state.post;
   useEffect(() => {

@@ -51,7 +51,7 @@ describe('the notes line under the verdict', () => {
     expect(region().textContent).toBe('2 shown, 1 waiting for their lines to load');
     expect(s.timers.pending.size).toBe(0);
 
-    const missing = "Notes cannot be shown on this version of GitHub's page (classic-file, react-file, react-toolbar). Jump to line still works.";
+    const missing = "Notes cannot be shown on this version of GitHub's page (classic-file, react-file, react-toolbar). Show in diff still works.";
     s.again({ notesLine: notesLine(shown(0, 3, null, ['classic-file', 'react-file', 'react-toolbar']), 0) });
     expect(within(verdictCard()).getByText(missing)).toBeTruthy();
     expect(region().textContent).toBe(missing);

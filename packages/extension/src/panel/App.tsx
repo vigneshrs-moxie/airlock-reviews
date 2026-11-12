@@ -138,7 +138,7 @@ export function App({ start = (onState) => startRealPanel(onState), services }: 
   const notesState = useSyncExternalStore(notes?.subscribe ?? noSubscribe, notes?.current ?? noNotes);
   const openFinding = useOpenFinding(state, services?.noteOpen);
   const [pageReport, setPageReport] = useState<PageReport | null>(null);
-  // The page's report on the notes is the same report as a jump's: the latest of either is what Packs shows.
+  // The page's report on the notes is the same report as a jump's: the latest of either is what the Service screen shows.
   const notesPage = notesState.page;
   useEffect(() => { if (notesPage !== undefined) setPageReport(notesPage); }, [notesPage]);
   const jump = services?.jump;

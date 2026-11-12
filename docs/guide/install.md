@@ -69,7 +69,7 @@ Paste the new token and press **Pair**.
 
 Open a pull request, press the Airlock button, choose a depth, and press **Review**. The panel shows what the pull request does while the findings are still being checked, then the verdict and up to five findings.
 
-- Press a finding to read it, then **Jump to line** to see it on the Files changed page.
+- Press a finding to read it, then **Show in diff** to see it on the Files changed page.
 - **Copy fix prompt** puts a prompt for a coding agent on the clipboard, for one finding or for the ones you ticked.
 - **Dismiss** hides a finding. Wrong and Intended also save one line to your rule pack, which the reviewer follows from the next review on. You see and can edit that line before it is saved.
 
@@ -82,16 +82,16 @@ While a review is on screen, each open finding also appears as a note on the pul
 - Notes are private to this browser. Airlock draws them on the page itself: nothing about them is sent to the service or to GitHub, and they are never posted. Only the post button posts anything.
 - To turn them off, press **Settings** at the top of the panel and switch off **Notes in the diff**. Switch it on again to bring them back.
 - A line under the verdict says how many notes are on the page, for example "4 notes shown in the diff". "<n> shown, <m> waiting for their lines to load" means that m findings' lines are not on the page yet: GitHub loads files as you scroll, a file may be collapsed, or the line is in folded context or outside the diff. Each note appears when its line does; Airlock never puts a note anywhere else. At most 60 notes are shown, and the line then adds "(the first 60 findings)".
-- GitHub's newer Files changed view is not fully known to Airlock yet, so notes may not appear there. When Airlock still cannot place them after a minute, the panel says "Notes cannot be shown on this version of GitHub's page (…). Jump to line still works.", naming the parts of the page it could not find.
+- GitHub's newer Files changed view is not fully known to Airlock yet, so notes may not appear there. When Airlock still cannot place them after a minute, the panel says "Notes cannot be shown on this version of GitHub's page (…). Show in diff still works.", naming the parts of the page it could not find.
 - If the GitHub page was opened before the commit the review is of (you reviewed a push without reloading the page), the panel says "The GitHub page was opened before the commit this review is of, so the notes are hidden until you reload it." Press **Reload the GitHub tab** and the notes appear.
 - If Airlock could not check which commit the page shows (for example, the service was not running when the page loaded), the panel says "Airlock could not check which commit the GitHub page shows, so the notes are hidden until you reload it." Press **Reload the GitHub tab** to try again.
 
 ## Posting comments
 
-1. Open a finding and press **Post comment**. Or tick several findings and press **Post selected (n)** above the list. One post holds at most 30 comments.
-2. The **Post to GitHub** sheet shows each comment, the summary, and "The review's own text, as it will be posted:". It says "This is the exact text. Nothing has been sent yet." It also names the GitHub account the comments will be posted as ("Posts as …"): the account `gh` is signed in as when the preview is made.
+1. Open a finding and press **Comment on GitHub**. Or press **Select** in the bar at the bottom of the review, tick several findings and press **Comment on GitHub (n)**. One post holds at most 30 comments.
+2. The **Comment on GitHub** sheet shows each comment, the summary, and "The review's own text, as it will be posted:". It says "This is the exact text. Nothing has been sent yet." It also names the GitHub account the comments will be posted as ("Posts as …"): the account `gh` is signed in as when the preview is made.
 3. You can edit any comment and the summary. A comment GitHub cannot place on a line goes in the summary, and the sheet says why. You can also tick **Put in the summary instead**. After an edit, press **Update preview** to see the exact text again.
-4. Press **Post n comments to GitHub**. Nothing is posted until you press it.
+4. Press **Post comment** (or **Post n comments**). Nothing is posted until you press it.
 
 Airlock posts them as one review with the **Comment** action, as the sheet says, under your own GitHub name. When it is done, the sheet says "Posted n comments." with **Open on GitHub**, and each finding shows **Posted**. A finding that is already posted cannot be posted again.
 

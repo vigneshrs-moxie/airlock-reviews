@@ -21,7 +21,7 @@ const DEPTHS: { depth: Depth; name: string; line: string }[] = [
 export function Ready({ state, dispatch, defaultDepth = null, offline = false }: {
   state: Extract<PanelState, { kind: 'ready' }>;
   dispatch: (a: UserAction) => void;
-  /** The depth stored in the Packs screen, when there is one; the pull request's suggestion otherwise. */
+  /** The default depth stored in Settings, when there is one; the pull request's suggestion otherwise. */
   defaultDepth?: Depth | null;
   /** Kept from before the service stopped: the choices stay, and Review waits for the service. */
   offline?: boolean;

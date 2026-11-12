@@ -111,7 +111,7 @@ const readyKey = (pr: PrSummary): string => `${pr.repo}#${pr.number}@${pr.headSh
 
 type BodyProps = Pick<PanelScreenProps, 'state' | 'dispatch' | 'timers' | 'onJump' | 'defaultDepth' | 'notesLine' | 'onReloadNotes' | 'openFinding'> & {
   onDismiss: (finding: Finding) => void;
-  /** `opener`: the finding whose Post comment was pressed, or `selected` for the bar. */
+  /** `opener`: the finding whose Comment on GitHub was pressed, or `selected` for the bar. */
   onPost: (findings: Finding[], opener: string) => void;
 };
 

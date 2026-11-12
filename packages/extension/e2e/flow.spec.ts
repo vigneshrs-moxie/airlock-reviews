@@ -553,7 +553,7 @@ const NAMES_CAROL = 'Names @carol: GitHub notifies them unless the name is insid
 const postBodies = () => bodiesOf('POST', '/posts').map((b) => PostBodySchema.parse(b));
 const previewBodies = () => bodiesOf('POST', '/posts/preview').map((b) => PostPreviewBodySchema.parse(b));
 
-test('11. Post comment: the preview, an edit, Update preview, then the post; the finding is marked Posted', async () => {
+test('11. Comment on GitHub: the preview, an edit, Update preview, then the post; the finding is marked Posted', async () => {
   const first = top[0]!;
   await cards().first().getByRole('button').click();
   await expect(panel.getByRole('heading', { name: first.title })).toBeVisible();
@@ -604,7 +604,7 @@ test('11. Post comment: the preview, an edit, Update preview, then the post; the
   await expect(cards().first()).toContainText('Posted');
 });
 
-test('12. Post selected skips the posted finding; GitHub refuses, and every text is kept', async () => {
+test('12. Comment on GitHub for the selected findings skips the posted one; GitHub refuses, and every text is kept', async () => {
   const third = top[2]!;
   svc().answerNextPost({ refuse: 'Line 13 is not part of the diff' });
   await panel.getByRole('button', { name: 'Select', exact: true }).click();
