@@ -37,7 +37,7 @@ import { runSweep } from '../rules/sweep.js';
 import { decideVerdict, sameTextOnce, select, selfReviewText, type RereviewText, type SelectResult } from '../select/select.js';
 import { mergeNote, mergeNoteBlock, settledSentence, type MergeScope } from '../shape/merge-range.js';
 import { reviewById, saveReview } from '../store/store.js';
-import { summarise, SUMMARY_FAILED_NOTE } from '../summary/summary.js';
+import { summarise, summaryFailed, SUMMARY_FAILED_NOTE } from '../summary/summary.js';
 import type { Exec } from '../util/exec.js';
 import { limiter } from '../util/limit.js';
 import { presentAt, safeRead, safeSize } from '../util/safe-read.js';
@@ -666,15 +666,20 @@ async function reviewInWorkspace(
     log.skip('summary', 'usage limit');
     summaryNotes.push(SUMMARY_FAILED_NOTE);
   } else {
+    // Whatever goes wrong in the stage becomes the failure note, never a stage error; a stop still ends the review.
     const r = await log.run('summary', async (rec) => {
-      const out = await summarise(runner, ctx, ranked.findings);
-      rec.usage(out.usage);
-      return out;
+      try {
+        const out = await summarise(runner, ctx, ranked.findings);
+        rec.usage(out.usage);
+        return out;
+      } catch {
+        return summaryFailed(ranked.findings, brief);
+      }
     });
     if (r !== undefined) {
       selection = { ...ranked, findings: r.findings };
       finalBrief = r.brief;
-      if (r.note !== null) summaryNotes.push(r.note);
+      summaryNotes.push(...r.notes);
     }
   }
 

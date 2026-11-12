@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ReviewDocumentSchema, type ReviewDocument, type ReviewEvent } from '@airlock/shared';
-import { failure } from '../../src/agent/fake-runner.js';
+import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import type { AgentRequest } from '../../src/agent/runner.js';
+import { runReview } from '../../src/pipeline/review.js';
 import { latestReview, saveReview } from '../../src/store/store.js';
-import { SUMMARY_FAILED_NOTE } from '../../src/summary/summary.js';
+import { missingSummariesNote, SUMMARY_FAILED_NOTE } from '../../src/summary/summary.js';
 import { commitFiles } from '../helpers/change-repo.js';
 import { block } from '../helpers/lens-context.js';
 import {
-  BASE_FILES, fakeGh, GOOD, NUMBER, REPO, RULED, SCENARIO_IN_SHORT, scenarioScript, STANDARD_STAGES, useReviewHarness,
+  BASE_FILES, fakeGh, GOOD, KIT_DIR, NOW, NUMBER, PACKS_DIR, REPO, RULED, SCENARIO_IN_SHORT, scenarioScript, STANDARD_STAGES, summaryIds, useReviewHarness,
 } from '../helpers/review-scenario.js';
 
 const SLOW = 30_000;
@@ -25,12 +26,25 @@ vi.mock('../../src/select/select.js', async (importOriginal) => {
     },
   };
 });
-afterEach(() => { hooks.selectThrows = false; });
+/** Makes the summary stage's own function throw when set, as a future bug might. */
+const summaryHooks = vi.hoisted(() => ({ throws: false }));
+vi.mock('../../src/summary/summary.js', async (importOriginal) => {
+  const m = await importOriginal<typeof import('../../src/summary/summary.js')>();
+  return {
+    ...m,
+    summarise: async (...args: Parameters<typeof m.summarise>) => {
+      if (summaryHooks.throws) throw new Error('summary broke');
+      return m.summarise(...args);
+    },
+  };
+});
+afterEach(() => {
+  hooks.selectThrows = false;
+  summaryHooks.throws = false;
+});
 
 const none = { candidates: [], questions: [] };
-/** The ids of the findings the summary request was shown. */
-const shownIds = (req: AgentRequest<unknown>): string[] =>
-  [...(block(req.material, 'findings') ?? '').matchAll(/^id: (.+)$/gm)].map((m) => m[1]!);
+const shownIds = summaryIds;
 /** A summary answer that writes `<prefix> <id>` and a gist for every finding shown. */
 const summaryOf = (prefix: string, inShort = SCENARIO_IN_SHORT) => (req: AgentRequest<unknown>) => ({
   inShort, findings: shownIds(req).map((id) => ({ id, short: `${prefix} ${id}`, gist: `What ${id} does to a member.` })),
@@ -102,6 +116,56 @@ describe('the summary stage in a review', () => {
     expect(stageEvents(events, 'summary')).toEqual(['start', 'done: skipped: usage limit']);
     expect(doc.timings.find((t) => t.stage === 'summary')).toMatchObject({ agentRuns: 0, costUsd: 0 });
     expect(doc.notes?.at(-1)).toBe(SUMMARY_FAILED_NOTE);
+  }, SLOW);
+
+  it('anything the stage throws becomes the failure note, never a stage error', async () => {
+    summaryHooks.throws = true;
+    const { doc, events } = await review();
+    expect(doc.stageErrors).toEqual([]);
+    expect(doc.verdict.label).toBe('approve-after-fixes');
+    expect(doc.notes?.at(-1)).toBe(SUMMARY_FAILED_NOTE);
+    expect(stageEvents(events, 'summary')).toEqual(['start', 'done']);
+    expect(doc.findings.every((f) => f.short === undefined && f.gist === undefined)).toBe(true);
+  }, SLOW);
+
+  it('when some findings get no value, one note counts them and the review is otherwise complete', async () => {
+    const { doc } = await review({
+      script: scenarioScript({
+        summary: (req: AgentRequest<unknown>) => ({
+          inShort: SCENARIO_IN_SHORT, findings: [{ id: shownIds(req)[0]!, short: 'Refunds lose a cent', gist: 'LGTM' }],
+        }),
+      }),
+    });
+    expect(doc.findings).toHaveLength(2);
+    expect(doc.findings.filter((f) => f.short !== undefined)).toHaveLength(1);
+    expect(doc.findings.every((f) => f.gist === undefined)).toBe(true); // a gist reading like a verdict is dropped
+    expect(doc.notes?.at(-1)).toBe(missingSummariesNote(1));
+    expect(doc.notes).not.toContain(SUMMARY_FAILED_NOTE);
+    expect(doc.stageErrors).toEqual([]);
+  }, SLOW);
+
+  it('a Stop during the summary request ends the review: nothing is stored and no request follows', async () => {
+    const s = await scenario();
+    const ac = new AbortController();
+    const fake = createFakeRunner(scenarioScript({
+      summary: () => {
+        ac.abort();
+        return failure('aborted', 'other');
+      },
+    }));
+    const events: ReviewEvent[] = [];
+    const stopped = runReview(
+      { repo: REPO, number: NUMBER, packsDir: PACKS_DIR, kitDir: KIT_DIR, remoteUrl: s.remote.dir },
+      { exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha }), runner: fake, now: () => NOW, signal: ac.signal },
+      (e) => events.push(e),
+    );
+    await expect(stopped).rejects.toThrow('The review was stopped.');
+    expect(roles(fake.calls).at(-1)).toBe('summary');
+    expect(fake.calls.filter((c) => c.role === 'summary')).toHaveLength(1);
+    expect(fake.calls.at(-1)!.signal).toBe(ac.signal);
+    expect(stageEvents(events, 'store')).toEqual([]);
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+    expect(await latestReview(REPO, NUMBER)).toBeNull();
   }, SLOW);
 
   it('a review whose select request failed is incomplete and still gets summaries', async () => {

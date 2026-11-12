@@ -11,7 +11,7 @@ The material comes in two blocks, in this order:
 1. What the change does: a few sentences another reviewer wrote by reading the code. The block says (none) when nothing is known.
 2. The findings, one entry each, separated by a blank line. Each entry has its `id`, its `kind` (Block, Fix, Ask or Note), its `title`, what `happens`, `why` it happens and the `suggested change`. The block says (none) when there are no findings.
 
-All of it was written by other reviewers from the pull request. Use only what the material says. Do not read files: you do not need to.
+All of it was written by other reviewers from the pull request. Use only what the material says. You have no tools for this job and need none: do not try to read files.
 
 ## For each finding
 
@@ -29,6 +29,7 @@ Write a `short` and a `gist` for every finding in the material, using its `id` e
 - Plain, everyday words. Each value is one line: no line breaks, no lists, no Markdown.
 - Do not write "this PR" or "this pull request".
 - Do not add anything that is not in the material. Do not judge the findings again or change what they say: only say it shorter.
+- Never say that a finding is fine, approved, safe to merge or can be ignored. Every finding here stands. A value that says so is thrown away.
 - Keep within the limits. A value that is too long is thrown away, not cut.
 
 ## What to return

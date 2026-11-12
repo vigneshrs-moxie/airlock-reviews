@@ -75,8 +75,16 @@ export const DEEP_NEW = rawCandidate({
 });
 
 const none = { candidates: [], questions: [] };
-/** The sentence on the change the fake summary stage writes; it writes no finding's short fields unless told to. */
+/** The sentence on the change the fake summary stage writes. */
 export const SCENARIO_IN_SHORT = 'Adds refunds and a job that pauses plans.';
+/** The ids of the findings a summary request was shown. */
+export const summaryIds = (req: AgentRequest<unknown>): string[] =>
+  [...(block(req.material, 'findings') ?? '').matchAll(/^id: (.+)$/gm)].map((m) => m[1]!);
+/** The fake summary answer: the sentence on the change, and `Short <id>` with a one-line gist for every finding shown. */
+export function scenarioSummary(req: AgentRequest<unknown>): unknown {
+  const ids = summaryIds(req);
+  return { inShort: SCENARIO_IN_SHORT, findings: ids.map((id) => ({ id, short: `Short ${id}`, gist: `What ${id} does to a member.` })) };
+}
 const cohortLine = (req: AgentRequest<unknown>): string => block(req.material, 'cohort')?.split('\n')[0] ?? '';
 
 /** Answers each request of the scenario by role. `over` replaces the answer for a role prefix. */
@@ -109,7 +117,7 @@ export function scenarioScript(over: Record<string, (req: AgentRequest<unknown>)
         checksAfterMerge: [], splitSuggested: false,
       };
     }
-    if (req.role === 'summary') return { inShort: SCENARIO_IN_SHORT, findings: [] };
+    if (req.role === 'summary') return scenarioSummary(req);
     throw new Error(`unexpected role ${req.role}`);
   };
 }
