@@ -178,7 +178,7 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
     expiresAt: now + PREVIEW_MS,
   };
   deps.previews.add(stored);
-  const named = postMentions(texts, { text: summary, isDefault: summary === generated }, reviewBody);
+  const named = postMentions(texts, { isDefault: summary === generated }, reviewBody);
   for (const [i, item] of items.entries()) item.mentions = named.items[i] ?? [];
   return {
     previewId, headSha: doc.pr.headSha, viewer: doc.pr.viewer, items, summary, reviewBody, reviewBodyMentions: named.reviewBody, expiresAt: new Date(stored.expiresAt).toISOString(),

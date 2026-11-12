@@ -381,7 +381,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     if (summaryProblem !== null) throw new Refusal(400, summaryProblem);
     const reviewBody = summaryBody(inSummary, summary);
     // As the service: no names for Airlock's own text, every name once the person typed or changed any of it.
-    const named = postMentions(texts, { text: summary, isDefault: summary === generated }, reviewBody);
+    const named = postMentions(texts, { isDefault: summary === generated }, reviewBody);
     for (const [i, item] of items.entries()) item.mentions = named.items[i] ?? [];
     const previewId = `pv_${randomBytes(8).toString('hex')}`;
     const expiresAt = Date.now() + PREVIEW_MS;
