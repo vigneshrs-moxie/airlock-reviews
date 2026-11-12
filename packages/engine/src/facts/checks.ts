@@ -3,8 +3,24 @@ import type { Fact, FileDiff } from '@airlock/shared';
 import picomatch from 'picomatch';
 import { SYMLINK_MODE } from '../diff/parse.js';
 import type { CheckDef, Pack } from '../packs/types.js';
+import { EXTENSION_CHECKS, type CodeCheck } from './extension-checks.js';
 
 type ReadHead = (path: string) => Promise<string | null>;
+
+/** The code checks a pack can name under `codeChecks:`, by id. */
+export const CODE_CHECKS: Readonly<Record<string, CodeCheck>> = { ...EXTENSION_CHECKS };
+export const CODE_CHECK_IDS: readonly string[] = Object.keys(CODE_CHECKS);
+
+/** What the code checks may look at besides the head: the base side of the pull request and the size of a head file. */
+export interface OtherSides {
+  /** Reads a file of the base worktree; nothing is at the base when not given. */
+  readBase?: (path: string) => Promise<string | null>;
+  /** The size in bytes of a head file; unknown when not given. */
+  sizeOfHead?: (path: string) => Promise<number | null>;
+}
+
+const nothing = async (): Promise<null> => null;
+const factKey = (f: Fact): string => JSON.stringify([f.checkId, f.path, f.line, f.message]);
 
 const matches = (globs: string[], path: string): boolean => globs.some((g) => picomatch(g, { dot: true })(path));
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -24,19 +40,44 @@ const inScope = (check: CheckDef, path: string): boolean =>
 const byPathThenLine = (a: Fact, b: Fact): number =>
   a.path < b.path ? -1 : a.path > b.path ? 1 : (a.line ?? 0) - (b.line ?? 0);
 
-export async function runChecks(files: FileDiff[], packs: Pack[], readHead: ReadHead): Promise<Fact[]> {
-  const cache = new Map<string, Promise<string | null>>();
-  const read = (path: string): Promise<string | null> => {
+/** Reads each path once, however many checks ask for it. */
+function once<T>(read: (path: string) => Promise<T>): (path: string) => Promise<T> {
+  const cache = new Map<string, Promise<T>>();
+  return (path) => {
     let hit = cache.get(path);
-    if (!hit) { hit = readHead(path); cache.set(path, hit); }
+    if (!hit) { hit = read(path); cache.set(path, hit); }
     return hit;
   };
+}
 
+/**
+ * Runs each pack's own checks, then the code checks it names (facts/extension-checks.ts), in pack order. A code check runs
+ * once however many packs name it, and a fact two code checks both give (a manifest that is not JSON) is kept once.
+ * Nothing here runs code from the pull request: files are only read through the given readers.
+ */
+export async function runChecks(files: FileDiff[], packs: Pack[], readHead: ReadHead, sides: OtherSides = {}): Promise<Fact[]> {
+  const read = once(readHead);
   const out: Fact[] = [];
   for (const pack of packs) {
     for (const check of pack.checks) {
       const facts = await runOne(pack, check, files, read);
       out.push(...facts.sort(byPathThenLine));
+    }
+  }
+
+  // A symbolic link holds a path, not code, so no code check reads it.
+  const live = files.filter((f) => f.mode !== SYMLINK_MODE);
+  const input = { files: live, readHead: read, readBase: once(sides.readBase ?? nothing), sizeOfHead: once(sides.sizeOfHead ?? nothing) };
+  const ran = new Set<string>();
+  const seen = new Set<string>();
+  for (const id of packs.flatMap((p) => p.codeChecks ?? [])) {
+    if (ran.has(id)) continue;
+    ran.add(id);
+    const check = Object.hasOwn(CODE_CHECKS, id) ? CODE_CHECKS[id] : undefined;
+    if (check === undefined) throw new Error(`No code check is called "${id}".`);
+    for (const fact of (await check(input)).sort(byPathThenLine)) {
+      const key = factKey(fact);
+      if (!seen.has(key)) { seen.add(key); out.push(fact); }
     }
   }
   return out;

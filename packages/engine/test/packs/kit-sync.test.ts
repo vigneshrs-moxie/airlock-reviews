@@ -1,8 +1,8 @@
 import { mkdir, mkdtemp, readdir, readFile, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { attachKit, kitRefProblem, syncKit } from '../../src/packs/kit-sync.js';
+import { attachKit, kitCacheRoot, kitRefProblem, syncKit } from '../../src/packs/kit-sync.js';
 import type { KitRef, Pack } from '../../src/packs/types.js';
 import { isGhRead, type Exec } from '../../src/util/exec.js';
 
@@ -45,6 +45,9 @@ function fakeGh(opts: { sha?: string | ((repo: string) => string); resolveFails?
   return { exec, calls };
 }
 
+/** Where syncKit keeps `kit`'s copies, as parts under <home>/kit, followed by `more`. */
+const at = (kit: KitRef, ...more: string[]): string[] => [...relative(join(home, 'kit'), kitCacheRoot(kit)).split(sep), ...more];
+
 /** A cached copy under `<home>/kit/<parts...>`, with the given files, dated `time` (seconds). */
 async function cache(parts: string[], files: string[], time: number): Promise<string> {
   const dir = join(home, 'kit', ...parts);
@@ -58,7 +61,7 @@ describe('syncKit', () => {
   it('fetches the listed files once and serves the second call from the cache', async () => {
     const gh = fakeGh();
     const first = await syncKit(gh.exec, TEAM);
-    expect(first).toEqual({ sha: SHA, dir: join(home, 'kit', TEAM_SLUG, SHA), stale: false });
+    expect(first).toEqual({ sha: SHA, dir: join(kitCacheRoot(TEAM), SHA), stale: false });
     expect(gh.calls[0]).toEqual({ cmd: 'gh', args: ['api', 'repos/acme/review-kit/commits/main', '--jq', '.sha'] });
     expect(gh.calls).toHaveLength(4);
     for (const path of TEAM.files) {
@@ -88,8 +91,8 @@ describe('syncKit', () => {
     const gh = fakeGh({ sha: (repo) => (repo === 'acme/ext-kit' ? other : SHA) });
     const team = await syncKit(gh.exec, TEAM);
     const ext = await syncKit(gh.exec, OTHER);
-    expect(team.dir).toBe(join(home, 'kit', TEAM_SLUG, SHA));
-    expect(ext).toEqual({ sha: other, dir: join(home, 'kit', 'acme__ext-kit', other), stale: false });
+    expect(team.dir).toBe(join(kitCacheRoot(TEAM), SHA));
+    expect(ext).toEqual({ sha: other, dir: join(kitCacheRoot(OTHER), other), stale: false });
     expect((await readdir(join(home, 'kit'))).sort()).toEqual(['acme__ext-kit', TEAM_SLUG]);
     expect((await readdir(team.dir)).sort()).toEqual(NAMES);
     expect((await readdir(ext.dir)).sort()).toEqual(['calibration.md', 'standard.md']);
@@ -98,23 +101,54 @@ describe('syncKit', () => {
 
     // The same commit of two repositories is still two folders.
     const same = fakeGh();
-    expect((await syncKit(same.exec, OTHER)).dir).toBe(join(home, 'kit', 'acme__ext-kit', SHA));
-    expect((await readdir(join(home, 'kit', 'acme__ext-kit'))).sort()).toEqual([SHA, other].sort());
+    expect((await syncKit(same.exec, OTHER)).dir).toBe(join(kitCacheRoot(OTHER), SHA));
+    expect((await readdir(kitCacheRoot(OTHER))).sort()).toEqual([SHA, other].sort());
+  });
+
+  it("the cache key holds the repository and a short hash of the kit's file list, whatever their order", () => {
+    const root = kitCacheRoot(TEAM);
+    expect(relative(join(home, 'kit'), root).split(sep)).toEqual([TEAM_SLUG, expect.stringMatching(/^[0-9a-f]{12}$/)]);
+    expect(kitCacheRoot({ ...TEAM, files: [...TEAM.files].reverse(), datedStandards: [], ref: 'v2' })).toBe(root);
+    expect(kitCacheRoot({ ...TEAM, files: TEAM.files.slice(0, 2) })).not.toBe(root);
+  });
+
+  it("two kits naming one repository with different files keep their own copies and never delete each other's", async () => {
+    const two: KitRef = { repo: TEAM.repo, files: ['skills/review/profile.md', 'skills/review/register.md'] };
+    const gh = fakeGh();
+    const a = await syncKit(gh.exec, TEAM);
+    const b = await syncKit(gh.exec, two);
+    expect(a.sha).toBe(b.sha);
+    expect(a.dir).not.toBe(b.dir);
+    expect((await readdir(a.dir)).sort()).toEqual(NAMES);
+    expect((await readdir(b.dir)).sort()).toEqual(['profile.md', 'register.md']);
+    // each is served from its own copy now, with only the commit looked up again
+    const calls = gh.calls.length;
+    expect(await syncKit(gh.exec, TEAM)).toEqual(a);
+    expect(await syncKit(gh.exec, two)).toEqual(b);
+    expect(gh.calls.length).toBe(calls + 2);
+    // and each still has its copy to fall back on
+    expect(await syncKit(fakeGh({ resolveFails: true }).exec, TEAM)).toEqual({ ...a, stale: true });
+    expect(await syncKit(fakeGh({ resolveFails: true }).exec, two)).toEqual({ ...b, stale: true });
+  });
+
+  it('a copy in the place used before the file list was in the key is not a cache', async () => {
+    await cache([TEAM_SLUG, SHA], NAMES, 1000); // <home>/kit/<slug>/<sha>/
+    await expect(syncKit(fakeGh({ resolveFails: true }).exec, TEAM)).rejects.toThrow(/none is cached/);
   });
 
   it('when the kit cannot be fetched the newest cached copy is used and marked stale', async () => {
-    await cache([TEAM_SLUG, 'old'], NAMES, 1000);
-    const newer = await cache([TEAM_SLUG, 'new'], NAMES, 2000);
-    await cache([TEAM_SLUG, 'newest-but-partial'], ['profile.md'], 3000);
-    await cache([TEAM_SLUG, '.new-download-abc123'], NAMES, 4000); // in-progress temp folder: ignored
-    await cache(['acme__ext-kit', 'other-kit'], NAMES, 5000); // another kit's copy: never this kit's
+    await cache(at(TEAM, 'old'), NAMES, 1000);
+    const newer = await cache(at(TEAM, 'new'), NAMES, 2000);
+    await cache(at(TEAM, 'newest-but-partial'), ['profile.md'], 3000);
+    await cache(at(TEAM, '.new-download-abc123'), NAMES, 4000); // in-progress temp folder: ignored
+    await cache(at(OTHER, 'other-kit'), NAMES, 5000); // another kit's copy: never this kit's
     await cache(['f'.repeat(40)], NAMES, 6000); // the old place, <home>/kit/<sha>/: ignored
     expect(await syncKit(fakeGh({ resolveFails: true }).exec, TEAM)).toEqual({ sha: 'new', dir: newer, stale: true });
 
     // A listed file that is gone (renamed in the kit) falls back the same way, and leaves no partial copy.
     const renamed = fakeGh({ failPath: 'calibration.md' });
     expect(await syncKit(renamed.exec, TEAM)).toEqual({ sha: 'new', dir: newer, stale: true });
-    expect(await readdir(join(home, 'kit', TEAM_SLUG))).not.toContain(SHA);
+    expect(await readdir(kitCacheRoot(TEAM))).not.toContain(SHA);
   });
 
   it('with no cache it throws a sentence naming the kit and what went wrong', async () => {
@@ -137,15 +171,15 @@ describe('syncKit', () => {
   it('lets two syncs of the same commit run at once and both return the same folder', async () => {
     const gh = fakeGh();
     const [a, b] = await Promise.all([syncKit(gh.exec, TEAM), syncKit(gh.exec, TEAM)]);
-    expect(a).toEqual({ sha: SHA, dir: join(home, 'kit', TEAM_SLUG, SHA), stale: false });
+    expect(a).toEqual({ sha: SHA, dir: join(kitCacheRoot(TEAM), SHA), stale: false });
     expect(b).toEqual(a);
-    expect((await readdir(join(home, 'kit', TEAM_SLUG))).sort()).toEqual([SHA]);
+    expect((await readdir(kitCacheRoot(TEAM))).sort()).toEqual([SHA]);
     expect((await readdir(a.dir)).sort()).toEqual(NAMES);
   });
 
   it('does not treat a half-finished download as cached', async () => {
     await expect(syncKit(fakeGh({ failPath: 'calibration.md' }).exec, TEAM)).rejects.toThrow(/HTTP 404/);
-    const kitDir = join(home, 'kit', TEAM_SLUG);
+    const kitDir = kitCacheRoot(TEAM);
     expect((await readdir(kitDir)).filter((n) => n === SHA)).toEqual([]);
     // a leftover folder without every listed file is not a cache either
     await mkdir(join(kitDir, SHA), { recursive: true });

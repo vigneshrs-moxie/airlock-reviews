@@ -53,3 +53,21 @@ export async function safeRead(rootDir: string, relPath: string, opts: { firstBy
     return null;
   }
 }
+
+/**
+ * The size in bytes of the regular file at `relPath` under `rootDir`, checked as safeRead checks a path (repository-relative,
+ * not under `.git`, its real path spelled exactly as asked, no link followed), whatever its size; null otherwise. Reads
+ * nothing of the file. Never throws.
+ */
+export async function safeSize(rootDir: string, relPath: string): Promise<number | null> {
+  try {
+    if (typeof relPath !== 'string' || !isRepoPath(relPath)) return null;
+    const root = await realpath(rootDir);
+    const real = await realpath(join(root, relPath));
+    if (relative(root, real).split(sep).join('/') !== relPath) return null;
+    const info = await lstat(real);
+    return info.isFile() ? info.size : null;
+  } catch {
+    return null;
+  }
+}

@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path';
 import { SeveritySchema, StageSchema } from '@airlock/shared';
 import { parse } from 'yaml';
 import { z } from 'zod';
+import { CODE_CHECK_IDS } from '../facts/checks.js';
 import type { StageRule } from '../intake/pr.js';
 import { kitRefProblem } from './kit-sync.js';
 import { learnedFileName, readLearned } from './learned.js';
@@ -69,6 +70,21 @@ function kitOf(doc: Obj, file: string): KitRef | undefined {
   const problem = kitRefProblem(kit);
   if (problem !== null) throw new Error(`${file}: invalid "kit": ${problem}`);
   return kit;
+}
+
+/** The engine code checks the manifest names under `codeChecks:`, each known and named once; undefined when there are none. */
+function codeChecksOf(doc: Obj, file: string): string[] | undefined {
+  if (doc.codeChecks === undefined || doc.codeChecks === null) return undefined;
+  const ids = strList(doc, 'codeChecks', file);
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (!CODE_CHECK_IDS.includes(id)) {
+      throw new Error(`${file}: invalid "codeChecks": no code check is called ${JSON.stringify(id)}; the known ones are ${CODE_CHECK_IDS.join(', ')}`);
+    }
+    if (seen.has(id)) throw new Error(`${file}: invalid "codeChecks": ${JSON.stringify(id)} is named twice`);
+    seen.add(id);
+  }
+  return ids;
 }
 
 function section<T extends z.ZodType>(doc: Obj, key: string, schema: T, file: string, fallback: unknown): z.output<T> {
@@ -195,6 +211,7 @@ export async function loadPack(dir: string): Promise<Pack> {
   if (appRoot !== null && typeof appRoot !== 'string') throw new Error(`${yamlPath}: "appRoot" must be text`);
   const version = doc.version;
   const kit = kitOf(doc, yamlPath);
+  const codeChecks = codeChecksOf(doc, yamlPath);
 
   return {
     id, title: str(doc, 'title', yamlPath),
@@ -206,5 +223,6 @@ export async function loadPack(dir: string): Promise<Pack> {
     linkRules: section(doc, 'linkRules', z.array(LinkRuleSchema), yamlPath, []) as LinkRule[],
     checks: section(doc, 'checks', z.array(CheckSchema), yamlPath, []) as CheckDef[],
     standards, lenses, rules, learned, learnedProblems, ...(kit === undefined ? {} : { kit }),
+    ...(codeChecks === undefined ? {} : { codeChecks }),
   };
 }

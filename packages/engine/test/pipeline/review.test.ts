@@ -5,6 +5,8 @@ import { candidate, ReviewDocumentSchema, type Candidate, type ReviewEvent } fro
 import { PROMPT_BOUNDARY, splitInstructions } from '../../src/agent/prompt.js';
 import { type AgentRequest, type AgentRunner, withRetry } from '../../src/agent/runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
+import { kitCacheRoot } from '../../src/packs/kit-sync.js';
+import type { KitRef } from '../../src/packs/types.js';
 import { withUniqueIds } from '../../src/pipeline/review.js';
 import { selfReviewText } from '../../src/select/select.js';
 import { latestReview } from '../../src/store/store.js';
@@ -68,11 +70,16 @@ const roles = (calls: AgentRequest<unknown>[]): string[] => calls.map((c) => c.r
 const everything = (calls: AgentRequest<unknown>[]): string => calls.map((c) => `${c.instructions}\n${c.material}`).join('\n');
 const exists = (p: string): Promise<boolean> => stat(p).then(() => true, () => false);
 
-const STALE_KIT_QUESTION = 'The review kit acme/review-kit could not be refreshed; the copy from 2026-03-04 was used.';
+/** The kit the fixture team pack names (test/fixtures/pipeline/packs/raj-standard/pack.yaml). */
+const FIXTURE_KIT: KitRef = {
+  repo: 'Moxie-Pest-Control-Phoenix/moxie-review-kit',
+  files: ['skills/review/profile.md', 'skills/review/orbit.md', 'skills/review/calibration.md'],
+};
+const STALE_KIT_QUESTION = 'The review kit Moxie-Pest-Control-Phoenix/moxie-review-kit could not be refreshed; the copy from 2026-03-04 was used.';
 /** Puts a copy of the fixture team pack's kit dated 2026-03-04 in the cache, so a review without `kitDir` uses it and says it is stale. */
 async function cacheStaleKit(): Promise<string> {
   const sha = 'f'.repeat(40);
-  const cached = join(home(), 'kit', 'acme__review-kit', sha);
+  const cached = join(kitCacheRoot(FIXTURE_KIT), sha);
   await mkdir(cached, { recursive: true });
   for (const name of ['profile.md', 'orbit.md', 'calibration.md', 'SKILL.md']) await copyFile(join(KIT_DIR, name), join(cached, name));
   await utimes(cached, new Date('2026-03-04T12:00:00Z'), new Date('2026-03-04T12:00:00Z'));
@@ -316,7 +323,7 @@ describe('runReview', () => {
     const events: ReviewEvent[] = [];
     const counting = (inner: AgentRunner): AgentRunner => ({ run: (r) => { asked.push(r.role); return inner.run(r); } });
     await expect(review({ req: { kitDir: undefined }, wrap: counting, onEvent: (e) => events.push(e) }))
-      .rejects.toThrow('The review kit could not be fetched from acme/review-kit and none is cached: gh: no network in tests');
+      .rejects.toThrow('The review kit could not be fetched from Moxie-Pest-Control-Phoenix/moxie-review-kit and none is cached: gh: no network in tests');
     expect(asked).toEqual([]);
     expect(starts(events)).toEqual(['intake', 'packs']);
     expect(await readdir(join(home(), 'reviews')).catch(() => [])).toEqual([]);

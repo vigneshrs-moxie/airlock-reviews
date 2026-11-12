@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { isRepo } from '@airlock/shared';
@@ -44,6 +45,16 @@ export function kitRefProblem(kit: KitRef): string | null {
   return null;
 }
 
+/**
+ * Where a kit's copies are cached: <airlockHome>/kit/<repo slug>/<file list key>/, one folder per commit under it. The
+ * key is a short hash of the kit's file paths in any order, so two packs that name one kit repository with different
+ * files keep separate copies and never replace or delete each other's.
+ */
+export function kitCacheRoot(kit: KitRef): string {
+  const key = createHash('sha256').update(JSON.stringify([...new Set(kit.files)].sort())).digest('hex').slice(0, 12);
+  return join(airlockHome(), 'kit', repoSlug(kit.repo), key);
+}
+
 async function isComplete(dir: string, names: string[]): Promise<boolean> {
   try {
     const present = new Set(await readdir(dir));
@@ -74,7 +85,7 @@ async function runGh(exec: Exec, args: string[]): Promise<{ stdout: string; stde
 
 /**
  * Downloads a kit's files at one commit of `opts.ref`, else the kit's `ref`, else `main`, into
- * <airlockHome>/kit/<repo slug>/<sha>/, with `gh api` reads only; never edits the kit repository. When the commit or a file
+ * kitCacheRoot(kit)/<sha>/, with `gh api` reads only; never edits the kit repository. When the commit or a file
  * cannot be fetched, the newest complete copy of this kit in the cache is used and marked stale; with none, it throws a
  * sentence naming the kit. A kit that fails `kitRefProblem` is refused before anything runs.
  */
@@ -83,7 +94,7 @@ export async function syncKit(exec: Exec, kit: KitRef, opts: { ref?: string } = 
   const problem = kitRefProblem({ ...kit, ref });
   if (problem !== null) throw new Error(`The review kit cannot be used: ${problem}.`);
   const names = kit.files.map((p) => basename(p));
-  const root = join(airlockHome(), 'kit', repoSlug(kit.repo));
+  const root = kitCacheRoot(kit);
   const fallBack = async (why: string): Promise<SyncedKit> => {
     const cached = await newestCachedKit(root, names);
     if (cached) return { ...cached, stale: true };

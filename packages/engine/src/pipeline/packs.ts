@@ -79,9 +79,17 @@ export function stageRulesOf(packs: Pack[]): StageRule[] {
   return packs.find((p) => p.stageRules.length > 0)?.stageRules ?? [];
 }
 
+/** The team review kit's repository: the one kit the replay pins with `kitDir`. */
+export const TEAM_KIT_REPO = 'Moxie-Pest-Control-Phoenix/moxie-review-kit';
+
+const isTeamKit = (repo: string): boolean => repo.toLowerCase() === TEAM_KIT_REPO.toLowerCase();
+
 export interface PackOptions {
   exec: Exec;
-  /** Stands in for the download of the first selected pack's kit that has one (the replay pins it); others are synced. */
+  /**
+   * Stands in for the download of the team review kit (TEAM_KIT_REPO): the replay pins it. It is given only to a selected
+   * pack whose kit is that repository; every other kit is synced.
+   */
   kitDir?: string;
   /** The version of the kit in `kitDir`; `pinned` otherwise. */
   kitSha?: string;
@@ -118,11 +126,9 @@ export async function preparePacks(selected: Pack[], opts: PackOptions): Promise
 
   const withKit: Pack[] = [];
   const unavailable: string[] = [];
-  let pinnedUsed = false;
   for (const pack of selected) {
     if (pack.kit === undefined) { withKit.push(pack); continue; }
-    const pinnedDir = pinnedUsed ? undefined : opts.kitDir;
-    if (pinnedDir !== undefined) pinnedUsed = true;
+    const pinnedDir = isTeamKit(pack.kit.repo) ? opts.kitDir : undefined;
     try {
       const kit: SyncedKit = pinnedDir !== undefined
         ? { sha: opts.kitSha ?? 'pinned', dir: pinnedDir, stale: false }

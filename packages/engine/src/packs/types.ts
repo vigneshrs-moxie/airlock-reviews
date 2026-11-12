@@ -37,5 +37,10 @@ export interface Pack {
   learnedProblems?: string[];
   /** The review kit attached to this pack when the review is prepared; none when absent. */
   kit?: KitRef;
+  /**
+   * The engine's code checks this pack runs, by id (facts/checks.ts `CODE_CHECKS`), after its own `checks`. They read the
+   * pull request's files and give facts, never findings; none when absent.
+   */
+  codeChecks?: string[];
 }
 export interface Holdout { pr: number; reviewedAt: string }

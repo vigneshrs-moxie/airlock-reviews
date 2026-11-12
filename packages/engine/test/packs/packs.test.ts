@@ -216,6 +216,22 @@ describe('loadPack validation', () => {
     await refused(kit('  - acme/kit\n'), /kit/);
     await refused(kit(`  files: [docs/a.md]\n`), /repo/);
   });
+
+  it('reads the code checks a manifest names, and leaves a pack without any with no code checks at all', async () => {
+    const pack = await loadPack(await withYaml('codeChecks: [extension-permissions, extension-remote-code]\n'));
+    expect(pack.codeChecks).toEqual(['extension-permissions', 'extension-remote-code']);
+    expect(Object.hasOwn(await loadPack(await withYaml('')), 'codeChecks')).toBe(false);
+  });
+
+  it.each([
+    ['an unknown check', 'codeChecks: [extension-permissions, no-such-check]\n', /invalid "codeChecks": no code check is called "no-such-check"/],
+    ['a check named twice', 'codeChecks: [extension-permissions, extension-permissions]\n', /invalid "codeChecks": "extension-permissions" is named twice/],
+    ['not a list', 'codeChecks: extension-permissions\n', /"codeChecks" must be a list of text/],
+  ])('refuses %s in codeChecks, naming pack.yaml', async (_n, extra, message) => {
+    const dir = await withYaml(extra);
+    await expect(loadPack(dir)).rejects.toThrow(/pack\.yaml/);
+    await expect(loadPack(dir)).rejects.toThrow(message);
+  });
 });
 
 describe('selectPacks', () => {

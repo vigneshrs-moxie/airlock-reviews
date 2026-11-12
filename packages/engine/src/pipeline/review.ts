@@ -38,7 +38,7 @@ import { mergeNote, mergeNoteBlock, settledSentence, type MergeScope } from '../
 import { reviewById, saveReview } from '../store/store.js';
 import type { Exec } from '../util/exec.js';
 import { limiter } from '../util/limit.js';
-import { presentAt, safeRead } from '../util/safe-read.js';
+import { presentAt, safeRead, safeSize } from '../util/safe-read.js';
 import { deepPass } from './deep.js';
 import { choosePacks, ENGINE_SOURCE, preparePacks, stageRulesOf, type PreparedPacks } from './packs.js';
 import { createStageLog, messageOf, type StageLog, type StageName } from './stages.js';
@@ -61,7 +61,10 @@ export interface ReviewRequest {
   packsDir: string;
   remoteUrl?: string;
   parallel?: number;
-  /** Read the first selected kit pack's kit from this folder instead of GitHub (tests and the replay); others are synced. */
+  /**
+   * Read the team review kit (TEAM_KIT_REPO in pipeline/packs.ts) from this folder instead of GitHub (tests and the
+   * replay), for the selected pack whose kit is that repository; every other kit is synced.
+   */
   kitDir?: string;
   /** The kit's version when `kitDir` is given; `pinned` otherwise. */
   kitSha?: string;
@@ -382,7 +385,9 @@ async function reviewInWorkspace(
     const unreviewed = (pushed ? null : notReviewed(files, tiers)) ?? emptyDiff(files, pr, givenRange);
     if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
     for (const path of binarySourcePaths(files, packs)) rec.error({ stage: 'facts', cohortId: null, message: binarySourceSentence(path) });
-    const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead), [] as Fact[])];
+    const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead, {
+      readBase: (path) => safeRead(ws.baseDir, path), sizeOfHead: (path) => safeSize(ws.headDir, path),
+    }), [] as Fact[])];
     const found = await rec.attempt(
       () => findLinks(exec, ws.headDir, files, packs), { links: [] as Link[], skippedNames: 0, limits: [] as string[] },
     );
