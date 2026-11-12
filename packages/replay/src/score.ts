@@ -31,9 +31,19 @@ export interface CaseScore {
   ms: number;
   /** True when `ms` is the sum of stage times, which can overlap, so it is only about the time that passed. */
   msSummed: boolean;
+  /**
+   * What the case spent: from a replay's run folder, every review attempt and every judge request (spent.json); from
+   * scoreCase alone, the review's own usage.
+   */
   inputTokens: number;
   outputTokens: number;
   agentRuns: number;
+  /** Tokens in and out that went on review attempts that did not finish. */
+  unfinishedTokens: number;
+  /** Tokens in and out that went on judge requests. */
+  judgeTokens: number;
+  /** True when the counts are only the kept review's own, because the folder has no record of what was spent. */
+  usageAbout: boolean;
   verdict: VerdictLabel;
 }
 
@@ -74,8 +84,14 @@ export interface RunSummary {
   madeByEarlierVersion: boolean;
   /** One per call of the run that started a case: from its first case start to its last case end. Empty when not known. */
   spans: RunSpan[];
-  /** `ms` is the sum of the spans when there are any, else the sum of the cases' times (`msSummed`). */
-  totals: { ms: number; msSummed: boolean; inputTokens: number; outputTokens: number; agentRuns: number };
+  /**
+   * `ms` is the sum of the spans when there are any, else the sum of the cases' times (`msSummed`). `usageAbout` when
+   * any case's counts are only its kept review's own.
+   */
+  totals: {
+    ms: number; msSummed: boolean; inputTokens: number; outputTokens: number; agentRuns: number;
+    unfinishedTokens: number; judgeTokens: number; usageAbout: boolean;
+  };
   /**
    * Present when the run stopped early: because Claude's usage limit was reached during `caseId`, when the cases in
    * `notStarted` were left untouched; or because of an exit signal (Ctrl-C), when no case started after it and the cases
@@ -147,7 +163,8 @@ export function scoreCase(c: ReplayCase, doc: ReviewDocument, matches: Match[]):
     lostAt: { lenses: 0, schema: 0, anchor: 0, merge: 0, challenge: 0, select: 0 },
     crossFileKnown: 0, crossFileInTop: 0, findingsShown: doc.findings.length,
     blockOrFixShown: doc.findings.filter((f) => f.severity === 'block' || f.severity === 'fix').length,
-    ms: 0, msSummed: false, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: doc.verdict.label,
+    ms: 0, msSummed: false, inputTokens: 0, outputTokens: 0, agentRuns: 0, unfinishedTokens: 0, judgeTokens: 0, usageAbout: false,
+    verdict: doc.verdict.label,
   };
   // `createdAt` is when the document was assembled, at the review's end, once the review records its start.
   const elapsed = between(doc.startedAt, doc.createdAt);
@@ -241,6 +258,8 @@ export function summarise(
     totals: {
       ms: runningMs ?? sum(scores, (s) => s.ms), msSummed: runningMs === null, inputTokens: sum(scores, (s) => s.inputTokens),
       outputTokens: sum(scores, (s) => s.outputTokens), agentRuns: sum(scores, (s) => s.agentRuns),
+      unfinishedTokens: sum(scores, (s) => s.unfinishedTokens), judgeTokens: sum(scores, (s) => s.judgeTokens),
+      usageAbout: scores.some((s) => s.usageAbout),
     },
     meets: {
       halfInTop: positive.length === 0 ? 'not tested'

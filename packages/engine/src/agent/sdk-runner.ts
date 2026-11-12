@@ -27,8 +27,8 @@ const ROLE_LIMITS: Record<string, { timeoutMs: number; maxTurns: number }> = {
   mapper: { timeoutMs: 15 * MINUTE, maxTurns: 25 },
   seams: { timeoutMs: 15 * MINUTE, maxTurns: 40 },
   brief: { timeoutMs: 5 * MINUTE, maxTurns: 25 },
-  select: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
-  merge: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
+  select: { timeoutMs: 5 * MINUTE, maxTurns: 15 },
+  merge: { timeoutMs: 5 * MINUTE, maxTurns: 10 },
   judge: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
 };
 const OTHER_LIMITS = { timeoutMs: 10 * MINUTE, maxTurns: 40 };

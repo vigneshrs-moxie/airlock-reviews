@@ -37,7 +37,7 @@ A block that has nothing in it says (none).
 
 State first what happens to a person, or to a figure people rely on: a member is charged twice, a manager sees another office's customers, a monthly report undercounts cancelled plans. Then say why the code causes it.
 
-Pick the breaches that matter and leave the rest out. Return at most 6 candidates. Fewer is usually better, and none is a fine answer when you found nothing that matters.
+Pick the breaches that matter and leave the rest out. Return at most {{maxCandidates}} candidates. Fewer is usually better, and none is a fine answer when you found nothing that matters.
 
 Each candidate needs all of these:
 

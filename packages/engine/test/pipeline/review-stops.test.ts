@@ -1,11 +1,13 @@
+import { readdirSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import type { StageError } from '@airlock/shared';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ReviewEvent, StageError } from '@airlock/shared';
 import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import { loadTemplate } from '../../src/agent/prompt.js';
 import type { AgentRequest } from '../../src/agent/runner.js';
 import { runReview } from '../../src/pipeline/review.js';
+import { latestReview } from '../../src/store/store.js';
 import { realExec, type Exec } from '../../src/util/exec.js';
 import {
   fakeGh, KIT_DIR, NOW, NUMBER, PACKS_DIR, REPO, scenarioScript, useReviewHarness,
@@ -13,6 +15,21 @@ import {
 
 const SLOW = 20_000;
 const { home, scenario, review } = useReviewHarness();
+
+/** Runs after saveReview has written the document and before it returns, so a test can stop the review mid-save. */
+const storeHooks = vi.hoisted(() => ({ afterSave: undefined as (() => void) | undefined }));
+vi.mock('../../src/store/store.js', async (importOriginal) => {
+  const m = await importOriginal<typeof import('../../src/store/store.js')>();
+  return {
+    ...m,
+    saveReview: async (...args: Parameters<typeof m.saveReview>) => {
+      const path = await m.saveReview(...args);
+      storeHooks.afterSave?.();
+      return path;
+    },
+  };
+});
+afterEach(() => { storeHooks.afterSave = undefined; });
 
 const LIMIT = "Claude's usage limit was reached; it resets at 17:00";
 const errorsOf = (errors: StageError[], stage: string): StageError[] => errors.filter((e) => e.stage === stage);
@@ -98,6 +115,50 @@ describe('one signal stops a review', () => {
       { exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha }), runner: fake, now: () => NOW, signal: ac.signal },
     )).rejects.toThrow('The review was stopped.');
     expect(fake.calls).toEqual([]);
+  }, SLOW);
+});
+
+describe('a stopped review stores nothing', () => {
+  /** Every stored review document under AIRLOCK_HOME. */
+  const storedDocuments = async (): Promise<string[]> =>
+    (await readdir(join(home(), 'reviews'), { recursive: true }).catch(() => [] as string[])).filter((n) => n.endsWith('.json'));
+
+  const start = async (ac: AbortController, onEvent?: (e: ReviewEvent) => void) => {
+    const s = await scenario();
+    return runReview(
+      { repo: REPO, number: NUMBER, packsDir: PACKS_DIR, kitDir: KIT_DIR, remoteUrl: s.remote.dir },
+      { exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha }), runner: createFakeRunner(scenarioScript()), now: () => NOW, signal: ac.signal },
+      onEvent,
+    );
+  };
+
+  it('a signal aborted just before the store stage leaves no stored document', async () => {
+    const ac = new AbortController();
+    const stopped = start(ac, (e) => { if (e.type === 'stage' && e.stage === 'select' && e.status !== 'start') ac.abort(); });
+    await expect(stopped).rejects.toThrow('The review was stopped.');
+    expect(await storedDocuments()).toEqual([]);
+    expect(await latestReview(REPO, NUMBER)).toBeNull();
+  }, SLOW);
+
+  it('an abort that fires during the save removes the document that save wrote', async () => {
+    const ac = new AbortController();
+    let onDisk: string[] = [];
+    storeHooks.afterSave = () => {
+      onDisk = readdirSync(join(home(), 'reviews'), { recursive: true, encoding: 'utf8' }).filter((n) => n.endsWith('.json'));
+      ac.abort();
+    };
+    await expect(start(ac)).rejects.toThrow('The review was stopped.');
+    expect(onDisk).toHaveLength(1);
+    expect(await storedDocuments()).toEqual([]);
+    expect(await latestReview(REPO, NUMBER)).toBeNull();
+  }, SLOW);
+
+  it('a review that completes keeps its document when the signal is aborted afterwards', async () => {
+    const ac = new AbortController();
+    const doc = await start(ac);
+    ac.abort();
+    expect(await storedDocuments()).toHaveLength(1);
+    expect((await latestReview(REPO, NUMBER))?.id).toBe(doc.id);
   }, SLOW);
 });
 

@@ -5,6 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { descriptionAtReview } from './description-at-review.mjs';
 
 const dataset = fileURLToPath(new URL('../dataset/', import.meta.url));
 const raw = JSON.parse(readFileSync(`${dataset}cases.json`, 'utf8'));
@@ -26,14 +27,9 @@ for (const c of cases) {
   if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(name) || !Number.isInteger(c.pr)) throw new Error(`bad case ${c.id}`);
   const reply = JSON.parse(execFileSync('gh', ['api', 'graphql', '-f', `query=${query(owner, name, c.pr)}`], { encoding: 'utf8', maxBuffer: 50e6 }));
   const pr = reply.data.repository.pullRequest;
-  const versions = pr.userContentEdits.nodes
-    .map((e) => ({ at: e.editedAt ?? e.createdAt, text: e.diff ?? '' }))
-    .sort((a, b) => a.at.localeCompare(b.at));
-  const editedAfter = versions.filter((v) => v.at > c.reviewedAt).length;
-  const atReview = versions.filter((v) => v.at <= c.reviewedAt).at(-1);
-  // No version after the review: the description today is the one that was reviewed.
-  const body = editedAfter === 0 ? pr.body : atReview ? atReview.text : null;
-  if (body === null) throw new Error(`${c.id}: the description was edited after the review and no earlier version is recorded`);
+  const { body, editedAfterReview: editedAfter } = descriptionAtReview({
+    pullRequest: `${c.repo}#${c.pr}`, reviewedAt: c.reviewedAt, body: pr.body, edits: pr.userContentEdits.nodes,
+  });
   const renames = pr.timelineItems.nodes.filter((e) => e.createdAt > c.reviewedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const title = renames.length > 0 ? renames[0].previousTitle : pr.title;
   out[c.id] = { title, body, editedAfterReview: editedAfter, renamedAfterReview: renames.length };

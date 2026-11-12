@@ -110,7 +110,8 @@ function score(over: Partial<CaseScore>): CaseScore {
   return {
     caseId: 'pr1', kind: 'positive', known: 0, knownDefects: 0, inTop: 0, shown: 0, raised: 0, defectsInTop: 0,
     defectsShown: 0, partialInTop: 0, asQuestion: 0, sharedMatches: 0, lostAt: { ...ZERO_LOST }, crossFileKnown: 0, crossFileInTop: 0,
-    findingsShown: 0, blockOrFixShown: 0, ms: 0, msSummed: false, inputTokens: 0, outputTokens: 0, agentRuns: 0, verdict: 'approve',
+    findingsShown: 0, blockOrFixShown: 0, ms: 0, msSummed: false, inputTokens: 0, outputTokens: 0, agentRuns: 0,
+    unfinishedTokens: 0, judgeTokens: 0, usageAbout: false, verdict: 'approve',
     ...over,
   };
 }
@@ -238,7 +239,9 @@ describe('summarise', () => {
     const s = summarise('r', 'm', 'standard', scores, cases);
     expect(s.incompleteCases).toEqual(['a', 'c']);
     // With no spans recorded for the run, the total time is the sum of cases, and says so.
-    expect(s.totals).toEqual({ ms: 150, msSummed: true, inputTokens: 15, outputTokens: 3, agentRuns: 3 });
+    expect(s.totals).toEqual({
+      ms: 150, msSummed: true, inputTokens: 15, outputTokens: 3, agentRuns: 3, unfinishedTokens: 0, judgeTokens: 0, usageAbout: false,
+    });
     expect(s.spans).toEqual([]);
   });
 

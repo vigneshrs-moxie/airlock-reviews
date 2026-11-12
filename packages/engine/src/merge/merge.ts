@@ -215,12 +215,20 @@ export function plainCandidate(c: Candidate & Partial<{ anchor: Anchor; checked:
   return candidate;
 }
 
+/** The role of a merged duplicate's own place among the keeper's connected places. */
+export const ALSO_RAISED_HERE = 'also raised here';
+
+/** A duplicate's own place, as a connected place of the keeper: its file, its first anchored line and its quote. */
+const ownPlace = (c: AnchoredCandidate): Place => ({ path: c.path, line: c.anchor.startLine, role: ALSO_RAISED_HERE, quote: c.quote });
+
 /**
- * The keeper with its duplicates folded in: their connected places (each place once, never its own place), the sources
- * that also raised it and their fingerprints (each once, never its own). A list stays absent when it would be empty.
+ * The keeper with its duplicates folded in: each duplicate's own place (role `also raised here`) and its connected places
+ * (each place once, never the keeper's own place), so a later check of the keeper's places still sees the lines the
+ * duplicates were on; the sources that also raised it and their fingerprints (each once, never its own). A list stays
+ * absent when it would be empty.
  */
 export function absorb<T extends AnchoredCandidate>(keeper: T, others: AnchoredCandidate[]): T {
-  const connected = uniqueBy<Place>([...keeper.connected, ...others.flatMap((o) => o.connected)],
+  const connected = uniqueBy<Place>([...keeper.connected, ...others.flatMap((o) => [ownPlace(o), ...o.connected])],
     (p) => placeKey(p.path, p.quote), new Set([placeKey(keeper.path, keeper.quote)]));
   const sources = uniqueBy([...(keeper.alsoRaisedBy ?? []), ...others.flatMap((o) => [o.source, ...(o.alsoRaisedBy ?? [])])],
     sourceKey, new Set([sourceKey(keeper.source)]));
@@ -288,7 +296,8 @@ export async function mergeSameProblems(runner: AgentRunner, ctx: LensContext, i
   if (clusters.length === 0) return out;
 
   const instructions = instructionsFor(await loadTemplate('merge'), ctx.packs, ctx.missingHelpers);
-  const ask = (asked: Cluster[]) => sendRequest<MergeOutput>(runner, ctx, {
+  // The second ask is itself the retry, so the runner does not retry it again.
+  const ask = (asked: Cluster[], again: boolean) => sendRequest<MergeOutput>(runner, ctx, {
     role: 'merge',
     instructions,
     material: asked.map(clusterBlock).join('\n\n'),
@@ -297,12 +306,13 @@ export async function mergeSameProblems(runner: AgentRunner, ctx: LensContext, i
     extraDirs: [ctx.baseDir],
     model: ctx.models.main,
     effort: 'low',
+    ...(again ? { noRetry: true } : {}),
   });
 
   const accepted: Accepted[] = [];
   let missing = clusters;
   for (let attempt = 0; attempt < 2 && missing.length > 0; attempt++) {
-    const result = await ask(missing);
+    const result = await ask(missing, attempt > 0);
     out.usage.push(result.usage);
     if (!result.ok) {
       if (result.kind === 'invalid-output') continue;

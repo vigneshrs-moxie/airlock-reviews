@@ -263,12 +263,12 @@ describe('createSdkRunner limits and failure kinds', () => {
     const minutes = (role: string) => roleLimits(role).timeoutMs / 60_000;
     expect(['lens:core/a', 'sweep:k1#1', 'challenge:c_1', 'mapper', 'seams', 'brief', 'select', 'judge', 'other'].map(minutes))
       .toEqual([10, 10, 10, 15, 15, 5, 5, 5, 10]);
-    expect(['select', 'judge', 'challenge:c_1', 'brief', 'mapper', 'lens:core/a', 'seams'].map((r) => roleLimits(r).maxTurns))
-      .toEqual([6, 6, 20, 25, 25, 40, 40]);
+    expect(['select', 'merge', 'judge', 'challenge:c_1', 'brief', 'mapper', 'lens:core/a', 'seams'].map((r) => roleLimits(r).maxTurns))
+      .toEqual([15, 10, 6, 20, 25, 25, 40, 40]);
   });
 
   it('sends the role\'s turn limit unless the request names one', async () => {
-    expect((await optionsFor(req({ role: 'select' }))).options.maxTurns).toBe(6);
+    expect((await optionsFor(req({ role: 'select' }))).options.maxTurns).toBe(15);
     expect((await optionsFor(req({ role: 'challenge:c_1' }))).options.maxTurns).toBe(20);
     expect((await optionsFor(req({ role: 'select', maxTurns: 9 }))).options.maxTurns).toBe(9);
   });

@@ -7,8 +7,9 @@ import type { AgentRequest, EngineDeps, ReviewRequest } from '@airlock/engine';
 import { ReviewDocumentSchema } from '@airlock/shared';
 import type { ReviewDocument } from '@airlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { loadRun, renderReport, runReplay } from '../src/index.js';
-import type { CaseEvent, ReplayCase, ReplayDeps, ReplayOptions } from '../src/index.js';
+import type { CaseEvent, ReplayCase, ReplayDeps, ReplayOptions, RunSummary } from '../src/index.js';
 import { doc, finding, problem, replayCase } from './fixtures.js';
 
 const MODEL = 'claude-opus-5-5';
@@ -210,7 +211,7 @@ describe('runReplay', () => {
     for (const c of cases()) {
       const saved = ReviewDocumentSchema.parse(await readJson(join(runDir, c.id, 'review.json')));
       expect(saved).toEqual(reviewFor(review.requests.find((r) => r.number === c.pr)!));
-      expect((await readdir(join(runDir, c.id))).sort()).toEqual(['matches.json', 'review.json']);
+      expect((await readdir(join(runDir, c.id))).sort()).toEqual(['matches.json', 'review.json', 'spent.json']);
     }
     expect(await readJson(join(runDir, 'pr1', 'matches.json'))).toEqual([
       { knownId: 'K1', where: 'top', itemId: 'f1', partial: false, reason: 'Same cause.', others: [] },
@@ -304,7 +305,7 @@ describe('runReplay', () => {
     expect(summary.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 0, raised: 0, findingsShown: 1, verdict: 'incomplete' });
     expect(Object.values(summary.cases[0]!.lostAt).every((n) => n === 0)).toBe(true);
     expect(summary.incompleteCases).toEqual(['pr1']);
-    expect((await readdir(caseDir('pr1'))).sort()).toEqual(['error.txt', 'review.json']);
+    expect((await readdir(caseDir('pr1'))).sort()).toEqual(['error.txt', 'review.json', 'spent.json']);
     // The saved review stays the real one.
     expect(ReviewDocumentSchema.parse(await readJson(join(caseDir('pr1'), 'review.json'))).verdict.label).toBe('approve');
     const error = await readFile(join(caseDir('pr1'), 'error.txt'), 'utf8');
@@ -320,7 +321,7 @@ describe('runReplay', () => {
     expect(working.calls).toHaveLength(1);
     expect(resumed.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 1, verdict: 'approve' });
     expect(resumed.incompleteCases).toEqual([]);
-    expect((await readdir(caseDir('pr1'))).sort()).toEqual(['matches.json', 'review.json']);
+    expect((await readdir(caseDir('pr1'))).sort()).toEqual(['matches.json', 'review.json', 'spent.json']);
   });
 
   it('refuses a run folder made with another model, depth or kit version', async () => {
@@ -439,9 +440,14 @@ describe('runReplay', () => {
     expect(review.requests).toHaveLength(0);
     expect(runner.calls).toHaveLength(1); // pr2 is judged again, and only that
     expect(new Set(events.map((e) => e.caseId))).toEqual(new Set(['pr2']));
-    // The same summary, apart from the second call's own span.
+    // The same summary, apart from the second call's own span and its judge request, which pr2 spent.
     expect(second.spans).toHaveLength(2);
-    expect({ ...second, spans: first.spans }).toEqual(first);
+    expect(second.cases[1]!.judgeTokens).toBe(first.cases[1]!.judgeTokens + 15);
+    const withoutSpending = (s: RunSummary) => ({
+      ...s, spans: [], totals: { ...s.totals, inputTokens: 0, outputTokens: 0, agentRuns: 0, judgeTokens: 0 },
+      cases: s.cases.map((x) => ({ ...x, inputTokens: 0, outputTokens: 0, agentRuns: 0, judgeTokens: 0 })),
+    });
+    expect(withoutSpending(second)).toEqual(withoutSpending(first));
     expect(await readJson(join(outDir, 'run-a', 'summary.json'))).toEqual(second);
     expect(await readJson(join(outDir, 'run-a', 'run.json'))).toMatchObject({ caseIds: ['pr1', 'pr2', 'pr3'] });
     const loaded = await loadRun(join(outDir, 'run-a'), cases());
@@ -544,7 +550,7 @@ describe('runReplay', () => {
       const { events, onCase } = recorder();
       const summary = await runReplay(options(), deps(fakeReview((req) => (req.number === 1 ? incomplete(req) : reviewFor(req))), runner), onCase);
       expect(runner.calls.filter((r) => isFor(r, 'K1'))).toHaveLength(0);
-      expect((await readdir(caseDir('pr1'))).sort()).toEqual(['review.json']);
+      expect((await readdir(caseDir('pr1'))).sort()).toEqual(['review.json', 'spent.json']);
       expect(summary.incompleteCases).toEqual(['pr1']);
       expect(summary.cases[0]).toMatchObject({ caseId: 'pr1', inTop: 0, raised: 0, findingsShown: 1, verdict: 'incomplete' });
       expect(events.filter((e) => e.caseId === 'pr1').map((e) => [e.status, e.message])).toEqual([
@@ -720,7 +726,7 @@ describe('runReplay', () => {
       expect(summary.stopped).toEqual({ reason: 'usage-limit', caseId: 'pr2', notStarted: ['pr3', 'pr4', 'pr5'] });
       expect(summary.incompleteCases).toEqual(['pr2', 'pr3', 'pr4', 'pr5']);
       // The saved review is kept; only the judge runs again next time.
-      expect((await readdir(caseDir('pr2'))).sort()).toEqual(['error.txt', 'review.json']);
+      expect((await readdir(caseDir('pr2'))).sort()).toEqual(['error.txt', 'review.json', 'spent.json']);
     });
 
     it('a judge result marked as a usage limit stops the run', async () => {
@@ -824,7 +830,7 @@ describe('runReplay', () => {
       const summary = await runReplay(options({ cases: four, parallelCases: 1 }), { ...deps(review, runner), signal: controller.signal });
       expect(review.requests.map((r) => r.number)).toEqual([1]);
       expect(runner.calls).toHaveLength(0);
-      expect((await readdir(caseDir('pr1'))).sort()).toEqual(['review.json']);
+      expect((await readdir(caseDir('pr1'))).sort()).toEqual(['review.json', 'spent.json']);
       expect(summary.incompleteCases).toEqual(['pr1', 'pr2', 'pr3', 'pr4']);
       expect(summary.stopped).toEqual({ reason: 'exit-signal' });
 
@@ -842,6 +848,69 @@ describe('runReplay', () => {
       expect(runner.calls).toHaveLength(4);
       expect(runner.calls.every((r) => r.signal === controller.signal)).toBe(true);
       expect(summary.stopped).toBeUndefined();
+    });
+  });
+
+  describe('everything spent is counted', () => {
+    const one = (): ReplayCase[] => [cases()[0]!];
+    const incomplete = (req: ReviewRequest): ReviewDocument => ({
+      ...reviewFor(req),
+      verdict: { label: 'incomplete', sentence: 'The review did not finish.', counts: { block: 0, fix: 0, ask: 0, note: 1 } },
+      stageErrors: [{ stage: 'lenses', cohortId: 'c1', message: 'The lens failed.' }],
+    });
+    // reviewFor's document records 300 tokens in, 40 out and 2 agent runs; a fake runner's request spends 10 in and 5 out.
+    const review = { step: 'review', inputTokens: 300, outputTokens: 40, agentRuns: 2 };
+    const judge = { step: 'judge', finished: true, inputTokens: 10, outputTokens: 5, agentRuns: 1 };
+
+    it('an incomplete review replaced by a finished one counts both, and the judge\'s request too', async () => {
+      await runReplay(options({ cases: one() }), deps(fakeReview(incomplete)));
+      expect(await readJson(join(caseDir('pr1'), 'spent.json'))).toEqual([{ ...review, finished: false }]);
+
+      const summary = await runReplay(options({ cases: one() }), deps(fakeReview()));
+      expect(await readJson(join(caseDir('pr1'), 'spent.json'))).toEqual([{ ...review, finished: false }, { ...review, finished: true }, judge]);
+      expect(summary.cases[0]).toMatchObject({ inputTokens: 610, outputTokens: 85, agentRuns: 5, unfinishedTokens: 340, judgeTokens: 15, usageAbout: false });
+      expect(summary.totals).toMatchObject({ inputTokens: 610, outputTokens: 85, agentRuns: 5, unfinishedTokens: 340, judgeTokens: 15, usageAbout: false });
+      expect((await loadRun(join(outDir, 'run-a'), one())).summary).toEqual(summary);
+      expect(await readFile(join(outDir, 'run-a', 'report.md'), 'utf8')).toContain(
+        'Of the 695 tokens spent, 340 (49%) went on reviews that did not finish and 15 (2%) on the judge.',
+      );
+    });
+
+    it('a review that fails counts what its requests spent before it failed, and one that spent nothing adds no entry', async () => {
+      const runner = createFakeRunner((req) => (req.role === 'lens' ? {} : judgeAnswer()));
+      const spending = fakeReview(async (req, engine) => {
+        await engine.runner.run({ role: 'lens', instructions: 'x', material: 'x', schema: z.object({}), cwd: tmpdir(), model: MODEL, effort: 'high' });
+        throw new Error('clone failed');
+      });
+      const summary = await runReplay(options({ cases: one() }), deps(spending, runner));
+      expect(await readJson(join(caseDir('pr1'), 'spent.json'))).toEqual([{ step: 'review', finished: false, inputTokens: 10, outputTokens: 5, agentRuns: 1 }]);
+      expect(summary.cases[0]).toMatchObject({ inputTokens: 10, outputTokens: 5, agentRuns: 1, unfinishedTokens: 15, judgeTokens: 0 });
+
+      await runReplay(options({ cases: [cases()[1]!], runId: 'run-b' }), deps(fakeReview(() => { throw new Error('clone failed'); })));
+      expect((await readdir(caseDir('pr2', 'run-b'))).sort()).toEqual(['error.txt']);
+    });
+
+    it('a spent.json that cannot be read is left as it is, and the case is still reviewed and judged, its counts marked about', async () => {
+      await runReplay(options({ cases: one() }), deps(fakeReview(() => { throw new Error('clone failed'); })));
+      await writeFile(join(caseDir('pr1'), 'spent.json'), '{ not json');
+      const summary = await runReplay(options({ cases: one() }), deps(fakeReview()));
+      expect(await readFile(join(caseDir('pr1'), 'spent.json'), 'utf8')).toBe('{ not json');
+      expect(summary.incompleteCases).toEqual([]);
+      expect(summary.cases[0]).toMatchObject({ inTop: 1, inputTokens: 300, usageAbout: true });
+    });
+
+    it('a folder without spent.json counts the kept review\'s own usage, marked about', async () => {
+      await runReplay(options(), deps(fakeReview()));
+      await rm(join(caseDir('pr1'), 'spent.json'));
+      const { summary, details } = await loadRun(join(outDir, 'run-a'), cases());
+      expect(summary.cases[0]).toMatchObject({ inputTokens: 300, outputTokens: 40, agentRuns: 2, usageAbout: true });
+      expect(summary.cases[1]).toMatchObject({ inputTokens: 310, outputTokens: 45, agentRuns: 3, usageAbout: false });
+      expect(summary.totals).toMatchObject({ inputTokens: 910, outputTokens: 125, usageAbout: true });
+      const time = renderReport(summary, cases(), details).split('## Time and tokens')[1]!;
+      expect(time).toMatch(/\| #1 Add totals \| [^|]+ \| about 300 \| about 40 \| about 2 \|/);
+      expect(time).toMatch(/\| #2 Add totals \| [^|]+ \| 310 \| 45 \| 3 \|/);
+      expect(time).toMatch(/\| Total \| [^|]+ \| about 910 \| about 125 \| about 7 \|/);
+      expect(time).toContain('A token count marked about is only the kept review\'s own: earlier attempts and the judge are not in it.');
     });
   });
 

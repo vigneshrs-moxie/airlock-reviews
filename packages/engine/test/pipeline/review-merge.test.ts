@@ -111,6 +111,53 @@ describe('runReview merge stage', () => {
     });
   });
 
+  describe('a keeper challenged as pre-existing', () => {
+    const PAY = "import { formatMoney } from './money';\n\nexport function pay(n: number): string {\n  return formatMoney(n);\n}\n";
+    const ROUNDING = rawCandidate({ severity: 'block', title: 'formatMoney rounds half down', path: 'src/money.ts', quote: 'return n.toFixed(2);', lineHint: 2 });
+    /** The challenger says pre-existing, quoting the finding's own line on the base. */
+    const preExisting = (req: AgentRequest<unknown>) => {
+      const finding = block(req.material, 'finding') ?? req.material;
+      const [path, quote] = /^Where: src\/pay\.ts/m.test(finding) ? ['src/pay.ts', 'return formatMoney(n);'] : ['src/money.ts', 'return n.toFixed(2);'];
+      return {
+        outcome: 'drop', ground: 'pre-existing', explanation: 'This code was already there.', refutation: { path, quote, where: 'base' },
+        newSeverity: null, checked: 'Read the base.',
+      };
+    };
+
+    it('keeps a duplicate on a line this pull request added, as a second place of the keeper', async () => {
+      const onAdded = rawCandidate({
+        severity: 'fix', title: 'The new pay screen shows a wrongly rounded amount', path: 'src/pay.ts', quote: 'return formatMoney(n);', lineHint: 4,
+        connected: [{ path: 'src/money.ts', quote: 'return n.toFixed(2);', role: 'the rounding is done here' }],
+      });
+      const lens = (req: AgentRequest<unknown>) => (req.role === 'lens:core/correctness' ? { candidates: [ROUNDING], questions: [] }
+        : req.role === 'lens:raj-standard/boundary' ? { candidates: [onAdded], questions: [] } : none);
+      const s = await h.scenario(undefined, { 'src/pay.ts': PAY });
+      const { doc, calls } = await h.review({ s, script: scenarioScript({ 'lens:': lens, 'sweep:': () => none, merge: allOneSet, 'challenge:': preExisting }) });
+      expect(calls.filter((c) => c.role === 'merge')).toHaveLength(1);
+      expect(doc.dropped.filter((d) => d.stage === 'merge').map((d) => d.candidate.title)).toEqual(['The new pay screen shows a wrongly rounded amount']);
+      expect(doc.findings.map((f) => [f.title, f.path])).toEqual([['formatMoney rounds half down', 'src/money.ts']]);
+      expect(doc.findings[0]!.connected).toContainEqual({ path: 'src/pay.ts', line: 4, role: 'also raised here', quote: '  return formatMoney(n);' });
+      expect(['approve', 'ready-for-pr2']).not.toContain(doc.verdict.label);
+    });
+
+    it('still drops a keeper whose merged duplicates are all on unchanged lines', async () => {
+      const header = rawCandidate({
+        severity: 'fix', title: 'formatMoney takes any number', path: 'src/money.ts', quote: 'export function formatMoney(n: number): string {', lineHint: 1,
+      });
+      const lens = (req: AgentRequest<unknown>) => (req.role === 'lens:core/correctness' ? { candidates: [ROUNDING], questions: [] }
+        : req.role === 'lens:raj-standard/boundary' ? { candidates: [header], questions: [] } : none);
+      const s = await h.scenario(undefined, { 'src/pay.ts': PAY });
+      const { doc } = await h.review({ s, script: scenarioScript({ 'lens:': lens, 'sweep:': () => none, merge: allOneSet, 'challenge:': preExisting }) });
+      expect(doc.findings).toEqual([]);
+      const dropped = doc.dropped.find((d) => d.stage === 'challenge')!;
+      expect(dropped.candidate.title).toBe('formatMoney rounds half down');
+      expect(dropped.candidate.connected).toContainEqual({
+        path: 'src/money.ts', line: 1, role: 'also raised here', quote: 'export function formatMoney(n: number): string {',
+      });
+      expect(dropped.reason).toMatch(/ \(1 merged duplicate went with it\)$/);
+    });
+  });
+
   it('makes no merge request at quick depth', async () => {
     const quick = await h.review({ req: { packsDir: SIX_LENSES_DIR, depth: 'quick' }, script: scenarioScript({ 'lens:': sameLine, merge: allOneSet }) });
     expect(quick.calls.filter((c) => c.role === 'merge')).toHaveLength(0);
