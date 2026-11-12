@@ -72,7 +72,7 @@ Airlock writes to GitHub only when you press the post button described next, and
 ## Posting comments
 
 1. Open a finding and press **Post comment**. Or tick several findings and press **Post selected (n)** above the list. One post holds at most 30 comments.
-2. The **Post to GitHub** sheet shows each comment, the summary, and "The review's own text, as it will be posted:". It says "This is the exact text. Nothing has been sent yet."
+2. The **Post to GitHub** sheet shows each comment, the summary, and "The review's own text, as it will be posted:". It says "This is the exact text. Nothing has been sent yet." It also names the GitHub account the comments will be posted as ("Posts as …"): the account `gh` is signed in as when the preview is made.
 3. You can edit any comment and the summary. A comment GitHub cannot place on a line goes in the summary, and the sheet says why. You can also tick **Put in the summary instead**. After an edit, press **Update preview** to see the exact text again.
 4. Press **Post n comments to GitHub**. Nothing is posted until you press it.
 
@@ -80,7 +80,7 @@ Airlock posts them as one review with the **Comment** action, as the sheet says,
 
 In the text Airlock writes, a name gets a space after the `@` (`@ carol`), so GitHub notifies no one. If a comment or the summary you typed names someone, the sheet warns you with "GitHub notifies them unless the name is inside code."
 
-Airlock refuses to post, and says why, when the pull request is closed or merged, or has new commits since the review. After new commits, review the push first (see the next section), then post.
+Airlock refuses to post, and says why, when the pull request is closed or merged, or has new commits since the review. After new commits, review the push first (see the next section), then post. It also refuses, and sends nothing, when `gh` is signed in as another account than the one the preview named; open the preview again to post as the account `gh` is signed in as now.
 
 A post can take up to about two minutes when another post to the same pull request is in flight (from a second panel, for example): Airlock sends one at a time. The sheet then says "Waiting to hear whether GitHub accepted the comments…", and when the wait is over it shows what Airlock's record says.
 
@@ -100,7 +100,7 @@ What to do:
 
 1. Press **Open the pull request** and look for the comments.
 2. If they are there, leave the mark as it is.
-3. If they are not there, press **It was not posted**, in the sheet or on the finding. The panel asks "Forget this record? Only do this after looking at the pull request." Press **It was not posted** again, or **Keep** to leave it.
+3. If they are not there, press **It was not posted**, in the sheet or on the finding. The panel asks "Forget this record? Only do this after looking at the pull request." Press **It was not posted** again, or **Keep** to leave it. Nothing is forgotten before Airlock has asked GitHub, as the next paragraph says.
 
 Airlock then asks GitHub first. If GitHub has the review after all, the panel says "GitHub has this review: it was posted. Nothing was forgotten." and the findings show **Posted**. If GitHub cannot be asked, it says "Airlock could not ask GitHub whether this review exists, so the record was kept." Otherwise the record is forgotten and you can post those findings again.
 

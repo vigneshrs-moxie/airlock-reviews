@@ -44,6 +44,7 @@ So a refusal by GitHub is: exit code 1, a JSON body on standard output with `mes
 
 - Before a post, two reads run side by side within the same ten seconds: the pull request (`gh api repos/<repo>/pulls/<number>`) and the account `gh` is signed in as (`gh api user --jq .login`). A post as another account than the one the preview named is refused, and nothing is sent.
 - A post record keeps the account it was posted as and the SHA-256 of the review's text, never the text.
+- Before the post carries the pairing token, the panel has the service prove it holds that token (unless it did less than a second before): the proof is the HMAC-SHA256 of `airlock-hello:<port>:<nonce>` and names the port, so a proof given on another port does not count and the token is not sent.
 - "It was not posted" on a record whose outcome is unknown first lists the pull request's reviews (`gh api repos/<repo>/pulls/<number>/reviews --paginate`, which prints one JSON array per page, one after another). A review by that account, at that commit, whose text has that hash, is the post: the record becomes posted and is kept. When the list cannot be read, the record is kept too.
 
 ## Not confirmed (needs a real post, which the build does not make)
