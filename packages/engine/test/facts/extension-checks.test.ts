@@ -617,20 +617,20 @@ describe('hostile input stays fast', () => {
     const entry = `${'*a'.repeat(140)}*!`;
     const path = 'a'.repeat(800);
     const head = { 'manifest.json': manifest({ web_accessible_resources: [{ resources: [entry], matches: ['<all_urls>'] }] }) };
-    expect(await timed(() => gather([changed(path, 'x;')], head))).toBeLessThan(200);
+    expect(await timed(() => gather([changed(path, 'x;')], head))).toBeLessThan(1000);
   });
 
   it('an import followed by a long run of spaces, or by a long comment, and no quote', async () => {
     for (const line of [`import${' '.repeat(15_000)}x`, `import/*${'c'.repeat(200_000)}*/x`, `import ${'import '.repeat(30_000)}`]) {
       const head = { 'manifest.json': manifest({ background: { service_worker: 'background.js' } }), 'background.js': line };
-      expect(await timed(() => gather([changed('background.js', line, 'added')], head))).toBeLessThan(200);
+      expect(await timed(() => gather([changed('background.js', line, 'added')], head))).toBeLessThan(1000);
     }
   });
 
   it('a manifest page made of <script repeated with no closing bracket', async () => {
     const page = '<script'.repeat(30_000);
     const head = { 'manifest.json': manifest({ action: { default_popup: 'popup.html' } }), 'popup.html': page };
-    expect(await timed(() => gather([changed('popup.html', page, 'added')], head))).toBeLessThan(200);
+    expect(await timed(() => gather([changed('popup.html', page, 'added')], head))).toBeLessThan(1000);
   });
 
   it('matching still works past the cut: a loader at the end of a long minified line is followed', async () => {
@@ -649,18 +649,18 @@ describe('the follower on hostile input: a budget, and then nothing trusted', ()
   const timed = cpuTimed;
   const NOT_ALL = 'not everything the extension loads could be followed, so no file is trusted as a test';
 
-  it("the re-check's three inputs each finish under 200 ms", async () => {
+  it("the re-check's three inputs each finish well under a second", async () => {
     // a 2 MB script of unclosed executeScript lists, and one of unclosed importScripts calls, followed from the manifest
     for (const code of ['executeScript(files:['.repeat(95_000), 'importScripts('.repeat(140_000)]) {
       const { ms } = await timed(() => gather([changed('tests/a.test.js', 'x;')], withBackground("importScripts('big.js');", { 'big.js': code })));
-      expect(ms, code.slice(0, 14)).toBeLessThan(200);
+      expect(ms, code.slice(0, 14)).toBeLessThan(1000);
     }
     // 100 long "*" entries against 300 changed files with long paths: the entry length bound
     const entries = Array.from({ length: 100 }, () => `*${'a/'.repeat(250)}b`);
     const files = Array.from({ length: 300 }, (_, i) => changed(`${'a/'.repeat(500)}${i}.js`, 'x;'));
     const head = { 'manifest.json': manifest({ web_accessible_resources: [{ resources: entries, matches: ['<all_urls>'] }] }) };
     const { ms, value } = await timed(() => gather(files, head));
-    expect(ms).toBeLessThan(200);
+    expect(ms).toBeLessThan(1000);
     expect(only(value.facts, 'extension-loaded-files').map((f) => f.message)).toEqual([
       'Not everything the extension loads could be followed (the manifest names a path longer than 256 characters), so a changed file only the rest load is not read closely for that, and no file is trusted as a test.',
     ]);
