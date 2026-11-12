@@ -4,6 +4,7 @@ import type { AgentRequest } from '../../src/agent/runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
 import { renderReview } from '../../src/render/terminal.js';
 import { saveReview } from '../../src/store/store.js';
+import type { Exec } from '../../src/util/exec.js';
 import { commitFiles } from '../helpers/change-repo.js';
 import { rawCandidate } from '../helpers/lens-context.js';
 import {
@@ -240,6 +241,64 @@ describe('re-review after a push', () => {
     expect(doc.previous).toEqual({ reviewId: unfinished.id, headSha: s.headSha });
     expect(doc.notes).toContain('The last review did not finish, so everything was reviewed again.');
     expect(Object.fromEntries(statuses(doc))).toEqual({ [GOOD.title as string]: 'still-open', [RULED.title as string]: 'still-open' });
+  }, SLOW);
+
+  it('reviews everything again when the pull request was retargeted to another base branch, and still carries its findings', async () => {
+    const { s, first } = await firstReview();
+    // The earlier review was made when the pull request targeted develop; GitHub now says main.
+    const againstDevelop: ReviewDocument = { ...first, id: 'r_dddddddddd', pr: { ...first.pr, baseRef: 'develop' } };
+    await saveReview(againstDevelop);
+    const head = await push(s, { 'src/jobs/pause.ts': 'export function pauseJob(): void { audit(); }\n' });
+    const { doc } = await rereview(s, againstDevelop.id, head, pushScript({
+      paths: ['CLAUDE.md', 'src/billing.ts', 'src/jobs/pause.ts', 'src/money.ts', 'test/money.test.ts'],
+    }));
+    expect(doc.range).toEqual({ baseSha: s.baseSha, headSha: head, kind: 'full' });
+    expect(doc.previous).toEqual({ reviewId: againstDevelop.id, headSha: s.headSha });
+    expect(doc.notes).toContain('The pull request now targets main; the last review was against develop, so everything was reviewed again.');
+    expect(Object.fromEntries(statuses(doc))).toEqual({ [GOOD.title as string]: 'still-open', [RULED.title as string]: 'still-open' });
+  }, SLOW);
+
+  it('reviews everything again when the last review covered a range given by hand', async () => {
+    const { s, first } = await firstReview();
+    const given: ReviewDocument = { ...first, id: 'r_eeeeeeeeee', range: { ...first.range, kind: 'explicit' } };
+    await saveReview(given);
+    const head = await push(s, { 'src/jobs/pause.ts': 'export function pauseJob(): void { audit(); }\n' });
+    const { doc } = await rereview(s, given.id, head, pushScript({
+      paths: ['CLAUDE.md', 'src/billing.ts', 'src/jobs/pause.ts', 'src/money.ts', 'test/money.test.ts'],
+    }));
+    expect(doc.range).toEqual({ baseSha: s.baseSha, headSha: head, kind: 'full' });
+    expect(doc.notes).toContain('The last review covered a range given by hand, so everything was reviewed again.');
+    expect(Object.fromEntries(statuses(doc))).toEqual({ [GOOD.title as string]: 'still-open', [RULED.title as string]: 'still-open' });
+  }, SLOW);
+
+  it('a push re-review gives the requests the base branch\'s rule files, never the ones the pull request\'s own earlier commit wrote', async () => {
+    // The pull request's first commit changed CLAUDE.md (HEAD_RULES_MARKER); the base branch has BASE_RULES_MARKER.
+    const { s, first } = await firstReview();
+    const head = await push(s, { 'src/jobs/pause.ts': 'export function pauseJob(): void { audit(); }\n' });
+    const { doc, calls } = await rereview(s, first.id, head, pushScript({ paths: ['src/jobs/pause.ts'], correctness: [NEW_ONE] }));
+    expect(doc.range.kind).toBe('rereview');
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) expect(`${c.instructions}\n${c.material}`).not.toContain('HEAD_RULES_MARKER');
+    const ruled = calls.filter((c) => c.material.includes('<material label="repository rule file CLAUDE.md"'));
+    expect(ruled.map((c) => c.role)).toEqual(expect.arrayContaining(['lens:core/correctness', `challenge:${doc.findings.find((f) => f.title === NEW_ONE.title)!.id}`]));
+    for (const c of ruled) expect(c.material).toContain('Base rules BASE_RULES_MARKER');
+  }, SLOW);
+
+  it('a push re-review whose pull request base cannot be found shows no rule files and says so', async () => {
+    const { s, first } = await firstReview();
+    const head = await push(s, { 'src/jobs/pause.ts': 'export function pauseJob(): void { audit(); }\n' });
+    const gh = fakeGh({ baseSha: s.baseSha, headSha: head });
+    // The merge base of the pull request cannot be found; ancestry questions still get answers.
+    const exec: Exec = async (cmd, args, opts) => (cmd === 'git' && args.includes('merge-base') && !args.includes('--is-ancestor')
+      ? { stdout: '', stderr: 'fatal: no merge base', code: 1 }
+      : gh(cmd, args, opts));
+    const { doc, calls } = await review({
+      s, req: { since: { reviewId: first.id } }, exec, script: pushScript({ paths: ['src/jobs/pause.ts'], correctness: [NEW_ONE] }),
+    });
+    expect(doc.range.kind).toBe('rereview');
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) expect(c.material).not.toContain('<material label="repository rule file');
+    expect(doc.limits).toContain('The repository\'s rule files were not shown: Airlock could not find the base of this pull request.');
   }, SLOW);
 
   it('a push that changes no files carries the earlier findings and says so, without an empty-diff error', async () => {

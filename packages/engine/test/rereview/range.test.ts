@@ -97,10 +97,12 @@ describe('planRereview', () => {
     await r.git('merge', '--no-ff', '--no-edit', 'main');
     const head = await r.git('rev-parse', 'HEAD');
     await r.git('branch', '-D', 'main');
-    expect(await planRereview(realExec, mirrorOf(r), previous(earlier), prAt(head, moved, { baseRef: 'gone' })))
+    // The earlier review was against the same base branch, by name, before it was deleted.
+    const earlierGone: ReviewDocument = { ...previous(earlier), pr: { ...previous(earlier).pr, baseRef: 'gone' } };
+    expect(await planRereview(realExec, mirrorOf(r), earlierGone, prAt(head, moved, { baseRef: 'gone' })))
       .toEqual({ kind: 'base-merge', baseSha: earlier, headSha: head });
     const after = await commitFiles(r, { 'b.ts': 'three\n' }, 'after the merge');
-    expect(await planRereview(realExec, mirrorOf(r), previous(earlier), prAt(after, moved, { baseRef: 'gone' })))
+    expect(await planRereview(realExec, mirrorOf(r), earlierGone, prAt(after, moved, { baseRef: 'gone' })))
       .toEqual({ kind: 'everything', reason: 'base-merged-in' });
   });
 
@@ -158,6 +160,65 @@ describe('planRereview', () => {
       .toEqual({ kind: 'everything', reason: 'earlier-incomplete' });
   });
 
+  it('plans everything, retargeted, when the pull request now targets another base branch', async () => {
+    const r = await repo();
+    const base = await commitFiles(r, { 'a.ts': 'one\n' }, 'base');
+    await r.git('branch', 'develop');
+    await r.git('checkout', '-b', 'feature');
+    const earlier = await commitFiles(r, { 'a.ts': 'two\n' }, 'first');
+    const head = await commitFiles(r, { 'a.ts': 'three\n' }, 'second');
+    const againstDevelop: ReviewDocument = { ...previous(earlier), pr: { ...previous(earlier).pr, baseRef: 'develop' } };
+    expect(await planRereview(realExec, mirrorOf(r), againstDevelop, prAt(head, base)))
+      .toEqual({ kind: 'everything', reason: 'retargeted' });
+    // The same base branch as before is still a push.
+    expect(await planRereview(realExec, mirrorOf(r), previous(earlier), prAt(head, base)))
+      .toEqual({ kind: 'push', baseSha: earlier, headSha: head });
+  });
+
+  it('plans everything, earlier-partial, when the earlier review covered a range given by hand', async () => {
+    const r = await repo();
+    const base = await commitFiles(r, { 'a.ts': 'one\n' }, 'base');
+    await r.git('checkout', '-b', 'feature');
+    const one = await commitFiles(r, { 'a.ts': 'two\n' }, 'first');
+    const earlier = await commitFiles(r, { 'a.ts': 'three\n' }, 'second');
+    const head = await commitFiles(r, { 'a.ts': 'four\n' }, 'third');
+    const given: ReviewDocument = { ...previous(earlier), range: { baseSha: one, headSha: earlier, kind: 'explicit' } };
+    expect(await planRereview(realExec, mirrorOf(r), given, prAt(head, base)))
+      .toEqual({ kind: 'everything', reason: 'earlier-partial' });
+  });
+
+  it('plans everything, earlier-partial, when the earlier merge review covered a given range that left commits out', async () => {
+    const r = await repo();
+    const base = await commitFiles(r, { 'a.ts': 'one\n' }, 'base');
+    await r.git('checkout', '-b', 'feature');
+    const own = await commitFiles(r, { 'b.ts': 'feature\n' }, 'a commit of the pull request');
+    await r.git('checkout', 'main');
+    await commitFiles(r, { 'c.ts': 'main moved on\n' }, 'main');
+    await r.git('checkout', 'feature');
+    await r.git('merge', '--no-ff', '--no-edit', 'main');
+    const merge = await r.git('rev-parse', 'HEAD');
+    const head = await commitFiles(r, { 'b.ts': 'pushed\n' }, 'push');
+    // A given range from the pull request's own commit to the merge is a merge review, stored as sync-merge.
+    const given: ReviewDocument = { ...previous(merge), range: { baseSha: own, headSha: merge, kind: 'sync-merge' } };
+    expect(await planRereview(realExec, mirrorOf(r), given, prAt(head, base)))
+      .toEqual({ kind: 'everything', reason: 'earlier-partial' });
+  });
+
+  it('plans a push after a merge review of a pull request that was only that merge', async () => {
+    const r = await repo();
+    await commitFiles(r, { 'a.ts': 'one\n' }, 'base');
+    await r.git('checkout', '-b', 'feature');
+    await r.git('checkout', 'main');
+    const moved = await commitFiles(r, { 'c.ts': 'main moved on\n' }, 'main');
+    await r.git('checkout', 'feature');
+    await r.git('merge', '--no-ff', '--no-edit', 'main');
+    const merge = await r.git('rev-parse', 'HEAD');
+    const head = await commitFiles(r, { 'b.ts': 'pushed\n' }, 'push');
+    const whole: ReviewDocument = { ...previous(merge), range: { baseSha: moved, headSha: merge, kind: 'sync-merge' } };
+    expect(await planRereview(realExec, mirrorOf(r), whole, prAt(head, moved)))
+      .toEqual({ kind: 'push', baseSha: merge, headSha: head });
+  });
+
   it('plans everything, base-missing, when the base commit is not in the mirror, instead of failing', async () => {
     const r = await repo();
     await commitFiles(r, { 'a.ts': 'one\n' }, 'base');
@@ -169,7 +230,8 @@ describe('planRereview', () => {
     await r.git('merge', '--no-ff', '--no-edit', 'side');
     const head = await r.git('rev-parse', 'HEAD');
     // The base branch is gone and GitHub's recorded base is a commit this mirror never had.
-    expect(await planRereview(realExec, mirrorOf(r), previous(earlier), prAt(head, 'e'.repeat(40), { baseRef: 'gone' })))
+    const earlierGone: ReviewDocument = { ...previous(earlier), pr: { ...previous(earlier).pr, baseRef: 'gone' } };
+    expect(await planRereview(realExec, mirrorOf(r), earlierGone, prAt(head, 'e'.repeat(40), { baseRef: 'gone' })))
       .toEqual({ kind: 'everything', reason: 'base-missing' });
   });
 });

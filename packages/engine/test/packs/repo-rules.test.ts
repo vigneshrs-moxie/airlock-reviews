@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadRepoRules } from '../../src/packs/repo-rules.js';
+import { loadRepoRules, loadRepoRulesAt } from '../../src/packs/repo-rules.js';
 import { realExec } from '../../src/util/exec.js';
 import { makeTempRepo } from '../helpers/temp-repo.js';
 
@@ -108,6 +108,41 @@ describe('loadRepoRules', () => {
       const { rules, leftOut } = await loadRepoRules(r.dir, [], realExec);
       expect(rules).toEqual([{ path: 'CLAUDE.md', text: 'THE REAL RULES' }]);
       expect(leftOut).toEqual([]);
+    } finally {
+      await rm(r.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('loadRepoRulesAt', () => {
+  it('reads the rule files of one commit from the git folder, not of a later one, in the same order and with the same limits', async () => {
+    const r = await makeTempRepo();
+    try {
+      await r.write('CLAUDE.md', 'BASE CLAUDE');
+      await r.write('a/b/AGENTS.md', 'BASE NESTED');
+      await r.write('docs/rules.md', 'RULES THROUGH A LINK');
+      await symlink('docs/rules.md', join(r.dir, 'AGENTS.md'));
+      await symlink('../outside.md', join(r.dir, 'REVIEW.md'));
+      await r.write('src/x.ts', 'x');
+      const base = await r.commit('base');
+      await r.write('CLAUDE.md', 'LATER CLAUDE');
+      await r.write('.cursorrules', 'LATER CURSOR');
+      await r.commit('later');
+      const gitDir = join(r.dir, '.git');
+      const { rules, leftOut } = await loadRepoRulesAt(realExec, gitDir, base, ['a/b/c.ts']);
+      expect(rules).toEqual([
+        { path: 'CLAUDE.md', text: 'BASE CLAUDE' }, { path: 'AGENTS.md', text: 'RULES THROUGH A LINK' },
+        { path: 'a/b/AGENTS.md', text: 'BASE NESTED' },
+      ]);
+      expect(leftOut).toEqual([]);
+      // The size limit is the same as for a checkout.
+      await r.write('CLAUDE.md', 'x'.repeat(64_001));
+      const big = await r.commit('big');
+      const capped = await loadRepoRulesAt(realExec, gitDir, big, []);
+      expect(capped.rules.map((x) => x.path)).toEqual(['AGENTS.md', '.cursorrules']);
+      expect(capped.leftOut).toEqual([{ path: 'CLAUDE.md', reason: 'it would take the rule files past 64,000 bytes' }]);
+      // Only a full commit id is given to git.
+      await expect(loadRepoRulesAt(realExec, gitDir, '--output=x', [])).rejects.toThrow('is not a full commit id');
     } finally {
       await rm(r.dir, { recursive: true, force: true });
     }

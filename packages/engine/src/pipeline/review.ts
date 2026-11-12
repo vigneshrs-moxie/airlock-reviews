@@ -272,6 +272,10 @@ function everythingNote(plan: Extract<RereviewPlan, { kind: 'everything' }>, pre
       return `A commit pushed since the last review merges the base branch ${pr.baseRef} in, so the whole pull request was reviewed again.`;
     case 'earlier-incomplete':
       return 'The last review did not finish, so everything was reviewed again.';
+    case 'retargeted':
+      return `The pull request now targets ${pr.baseRef}; the last review was against ${previous.pr.baseRef}, so everything was reviewed again.`;
+    case 'earlier-partial':
+      return 'The last review covered a range given by hand, so everything was reviewed again.';
     case 'base-missing':
       return `The base commit of this pull request could not be found, so Airlock could not tell whether the push merges ${pr.baseRef} in, and everything was reviewed again.`;
   }
@@ -350,6 +354,9 @@ async function reviewInWorkspace(
     const p = await preparePacks(chosen.packs, {
       exec, kitDir: req.kitDir, kitSha: req.kitSha, holdout: req.holdout, baseDir: ws.baseDir, changedPaths: files.map((f) => f.path),
       baseIsMerge: merge?.kind === 'by-hand',
+      // A push re-review's base worktree is the pull request's own earlier code (or a merge git made of it), whose rule
+      // files are the author's: the rules are read from the pull request's base commit, as a first review reads them.
+      ...(push === undefined ? {} : { rulesAt: { gitDir: ws.gitDir, commit: ws.whole?.baseSha ?? null } }),
     });
     rec.error(...p.errors);
     return p;
