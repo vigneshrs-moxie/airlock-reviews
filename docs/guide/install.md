@@ -69,6 +69,15 @@ Open a pull request, press the Airlock button, choose a depth, and press **Revie
 
 Airlock writes to GitHub only when you press the post button described next, and then only comments. It never approves, never requests changes and never merges.
 
+## Notes in the diff
+
+While a review is on screen, each open finding also appears as a note on the pull request's **Files changed** page, under the line it is about. A note shows the finding's severity and title, and an **Open in Airlock** button that opens the finding in the panel. A finding you dismiss loses its note; restore it and the note comes back. After new commits, the notes of the older review are taken off the page until you review again.
+
+- Notes are private to this browser. Airlock draws them on the page itself: nothing about them is sent to the service or to GitHub, and they are never posted. Only the post button posts anything.
+- To turn them off, press **Packs** and switch off **Show notes in the diff**. Switch it on again to bring them back.
+- A line under the verdict says how many notes are on the page, for example "4 notes shown in the diff". "<n> shown, <m> waiting for their lines to load" means that m findings' lines are not on the page yet: GitHub loads files as you scroll, a file may be collapsed, or the line is in folded context or outside the diff. Each note appears when its line does; Airlock never puts a note anywhere else. At most 60 notes are shown, and the line then adds "(the first 60 findings)".
+- GitHub's newer Files changed view is not fully known to Airlock yet, so notes may not appear there. The panel then says "Notes cannot be shown on this version of GitHub's page (…). Jump to line still works.", naming the parts of the page it could not find.
+
 ## Posting comments
 
 1. Open a finding and press **Post comment**. Or tick several findings and press **Post selected (n)** above the list. One post holds at most 30 comments.
@@ -137,7 +146,7 @@ Findings you posted or dismissed keep that mark in the new review.
 Airlock picks the packs for a pull request by its repository, ignoring letter case:
 
 - **Orbit** (`Moxie-Pest-Control-Phoenix/moxie-portal` and `vigneshrs-moxie/moxie-portal-vrs`): your pack, the team's standard (downloaded from the team's review kit at review time), and Generic.
-- **The supervisors' Chrome extensions** (`scheduling-tool-suite`, `termites-tool-suite`, `moxie-click-to-dial`, `isales-audit-tool` and `TI-route-snapshot` under `Moxie-Pest-Control-Phoenix`): Extensions and Generic. Extensions downloads the tech team's extension review kit (`moxie-ext-review-kit`) at review time, as the team's standard does. If neither GitHub nor an earlier copy can supply it, the review stops before any model is asked and says so. Lines you save on these repositories go to `packs/extensions/learned/`.
+- **The supervisors' Chrome extensions** (`scheduling-tool-suite`, `termites-tool-suite`, `moxie-click-to-dial`, `isales-audit-tool` and `TI-route-snapshot` under `Moxie-Pest-Control-Phoenix`): Extensions and Generic. Extensions downloads the tech team's extension review kit (`moxie-ext-review-kit`) at review time, as the team's standard does. If neither GitHub nor an earlier copy can supply it, the review stops before any model is asked, and the panel says "Airlock could not review this pull request: The review kit could not be fetched from Moxie-Pest-Control-Phoenix/moxie-ext-review-kit and none is cached:" followed by GitHub's reason. Check that `gh` is signed in and can read that repository, then press **Retry**. When only a refresh fails, the earlier copy is used, and a question in the review says the date of that copy. Lines you save on these repositories go to `packs/extensions/learned/`, never to the team's standard or to Generic.
 - **Any other repository**: Generic only.
 
 ## What Airlock learned
@@ -149,7 +158,7 @@ To take a line out:
 1. Press **Remove** under it.
 2. The panel asks "Remove this line? The reviewer stops following it from the next review." Press **Remove** again, or **Keep** to leave it.
 
-The finding you dismissed stays dismissed. Lines of the team's own pack say "Managed by the team; not edited here." and have no Remove button. If the connection drops while a line is being removed, the panel says "Airlock got no answer from its service, so it cannot tell whether the line was removed. The list below is read again." and shows the lines as they are now.
+The finding you dismissed stays dismissed. Lines of the team's own pack say "Managed by the team; not edited here." and have no Remove button. The Extensions pack also downloads a kit, but its learned lines are yours, with Remove like any other pack's. If the connection drops while a line is being removed, the panel says "Airlock got no answer from its service, so it cannot tell whether the line was removed. The list below is read again." and shows the lines as they are now.
 
 The lines are plain text files, so you can also edit them by hand (see the end of this guide). If a line you edited no longer reads as a learned line, Airlock skips that one line and still uses the rest of the pack.
 
