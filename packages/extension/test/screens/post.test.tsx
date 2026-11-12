@@ -22,10 +22,10 @@ type Reply = PostReply extends infer R ? (R extends { ticket: number } ? Omit<R,
 function mount(findings: Finding[], opts: ReviewOptions = {}) {
   const dispatch = vi.fn<(action: UserAction) => void>();
   let shown: PanelState = reviewState(findings, opts);
-  const view = render(<PanelScreen state={shown} dispatch={dispatch} onOpenPacks={() => undefined} />);
+  const view = render(<PanelScreen state={shown} dispatch={dispatch} onOpenSettings={() => undefined} />);
   const show = (state: PanelState): void => {
     shown = state;
-    view.rerender(<PanelScreen state={state} dispatch={dispatch} onOpenPacks={() => undefined} />);
+    view.rerender(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} />);
   };
   const last = (): UserAction => {
     const call = dispatch.mock.calls.at(-1);

@@ -11,8 +11,8 @@ afterEach(cleanup);
 
 function mount(state: PanelState) {
   const dispatch = vi.fn();
-  const view = render(<PanelScreen state={state} dispatch={dispatch} onOpenPacks={() => undefined} />);
-  const flip = (next: PanelState): void => view.rerender(<PanelScreen state={next} dispatch={dispatch} onOpenPacks={() => undefined} />);
+  const view = render(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} />);
+  const flip = (next: PanelState): void => view.rerender(<PanelScreen state={next} dispatch={dispatch} onOpenSettings={() => undefined} />);
   return { dispatch, flip };
 }
 

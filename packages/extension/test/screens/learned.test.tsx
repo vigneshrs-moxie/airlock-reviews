@@ -22,7 +22,7 @@ async function show(lines: LearnedReply | Error, extra: Partial<PanelScreenProps
   const fetchLearned = vi.fn<(repo: string) => Promise<LearnedReply>>(() => (lines instanceof Error ? Promise.reject(lines) : Promise.resolve(lines)));
   const removeLearned = vi.fn<NonNullable<PanelScreenProps['removeLearned']>>().mockResolvedValue({ removed: true, note: 'Removed. It stops from the next review.' });
   const view = render(
-    <PanelScreen state={state} dispatch={() => undefined} onOpenPacks={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))}
+    <PanelScreen state={state} dispatch={() => undefined} onOpenSettings={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))}
       fetchLearned={fetchLearned} removeLearned={removeLearned} {...extra} />,
   );
   await openPacks();

@@ -13,8 +13,8 @@ const WRONG_LINE = 'Flagged "Problem 1" in src/file1.ts. Wrong because: ';
 
 function mount(findings: Finding[], opts: ReviewOptions = {}) {
   const dispatch = vi.fn();
-  const view = render(<PanelScreen state={reviewState(findings, opts)} dispatch={dispatch} onOpenPacks={() => undefined} />);
-  const rerender = (state: PanelState): void => view.rerender(<PanelScreen state={state} dispatch={dispatch} onOpenPacks={() => undefined} />);
+  const view = render(<PanelScreen state={reviewState(findings, opts)} dispatch={dispatch} onOpenSettings={() => undefined} />);
+  const rerender = (state: PanelState): void => view.rerender(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} />);
   return { ...view, dispatch, rerender };
 }
 

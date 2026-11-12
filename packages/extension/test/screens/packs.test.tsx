@@ -19,7 +19,7 @@ function show(state: PanelState, extra: Partial<PanelScreenProps> = {}) {
   const fetchStatus = vi.fn().mockResolvedValue(STATUS);
   const setDepth = vi.fn();
   const view = render(
-    <PanelScreen state={state} dispatch={dispatch} onOpenPacks={() => undefined} fetchStatus={fetchStatus}
+    <PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} fetchStatus={fetchStatus}
       defaultDepth={null} onDefaultDepth={setDepth} {...extra} />,
   );
   return { dispatch, fetchStatus, setDepth, ...view };
@@ -155,10 +155,10 @@ describe('the Ready screen and the stored default depth', () => {
     const state: PanelState = { kind: 'ready', pr: prSummary({ suggestedDepth: 'quick' }) };
     const view = show(state);
     expect(depthOf()).toBe('quick');
-    view.rerender(<PanelScreen state={state} dispatch={view.dispatch} onOpenPacks={() => undefined} defaultDepth="deep" />);
+    view.rerender(<PanelScreen state={state} dispatch={view.dispatch} onOpenSettings={() => undefined} defaultDepth="deep" />);
     expect(depthOf()).toBe('deep');
     within(document.body).getByRole('radio', { name: /^Standard/ }).click();
-    view.rerender(<PanelScreen state={state} dispatch={view.dispatch} onOpenPacks={() => undefined} defaultDepth="deep" />);
+    view.rerender(<PanelScreen state={state} dispatch={view.dispatch} onOpenSettings={() => undefined} defaultDepth="deep" />);
     expect(depthOf()).toBe('standard');
   });
 });

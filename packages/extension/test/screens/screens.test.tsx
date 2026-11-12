@@ -266,7 +266,7 @@ describe('running', () => {
       { stage: 'intake', words: 'Reading the pull request', status: 'done', detail: '' },
       { stage: 'map', words: 'Mapping the change', status: 'done', detail: '' },
     ] });
-    rerender(<PanelScreen state={next} dispatch={dispatch} onOpenPacks={() => undefined} />);
+    rerender(<PanelScreen state={next} dispatch={dispatch} onOpenSettings={() => undefined} />);
     const regions = document.querySelectorAll('[aria-live="polite"]');
     expect(regions).toHaveLength(1);
     expect(regions[0]?.textContent).toContain('Mapping the change: Done');
@@ -283,7 +283,7 @@ describe('running', () => {
   it('announces the move to a finished review through the same region', () => {
     const { rerender, dispatch } = show(running());
     const pr = prSummary();
-    rerender(<PanelScreen state={{ kind: 'review', pr, latest: latestFor(pr), stale: false }} dispatch={dispatch} onOpenPacks={() => undefined} />);
+    rerender(<PanelScreen state={{ kind: 'review', pr, latest: latestFor(pr), stale: false }} dispatch={dispatch} onOpenSettings={() => undefined} />);
     const regions = document.querySelectorAll('[aria-live="polite"]');
     expect(regions).toHaveLength(1);
     expect(regions[0]?.textContent).toContain('Review finished.');

@@ -102,10 +102,10 @@ describe('ready keeps its choices', () => {
   it('a notice re-render keeps a changed depth and a switched-off pack', () => {
     const pr = prSummary({ packs: [{ id: 'orbit', title: 'Orbit' }, { id: 'generic', title: 'Generic' }] });
     const dispatch = vi.fn();
-    const { rerender } = render(<PanelScreen state={{ kind: 'ready', pr }} dispatch={dispatch} onOpenPacks={noop} />);
+    const { rerender } = render(<PanelScreen state={{ kind: 'ready', pr }} dispatch={dispatch} onOpenSettings={noop} />);
     fireEvent.click(screen.getByRole('radio', { name: /Deep/ }));
     fireEvent.click(screen.getByRole('switch', { name: 'Orbit' }));
-    rerender(<PanelScreen state={{ kind: 'ready', pr, notice: 'Refused.' }} dispatch={dispatch} onOpenPacks={noop} />);
+    rerender(<PanelScreen state={{ kind: 'ready', pr, notice: 'Refused.' }} dispatch={dispatch} onOpenSettings={noop} />);
     expect((screen.getByRole('radio', { name: /Deep/ }) as HTMLInputElement).checked).toBe(true);
     expect((screen.getByRole('switch', { name: 'Orbit' }) as HTMLInputElement).checked).toBe(false);
   });
@@ -114,11 +114,11 @@ describe('ready keeps its choices', () => {
 describe('pairing', () => {
   it('a failed pairing shows the message and the field stays empty', () => {
     const dispatch = vi.fn();
-    const { rerender } = render(<PanelScreen state={{ kind: 'unpaired' }} dispatch={dispatch} onOpenPacks={noop} />);
+    const { rerender } = render(<PanelScreen state={{ kind: 'unpaired' }} dispatch={dispatch} onOpenSettings={noop} />);
     const field = screen.getByLabelText('Pairing token') as HTMLInputElement;
     fireEvent.change(field, { target: { value: 'wrong' } });
     fireEvent.click(screen.getByRole('button', { name: 'Pair' }));
-    rerender(<PanelScreen state={{ kind: 'unpaired', message: 'That token was refused.' }} dispatch={dispatch} onOpenPacks={noop} />);
+    rerender(<PanelScreen state={{ kind: 'unpaired', message: 'That token was refused.' }} dispatch={dispatch} onOpenSettings={noop} />);
     expect(screen.getByText('That token was refused.')).toBeTruthy();
     expect((screen.getByLabelText('Pairing token') as HTMLInputElement).value).toBe('');
   });
@@ -128,7 +128,7 @@ describe('command box', () => {
   it('says Copied for two seconds, announces it, then says Copy again', async () => {
     const timers = new FakeTimers();
     Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn().mockResolvedValue(undefined) }, configurable: true });
-    render(<PanelScreen state={{ kind: 'offline' }} dispatch={noop} onOpenPacks={noop} timers={timers} />);
+    render(<PanelScreen state={{ kind: 'offline' }} dispatch={noop} onOpenSettings={noop} timers={timers} />);
     fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
     await screen.findByRole('button', { name: 'Copied' });
     expect(timers.delays()).toContain(2000);
@@ -159,7 +159,7 @@ describe('brief block', () => {
     expect(line?.textContent).toBe('Unclear');
   });
   it('an offline state with a brief and a map shows both', () => {
-    render(<PanelScreen state={{ kind: 'offline', progress: { pr: prSummary(), brief, map, startedAt: 1 } }} dispatch={noop} onOpenPacks={noop} />);
+    render(<PanelScreen state={{ kind: 'offline', progress: { pr: prSummary(), brief, map, startedAt: 1 } }} dispatch={noop} onOpenSettings={noop} />);
     expect(screen.getByRole('heading', { name: 'What this does' })).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Read in this order' })).toBeTruthy();
   });
@@ -168,25 +168,25 @@ describe('brief block', () => {
 describe('markup-looking text from the state', () => {
   const pr = prSummary({ title: evil, packs: [{ id: 'orbit', title: evil }] });
   it('on Ready: title, pack title and notice', () => {
-    render(<PanelScreen state={{ kind: 'ready', pr, notice: js }} dispatch={noop} onOpenPacks={noop} />);
+    render(<PanelScreen state={{ kind: 'ready', pr, notice: js }} dispatch={noop} onOpenSettings={noop} />);
     expect(screen.getAllByText(evil).length).toBe(2);
     expect(screen.getByText(js)).toBeTruthy();
     noMarkup();
   });
   it('on Pair', () => {
-    render(<PanelScreen state={{ kind: 'unpaired', message: evil }} dispatch={noop} onOpenPacks={noop} />);
+    render(<PanelScreen state={{ kind: 'unpaired', message: evil }} dispatch={noop} onOpenSettings={noop} />);
     expect(screen.getByText(evil)).toBeTruthy();
     noMarkup();
   });
   it('on Problem', () => {
-    render(<PanelScreen state={{ kind: 'problem', pr, message: js }} dispatch={noop} onOpenPacks={noop} />);
+    render(<PanelScreen state={{ kind: 'problem', pr, message: js }} dispatch={noop} onOpenSettings={noop} />);
     expect(screen.getByText(js)).toBeTruthy();
     noMarkup();
   });
   it('on Offline, in the kept brief and map', () => {
     const b = { whatItDoes: [evil], claims: [{ text: js, verdict: 'unclear' as const, evidence: js }] };
     const m = { cohorts: [{ id: 'c', title: evil, summary: '', neighbours: [], inferredLinks: [], layers: [{ id: 'l', title: js, kind: 'data' as const, files: [evil], dependsOn: [], note: '' }] }], standalone: [], links: [] };
-    render(<PanelScreen state={{ kind: 'offline', progress: { pr, brief: b, map: m, startedAt: null } }} dispatch={noop} onOpenPacks={noop} />);
+    render(<PanelScreen state={{ kind: 'offline', progress: { pr, brief: b, map: m, startedAt: null } }} dispatch={noop} onOpenSettings={noop} />);
     expect(screen.getAllByText(evil).length).toBeGreaterThan(0);
     noMarkup();
   });

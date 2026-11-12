@@ -16,7 +16,7 @@ const PREVIOUS = { reviewId: 'r_0000000000', headSha: EARLIER };
 
 function review(findings: Finding[], opts: ReviewOptions = {}) {
   const dispatch = vi.fn();
-  render(<PanelScreen state={reviewState(findings, opts)} dispatch={dispatch} onOpenPacks={() => undefined} />);
+  render(<PanelScreen state={reviewState(findings, opts)} dispatch={dispatch} onOpenSettings={() => undefined} />);
   return { dispatch };
 }
 const button = (name: string | RegExp) => screen.getByRole('button', { name });

@@ -26,7 +26,7 @@ const verdictCard = () => document.querySelector<HTMLElement>('.verdict')!;
 
 function show(state: PanelState, extra: Partial<PanelScreenProps> = {}) {
   const timers = new FakeTimers();
-  const props = (more: Partial<PanelScreenProps>) => ({ state, dispatch: vi.fn(), onOpenPacks: () => undefined, timers, ...extra, ...more });
+  const props = (more: Partial<PanelScreenProps>) => ({ state, dispatch: vi.fn(), onOpenSettings: () => undefined, timers, ...extra, ...more });
   const view = render(<PanelScreen {...props({})} />);
   return { timers, again: (more: Partial<PanelScreenProps>) => view.rerender(<PanelScreen {...props(more)} />) };
 }
@@ -213,7 +213,7 @@ describe('Open in Airlock while a sheet is open', () => {
     const dispatch = vi.fn<(a: UserAction) => void>();
     let state: PanelState = reviewState([finding(1), finding(2)]);
     let asked: OpenFinding | null = null;
-    const el = () => <PanelScreen state={state} dispatch={dispatch} onOpenPacks={() => undefined} openFinding={asked} />;
+    const el = () => <PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} openFinding={asked} />;
     const view = render(el());
     return {
       dispatch,

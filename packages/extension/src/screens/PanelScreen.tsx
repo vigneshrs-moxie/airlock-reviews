@@ -25,8 +25,6 @@ export interface PanelScreenProps {
   dispatch: (action: UserAction) => void;
   /** Called when the Settings button is pressed; the Settings screen opens either way. */
   onOpenSettings?: () => void;
-  /** @deprecated The old name of `onOpenSettings`, kept so callers that pass it still build; called the same way. */
-  onOpenPacks?: () => void;
   /** For the Copy buttons' two seconds; the real clock unless a test passes its own. */
   timers?: Timers;
   /** Takes the person to a place on GitHub; without it the finding screen says jumping is not connected. */
@@ -166,7 +164,7 @@ function FinishedAnnouncer({ kind }: { kind: PanelState['kind'] }) {
 
 /** The frame and the screen for one state, with the Settings screens and the dismiss and post sheets over it. */
 export function PanelScreen({
-  state, dispatch, onOpenSettings, onOpenPacks, timers, onJump, pageReport = null, fetchStatus = unreachable, fetchLearned = unreachable,
+  state, dispatch, onOpenSettings, timers, onJump, pageReport = null, fetchStatus = unreachable, fetchLearned = unreachable,
   removeLearned = unreachable, defaultDepth = null, onDefaultDepth, depthFailed = false, notesLine = null, onReloadNotes,
   showNotes = null, onShowNotes, notesFailed = false, openFinding = null, size = FIXED_SIZE, tourSeen = null, onTourSeen,
 }: PanelScreenProps) {
@@ -244,7 +242,7 @@ export function PanelScreen({
   return (
     <Frame
       status={connectionOf(state)} settingsRef={settingsButton} {...(timers ? { timers } : {})}
-      onOpenSettings={() => { setSettingsOpen(true); onOpenSettings?.(); onOpenPacks?.(); }}
+      onOpenSettings={() => { setSettingsOpen(true); onOpenSettings?.(); }}
     >
       <FinishedAnnouncer kind={state.kind} />
       {/* Settings opens beside the panel, which stays as it was, out of sight and out of reach. */}

@@ -18,7 +18,7 @@ afterEach(() => {
 
 function show(state: PanelState, extra: Partial<PanelScreenProps> = {}) {
   const dispatch = vi.fn();
-  const view = render(<PanelScreen state={state} dispatch={dispatch} onOpenPacks={() => undefined} {...extra} />);
+  const view = render(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} {...extra} />);
   return { dispatch, ...view };
 }
 
@@ -703,7 +703,7 @@ describe('the pinned bar', () => {
     const { rerender } = show(open);
     tick('Problem 1');
     tick('Problem 2');
-    rerender(<PanelScreen state={reviewState(f, { dismissals: [dismissal(f[0]!)] })} dispatch={vi.fn()} onOpenPacks={() => undefined} />);
+    rerender(<PanelScreen state={reviewState(f, { dismissals: [dismissal(f[0]!)] })} dispatch={vi.fn()} onOpenSettings={() => undefined} />);
     fireEvent.click(button('Copy fix prompt (1)'));
     const text = writeText.mock.calls[0]![0] as string;
     expect(text).toBe(fixPrompt(open.latest.document, [f[1]!]));
@@ -869,7 +869,7 @@ describe('dismissing the open finding', () => {
     const { rerender } = show(reviewState(f));
     openRow();
     expect(heading('Problem 1')).toBeTruthy();
-    const draw = (opts: ReviewOptions) => rerender(<PanelScreen state={reviewState(f, opts)} dispatch={vi.fn()} onOpenPacks={() => undefined} />);
+    const draw = (opts: ReviewOptions) => rerender(<PanelScreen state={reviewState(f, opts)} dispatch={vi.fn()} onOpenSettings={() => undefined} />);
     draw({ dismissals: [dismissal(f[0]!)] });
     expect(queryButton('Back to the review')).toBeNull();
     expect(document.activeElement).toBe(tab('Findings'));
@@ -881,7 +881,7 @@ describe('dismissing the open finding', () => {
     const f = finding(1);
     const { rerender } = show(reviewState([f]));
     openRow();
-    rerender(<PanelScreen state={reviewState([f], { dismissals: [dismissal(f)] })} dispatch={vi.fn()} onOpenPacks={() => undefined} />);
+    rerender(<PanelScreen state={reviewState([f], { dismissals: [dismissal(f)] })} dispatch={vi.fn()} onOpenSettings={() => undefined} />);
     expect(document.activeElement).toBe(heading('Approve after fixes'));
   });
   it('returns from Next into the collapsed Also found by opening it and focusing the row', () => {
@@ -946,7 +946,7 @@ describe('selection and the dropped sheet, second look', () => {
     const f = [finding(1), finding(2)];
     const { rerender } = show(reviewState(f));
     tick('Problem 1');
-    const draw = (opts: ReviewOptions) => rerender(<PanelScreen state={reviewState(f, opts)} dispatch={vi.fn()} onOpenPacks={() => undefined} />);
+    const draw = (opts: ReviewOptions) => rerender(<PanelScreen state={reviewState(f, opts)} dispatch={vi.fn()} onOpenSettings={() => undefined} />);
     draw({ dismissals: [dismissal(f[0]!)] });
     draw({});
     expect((screen.getByRole('checkbox', { name: /Problem 1$/ }) as HTMLInputElement).checked).toBe(false);
@@ -1029,7 +1029,7 @@ describe('the live region', () => {
   it('changes twice when the same sentence is announced twice', async () => {
     clipboard(vi.fn().mockResolvedValue(undefined));
     const timers = new FakeTimers();
-    render(<PanelScreen state={reviewState([finding(1)])} dispatch={vi.fn()} onOpenPacks={() => undefined} timers={timers} />);
+    render(<PanelScreen state={reviewState([finding(1)])} dispatch={vi.fn()} onOpenSettings={() => undefined} timers={timers} />);
     const region = document.querySelector('[aria-live="polite"]')!;
     tick('Problem 1');
     act(() => timers.fire());

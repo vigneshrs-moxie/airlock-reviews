@@ -44,7 +44,7 @@ const detail = (findings: Finding[], extra?: Partial<FindingDetailProps>) => ren
 /** The panel on a review, with the first finding open. */
 function panelOn(findings: Finding[], opts: ReviewOptions = {}) {
   const dispatch = vi.fn();
-  const view = render(<PanelScreen state={reviewState(findings, opts)} dispatch={dispatch} onOpenPacks={() => undefined} />);
+  const view = render(<PanelScreen state={reviewState(findings, opts)} dispatch={dispatch} onOpenSettings={() => undefined} />);
   fireEvent.click(document.querySelector('.finding-card button')!);
   return { ...view, dispatch };
 }
