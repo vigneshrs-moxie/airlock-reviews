@@ -13,6 +13,7 @@ export const STAGE_WORDS = {
   challenge: 'Challenging every finding',
   'lenses-deep': 'Taking a second, deeper look',
   select: 'Ranking and picking the top five',
+  summary: 'Writing the short version of each finding',
   store: 'Saving the review',
 } as const satisfies Record<string, string>;
 

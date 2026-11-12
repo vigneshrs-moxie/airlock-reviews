@@ -93,7 +93,11 @@ export const ClaimSchema = z.object({
 });
 export type Claim = z.infer<typeof ClaimSchema>;
 
-export const BriefSchema = z.object({ whatItDoes: z.array(z.string()), claims: z.array(ClaimSchema) });
+export const BriefSchema = z.object({
+  whatItDoes: z.array(z.string()), claims: z.array(ClaimSchema),
+  /** One plain sentence, at most 200 characters, on what the change does; written by the summary stage, absent when it did not run. */
+  inShort: z.string().max(200).optional(),
+});
 export type Brief = z.infer<typeof BriefSchema>;
 
 export const PlaceSchema = z.object({
@@ -130,6 +134,13 @@ export const FindingSchema = CandidateSchema.extend({
   alsoRaisedBy: z.array(SourceSchema).optional(),
   /** The fingerprints of those duplicates, so a dismissal or a re-review can recognise the finding under any of them. */
   aliases: z.array(z.string()).optional(),
+  /**
+   * A title of at most 60 characters and a summary of at most 200, in plain words for someone who does not read the
+   * code. Written by the summary stage; absent on older reviews and when that stage did not finish. Readers fall back
+   * to `title` and `happens`. What is posted to GitHub is never these.
+   */
+  short: z.string().max(60).optional(),
+  gist: z.string().max(200).optional(),
 });
 export type Finding = z.infer<typeof FindingSchema>;
 

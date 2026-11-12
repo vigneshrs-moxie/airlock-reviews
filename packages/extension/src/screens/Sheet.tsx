@@ -6,7 +6,7 @@ const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), textarea:not(:di
  * A dialog over the panel: it has a role and a label, closes on Escape or a click on the backdrop, takes focus when it
  * opens, keeps focus inside while open and gives focus back to what had it before. The content is the children.
  */
-export function Sheet({ labelledBy, initialFocus, returnFocusTo, returnFocus = true, active = true, onClose, children }: {
+export function Sheet({ labelledBy, initialFocus, returnFocusTo, returnFocus = true, active = true, bottom = false, onClose, children }: {
   /** The id of the heading that names the dialog. */
   labelledBy: string;
   /** What takes focus when the sheet opens. */
@@ -17,6 +17,8 @@ export function Sheet({ labelledBy, initialFocus, returnFocusTo, returnFocus = t
   returnFocus?: boolean;
   /** False while the sheet is kept out of sight (hidden): it then neither traps focus nor reacts to keys. */
   active?: boolean;
+  /** True for a sheet that rises from the bottom edge, leaving the screen behind it in view. */
+  bottom?: boolean;
   onClose: () => void;
   children: ReactNode;
 }) {
@@ -72,7 +74,7 @@ export function Sheet({ labelledBy, initialFocus, returnFocusTo, returnFocus = t
   };
 
   return (
-    <div className="sheet" onClick={(event) => { if (event.target === event.currentTarget) close.current(); }}>
+    <div className={bottom ? 'sheet bottom' : 'sheet'} onClick={(event) => { if (event.target === event.currentTarget) close.current(); }}>
       <div className="sheet-body" role="dialog" aria-modal="true" aria-labelledby={labelledBy} ref={sheet} onKeyDown={trap}>
         {children}
       </div>

@@ -9,6 +9,9 @@
   --accent-fg: #ffffff;
   --danger: #b3261e;
   --focus: #1f5fd0;
+  --warn: #8a5a00;
+  --ok: #1a7f37;
+  --tint: #eaf1fd;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -21,6 +24,9 @@
     --accent-fg: #0c1220;
     --danger: #ff8a80;
     --focus: #8ab4ff;
+    --warn: #e3b341;
+    --ok: #57c27a;
+    --tint: #1b2638;
   }
 }
 * { box-sizing: border-box; }
@@ -97,6 +103,9 @@ div.quote { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible;
 .sheet { position: fixed; inset: 0; z-index: 10; display: flex; background: rgba(0, 0, 0, 0.45); }
 .sheet-body { flex: 1; margin: 12px; padding: 12px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
 .sheet-body > .row { justify-content: space-between; align-items: center; }
+/* A sheet that rises from the bottom edge and leaves the screen behind it in view. */
+.sheet.bottom { align-items: flex-end; }
+.sheet.bottom .sheet-body { margin: 0; max-height: 90vh; padding: 16px 14px 18px; border-bottom: 0; border-radius: 14px 14px 0 0; }
 .sheet-body li { padding: 8px 0; border-bottom: 1px solid var(--border); }
 .proof { margin-top: 4px; overflow-wrap: anywhere; }
 .kept { display: contents; }
