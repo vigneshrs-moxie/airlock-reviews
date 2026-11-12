@@ -203,6 +203,10 @@ export function PanelScreen({
     (focusAfterPost(closed) ?? document.querySelector<HTMLElement>('main'))?.focus();
   }, [postDraft]);
   const sheetView = sheetViewOf(state);
+  // A finding asked for while a dismiss or post sheet is open waits for the sheet to close: the review under the sheet
+  // does not change, and the person's typing and focus stay where they are.
+  const openUnderSheets = useRef(openFinding);
+  if (draft === null && postDraft === null) openUnderSheets.current = openFinding;
   const postView: PostSheetView | null = state.kind === 'review' && sheetView !== null ? { ...sheetView, post: state.post, stale: state.stale }
     : state.kind === 'offline' && state.review !== undefined && sheetView !== null ? { ...sheetView, stale: state.review.stale } : null;
   const known = knownOf(state);
@@ -223,7 +227,7 @@ export function PanelScreen({
         <PanelVisible value={!packsOpen}>
         <Body
           state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={startDismiss} onPost={startPost} defaultDepth={defaultDepth}
-          notesLine={notesLine} onReloadNotes={onReloadNotes} openFinding={openFinding}
+          notesLine={notesLine} onReloadNotes={onReloadNotes} openFinding={openUnderSheets.current}
         />
         {draft !== null && sheetView !== null && (
           <DismissSheet draft={draft} onDraft={setDraft} view={sheetView} dispatch={dispatch} active={!packsOpen} onClose={closeDismiss} />

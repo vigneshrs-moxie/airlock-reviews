@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { signal, startFakeService, type FakeService, type RunStep } from './fake-service';
-import { clickNode, insideNotes } from './note-dom';
+import { clickNode, insideNotes, otherPages, type OtherPage } from './note-dom';
 import { E2E_PORT } from './port';
 
 // The whole flow a person goes through, in the built extension beside the classic Files changed fixture, against the
@@ -447,26 +447,54 @@ test('10. notes: Show notes in the diff turned off removes them all and on bring
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(verdictLines().getByText('3 shown, 1 waiting for their lines to load')).toBeVisible();
 
-  // The person presses Open in Airlock on the third finding's note: the panel opens that finding.
+  // The person presses Open in Airlock on the third finding's note: the open panel opens that finding.
+  const ctx = context;
   const third = top[2]!;
-  const { seen, cdp } = await insideNotes(context, github);
-  const note = seen.find((n) => n.id === third.id);
-  expect(note?.text).toBe(`Ask ${third.title} Open in Airlock`);
-  // This test's panel is a tab, so for Chrome the tab's side panel is closed: the worker opens it, inside the click.
-  const browserCdp = await context.newCDPSession(panel);
-  const panels = async (): Promise<number> => {
-    const { targetInfos } = await browserCdp.send('Target.getTargets') as { targetInfos: { type: string; url: string }[] };
-    return targetInfos.filter((t) => t.type === 'page' && t.url === `${ORIGIN}/sidepanel.html`).length;
+  const pressNote = async (id: string): Promise<void> => {
+    const { seen, cdp } = await insideNotes(ctx, github);
+    const note = seen.find((n) => n.id === id);
+    if (note === undefined) throw new Error(`no note for ${id}`);
+    await clickNode(github, cdp, note.buttonNodeId);
   };
-  expect(await panels()).toBe(1);
-  await clickNode(github, cdp, note!.buttonNodeId);
+  expect((await insideNotes(ctx, github)).seen.find((n) => n.id === third.id)?.text).toBe(`Ask ${third.title} Open in Airlock`);
+  // This test's panel is a tab, so for Chrome the tab's side panel is closed: the worker opens it too, inside the click.
+  // Playwright does not list a side panel; it is found and read through the DevTools protocol.
+  const sidePanels = (except: Page[]): Promise<OtherPage[]> => otherPages(ctx, github, `${ORIGIN}/sidepanel.html`, except);
+  const sidePanel = async (except: Page[]): Promise<OtherPage> => {
+    await expect.poll(async () => (await sidePanels(except)).length).toBe(1);
+    return (await sidePanels(except))[0]!;
+  };
+  /** The heading of the finding a panel shows in full, and whether it has the focus. */
+  const DETAIL = `(() => { const h = document.querySelector('[data-focus="detail"]'); return h === null ? null : [h.textContent, document.activeElement === h]; })()`;
+  const sessionIds = () => worker.evaluate(async () => (globalThis as unknown as { chrome: typeof browser }).chrome.storage.session.get(null));
+  await activate();
+  await pressNote(third.id);
   await expect(panel.getByRole('heading', { name: third.title })).toBeVisible();
   await expect(panel.locator('[data-focus="detail"]')).toBeFocused();
-  await expect.poll(panels).toBe(2);
-  // The id the worker left was taken by a panel as it started (or at once), not kept.
-  await expect.poll(() => worker.evaluate(async () => (globalThis as unknown as { chrome: typeof browser }).chrome.storage.session.get(null))).toEqual({});
+  // The open panel took the id the worker left at once; the side panel that opened beside it is closed again.
+  await expect.poll(sessionIds).toEqual({});
+  await (await sidePanel([panel])).close();
+  await expect.poll(async () => (await sidePanels([panel])).length).toBe(0);
   await panel.getByRole('button', { name: 'Back to the review' }).click();
+
+  // With no panel open: the worker opens the side panel, which opens the finding from the id the worker left.
+  await panel.close();
+  await activate();
+  const first = top[0]!;
+  await pressNote(first.id);
+  const opened = await sidePanel([]);
+  await expect.poll(() => opened.evaluate(DETAIL), { timeout: 15_000 }).toEqual([first.title, true]);
+  await expect.poll(sessionIds).toEqual({});
+  await opened.close();
+  await expect.poll(async () => (await sidePanels([])).length).toBe(0);
+
+  // The test's own panel again, beside the GitHub tab, for the steps that follow; only one panel runs from here on.
+  panel = await ctx.newPage();
+  await panel.goto(`${ORIGIN}/sidepanel.html`);
+  await activate();
+  await panel.reload();
   await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
+  expect(await sidePanels([panel])).toEqual([]);
   // Notes are private: nothing about them reached the service.
   expect(svc().requests.filter((r) => /note/i.test(r.url))).toEqual([]);
 });

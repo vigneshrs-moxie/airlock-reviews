@@ -6,8 +6,10 @@ import type { TabWatcher } from '../src/state/tab';
 const ID = 'nbcmjckbkploiemllhkmhegjimgeimoa';
 const T0 = Date.parse('2026-11-12T10:00:00.000Z');
 const OPEN = { type: 'airlock:note-open', id: 'c_00000002' };
+/** The address of the frame the content script runs in, as Chrome gives it in the sender. */
+const PAGE = 'https://github.com/acme/widgets/pull/1/files';
 
-type Listener = (message: unknown, sender: { id?: string; tab?: { id?: number } }, sendResponse: (r: unknown) => void) => unknown;
+type Listener = (message: unknown, sender: { id?: string; url?: string; tab?: { id?: number } }, sendResponse: (r: unknown) => void) => unknown;
 type Changed = (changes: Record<string, { newValue?: unknown }>) => void;
 
 /** `chrome.storage.session` as both the worker and the panel see it: one store, with its change events. */
@@ -67,7 +69,7 @@ describe('Open in Airlock with the panel closed', () => {
     const store = session();
     const w = worker(store);
     wireNoteOpen(w.chrome, () => T0);
-    expect(w.press(OPEN, { id: ID, tab: { id: 7 } })).toBeUndefined();
+    expect(w.press(OPEN, { id: ID, url: PAGE, tab: { id: 7 } })).toBeUndefined();
     // Opened inside the click's message, before anything was awaited, so Chrome counts it as the person's action.
     expect(w.calls).toEqual(['open 7', 'store']);
     await settle();
@@ -90,7 +92,7 @@ describe('Open in Airlock with the panel closed', () => {
     stopAgain();
 
     // An id left more than 30 seconds before the panel starts is taken away and not used.
-    w.press(OPEN, { id: ID, tab: { id: 7 } });
+    w.press(OPEN, { id: ID, url: PAGE, tab: { id: 7 } });
     await settle();
     const late = panel(store);
     const stopLate = listenNoteOpen(late.chrome, late.tab, (id) => opened.push(id), () => T0 + OPEN_ID_MS + 1);
@@ -100,13 +102,32 @@ describe('Open in Airlock with the panel closed', () => {
     stopLate();
 
     // An id left for another tab is that tab's panel's: it is not used here, and left alone.
-    w.press(OPEN, { id: ID, tab: { id: 8 } });
+    w.press(OPEN, { id: ID, url: PAGE, tab: { id: 8 } });
     await settle();
     const other = panel(store, 7);
     listenNoteOpen(other.chrome, other.tab, (id) => opened.push(id), () => T0);
     await settle();
     expect(opened).toEqual(['c_00000002']);
     expect(store.data).toEqual({ [OPEN_ID_KEY]: { id: 'c_00000002', at: T0, tabId: 8 } });
+
+    // The same id read more than 30 seconds later, by a panel of any tab, is taken away: it never outlives its time.
+    const later = panel(store, 7);
+    listenNoteOpen(later.chrome, later.tab, (id) => opened.push(id), () => T0 + OPEN_ID_MS + 1);
+    await settle();
+    expect(opened).toEqual(['c_00000002']);
+    expect(store.data).toEqual({});
+  });
+
+  it('a new press replaces the id left before it: one record, the latest', async () => {
+    const store = session();
+    let now = T0;
+    const w = worker(store);
+    wireNoteOpen(w.chrome, () => now);
+    w.press(OPEN, { id: ID, url: PAGE, tab: { id: 7 } });
+    now += 1_000;
+    w.press({ ...OPEN, id: 'c_00000009' }, { id: ID, url: PAGE, tab: { id: 8 } });
+    await settle();
+    expect(store.data).toEqual({ [OPEN_ID_KEY]: { id: 'c_00000009', at: T0 + 1_000, tabId: 8 } });
   });
 
   it('the worker acts only on a well-formed note-open from a page of this extension, and catches a refused open', async () => {
@@ -117,23 +138,28 @@ describe('Open in Airlock with the panel closed', () => {
     for (const [message, sender] of [
       [OPEN, { id: 'abcdefghijklmnopabcdefghijklmnop', tab: { id: 7 } }],
       [OPEN, { id: ID }],
-      [{ ...OPEN, id: 'c_0000000G' }, { id: ID, tab: { id: 7 } }],
-      [{ ...OPEN, extra: true }, { id: ID, tab: { id: 7 } }],
-      [{ type: 'airlock:notes-clear' }, { id: ID, tab: { id: 7 } }],
-      [null, { id: ID, tab: { id: 7 } }],
+      // An extension page open in a tab, a look-alike host, and no address at all.
+      [OPEN, { id: ID, url: `chrome-extension://${ID}/sidepanel.html`, tab: { id: 7 } }],
+      [OPEN, { id: ID, url: 'https://github.com.example.net/acme/widgets/pull/1/files', tab: { id: 7 } }],
+      [OPEN, { id: ID, url: 'http://github.com/acme/widgets/pull/1/files', tab: { id: 7 } }],
+      [OPEN, { id: ID, tab: { id: 7 } }],
+      [{ ...OPEN, id: 'c_0000000G' }, { id: ID, url: PAGE, tab: { id: 7 } }],
+      [{ ...OPEN, extra: true }, { id: ID, url: PAGE, tab: { id: 7 } }],
+      [{ type: 'airlock:notes-clear' }, { id: ID, url: PAGE, tab: { id: 7 } }],
+      [null, { id: ID, url: PAGE, tab: { id: 7 } }],
     ] as const) {
       expect(w.press(message, sender)).toBeUndefined();
     }
     expect(w.calls).toEqual([]);
     // A refused open (no user action counted) is caught; the id is still left for when the person opens the panel.
-    w.press(OPEN, { id: ID, tab: { id: 7 } });
+    w.press(OPEN, { id: ID, url: PAGE, tab: { id: 7 } });
     await settle();
     expect(w.calls).toEqual(['open 7', 'store']);
     expect(store.data[OPEN_ID_KEY]).toEqual({ id: 'c_00000002', at: T0, tabId: 7 });
     // A Chrome without sidePanel.open: the same.
     const old = worker(session(), { openFails: 'throw' });
     wireNoteOpen(old.chrome, () => T0);
-    expect(() => old.press(OPEN, { id: ID, tab: { id: 7 } })).not.toThrow();
+    expect(() => old.press(OPEN, { id: ID, url: PAGE, tab: { id: 7 } })).not.toThrow();
     expect(old.calls).toEqual(['open 7', 'store']);
     // The worker asks nothing of the network.
     expect(fetch).not.toHaveBeenCalled();
@@ -147,25 +173,26 @@ describe('Open in Airlock with the panel open', () => {
     const opened: string[] = [];
     const stop = listenNoteOpen(p.chrome, p.tab, (id) => opened.push(id), () => T0);
     await settle();
-    p.send(OPEN, { id: ID, tab: { id: 7 } });
+    p.send(OPEN, { id: ID, url: PAGE, tab: { id: 7 } });
     expect(opened).toEqual(['c_00000002']);
     for (const [message, sender] of [
-      [OPEN, { id: ID, tab: { id: 8 } }],
+      [OPEN, { id: ID, url: PAGE, tab: { id: 8 } }],
       [OPEN, { id: 'abcdefghijklmnopabcdefghijklmnop', tab: { id: 7 } }],
       [OPEN, { id: ID }],
-      [{ ...OPEN, id: 'c_1' }, { id: ID, tab: { id: 7 } }],
+      [OPEN, { id: ID, url: `chrome-extension://${ID}/sidepanel.html`, tab: { id: 7 } }],
+      [{ ...OPEN, id: 'c_1' }, { id: ID, url: PAGE, tab: { id: 7 } }],
     ] as const) p.send(message, sender);
     expect(opened).toEqual(['c_00000002']);
 
     // The worker leaves the id too (it cannot tell the panel is open): the open panel takes it at once.
     const w = worker(store);
     wireNoteOpen(w.chrome, () => T0);
-    w.press({ ...OPEN, id: 'c_00000003' }, { id: ID, tab: { id: 7 } });
+    w.press({ ...OPEN, id: 'c_00000003' }, { id: ID, url: PAGE, tab: { id: 7 } });
     await settle();
     expect(opened).toEqual(['c_00000002', 'c_00000003']);
     expect(store.data).toEqual({});
     // One left for another tab stays.
-    w.press(OPEN, { id: ID, tab: { id: 8 } });
+    w.press(OPEN, { id: ID, url: PAGE, tab: { id: 8 } });
     await settle();
     expect(opened).toEqual(['c_00000002', 'c_00000003']);
     expect(store.data[OPEN_ID_KEY]).toMatchObject({ tabId: 8 });

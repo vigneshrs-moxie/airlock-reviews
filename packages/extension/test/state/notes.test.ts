@@ -4,7 +4,9 @@ import { ServiceClient } from '../../src/client/service';
 import type { ClearNotesMessage, NotesMessage } from '../../src/page/protocol';
 import { startPanel } from '../../src/state/machine';
 import type { NotesResult } from '../../src/state/jump';
-import { COULD_NOT_REACH_PAGE, notesFor, notesLine, noteTitle, startNotes, type NotesLine } from '../../src/state/notes';
+import {
+  COULD_NOT_REACH_PAGE, RECHECK_FOR_MS, RECHECK_MS, notesFor, notesLine, noteTitle, startNotes, type NotesLine,
+} from '../../src/state/notes';
 import type { PanelState, ReviewView } from '../../src/state/reduce';
 import type { SettingsStore } from '../../src/state/settings';
 import type { TabWatcher } from '../../src/state/tab';
@@ -60,7 +62,11 @@ const stops: { stop(): void }[] = [];
 afterEach(() => { for (const s of stops.splice(0)) s.stop(); });
 
 /** The panel's machine with its notes beside a tab, against the fake service; every message the notes send. */
-function setup(opts: { url?: string; latest?: LatestReply | null; pr?: PrSummary; show?: boolean | 'fails'; answers?: NotesResult[] } = {}) {
+function setup(opts: {
+  url?: string; latest?: LatestReply | null; pr?: PrSummary; show?: boolean | 'fails'; answers?: NotesResult[];
+  /** The page's answer once the scripted ones are used up; every note placed unless given. */
+  otherwise?: (m: NotesMessage | ClearNotesMessage) => NotesResult;
+} = {}) {
   const svc = new FakeService();
   const pr = opts.pr ?? prSummary();
   svc.addPr(pr);
@@ -70,11 +76,14 @@ function setup(opts: { url?: string; latest?: LatestReply | null; pr?: PrSummary
   const tab = fakeTab('url' in opts ? opts.url : FILES);
   const sent: Sent[] = [];
   const answers = [...(opts.answers ?? [])];
+  // The notes' own clock and timers (the rechecks), apart from the machine's.
+  const timers = new FakeTimers();
+  const clock = { now: Date.parse('2026-11-12T10:00:00.000Z') };
   const notes = startNotes({
-    tab, settings,
+    tab, settings, timers, now: () => clock.now,
     send: async (tabId, message, { reload }) => {
       sent.push({ tabId, message, reload });
-      return answers.shift() ?? placedAll(message);
+      return answers.shift() ?? (opts.otherwise ?? placedAll)(message);
     },
   });
   const lines: (NotesLine | null)[] = [];
@@ -82,7 +91,7 @@ function setup(opts: { url?: string; latest?: LatestReply | null; pr?: PrSummary
   const states: PanelState[] = [];
   const panel = startPanel({ client, tab, settings, timers: new FakeTimers(), notes, onState: (s) => states.push(s) });
   stops.push(panel, notes);
-  return { svc, settings, tab, sent, notes, lines, states, panel, last: () => states.at(-1) };
+  return { svc, settings, tab, sent, notes, lines, states, panel, timers, clock, last: () => states.at(-1) };
 }
 
 async function until(check: () => boolean, what: string): Promise<void> {
@@ -283,6 +292,163 @@ describe('the notes the panel sends', () => {
     await until(() => h.sent.length === 2, 'the reload');
     expect(h.sent[1]!.reload).toBe(true);
     await until(() => h.lines.at(-1)?.text === '1 note shown in the diff', 'the line');
+  });
+});
+
+const viewOf = (s: PanelState | undefined): ReviewView => {
+  if (s?.kind !== 'review') throw new Error(`no review on screen: ${JSON.stringify(s)}`);
+  return { pr: s.pr, latest: s.latest, stale: s.stale };
+};
+const shownOf = (placed: number, waitingFor: number): NotesResult => ({ kind: 'shown', placed, waiting: waitingFor, view: 'classic', missing: [] });
+const waiting = (m: NotesMessage | ClearNotesMessage): NotesResult => (m.type === 'airlock:notes'
+  ? { kind: 'shown', placed: 0, waiting: m.notes.length, view: 'classic', missing: [] }
+  : placedAll(m));
+
+describe('the notes the panel sends: follow-ups', () => {
+  it('sends nothing on a loading update, at the same address or a new one; the complete update sends', async () => {
+    const h = setup({ latest: review([finding(1)]) });
+    await until(() => h.sent.length === 1, 'the notes');
+    // A full reload of the same page, and a full load of the page with a fragment: no script answers while they load.
+    h.tab.go(FILES, 'loading');
+    h.tab.go(`${FILES}#diff-abc`, 'loading');
+    await settle();
+    expect(h.sent).toHaveLength(1);
+    expect(h.lines.at(-1)?.text).toBe('1 note shown in the diff');
+    h.tab.go(`${FILES}#diff-abc`, 'complete');
+    await until(() => h.sent.length === 2, 'the notes once loaded');
+    // A change of address with no status (a move within the page) still sends.
+    h.tab.go(`${FILES}#diff-def`);
+    await until(() => h.sent.length === 3, 'the notes after a move');
+  });
+
+  it('a page that starts loading stops a recheck, and gets nothing until it is complete', async () => {
+    const h = setup({ latest: review([finding(1)]), otherwise: (m) => (m.type === 'airlock:notes' ? waiting(m) : placedAll(m)) });
+    await until(() => h.timers.delays().length === 1, 'a recheck');
+    h.tab.go(FILES, 'loading');
+    expect(h.timers.delays()).toEqual([]);
+    await settle();
+    expect(h.sent).toHaveLength(1);
+    h.tab.go(FILES, 'complete');
+    await until(() => h.sent.length === 2, 'the notes once loaded');
+  });
+
+  it('a forced resend is never dropped when another update starts while it builds its notes', async () => {
+    const h = setup({ latest: review([finding(1)]) });
+    await until(() => h.sent.length === 1, 'the notes');
+    const view = viewOf(h.last());
+    // Reload, then at once an update with the same notes (as a machine state with nothing new does).
+    h.notes.reload();
+    h.notes.review(view);
+    await until(() => h.sent.length === 2, 'the reload');
+    expect(h.sent[1]!.reload).toBe(true);
+    // The same for a page that finished loading again at the same address.
+    h.tab.go(FILES, 'complete');
+    h.notes.review(view);
+    await until(() => h.sent.length === 3, 'the notes after the reload');
+    expect(h.sent[2]!.reload).toBe(false);
+    await settle();
+    expect(h.sent).toHaveLength(3);
+  });
+
+  it('while notes wait, sends the same notes every 3 seconds for at most a minute, and the line follows the page', async () => {
+    const w = setup({ latest: review([finding(1), finding(2)]), otherwise: (m) => (m.type === 'airlock:notes' ? shownOf(1, 1) : placedAll(m)) });
+    await until(() => w.lines.at(-1)?.text === '1 shown, 1 waiting for their lines to load', 'the waiting line');
+    expect(RECHECK_MS).toBe(3_000);
+    expect(w.timers.delays()).toEqual([RECHECK_MS]);
+    // The same answer again: the same notes, no change to the line (so nothing is said again).
+    const lines = w.lines.length;
+    for (let i = 0; i < 3; i++) {
+      w.clock.now += RECHECK_MS;
+      w.timers.fire();
+      await until(() => w.sent.length === i + 2, 'a recheck');
+    }
+    expect(w.sent.every((s) => JSON.stringify(s.message) === JSON.stringify(w.sent[0]!.message) && !s.reload)).toBe(true);
+    expect(w.lines.length).toBe(lines);
+    // At most a minute after the first answer that said notes wait.
+    expect(RECHECK_FOR_MS).toBe(60_000);
+    for (let i = 0; i < 30 && w.timers.delays().length > 0; i++) {
+      w.clock.now += RECHECK_MS;
+      w.timers.fire();
+      await settle();
+    }
+    expect(w.sent).toHaveLength(1 + RECHECK_FOR_MS / RECHECK_MS);
+    expect(w.timers.delays()).toEqual([]);
+  });
+
+  it('stops rechecking when the notes are all placed, when the list changes and when the tab leaves the view', async () => {
+    let placed = false;
+    const h = setup({ latest: review([finding(1), finding(2)]), otherwise: (m) => (m.type === 'airlock:notes' && !placed ? waiting(m) : placedAll(m)) });
+    await until(() => h.lines.at(-1)?.text === '0 shown, 2 waiting for their lines to load', 'the waiting line');
+    // GitHub loaded the lines: the next recheck finds them placed, and the rechecks end.
+    placed = true;
+    h.clock.now += RECHECK_MS;
+    h.timers.fire();
+    await until(() => h.lines.at(-1)?.text === '2 notes shown in the diff', 'the placed line');
+    expect(h.timers.delays()).toEqual([]);
+
+    // A new list: the recheck of the old one ends, and the new list is sent at once.
+    placed = false;
+    h.tab.go(`${FILES}#a`);
+    await until(() => h.timers.delays().length === 1, 'a recheck');
+    h.svc.on('POST /dismissals', () => json(dismissal(finding(1), { reason: 'not-now' })));
+    h.panel.dispatch({ type: 'dismiss', body: { repo: 'acme/widgets', number: 1, reviewId: 'r_0000000001', findingId: finding(1).id, reason: 'not-now', text: '' } });
+    await until(() => notesSent(h.sent.at(-1)!).notes.length === 1, 'the new list');
+    const sends = h.sent.length;
+    // Leaving the view: no more rechecks.
+    h.tab.go(prUrl('acme/widgets', 1));
+    await until(() => h.lines.at(-1) === null, 'no line');
+    expect(h.timers.delays()).toEqual([]);
+    expect(h.sent).toHaveLength(sends);
+  });
+
+  it('another pull request\'s Files changed page gets no notes', async () => {
+    const tab = fakeTab(prUrl('acme/widgets', 2, '/files'));
+    const sent: Sent[] = [];
+    const notes = startNotes({ tab, settings: memorySettings(), send: async (tabId, message, { reload }) => { sent.push({ tabId, message, reload }); return placedAll(message); } });
+    stops.push(notes);
+    const view: ReviewView = { pr: prSummary(), stale: false, latest: review([finding(1)]) };
+    notes.review(view);
+    await settle();
+    tab.go(prUrl('acme/gadgets', 1, '/files'), 'complete');
+    tab.go(prUrl('ACME/widgets', 10, '/files'), 'complete');
+    await settle();
+    expect(sent).toEqual([]);
+    tab.go(prUrl('ACME/widgets', 1, '/files'), 'complete');
+    await until(() => sent.length === 1, 'the notes');
+  });
+
+  it('a tab that could not be read at the start is read again on the next change, and the setting works meanwhile', async () => {
+    for (const next of ['review', 'tab update'] as const) {
+      let reads = 0;
+      const tab = fakeTab(FILES);
+      const read = tab.current;
+      tab.current = async () => {
+        reads += 1;
+        if (reads === 1) throw new Error('No tab with id 3');
+        return read();
+      };
+      const sent: Sent[] = [];
+      const notes = startNotes({ tab, settings: memorySettings(), send: async (tabId, message, { reload }) => { sent.push({ tabId, message, reload }); return placedAll(message); } });
+      stops.push(notes);
+      const view: ReviewView = { pr: prSummary(), stale: false, latest: review([finding(1)]) };
+      await settle();
+      expect(notes.current().on, next).toBe(true);
+      expect(reads).toBe(1);
+      if (next === 'tab update') {
+        tab.go(FILES, 'complete');
+        await settle();
+        expect(reads).toBe(2);
+      }
+      notes.review(view);
+      await until(() => sent.length === 1, `the notes after a ${next}`);
+      expect(reads).toBe(2);
+    }
+  });
+
+  it('a refusal from the page reaches the line', async () => {
+    const h = setup({ latest: review([finding(1)]), answers: [{ kind: 'refused', sentence: "The page refused Airlock's notes: a line is not a positive whole number." }] });
+    await until(() => h.lines.at(-1)?.text === "The page refused Airlock's notes: a line is not a positive whole number.", 'the refusal');
+    expect(h.lines.at(-1)?.reload).toBe(false);
   });
 });
 

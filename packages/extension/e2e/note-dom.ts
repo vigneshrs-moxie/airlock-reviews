@@ -39,3 +39,40 @@ export async function clickNode(page: Page, cdp: Cdp, nodeId: number): Promise<v
   const [x1, y1, , , x3, y3] = model.content as [number, number, number, number, number, number];
   await page.mouse.click((x1 + x3) / 2, (y1 + y3) / 2);
 }
+
+/** A page Playwright does not list, such as a side panel Chrome opened: read through the DevTools protocol, and closed. */
+export interface OtherPage { evaluate(expression: string): Promise<unknown>; close(): Promise<void> }
+
+/**
+ * The page targets at `url` other than `except`, found through `via` (any page of the browser). Each can run an
+ * expression and give back its value, and be closed.
+ */
+export async function otherPages(context: BrowserContext, via: Page, url: string, except: Page[] = []): Promise<OtherPage[]> {
+  const cdp = await context.newCDPSession(via);
+  const own = await Promise.all(except.map(async (p) => {
+    const session = await context.newCDPSession(p);
+    const { targetInfo } = await session.send('Target.getTargetInfo') as { targetInfo: { targetId: string } };
+    await session.detach();
+    return targetInfo.targetId;
+  }));
+  const { targetInfos } = await cdp.send('Target.getTargets') as { targetInfos: { targetId: string; type: string; url: string }[] };
+  const replies = new Map<number, (result: unknown) => void>();
+  cdp.on('Target.receivedMessageFromTarget', ({ message }) => {
+    const reply = JSON.parse(message) as { id?: number; result?: { result?: { value?: unknown } } };
+    if (reply.id !== undefined) replies.get(reply.id)?.(reply.result?.result?.value);
+  });
+  let next = 0;
+  return Promise.all(targetInfos.filter((t) => t.type === 'page' && t.url === url && !own.includes(t.targetId)).map(async (t) => {
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: t.targetId, flatten: false }) as { sessionId: string };
+    return {
+      evaluate: (expression: string) => new Promise<unknown>((resolve) => {
+        const id = ++next;
+        replies.set(id, resolve);
+        void cdp.send('Target.sendMessageToTarget', {
+          sessionId, message: JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, returnByValue: true } }),
+        });
+      }),
+      close: async () => { await cdp.send('Target.closeTarget', { targetId: t.targetId }); },
+    };
+  }));
+}

@@ -7,7 +7,10 @@ import type { PanelState, UserAction } from '../../src/state/machine';
 import { COULD_NOT_REACH_PAGE, notesLine, type NotesState, type PageNotes } from '../../src/state/notes';
 import type { NotesResult } from '../../src/state/jump';
 import type { SettingsStore } from '../../src/state/settings';
+import type { OpenFinding } from '../../src/screens/Verdict';
+import type { PostReply } from '../../src/state/reduce';
 import { FakeTimers } from '../helpers/fake-timers';
+import { previewItem, previewOf } from '../helpers/post-fixtures';
 import { prSummary } from './fixtures';
 import { dismissal, finding, reviewState } from './review-fixtures';
 
@@ -185,5 +188,58 @@ describe('Open in Airlock in the panel', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
     fireEvent.click(screen.getByRole('switch', { name: 'Show notes in the diff' }));
     expect(a.notes.setShown).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('Open in Airlock while a sheet is open', () => {
+  /** The panel on a review, with the test setting the state and asking for findings as the App would. */
+  function mount() {
+    const dispatch = vi.fn<(a: UserAction) => void>();
+    let state: PanelState = reviewState([finding(1), finding(2)]);
+    let asked: OpenFinding | null = null;
+    const el = () => <PanelScreen state={state} dispatch={dispatch} onOpenPacks={() => undefined} openFinding={asked} />;
+    const view = render(el());
+    return {
+      dispatch,
+      setState: (next: PanelState) => { state = next; view.rerender(el()); },
+      ask: (id: string, seq: number) => { asked = { id, seq }; view.rerender(el()); },
+    };
+  }
+  const dialog = () => screen.queryByRole('dialog');
+  const textbox = (name: string) => screen.getByRole('textbox', { name }) as HTMLTextAreaElement;
+
+  it('waits for a dismiss sheet to close: the sheet and its draft stay, then the finding opens', () => {
+    const m = mount();
+    fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Wrong' }));
+    const line = 'Flagged "Problem 1" in src/file1.ts. Wrong because: the caller checks it first.';
+    fireEvent.change(textbox('The line that will be saved to your pack'), { target: { value: line } });
+    textbox('The line that will be saved to your pack').focus();
+    m.ask(finding(2).id, 1);
+    expect(dialog()).not.toBeNull();
+    expect(textbox('The line that will be saved to your pack').value).toBe(line);
+    expect(document.activeElement).toBe(textbox('The line that will be saved to your pack'));
+    expect(detailHeading()?.textContent).toBe('Problem 1');
+    fireEvent.click(within(dialog()!).getByRole('button', { name: 'Cancel' }));
+    expect(dialog()).toBeNull();
+    expect(detailHeading()?.textContent).toBe('Problem 2');
+  });
+
+  it('waits for a post sheet to close: the sheet and its edited comment stay, then the finding opens', () => {
+    const m = mount();
+    fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Post comment' }));
+    const action = m.dispatch.mock.calls.at(-1)![0] as Extract<UserAction, { type: 'preview-post' }>;
+    const preview = previewOf([previewItem(finding(1))]);
+    m.setState({ ...reviewState([finding(1), finding(2)]), post: { ticket: action.ticket, kind: 'preview', preview } as PostReply });
+    fireEvent.change(textbox('Comment 1'), { target: { value: 'My own words.' } });
+    m.ask(finding(2).id, 1);
+    expect(dialog()).not.toBeNull();
+    expect(textbox('Comment 1').value).toBe('My own words.');
+    expect(detailHeading()?.textContent).toBe('Problem 1');
+    fireEvent.click(within(dialog()!).getByRole('button', { name: 'Cancel' }));
+    expect(dialog()).toBeNull();
+    expect(detailHeading()?.textContent).toBe('Problem 2');
   });
 });

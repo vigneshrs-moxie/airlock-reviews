@@ -8,7 +8,10 @@ export const OPEN_ID_KEY = 'airlock.noteOpen';
 /** How long the id is good for: a panel that starts later does not open it. */
 export const OPEN_ID_MS = 30_000;
 
-/** The id left for the panel of tab `tabId`, and when (milliseconds since 1970). */
+/**
+ * The id left for the panel of tab `tabId`, and when (milliseconds since 1970). One record under one key: a new press
+ * replaces the one before.
+ */
 export interface PendingOpen { id: string; at: number; tabId: number }
 
 /** Exactly `{ type: 'airlock:note-open', id }` with a finding's id. */
@@ -18,7 +21,11 @@ export function isNoteOpen(message: unknown): message is NoteOpenMessage {
   return Object.keys(m).sort().join() === 'id,type' && m.type === 'airlock:note-open' && typeof m.id === 'string' && NOTE_ID.test(m.id);
 }
 
-type Sender = { id?: string; tab?: { id?: number } };
+type Sender = { id?: string; url?: string; tab?: { id?: number } };
+
+/** From this extension's content script on a github.com page: an extension page open in a tab does not count. */
+export const fromGithubPage = (sender: Sender, runtimeId: string): boolean =>
+  sender.id === runtimeId && sender.tab?.id !== undefined && sender.url?.startsWith('https://github.com/') === true;
 
 /** The Chrome calls the worker makes for a note, so tests can pass a fake. */
 export interface NoteOpenWorkerChrome {
@@ -35,7 +42,7 @@ export interface NoteOpenWorkerChrome {
 export function wireNoteOpen(chrome: NoteOpenWorkerChrome, now: () => number = Date.now): void {
   chrome.runtime.onMessage.addListener((message, sender) => {
     const tabId = sender.tab?.id;
-    if (sender.id !== chrome.runtime.id || tabId === undefined || !isNoteOpen(message)) return undefined;
+    if (!fromGithubPage(sender, chrome.runtime.id) || tabId === undefined || !isNoteOpen(message)) return undefined;
     try {
       chrome.sidePanel.open({ tabId }).catch(() => undefined);
     } catch {
