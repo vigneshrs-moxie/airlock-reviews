@@ -125,7 +125,10 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
   const inSummary: { path: string; line: number | null; body: string }[] = [];
   for (const [i, item] of body.items.entries()) {
     const finding = chosen[i] as Finding;
-    const text = item.body ?? commentBody(finding);
+    const drafted = commentBody(finding);
+    const text = item.body ?? drafted;
+    // The drafted text names no one by construction (every `@name` is in backticks); text the person wrote is checked.
+    const mentions = text === drafted ? [] : mentionsIn(text);
     const problem = checkCommentText(text);
     if (problem !== null) throw new PostError(400, problem);
     const place = finding.anchor.comment ?? null;
@@ -137,14 +140,14 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
       });
       items.push({
         fingerprint: item.fingerprint, title: finding.title, path: finding.path, line: place.line, startLine, placement: 'inline',
-        whySummary: null, body: text, mentions: mentionsIn(text),
+        whySummary: null, body: text, mentions,
       });
     } else {
       const line = place?.line ?? finding.anchor.startLine ?? null;
       inSummary.push({ path: finding.path, line, body: text });
       items.push({
         fingerprint: item.fingerprint, title: finding.title, path: finding.path, line, startLine: null, placement: 'summary',
-        whySummary: item.placement === 'summary' ? CHOSEN : NOT_ON_DIFF, body: text, mentions: mentionsIn(text),
+        whySummary: item.placement === 'summary' ? CHOSEN : NOT_ON_DIFF, body: text, mentions,
       });
     }
   }
