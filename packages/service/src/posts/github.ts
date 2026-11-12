@@ -111,3 +111,47 @@ export async function sendReview(exec: Exec, repo: string, number: number, paylo
   }
   return { kind: 'unknown', message: clean(result.stderr) };
 }
+
+/** How long the read of the pull request before a post may take. */
+export const READ_TIMEOUT_MS = 10_000;
+
+const PullSchema = z.object({
+  state: z.string().optional(), merged: z.boolean().optional(), head: z.object({ sha: z.string() }),
+});
+
+export type PullRead =
+  | { kind: 'pull'; state: string | null; merged: boolean; headSha: string }
+  | { kind: 'missing' }
+  | { kind: 'refused'; status: number; message: string }
+  | { kind: 'no-answer' }
+  | { kind: 'unreadable' };
+
+/**
+ * Reads the pull request before a post: `gh api repos/<repo>/pulls/<number>`, a read, within READ_TIMEOUT_MS. Says
+ * which it was: the pull request, GitHub's 404, another refusal with GitHub's reason, no answer (a timeout, a cut
+ * connection, no status), or an answer that is not a pull request. Throws, before running anything, for a repository
+ * name or number that is not one.
+ */
+export async function readPull(exec: Exec, repo: string, number: number): Promise<PullRead> {
+  if (!isRepo(repo) || !PrNumberSchema.safeParse(number).success) throw new Error('Airlock will not read that address.');
+  let result: { stdout: string; stderr: string; code: number };
+  try {
+    result = await exec('gh', ['api', `repos/${repo}/pulls/${number}`], { timeoutMs: READ_TIMEOUT_MS });
+  } catch {
+    return { kind: 'no-answer' };
+  }
+  if (result.code === 0) {
+    try {
+      const pull = PullSchema.safeParse(JSON.parse(result.stdout));
+      if (pull.success) {
+        return { kind: 'pull', state: pull.data.state ?? null, merged: pull.data.merged === true, headSha: pull.data.head.sha };
+      }
+    } catch { /* not JSON */ }
+    return { kind: 'unreadable' };
+  }
+  const firstErrorLine = result.stderr.split('\n')[0] ?? '';
+  const status = STATUS.exec(firstErrorLine)?.[1];
+  if (result.code !== 1 || status === undefined) return { kind: 'no-answer' };
+  if (status === '404') return { kind: 'missing' };
+  return { kind: 'refused', status: Number(status), message: reason(result.stdout, firstErrorLine) };
+}

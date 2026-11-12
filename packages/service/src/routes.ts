@@ -92,7 +92,7 @@ export function reviewRoutes(
   const review = deps.review ?? runReview;
   const { dismissals } = deps;
   const posts: PostDeps = {
-    home: config.home, exec: engine.exec, now: deps.now, log: deps.log, previews: new Previews(), dismissals, hidePaths,
+    home: config.home, exec: engine.exec, now: deps.now, log: deps.log, previews: new Previews(), dismissals,
   };
   const runs = new Runs({
     timers,
@@ -219,7 +219,8 @@ export function reviewRoutes(
         reply<PostPreviewReply>(PostPreviewReplySchema, 200, await buildPreview(posts, req.body as PostPreviewBody))),
     },
     {
-      method: 'POST', path: '/posts', requiresOrigin: true, body: PostBodySchema,
+      // Strict: the request carries the preview id and nothing else.
+      method: 'POST', path: '/posts', requiresOrigin: true, body: PostBodySchema.strict(),
       handler: posting(async (req) => reply<PostRecord>(PostRecordSchema, 200, await post(posts, (req.body as PostBody).previewId))),
     },
     {

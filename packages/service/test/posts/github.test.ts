@@ -4,7 +4,8 @@ import { delimiter, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { realExec, type Exec } from '@airlock/engine';
-import { sendReview, type ReviewPayload } from '../../src/posts/github.js';
+import { isGhRead } from '../../../engine/src/util/exec.js';
+import { readPull, sendReview, type ReviewPayload } from '../../src/posts/github.js';
 
 const WRITE_SUBCOMMANDS = 'pr|issue|repo|release|workflow|label|gist|secret';
 
@@ -172,6 +173,23 @@ describe('sendReview', () => {
       await expect(sendReview(exec, repo, number, payload)).rejects.toThrow();
       expect(seen).toEqual([]);
     }
+  });
+});
+
+describe('readPull', () => {
+  it('reads only the pull request, within ten seconds, as a read the engine lets through', async () => {
+    const pullJson = JSON.stringify({ state: 'open', merged: false, head: { sha: 'c'.repeat(40) } });
+    const { exec, seen } = fakeExec(answer(pullJson, '', 0));
+    expect(await readPull(exec, REPO, 7)).toEqual({ kind: 'pull', state: 'open', merged: false, headSha: 'c'.repeat(40) });
+    expect(seen).toEqual([{ cmd: 'gh', args: ['api', `repos/${REPO}/pulls/7`], input: undefined, timeoutMs: 10_000, allowGhWrite: undefined }]);
+    expect(isGhRead(seen[0]?.args ?? [])).toBe(true);
+    expect(await readPull(fakeExec(answer('{"message":"Not Found"}', 'gh: Not Found (HTTP 404)', 1)).exec, REPO, 7)).toEqual({ kind: 'missing' });
+    expect(await readPull(fakeExec(answer('{"message":"Bad credentials"}', 'gh: Bad credentials (HTTP 401)', 1)).exec, REPO, 7))
+      .toEqual({ kind: 'refused', status: 401, message: 'Bad credentials' });
+    expect(await readPull(fakeExec(answer('', 'timed out after 10 s', 124)).exec, REPO, 7)).toEqual({ kind: 'no-answer' });
+    expect(await readPull(fakeExec(async () => { throw new Error('spawn gh ENOENT'); }).exec, REPO, 7)).toEqual({ kind: 'no-answer' });
+    expect(await readPull(fakeExec(answer('{"state":"open"}', '', 0)).exec, REPO, 7)).toEqual({ kind: 'unreadable' });
+    await expect(readPull(fakeExec(answer('{}', '', 0)).exec, 'a/b/c', 7)).rejects.toThrow();
   });
 });
 

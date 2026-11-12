@@ -1,3 +1,5 @@
+import { chmod } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { saveReview } from '@airlock/engine';
 import {
@@ -92,6 +94,7 @@ describe('POST /posts/preview', () => {
     const s = await startService();
     const fixed = await s.preview({ items: [{ fingerprint: FP_A }, { fingerprint: FP_D }] });
     expect(fixed.status).toBe(404);
+    expect((fixed.json as { error: string }).error).toContain('An old problem now fixed');
     const unknown = await s.preview({ items: [{ fingerprint: '9999999999999999' }] });
     expect([unknown.status, unknown.json]).toEqual([404, { error: 'Airlock cannot find that finding in the stored review.' }]);
     const otherReview = await s.preview({ reviewId: 'r_9999999999' });
@@ -140,8 +143,13 @@ describe('POST /posts', () => {
   it('post sends exactly the stored preview: commit, COMMENT, body and comments, as JSON on standard input', async () => {
     const s = await startService();
     const p = await previewed(s, { items: [{ fingerprint: FP_A }, { fingerprint: FP_B }, { fingerprint: FP_C }] });
-    // Anything but the preview id is ignored: what is sent is what was stored.
-    const r = await s.call('POST', '/posts', { previewId: p.previewId, summary: 'Something else', items: [] });
+    // The request carries the preview id and nothing else: anything more is refused, and nothing is read or sent.
+    for (const extra of [{ summary: 'Something else' }, { items: [] }, { repo: 'someone/else' }]) {
+      const refused = await s.call('POST', '/posts', { previewId: p.previewId, ...extra });
+      expect(refused.status, JSON.stringify(extra)).toBe(400);
+    }
+    expect(s.calls).toEqual([]);
+    const r = await s.post(p.previewId);
     expect(r.status, JSON.stringify(r.json)).toBe(200);
     const posted = PostRecordSchema.parse(r.json);
     expect(posted).toMatchObject({
@@ -153,8 +161,9 @@ describe('POST /posts', () => {
         { fingerprint: FP_C, aliases: [FP_C_ALIAS], placement: 'inline' },
       ],
     });
-    // The pull request is read first, then the one write.
-    expect(s.calls.map((c) => c.line).filter((l) => l !== 'gh api user --jq .login')).toEqual([PULL_LINE, POST_LINE]);
+    // Only the pull request is read first, within ten seconds, then the one write.
+    expect(s.calls.map((c) => c.line)).toEqual([PULL_LINE, POST_LINE]);
+    expect(s.calls[0]?.timeoutMs).toBe(10_000);
     const [write] = s.writes();
     expect(write?.args).toEqual(POST_ARGS);
     expect(write?.input).toBe(JSON.stringify({
@@ -186,15 +195,56 @@ describe('POST /posts', () => {
       const r = await s.post(p.previewId);
       expect([r.status, r.json]).toEqual([status, { error }]);
     }
-    s.answers.set(PULL_LINE, { stdout: '{"message":"Not Found"}', stderr: 'gh: Not Found (HTTP 404)', code: 1 });
-    const unread = await s.post(p.previewId);
-    expect(unread.status).toBe(502);
-    expect((unread.json as { error: string }).error).toMatch(/^GitHub did not answer: /);
+    const reads: Array<[ExecResult, string]> = [
+      [{ stdout: '{"message":"Not Found"}', stderr: 'gh: Not Found (HTTP 404)', code: 1 }, `GitHub has no pull request ${NUMBER} in ${REPO}.`],
+      [{ stdout: '{"message":"Resource not accessible"}', stderr: 'gh: Resource not accessible (HTTP 403)', code: 1 },
+        'GitHub refused to show the pull request: Resource not accessible. Nothing was posted.'],
+      [{ stdout: '', stderr: 'timed out after 10 s', code: 124 }, 'GitHub did not answer when Airlock read the pull request. Nothing was posted.'],
+      [{ stdout: '', stderr: 'error connecting to api.github.com', code: 1 }, 'GitHub did not answer when Airlock read the pull request. Nothing was posted.'],
+      [{ stdout: 'not json', stderr: '', code: 0 }, 'Airlock could not read whether the pull request is open. Nothing was posted.'],
+    ];
+    for (const [answer, error] of reads) {
+      s.answers.set(PULL_LINE, answer);
+      const r = await s.post(p.previewId);
+      expect([r.status, r.json], error).toEqual([502, { error }]);
+    }
     expect(s.writes()).toEqual([]);
     expect(await latestPosts(s)).toEqual([]);
     // Nothing was sent, so the preview still stands.
     s.answers.set(PULL_LINE, { stdout: pull(), stderr: '', code: 0 });
     expect((await s.post(p.previewId)).status).toBe(200);
+  });
+
+  it('a finding dismissed since the preview is refused, and nothing is sent', async () => {
+    const s = await startService();
+    const p = await previewed(s, { items: [{ fingerprint: FP_A }, { fingerprint: FP_C }] });
+    // Dismissed in another panel, under the finding's alias.
+    await s.writeDismissals([{ fingerprint: FP_C_ALIAS, findingId: 'c_cccccccc', reviewId: REVIEW, reason: 'not-now', text: '', at: '2026-11-11T08:00:00.000Z', learned: null }]);
+    const r = await s.post(p.previewId);
+    expect(r.status).toBe(409);
+    expect((r.json as { error: string }).error).toContain(FINDING_C.title);
+    expect(s.writes()).toEqual([]);
+    expect(await latestPosts(s)).toEqual([]);
+  });
+
+  it('a refusal whose record cannot be cleared says so and does not keep the preview', async () => {
+    const s = await startService();
+    const p = await previewed(s);
+    const folder = dirname(s.recordsFile());
+    // The record is written; then, while GitHub answers, its folder stops taking writes.
+    s.answers.set(POST_LINE, async () => { await chmod(folder, 0o500); return REFUSED; });
+    try {
+      const r = await s.post(p.previewId);
+      expect([r.status, r.json]).toEqual([502, {
+        error: 'GitHub refused the comments: Validation failed: pull_request_review_thread.line must be part of the diff. Nothing was posted, '
+          + 'but Airlock could not clear its own record: press "It was not posted" before trying again.',
+      }]);
+    } finally {
+      await chmod(folder, 0o700);
+    }
+    expect((await latestPosts(s)).map((x) => x.outcome)).toEqual(['unknown']);
+    expect((await s.post(p.previewId)).json).toEqual({ error: EXPIRED });
+    expect(s.writes()).toHaveLength(1);
   });
 
   it('two posts of one preview at once send one review', async () => {

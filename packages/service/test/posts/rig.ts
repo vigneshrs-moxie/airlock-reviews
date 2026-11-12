@@ -27,7 +27,7 @@ export const PULL_LINE = `gh api repos/${REPO}/pulls/${NUMBER}`;
 export const EXPIRED = 'This preview has expired. Open the preview again.';
 
 export interface ExecResult { stdout: string; stderr: string; code: number }
-export interface Call { line: string; args: string[]; input: string | undefined }
+export interface Call { line: string; args: string[]; input: string | undefined; timeoutMs: number | undefined }
 
 const finding = (over: Partial<Finding>): Finding => ({
   ...candidate(), id: 'c_aaaaaaaa', fingerprint: FP_A, checked: 'checked', bucket: 'top', rank: 1, status: null,
@@ -105,13 +105,12 @@ export async function startService(): Promise<Rig> {
   const calls: Call[] = [];
   const answers: Rig['answers'] = new Map<string, ExecResult | (() => Promise<ExecResult>)>([
     [PULL_LINE, { stdout: pull(), stderr: '', code: 0 }],
-    ['gh api user --jq .login', { stdout: 'bob\n', stderr: '', code: 0 }],
     [POST_LINE, POSTED],
   ]);
   const engine: EngineDeps = {
     exec: async (cmd, args, opts) => {
       const line = [cmd, ...args].join(' ');
-      calls.push({ line, args: [...args], input: opts?.input });
+      calls.push({ line, args: [...args], input: opts?.input, timeoutMs: opts?.timeoutMs });
       const answer = answers.get(line);
       if (answer === undefined) throw new Error(`no fake answer for ${line}`);
       return typeof answer === 'function' ? answer() : answer;

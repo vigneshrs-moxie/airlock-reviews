@@ -1,12 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fetchPr, repoSlug, type Exec } from '@airlock/engine';
-import { MESSAGE_MAX, PostRecordSchema, visibleText, type ForgetPostBody, type PostRecord, type PrInfo } from '@airlock/shared';
+import { repoSlug, type Exec } from '@airlock/engine';
+import { MESSAGE_MAX, PostRecordSchema, visibleText, type ForgetPostBody, type PostRecord } from '@airlock/shared';
 import { z } from 'zod';
 import { writeList } from '../dismissals.js';
-import { plainMessage } from '../http.js';
-import { sendReview, type SendResult } from './github.js';
+import { readPull, sendReview, type SendResult } from './github.js';
 import type { PreviewDeps } from './preview.js';
 
 /** A refusal with the status the route answers with; the message is for the person. */
@@ -22,6 +21,7 @@ const MOVED = 'The pull request has new commits since this review. Review the pu
 const CLOSED = 'The pull request is closed. Nothing was posted.';
 const MERGED = 'The pull request has been merged. Nothing was posted.';
 const STATE_UNREAD = 'Airlock could not read whether the pull request is open. Nothing was posted.';
+const READ_NO_ANSWER = 'GitHub did not answer when Airlock read the pull request. Nothing was posted.';
 const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
 const KEPT = 'This review was posted, so Airlock keeps its record.';
 const BROKEN =
@@ -130,14 +130,10 @@ function inQueue<T>(repo: string, number: number, work: () => Promise<T>): Promi
 export interface PostDeps extends PreviewDeps {
   exec: Exec;
   log: (line: string) => void;
-  /** Folders whose paths are hidden in error sentences. */
-  hidePaths: readonly string[];
 }
 
-/** GitHub's reason in the reply sentence, cut so the whole sentence fits and still ends by saying nothing was posted. */
-function refusedSentence(status: number, message: string): string {
-  const lead = 'GitHub refused the comments: ';
-  const tail = '. Nothing was posted.';
+/** GitHub's reason in a sentence, cut so the whole sentence fits and still ends with `tail`. */
+function withReason(lead: string, status: number, message: string, tail: string): string {
   const reason = message.replace(/[\s.]+$/, '') || `HTTP ${status}`;
   const room = MESSAGE_MAX - [...lead].length - [...tail].length;
   const chars = [...reason];
@@ -162,16 +158,27 @@ export async function post(deps: PostDeps, previewId: string): Promise<PostRecor
     if (preview === null || preview !== found) throw new PostError(404, EXPIRED);
     const { repo, number } = preview;
 
-    let pr: PrInfo;
-    try {
-      pr = await fetchPr(deps.exec, repo, number, []);
-    } catch (e) {
-      throw new PostError(502, plainMessage(e, deps.hidePaths, 'GitHub did not answer: '));
+    // Only the pull request is read, not the signed-in user: nothing else stands between the person and the post.
+    const pr = await readPull(deps.exec, repo, number);
+    if (pr.kind === 'missing') throw new PostError(502, fit(`GitHub has no pull request ${number} in ${repo}.`));
+    if (pr.kind === 'refused') {
+      throw new PostError(502, withReason('GitHub refused to show the pull request: ', pr.status, pr.message, '. Nothing was posted.'));
     }
-    if (pr.merged === true) throw new PostError(409, MERGED);
-    if (pr.state === undefined) throw new PostError(502, STATE_UNREAD);
+    if (pr.kind === 'no-answer') throw new PostError(502, READ_NO_ANSWER);
+    if (pr.kind === 'unreadable') throw new PostError(502, STATE_UNREAD);
+    if (pr.merged) throw new PostError(409, MERGED);
+    if (pr.state === null) throw new PostError(502, STATE_UNREAD);
     if (pr.state !== 'open') throw new PostError(409, CLOSED);
     if (pr.headSha !== preview.headSha) throw new PostError(409, MOVED);
+
+    // Dismissed in another panel since the preview was made: not posted.
+    const dismissals = await deps.dismissals(repo, number);
+    for (const item of preview.items) {
+      const keys = keysOf(item.fingerprint, item.aliases);
+      if (dismissals.some((d) => keys.includes(d.fingerprint))) {
+        throw new PostError(409, fit(`This finding is dismissed; restore it before posting it: ${shown(item.title)}.`));
+      }
+    }
 
     const { path, list } = await recordsOf(deps.home, repo, number);
     for (const item of preview.items) {
@@ -219,13 +226,17 @@ export async function post(deps: PostDeps, previewId: string): Promise<PostRecor
     }
     if (result.kind === 'refused') {
       deps.log(`${where}, refused (HTTP ${result.status})`);
+      const lead = 'GitHub refused the comments: ';
       try {
         await writeList(path, list);
       } catch (e) {
+        // The unknown record stays and blocks these findings, so the preview is not kept; the person is told how to clear it.
         deps.log(`${where}: the record could not be removed and stays unknown: ${e instanceof Error ? e.message : String(e)}`);
+        throw new PostError(502, withReason(lead, result.status, result.message,
+          '. Nothing was posted, but Airlock could not clear its own record: press "It was not posted" before trying again.'));
       }
       deps.previews.keep(preview, deps.now());
-      throw new PostError(502, refusedSentence(result.status, result.message));
+      throw new PostError(502, withReason(lead, result.status, result.message, '. Nothing was posted.'));
     }
     deps.log(`${where}, outcome unknown`);
     throw new PostError(504, UNKNOWN);
