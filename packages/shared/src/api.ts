@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ReviewEventSchema } from './events.js';
-import { POST_MAX_ITEMS } from './comment-text.js';
+import { POST_MAX_ITEMS, REVIEW_BODY_MAX } from './comment-text.js';
 import { isRepo } from './pr-ref.js';
 import { DepthSchema, ReviewDocumentSchema, StageSchema, type Depth } from './review.js';
 
@@ -53,7 +53,7 @@ export const PrSummarySchema = z.object({
   additions: z.number().int(), deletions: z.number().int(), changedFiles: z.number().int(),
   packs: z.array(z.object({ id: PackIdSchema, title: z.string() })), suggestedDepth: DepthSchema,
   state: z.enum(['open', 'closed', 'merged']).default('open'),
-  lastReview: z.object({ reviewId: ReviewIdSchema, headSha: z.string(), createdAt: z.string(), depth: DepthSchema }).nullable().default(null),
+  lastReview: z.object({ reviewId: ReviewIdSchema, headSha: z.string().regex(/^[0-9a-f]{7,64}$/), createdAt: z.string(), depth: DepthSchema }).nullable().default(null),
 });
 export type PrSummary = z.infer<typeof PrSummarySchema>;
 
@@ -112,14 +112,14 @@ export type RestoreReply = z.infer<typeof RestoreReplySchema>;
 export const PlacementSchema = z.enum(['inline', 'summary']);
 export type Placement = z.infer<typeof PlacementSchema>;
 
-export const PostItemSchema = z.object({ fingerprint: FingerprintSchema, body: z.string().optional(), placement: PlacementSchema.optional() });
+export const PostItemSchema = z.object({ fingerprint: FingerprintSchema, body: z.string().max(REVIEW_BODY_MAX).optional(), placement: PlacementSchema.optional() });
 export type PostItem = z.infer<typeof PostItemSchema>;
 
 export const PostPreviewBodySchema = z.object({
   repo, number, reviewId: ReviewIdSchema,
   items: z.array(PostItemSchema).min(1).max(POST_MAX_ITEMS)
     .refine((items) => new Set(items.map((i) => i.fingerprint)).size === items.length, { message: 'duplicate finding' }),
-  summary: z.string().optional(),
+  summary: z.string().max(REVIEW_BODY_MAX).optional(),
 });
 export type PostPreviewBody = z.infer<typeof PostPreviewBodySchema>;
 
@@ -143,13 +143,18 @@ export type PostBody = z.infer<typeof PostBodySchema>;
 export const PostRecordSchema = z.object({
   id: PostIdSchema, repo, number, reviewId: ReviewIdSchema, headSha: z.string().regex(/^[0-9a-f]{7,64}$/), postedAt: z.string(),
   outcome: z.enum(['posted', 'unknown']), githubReviewId: z.number().int().nullable(), url: z.string().nullable(),
-  items: z.array(z.object({ fingerprint: FingerprintSchema, aliases: z.array(z.string()), placement: PlacementSchema })),
+  items: z.array(z.object({ fingerprint: FingerprintSchema, aliases: z.array(FingerprintSchema).max(50), placement: PlacementSchema })),
 }).superRefine((record, ctx) => {
-  if (record.url === null) return;
+  const bad = (path: string, message: string): void => ctx.addIssue({ code: 'custom', path: [path], message });
+  if (record.outcome === 'unknown') {
+    if (record.url !== null || record.githubReviewId !== null) bad('outcome', 'an unknown outcome has no review address or id');
+    return;
+  }
+  if (record.url === null || record.githubReviewId === null) { bad('url', 'a posted review has an address and an id'); return; }
   // Not a regular expression: the dot of the host would be escaped in it, and the bundle's address check reads that as another host.
   const start = `https://github.com/${record.repo}/pull/${record.number}#pullrequestreview-`;
-  if (!record.url.startsWith(start) || !/^[0-9]+$/.test(record.url.slice(start.length))) {
-    ctx.addIssue({ code: 'custom', path: ['url'], message: "not this pull request's review address" });
+  if (!record.url.startsWith(start) || record.url.slice(start.length) !== String(record.githubReviewId)) {
+    bad('url', "not this pull request's review address");
   }
 });
 export type PostRecord = z.infer<typeof PostRecordSchema>;
@@ -161,7 +166,7 @@ export const LearnedKindSchema = z.enum(['wrong', 'product-knowledge']);
 export type LearnedKind = z.infer<typeof LearnedKindSchema>;
 
 export const LearnedLineSchema = z.object({
-  pack: PackIdSchema, packTitle: z.string(), kind: LearnedKindSchema, date: z.string(), repo: z.string().nullable(),
+  pack: PackIdSchema, packTitle: z.string(), kind: LearnedKindSchema, date: z.string(), repo: RepoSchema.nullable(),
   text: z.string(), key: FingerprintSchema, appliesHere: z.boolean(), removable: z.boolean(),
 });
 export type LearnedLine = z.infer<typeof LearnedLineSchema>;

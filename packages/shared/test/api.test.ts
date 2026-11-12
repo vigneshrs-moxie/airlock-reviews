@@ -6,7 +6,7 @@ import {
   PackIdSchema, PrSummarySchema, RepoSchema, ReviewIdSchema, RestoreBodySchema, RunIdSchema, ServiceEventSchema,
   ServiceStatusSchema, SMALL_PR_LINES, StartReviewBodySchema, StartReviewReplySchema, checkLearnedText, isRepo,
   minimalDocument, prRefFromUrl, suggestedDepth, HelloSchema, LatestReplySchema, PostPreviewBodySchema, PostRecordSchema,
-  PostBodySchema, PreviewIdSchema, PostIdSchema, StartReviewBodySchema as StartBody,
+  PostBodySchema, PreviewIdSchema, PostIdSchema, LearnedLineSchema, REVIEW_BODY_MAX,
 } from '@airlock/shared';
 
 describe('suggestedDepth', () => {
@@ -237,7 +237,6 @@ describe('remaining reply fields', () => {
   });
 });
 
-
 describe('posting contract', () => {
   const record = {
     id: 'post_0123456789ab', repo: 'acme/widgets', number: 12, reviewId: 'r_0123456789', headSha: 'a'.repeat(40),
@@ -254,6 +253,12 @@ describe('posting contract', () => {
       'https://github.com/acme/widgets/pull/12#pullrequestreview-x',
       'https://evil.example/acme/widgets/pull/12#pullrequestreview-7',
       'https://github.com/acme/widgets/pull/12#pullrequestreview-7/extra',
+      'https://github.com.evil/acme/widgets/pull/12#pullrequestreview-7',
+      'https://github.com@evil/acme/widgets/pull/12#pullrequestreview-7',
+      'https://github.com/acme/widgets/pull/1#pullrequestreview-7',
+      'https://github.com/Acme/widgets/pull/12#pullrequestreview-7',
+      'https://github.com/acme/widgets/pull/12#pullrequestreview-7\n',
+      'https://github.com/acme/widgets/pull/12#pullrequestreview-9',
     ]) expect(() => PostRecordSchema.parse({ ...record, url })).toThrow();
   });
   it('a preview body with two items of one fingerprint, or 31 items, is refused', () => {
@@ -285,10 +290,35 @@ describe('posting contract', () => {
     expect(() => PrSummarySchema.parse({ ...pr, state: 'draft' })).toThrow();
   });
   it('start accepts since last only, and hello may carry a 64-hex proof', () => {
-    expect(StartBody.parse({ repo: 'acme/widgets', number: 1, since: 'last' }).since).toBe('last');
-    expect(() => StartBody.parse({ repo: 'acme/widgets', number: 1, since: 'first' })).toThrow();
+    expect(StartReviewBodySchema.parse({ repo: 'acme/widgets', number: 1, since: 'last' }).since).toBe('last');
+    expect(() => StartReviewBodySchema.parse({ repo: 'acme/widgets', number: 1, since: 'first' })).toThrow();
     expect(HelloSchema.parse({ airlock: true, version: '1', paired: true }).proof).toBeUndefined();
     expect(HelloSchema.parse({ airlock: true, version: '1', paired: true, proof: 'a'.repeat(64) }).proof).toBe('a'.repeat(64));
     expect(() => HelloSchema.parse({ airlock: true, version: '1', paired: true, proof: 'xyz' })).toThrow();
+  });
+  it('a post record is checked as a whole', () => {
+    expect(() => PostRecordSchema.parse({ ...record, url: null })).toThrow();
+    expect(() => PostRecordSchema.parse({ ...record, githubReviewId: null })).toThrow();
+    expect(() => PostRecordSchema.parse({ ...record, outcome: 'unknown' })).toThrow();
+    expect(() => PostRecordSchema.parse({ ...record, outcome: 'unknown', url: null })).toThrow();
+    expect(() => PostRecordSchema.parse({ ...record, items: [{ ...record.items[0], aliases: ['nope'] }] })).toThrow();
+    expect(() => PostRecordSchema.parse({ ...record, items: [{ ...record.items[0], aliases: Array(51).fill('0123456789abcdef') }] })).toThrow();
+  });
+  it('request texts are bounded, and nested ids have their patterns', () => {
+    const base = { repo: 'acme/widgets', number: 12, reviewId: 'r_0123456789' };
+    const item = { fingerprint: '0123456789abcdef' };
+    expect(() => PostPreviewBodySchema.parse({ ...base, items: [{ ...item, body: 'a'.repeat(REVIEW_BODY_MAX + 1) }] })).toThrow();
+    expect(() => PostPreviewBodySchema.parse({ ...base, items: [item], summary: 'a'.repeat(REVIEW_BODY_MAX + 1) })).toThrow();
+    const pr = {
+      repo: 'acme/widgets', number: 1, title: 't', author: 'a', viewer: 'v', isOwn: false, stage: 'pr1', baseRef: 'main',
+      headRef: 'f', headSha: 'b'.repeat(40), additions: 1, deletions: 0, changedFiles: 1, packs: [], suggestedDepth: 'quick',
+    };
+    const last = { reviewId: 'r_0123456789', headSha: 'b'.repeat(40), createdAt: 'x', depth: 'quick' };
+    expect(PrSummarySchema.parse({ ...pr, lastReview: last }).lastReview?.headSha).toBe('b'.repeat(40));
+    expect(() => PrSummarySchema.parse({ ...pr, lastReview: { ...last, headSha: 'zz' } })).toThrow();
+    const line = { pack: 'generic', packTitle: 'Generic', kind: 'wrong', date: '2026-11-11', repo: null, text: 't', key: '0123456789abcdef', appliesHere: true, removable: true };
+    expect(LearnedLineSchema.parse(line).repo).toBeNull();
+    expect(LearnedLineSchema.parse({ ...line, repo: 'acme/widgets' }).repo).toBe('acme/widgets');
+    expect(() => LearnedLineSchema.parse({ ...line, repo: 'not a repo' })).toThrow();
   });
 });

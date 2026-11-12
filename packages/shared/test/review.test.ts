@@ -31,5 +31,7 @@ describe('review document schema', () => {
     const next = ReviewDocumentSchema.parse({ ...doc, fixed: [f], previous: { reviewId: 'r_0123456789', headSha: 'a'.repeat(40) } });
     expect(next.fixed).toHaveLength(1);
     expect(next.previous?.headSha).toBe('a'.repeat(40));
+    expect(() => ReviewDocumentSchema.parse({ ...doc, previous: { reviewId: 'x', headSha: 'a'.repeat(40) } })).toThrow();
+    expect(() => ReviewDocumentSchema.parse({ ...doc, previous: { reviewId: 'r_0123456789', headSha: 'zz' } })).toThrow();
   });
 });
