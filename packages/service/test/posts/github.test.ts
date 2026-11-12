@@ -6,23 +6,83 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { realExec, type Exec } from '@airlock/engine';
 import { sendReview, type ReviewPayload } from '../../src/posts/github.js';
 
+const WRITE_SUBCOMMANDS = 'pr|issue|repo|release|workflow|label|gist|secret';
+
 /**
- * The flags that make `gh api` write, as they appear in a source file: `--method`, `--input`, `--field`, `--raw-field` and
- * `-X` anywhere; `-f` and `-F` in a file that runs `gh` (git's `grep -F` is a search). In order of appearance.
+ * What in a source file could make `gh` write, in order of appearance. A second net under the run-time guard in
+ * `realExec`; it reads text, so it errs towards finding too much.
+ * - the `gh api` flags `--method`, `--input`, `--field`, `--raw-field` and `-X`, anywhere;
+ * - `-f` and `-F`, anywhere except on a line that runs git's `grep` (where `-F` means fixed strings) and names no `gh`;
+ * - an argument list that starts with a write subcommand (`['pr', …]`), and a `gh` call whose first argument is not
+ *   `api` or `auth`;
+ * - `gh pr …` and the other write subcommands, and `gh api graphql`, written out in a string; a `graphql` argument;
+ * - `--approve` and `--request-changes` in any letter case, and the events APPROVE, REQUEST_CHANGES and PENDING.
  */
-function writeFlagsIn(text: string): string[] {
-  const found: Array<{ at: number; flag: string }> = [];
-  const look = (pattern: RegExp): void => {
-    for (const match of text.matchAll(pattern)) found.push({ at: match.index, flag: match[0] });
+function ghWritesIn(text: string): string[] {
+  const found: Array<{ at: number; what: string }> = [];
+  const look = (pattern: RegExp, what = (m: RegExpMatchArray): string => m[0]): void => {
+    for (const match of text.matchAll(pattern)) found.push({ at: match.index ?? 0, what: what(match) });
   };
   look(/(?<![\w-])--(?:method|input|field|raw-field)(?![\w-])/g);
   look(/(?<![\w-])-X/g);
-  if (/['"`]gh['"`\s]/.test(text)) look(/(?<![\w-])-[fF](?!-)/g);
-  return found.sort((a, b) => a.at - b.at).map((f) => f.flag);
+  let offset = 0;
+  for (const line of text.split('\n')) {
+    const gitGrep = /['"`]grep['"`]/.test(line) && !/\bgh\b/.test(line);
+    if (!gitGrep) for (const m of line.matchAll(/(?<![\w-])-[fF](?![-\w])|(?<![\w-])-[fF](?=[A-Za-z_[\]]+=)/g)) found.push({ at: offset + (m.index ?? 0), what: m[0] });
+    offset += line.length + 1;
+  }
+  look(new RegExp(`\\[\\s*(['"\`])(?:${WRITE_SUBCOMMANDS})\\1\\s*[,\\]]`, 'g'), (m) => `subcommand ${m[0]}`);
+  look(/['"`]gh['"`]\s*,\s*\[\s*['"`](?!api['"`]|auth['"`])\w*/g, (m) => `gh call ${m[0]}`);
+  look(new RegExp(`\\bgh\\s+(?:${WRITE_SUBCOMMANDS}|api\\s+graphql)\\b`, 'g'));
+  look(/(['"`])graphql\1/g);
+  look(/--approve|--request-changes/gi);
+  look(/APPROVE|REQUEST_CHANGES|PENDING/g);
+  return found.sort((a, b) => a.at - b.at).map((f) => f.what);
 }
 
+/** Every source file the guard reads: each package's src and scripts, the extension's entrypoints, and config files. */
+async function guardedSources(): Promise<string[]> {
+  const sources: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw e;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(path);
+      else if (SOURCE.test(entry.name)) sources.push(path);
+    }
+  };
+  for (const pkg of await readdir(join(ROOT, 'packages'))) {
+    for (const folder of ['src', 'scripts', 'entrypoints']) await walk(join(ROOT, 'packages', pkg, folder));
+  }
+  // Config files at the root, in each package and one level below it (such as the extension's e2e folder).
+  const configs = async (dir: string, depth: number): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (entry.isDirectory() && depth > 0 && !['node_modules', 'dist', '.output', '.wxt', '.git'].includes(entry.name)) {
+        await configs(join(dir, entry.name), depth - 1);
+      } else if (entry.isFile() && /\.config\.(ts|js|mjs|cjs|mts|cts)$/.test(entry.name)) {
+        sources.push(join(dir, entry.name));
+      }
+    }
+  };
+  await configs(ROOT, 0);
+  for (const pkg of await readdir(join(ROOT, 'packages'))) await configs(join(ROOT, 'packages', pkg), 1);
+  return [...new Set(sources)];
+}
+
+const SOURCE = /\.(ts|tsx|mts|cts|js|mjs|cjs)$/;
 const ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
 const ONLY_WRITER = 'packages/service/src/posts/github.ts';
+/** The engine file that defines `allowGhWrite` and enforces it. */
+const GUARD = 'packages/engine/src/util/exec.ts';
+/**
+ * The one exception: a script run by hand that reads pull request descriptions with one GraphQL query per case. `gh api
+ * graphql` needs `-f query=…`; the test below checks that its query is a query and that it is the file's only gh call.
+ */
+const REPLAY_READER = 'packages/replay/scripts/capture-descriptions.mjs';
 // A repository that does not exist, so even a mistake could not touch a real pull request.
 const REPO = 'airlock-test-owner-zz9/none';
 
@@ -34,14 +94,14 @@ const payload: ReviewPayload = {
   ],
 };
 
-interface Seen { cmd: string; args: string[]; input: string | undefined; timeoutMs: number | undefined }
+interface Seen { cmd: string; args: string[]; input: string | undefined; timeoutMs: number | undefined; allowGhWrite: boolean | undefined }
 
 function fakeExec(answer: () => Promise<{ stdout: string; stderr: string; code: number }>): { exec: Exec; seen: Seen[] } {
   const seen: Seen[] = [];
   return {
     seen,
     exec: async (cmd, args, opts) => {
-      seen.push({ cmd, args: [...args], input: opts?.input, timeoutMs: opts?.timeoutMs });
+      seen.push({ cmd, args: [...args], input: opts?.input, timeoutMs: opts?.timeoutMs, allowGhWrite: opts?.allowGhWrite });
       return answer();
     },
   };
@@ -58,6 +118,8 @@ describe('sendReview', () => {
     expect(seen[0]).toMatchObject({ cmd: 'gh', args: ['api', '--method', 'POST', `repos/${REPO}/pulls/7/reviews`, '--input', '-'] });
     expect(seen[0]?.input).toBe(JSON.stringify(payload));
     expect(seen[0]?.timeoutMs).toBeGreaterThan(0);
+    // The one write says so, or the engine's exec refuses it.
+    expect(seen[0]?.allowGhWrite).toBe(true);
   });
 
   it('reads a refusal from gh: the status from standard error, the message from the body, cleaned and cut', async () => {
@@ -116,36 +178,60 @@ describe('sendReview', () => {
 describe('the one write', () => {
   it('no file but posts/github.ts gives gh a write flag, and its event can only be COMMENT', async () => {
     // The scan catches what it is meant to catch.
-    expect(writeFlagsIn("exec('gh', ['api', '-X', 'DELETE', path])")).toEqual(['-X']);
-    expect(writeFlagsIn("exec('gh', ['api', path, '-f', 'body=hi', '--field', 'x=1'])")).toEqual(['-f', '--field']);
-    expect(writeFlagsIn("const args = ['api', '--method=PATCH', path]; await exec('gh', args)")).toEqual(['--method']);
-    expect(writeFlagsIn("exec('gh', ['api', '-XPOST', path, '-Fbody=@file'])")).toEqual(['-X', '-F']);
-    expect(writeFlagsIn("run(`gh api ${path} --input body.json`)")).toEqual(['--input']);
-    expect(writeFlagsIn("exec('git', ['grep', '-l', '-w', '-F', name])")).toEqual([]);
-    expect(writeFlagsIn("exec('gh', ['api', `repos/${repo}/pulls/${n}`, '--jq', '.title'])")).toEqual([]);
+    const samples = [
+      "exec('gh', ['pr', 'review', String(n), '--approve'])",
+      "execFileSync('gh', ['pr', 'comment', '7', '--body', text])",
+      "await run(`gh pr comment ${n} --body x`)",
+      "exec('gh', ['api', '-X', 'POST', path])",
+      "exec('gh', ['api', 'graphql', '-f', 'query=mutation { addComment }'])",
+      "runGh(exec, ['api', path, '-f', 'body=x'])",
+      "exec('gh', ['api', '-XPOST', path, '-Fbody=@file'])",
+      "const args = ['api', '--method=PATCH', path]; await exec('gh', args)",
+      "run(`gh api ${path} --input body.json`)",
+      "exec('gh', ['issue', 'comment', n, '-b', t])",
+      "exec('gh', ['pr', 'merge', n, '--squash'])",
+      "exec('gh', ['pr', 'edit', n, '--add-label', 'x'])",
+      "exec(tool, ['pr', 'review', n, '--REQUEST-CHANGES'])",
+    ];
+    for (const sample of samples) expect(ghWritesIn(sample), sample).not.toEqual([]);
+    expect(ghWritesIn("exec('git', ['grep', '-l', '-w', '-F', name])")).toEqual([]);
+    expect(ghWritesIn("const args = ['grep', '-n', '-o', '-z', '-I', '-w', '-F', '-e', token];")).toEqual([]);
+    expect(ghWritesIn("exec('gh', ['api', `repos/${repo}/pulls/${n}`, '--jq', '.title'])")).toEqual([]);
+    expect(ghWritesIn("exec('gh', ['auth', 'status'])")).toEqual([]);
+    expect(ghWritesIn("const KEYS = ['anchorId', 'line', 'number', 'path', 'repo', 'type'];")).toEqual([]);
 
+    const sources = await guardedSources();
+    const names = sources.map((path) => relative(ROOT, path).split('\\').join('/'));
+    for (const expected of ['packages/replay/scripts/capture-descriptions.mjs', 'packages/engine/scripts/cache-probe.mjs',
+      'packages/extension/entrypoints/background.ts', 'packages/extension/wxt.config.ts', 'vitest.config.ts', GUARD, ONLY_WRITER]) {
+      expect(names, expected).toContain(expected);
+    }
     const offenders: string[] = [];
-    const words: string[] = [];
-    const sources: string[] = [];
-    const walk = async (dir: string): Promise<void> => {
-      for (const entry of await readdir(dir, { withFileTypes: true })) {
-        const path = join(dir, entry.name);
-        if (entry.isDirectory()) await walk(path);
-        else if (/\.(ts|tsx|mts|cts|js|mjs|cjs)$/.test(entry.name)) sources.push(path);
-      }
-    };
-    for (const pkg of await readdir(join(ROOT, 'packages'))) {
-      await walk(join(ROOT, 'packages', pkg, 'src')).catch((e: NodeJS.ErrnoException) => { if (e.code !== 'ENOENT') throw e; });
-    }
-    expect(sources.length).toBeGreaterThan(50);
-    for (const path of sources) {
+    const allowing: string[] = [];
+    const setting: string[] = [];
+    for (const [i, path] of sources.entries()) {
       const text = await readFile(path, 'utf8');
-      const name = relative(ROOT, path).split('\\').join('/');
-      if (writeFlagsIn(text).length > 0) offenders.push(name);
-      if (/APPROVE|REQUEST_CHANGES|PENDING/.test(text)) words.push(name);
+      const name = names[i] as string;
+      if (ghWritesIn(text).length > 0) offenders.push(name);
+      if (text.includes('allowGhWrite')) allowing.push(name);
+      if (/allowGhWrite\s*:\s*true/.test(text)) setting.push(name);
     }
-    expect(offenders).toEqual([ONLY_WRITER]);
-    expect(words).toEqual([]);
+    // The guard names the flags it refuses; its behaviour is tested in the engine's exec test.
+    expect(offenders.sort()).toEqual([GUARD, ONLY_WRITER, REPLAY_READER].sort());
+    // Only the guard knows the option, and only the one write sets it.
+    expect(allowing.sort()).toEqual([GUARD, ONLY_WRITER].sort());
+    expect(setting).toEqual([ONLY_WRITER]);
+
+    // The exception reads, and only reads: its one gh call sends the query built by its own query function.
+    const reader = await readFile(join(ROOT, REPLAY_READER), 'utf8');
+    expect(reader.match(/execFileSync\(\s*'gh'/g)).toHaveLength(1);
+    expect(reader.match(/['"`]gh['"`]/g)).toHaveLength(1);
+    expect(reader).not.toMatch(/\bspawn|\bexec\(|\bexecFile\(|\bexecSync/);
+    expect(reader).toContain("['api', 'graphql', '-f', `query=${query(owner, name, c.pr)}`]");
+    const queryText = /const query = \(owner, name, number\) => `([^`]*)`/.exec(reader)?.[1];
+    expect(queryText).toBeDefined();
+    expect(queryText?.trimStart().startsWith('query')).toBe(true);
+    expect(queryText).not.toMatch(/mutation/i);
 
     // The payload's event is the literal COMMENT, and whatever reaches sendReview at run time, COMMENT is what is sent.
     // @ts-expect-error: another event does not type-check.
@@ -194,10 +280,15 @@ describe('with a fake gh executable', () => {
     process.env['GH_HOST'] = 'airlock-fake-gh.invalid';
     process.env['GH_TOKEN'] = '';
 
-    // First prove that `gh` is the fake, with a harmless argument, before the write is ever made.
-    const probe = await realExec('gh', ['airlock-probe'], { input: '' });
+    // First prove that `gh` is the fake, with a harmless read, before the write is ever made.
+    const probe = await realExec('gh', ['api', 'airlock-probe'], { input: '' });
     expect(probe.code).toBe(0);
-    expect(JSON.parse(await readFile(seenFile, 'utf8'))).toEqual({ args: ['airlock-probe'], input: '', fake: true });
+    expect(JSON.parse(await readFile(seenFile, 'utf8'))).toEqual({ args: ['api', 'airlock-probe'], input: '', fake: true });
+
+    // The same write without the one writer's option is refused before the fake is started.
+    const write = ['api', '--method', 'POST', `repos/${REPO}/pulls/7/reviews`, '--input', '-'];
+    await expect(realExec('gh', write, { input: JSON.stringify(payload) })).rejects.toThrow('Airlock does not let this command write to GitHub.');
+    expect(JSON.parse(await readFile(seenFile, 'utf8'))).toEqual({ args: ['api', 'airlock-probe'], input: '', fake: true });
 
     const result = await sendReview(realExec, REPO, 7, payload);
     expect(result).toEqual({ kind: 'posted', id: 4242, url: `https://github.com/${REPO}/pull/7#pullrequestreview-4242` });

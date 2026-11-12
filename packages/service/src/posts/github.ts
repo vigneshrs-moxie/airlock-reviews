@@ -87,7 +87,8 @@ export async function sendReview(exec: Exec, repo: string, number: number, paylo
   let result: { stdout: string; stderr: string; code: number };
   try {
     result = await exec('gh', ['api', '--method', 'POST', `repos/${repo}/pulls/${number}/reviews`, '--input', '-'], {
-      input: JSON.stringify(sent), timeoutMs: SEND_TIMEOUT_MS,
+      // The one caller in the repository that may write through gh; the engine's exec refuses any other.
+      input: JSON.stringify(sent), timeoutMs: SEND_TIMEOUT_MS, allowGhWrite: true,
     });
   } catch (e) {
     return { kind: 'unknown', message: clean(e instanceof Error ? e.message : String(e)) };

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { basename } from 'node:path';
 
 export interface ExecResult { stdout: string; stderr: string; code: number }
 export interface ExecOptions {
@@ -9,6 +10,11 @@ export interface ExecOptions {
   timeoutMs?: number;
   /** Aborting it kills the command, and the call rejects with STOPPED. */
   signal?: AbortSignal;
+  /**
+   * Lets a `gh` call that is not a read through. Only the one GitHub write, `sendReview` in the service, sets it; without
+   * it, `realExec` refuses such a call before anything is started.
+   */
+  allowGhWrite?: boolean;
 }
 export type Exec = (cmd: string, args: string[], opts?: ExecOptions) => Promise<ExecResult>;
 
@@ -22,14 +28,35 @@ export const TIMED_OUT = 124;
 /** What a command stopped by its signal rejects with. */
 export const STOPPED = 'The command was stopped.';
 
+/** What `realExec` throws for a `gh` call that is not a read, when the caller has not said it is the one write. */
+export const GH_WRITE_REFUSED = 'Airlock does not let this command write to GitHub.';
+
+/** The `gh api` flags that send a body or choose a method other than GET, as a whole argument or its start. */
+const GH_WRITE_FLAGS = ['--method', '-X', '-f', '-F', '--field', '--raw-field', '--input'];
+
+/**
+ * Whether `gh` with these arguments only reads: `api` first, with no argument that is or starts with a write flag and no
+ * `graphql` endpoint (a query and a mutation go the same way), or exactly `auth status`.
+ */
+export function isGhRead(args: readonly string[]): boolean {
+  if (args[0] === 'auth') return args[1] === 'status' && args.length === 2;
+  if (args[0] !== 'api') return false;
+  return !args.slice(1).some((a) => a === 'graphql' || GH_WRITE_FLAGS.some((flag) => a.startsWith(flag)));
+}
+
 /**
  * Runs a command with execFile (never a shell), with GIT_TERMINAL_PROMPT=0 so a credential prompt cannot wait for input.
  * A command still running at its timeout is killed and returns exit code TIMED_OUT with `timed out after <n> s`. Output
  * over `maxBuffer` returns exit code 1 with the reason in stderr. Rejects when the command cannot start or its signal
- * aborts.
+ * aborts, and, before starting anything, for a `gh` call that is not a read (see `isGhRead`) unless `allowGhWrite` is set.
  */
 export const realExec: Exec = (cmd, args, opts = {}) =>
   new Promise((resolve, reject) => {
+    // Checked here, under every caller: nothing writes to GitHub through gh unless the caller is the one write.
+    if (basename(cmd) === 'gh' && opts.allowGhWrite !== true && !isGhRead(args)) {
+      reject(new Error(GH_WRITE_REFUSED));
+      return;
+    }
     const timeoutMs = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     const child = execFile(
       cmd,
