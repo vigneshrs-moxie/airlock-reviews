@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { PostPreviewBody } from '@airlock/shared';
 import { NOT_PROVED } from '../../src/client/proof';
-import { NOT_UNDERSTOOD, POST_TIMEOUT_MS, ServiceClient, ServiceError } from '../../src/client/service';
-import { BASE, FakeService, OTHER_TOKEN, TOKEN, json, never } from '../helpers/fake-service';
+import { NOT_UNDERSTOOD, POST_NOT_SENT, POST_TIMEOUT_MS, ServiceClient, ServiceError } from '../../src/client/service';
+import { BASE, CANNOT_ASK_GITHUB, FakeService, GITHUB_HAS_IT, OTHER_TOKEN, TOKEN, cannotAskGithub, githubHasIt, json, never } from '../helpers/fake-service';
 import { FakeTimers } from '../helpers/fake-timers';
 import { previewItem, previewOf, recordOf } from '../helpers/post-fixtures';
 
@@ -48,7 +48,8 @@ describe('posting through the client', () => {
       const { svc, client } = setup();
       svc.proofKey = key;
       expect(await failure(client.previewPost(previewBody))).toMatchObject({ kind: 'unproven', message: NOT_PROVED });
-      expect(await failure(client.post({ previewId: preview.previewId }))).toMatchObject({ kind: 'unproven', message: NOT_PROVED });
+      // A post whose proof fails was never sent: it says so, and is not a post whose outcome is unknown.
+      expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'unsent', why: 'unproven', message: NOT_PROVED });
       expect(await failure(client.forgetPost({ repo: 'acme/widgets', number: 1, id: posted.id }))).toMatchObject({ kind: 'unproven', message: NOT_PROVED });
       expect(svc.requests.filter((r) => r.headers.has('authorization'))).toEqual([]);
       expect(new Set(svc.calls)).toEqual(new Set(['GET /hello']));
@@ -75,7 +76,6 @@ describe('posting through the client', () => {
   it.each([
     [502, 'GitHub refused the comments: Validation Failed. Nothing was posted.'],
     [409, 'The pull request has new commits since this review. Review the push, then post.'],
-    [404, 'This preview has expired. Open the preview again.'],
     [400, 'Bad.'],
   ])('post: a %i is refused, in the service words', async (status, error) => {
     const { svc, client } = setup();
@@ -83,23 +83,49 @@ describe('posting through the client', () => {
     expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'refused', message: error });
   });
 
+  it('post: a 404 is no preview, with the service words, never a refusal: a copy the browser sent again gets it too', async () => {
+    const { svc, client } = setup();
+    const expired = 'This preview has expired. Open the preview again.';
+    svc.on('POST /posts', () => json({ error: expired }, 404));
+    expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'no-preview', message: expired });
+    // A 404 whose body is off the contract still says nothing was found; the panel's own sentence stands in.
+    svc.on('POST /posts', () => json({ nope: true }, 404));
+    expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'no-preview', message: NOT_UNDERSTOOD });
+    expect(svc.calls.filter((c) => c === 'POST /posts')).toHaveLength(2);
+  });
+
   it('post: a 504 is unclear, with the service words', async () => {
     const { svc, client } = setup();
     const said = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
     svc.on('POST /posts', () => json({ error: said }, 504));
-    expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'unclear', message: said });
+    expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'unclear', message: said, status: 504 });
   });
 
   it('post: a 500, a dropped connection, and a reply off the contract are unclear, never refused', async () => {
     const { svc, client } = setup();
     svc.on('POST /posts', () => json({ error: 'Airlock had a problem.' }, 500));
-    expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'unclear', message: 'Airlock had a problem.' });
+    expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'unclear', message: 'Airlock had a problem.', status: 500 });
     svc.on('POST /posts', () => Promise.reject(new TypeError('Failed to fetch')));
     expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'unclear' });
     svc.on('POST /posts', () => json({ ...posted, url: 'https://evil.example/' }));
     expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'unclear' });
     svc.on('POST /posts', () => json({ ...posted, outcome: 'unknown', url: null, githubReviewId: null }));
     expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'unclear' });
+  });
+
+  it('post: when the proof gets no answer, nothing was sent, and it says so', async () => {
+    const { svc, client } = setup();
+    svc.on('GET /hello', () => Promise.reject(new TypeError('Failed to fetch')));
+    expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'unsent', why: 'offline', message: POST_NOT_SENT });
+    expect(POST_NOT_SENT).toBe('Airlock could not reach its service, so nothing was sent.');
+    expect(svc.calls).toEqual(['GET /hello']);
+  });
+
+  it('post: a connection cut after the proof is unclear, as the post may have been sent', async () => {
+    const { svc, client } = setup();
+    svc.on('POST /posts', () => Promise.reject(new TypeError('Failed to fetch')));
+    expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'unclear' });
+    expect(svc.calls).toEqual(['GET /hello', 'POST /posts']);
   });
 
   it('post: waits 75 seconds, then is unclear', async () => {
@@ -135,5 +161,37 @@ describe('posting through the client', () => {
     expect(await failure(client.forgetPost(body))).toMatchObject({ kind: 'problem', message: 'This review was posted, so Airlock keeps its record.' });
     svc.on('POST /posts/forget', () => json({ forgotten: 'yes' }));
     expect(await failure(client.forgetPost(body))).toMatchObject({ kind: 'problem', message: NOT_UNDERSTOOD });
+  });
+
+  it('forgetPost: GitHub has the review, so nothing was forgotten, and the record comes back posted', async () => {
+    const { svc, client } = setup();
+    const body = { repo: 'acme/widgets', number: 1, id: posted.id };
+    svc.on('POST /posts/forget', () => githubHasIt(posted));
+    expect(await client.forgetPost(body)).toEqual({ forgotten: false, found: { record: posted, message: GITHUB_HAS_IT } });
+    expect(GITHUB_HAS_IT).toBe('GitHub has this review: it was posted. Nothing was forgotten.');
+  });
+
+  it('forgetPost: a found record that is not the one asked about, or not posted, is a refusal in the service words', async () => {
+    const { svc, client } = setup();
+    const body = { repo: 'acme/widgets', number: 1, id: posted.id };
+    for (const record of [
+      recordOf([FP], { id: 'post_bbbbbbbbbbbb' }),
+      recordOf([FP], { number: 2, url: 'https://github.com/acme/widgets/pull/2#pullrequestreview-77' }),
+      recordOf([FP], { outcome: 'unknown' }),
+    ]) {
+      svc.on('POST /posts/forget', () => githubHasIt(record));
+      expect(await failure(client.forgetPost(body))).toMatchObject({ kind: 'problem', message: GITHUB_HAS_IT });
+    }
+    // The record's repository may be spelt in another letter case, as on GitHub.
+    const spelt = recordOf([FP], { repo: 'Acme/Widgets', url: 'https://github.com/Acme/Widgets/pull/1#pullrequestreview-77' });
+    svc.on('POST /posts/forget', () => githubHasIt(spelt));
+    expect(await client.forgetPost(body)).toEqual({ forgotten: false, found: { record: spelt, message: GITHUB_HAS_IT } });
+  });
+
+  it('forgetPost: GitHub could not be asked, so the record was kept: a refusal in the service words', async () => {
+    const { svc, client } = setup();
+    svc.on('POST /posts/forget', () => cannotAskGithub());
+    expect(await failure(client.forgetPost({ repo: 'acme/widgets', number: 1, id: posted.id }))).toMatchObject({ kind: 'problem', message: CANNOT_ASK_GITHUB });
+    expect(CANNOT_ASK_GITHUB).toBe('Airlock could not ask GitHub whether this review exists, so the record was kept.');
   });
 });

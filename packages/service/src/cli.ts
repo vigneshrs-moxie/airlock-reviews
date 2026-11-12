@@ -367,12 +367,12 @@ async function status(io: CliIo, o: CliOverrides): Promise<number> {
   }
   // Whatever answers must prove it holds this token before it is sent. A token replaced a moment ago may not have been
   // picked up yet, so a failed proof is asked for once more, a second later, with a new nonce.
-  if (hello.proof !== helloProof(key, nonce)) {
+  if (hello.proof !== helloProof(key, config.port, nonce)) {
     await (o.wait ?? ((ms: number) => new Promise<void>((done) => { setTimeout(done, ms); })))(PROOF_RETRY_MS);
     nonce = newNonce();
     hello = await probe(config, o, nonce);
   }
-  if (hello === null || hello === 'other' || hello.proof !== helloProof(key, nonce)) {
+  if (hello === null || hello === 'other' || hello.proof !== helloProof(key, config.port, nonce)) {
     io.err(`The service on port ${config.port} could not show that it holds the pairing token on disk, so the token was not sent. `
       + `If Airlock is running from another AIRLOCK_HOME, stop it and start it again: ${START_HINT}. If not, another program may be answering on Airlock's port.\n`);
     return 1;

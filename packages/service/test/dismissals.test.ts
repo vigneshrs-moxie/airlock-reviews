@@ -6,7 +6,7 @@ import { loadPack, saveReview, type EngineDeps, type Pack } from '@airlock/engin
 import {
   candidate, DismissalSchema, LatestReplySchema, minimalDocument, RestoreReplySchema, type Dismissal, type Finding, type ReviewDocument,
 } from '@airlock/shared';
-import { readOrCreateToken } from '../src/config.js';
+import { pair, readOrCreateToken } from '../src/config.js';
 import { assertWritable, dismiss, learnedTarget } from '../src/dismissals.js';
 import { createServer } from '../src/server.js';
 import { FakeClock, send, type Reply } from './helpers.js';
@@ -21,6 +21,7 @@ const FP_A = '1111111111111111';
 const FP_B = '2222222222222222';
 const TEXT = 'The totals are rounded by the caller on purpose.';
 const NOT_FOUND = { error: 'Airlock cannot find that finding in the stored review.' };
+const ORIGIN = `chrome-extension://${'a'.repeat(32)}`;
 
 const savedHome = process.env['AIRLOCK_HOME'];
 const cleanups: Array<() => Promise<void>> = [];
@@ -82,10 +83,14 @@ async function startService(): Promise<Rig> {
   const service = createServer({ config: { port: 0, home, packsDir, version: '1.2.3' }, engine, now: clock.date, log: (l) => log.push(l), timers: clock.timers });
   const { port } = await service.listen();
   const token = await readOrCreateToken(home);
+  await pair(home, ORIGIN);
   cleanups.push(async () => { await service.close(); await rm(home, { recursive: true, force: true }); });
+  // As the panel sends them: the token, and the paired extension's Origin on every POST.
+  const panel = (method: string): Record<string, string> =>
+    (method === 'POST' ? { Authorization: `Bearer ${token}`, Origin: ORIGIN } : { Authorization: `Bearer ${token}` });
   const call: Rig['call'] = (method, path, body, headers) => send(port, method, path, body === undefined
-    ? { headers: headers ?? { Authorization: `Bearer ${token}` } }
-    : { headers: { ...(headers ?? { Authorization: `Bearer ${token}` }), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    ? { headers: headers ?? panel(method) }
+    : { headers: { ...(headers ?? panel(method)), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   return {
     home, packsDir, port, clock, log, call,
     dismissBody: (over = {}) => ({ repo: REPO, number: 7, reviewId: REVIEW, findingId: FINDING_A, reason: 'wrong', text: TEXT, ...over }),
@@ -436,13 +441,26 @@ describe('GET /reviews/latest and the front door', () => {
     expect(await latest()).toEqual([]);
   });
 
-  it('both routes are 401 without the token, and write nothing', async () => {
+  it('both routes are 401 without the token, even from the paired extension, and write nothing', async () => {
     const s = await startService();
-    const bare = { Host: `127.0.0.1:${s.port}` };
+    const bare = { Host: `127.0.0.1:${s.port}`, Origin: ORIGIN };
     expect((await s.call('POST', '/dismissals', s.dismissBody(), bare)).status).toBe(401);
     expect((await s.call('POST', '/dismissals/restore', s.restoreBody(), bare)).status).toBe(401);
     expect(await s.file('acme', 'wrong.md')).toBeNull();
     await expect(readFile(s.dismissalsFile(), 'utf8')).rejects.toThrow();
+  });
+
+  it('both routes refuse a request without an Origin even with the token, and write nothing: they write learned lines', async () => {
+    const s = await startService();
+    const bare = { Authorization: `Bearer ${await readOrCreateToken(s.home)}` };
+    const made = await s.call('POST', '/dismissals', s.dismissBody(), bare);
+    expect([made.status, made.json]).toEqual([403, { error: 'Airlock does not accept requests from this page.' }]);
+    expect(await s.file('acme', 'wrong.md')).toBeNull();
+    await expect(readFile(s.dismissalsFile(), 'utf8')).rejects.toThrow();
+    expect((await s.post(s.dismissBody())).status).toBe(200);
+    const restored = await s.call('POST', '/dismissals/restore', s.restoreBody(), bare);
+    expect([restored.status, restored.json]).toEqual([403, { error: 'Airlock does not accept requests from this page.' }]);
+    expect(await s.file('acme', 'wrong.md')).toContain(TEXT);
   });
 
   it('refuses a foreign Origin and a rebinding Host even with the token', async () => {

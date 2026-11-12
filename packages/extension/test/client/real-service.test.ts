@@ -339,9 +339,10 @@ describe('the panel\'s client and the real service', () => {
     if (outcome.outcome !== 'posted') throw new Error('not posted');
     expect((await client.latest(REPO, 7))?.posts).toEqual([outcome.record]);
 
-    // Posting twice: the spent preview is gone, and a new preview of the same findings is refused.
+    // Posting twice: the spent preview is gone (a 404, which the panel waits on as it would for a copy the browser sent
+    // again), and a new preview of the same findings is refused.
     expect(await client.post({ previewId: preview.previewId })).toEqual({
-      outcome: 'refused', message: 'This preview has expired. Open the preview again.',
+      outcome: 'no-preview', message: 'This preview has expired. Open the preview again.',
     });
     expect(await refusal(client.previewPost({ repo: REPO, number: 7, reviewId: 'r_0123456789', items }))).toEqual({
       kind: 'problem', message: 'This finding is already posted on this pull request: Total is not rounded.',

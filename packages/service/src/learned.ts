@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join, sep } from 'node:path';
 import { choosePacks, loadPack, reviewById, type LearnedEntry, type Pack } from '@airlock/engine';
 import {
@@ -9,6 +10,7 @@ import {
   assertWritable, DismissError, dismissalsFolder, dismissalsFor, KIT_PACK, LEARNED_CAP, listForChange, replaceFile, serialised,
   writeList, type DismissDeps,
 } from './dismissals.js';
+import { pathsForLog } from './http.js';
 
 const fileOf = (kind: LearnedKind): string => (kind === 'wrong' ? 'wrong.md' : 'product-knowledge.md');
 const engineKind = (kind: LearnedKind): LearnedEntry['kind'] => (kind === 'wrong' ? 'wrong' : 'intended');
@@ -35,6 +37,22 @@ const keyOf = (e: LearnedEntry): string => learnedKey(serviceKind(e.kind), e.dat
 const placeOf = (pack: Pack, e: LearnedEntry): string =>
   `${pack.id}/learned/${fileOf(serviceKind(e.kind))}:${/:(\d+)$/.exec(e.where ?? '')?.[1] ?? '?'}`;
 
+/** Where packs live: the packs folder, and the Airlock home. */
+type PackFolders = { packsDir: string; home: string };
+
+/** A message about packs for the log: paths written from the packs folder (`acme/learned/wrong.md`) or the Airlock home, any other of the person's paths hidden. */
+const packsLog = (text: string, folders: PackFolders): string => pathsForLog(text, [folders.packsDir, folders.home], [homedir()]);
+
+/**
+ * The messages of `choosePacks` that may be logged, each through `packsLog`. The engine's sentence for a learned line
+ * whose repository field is not a repository is left out: it holds that hand-written field (the list logs that line by
+ * its place in the pack instead).
+ */
+export function packMessagesForLog(chosen: { packs: readonly Pack[]; errors: ReadonlyArray<{ message: string }> }, folders: PackFolders): string[] {
+  const learnedDirs = chosen.packs.map((p) => `${join(p.dir, 'learned')}${sep}`);
+  return chosen.errors.filter((e) => !learnedDirs.some((dir) => e.message.startsWith(dir))).map((e) => packsLog(e.message, folders));
+}
+
 /**
  * The packs the engine chooses for the repository (`choosePacks`), each with every learned line it holds. The engine gives
  * the pack used for every repository only the lines that apply to this repository; the list shows that pack's other lines
@@ -42,18 +60,14 @@ const placeOf = (pack: Pack, e: LearnedEntry): string =>
  * read (`learnedProblems`), and a line whose repository field is neither a repository name nor empty or `-` (the contract
  * cannot show it), is left out and logged once by its place in the pack, never its text or an absolute path.
  */
-async function chosenPacks(packsDir: string, repo: string, log: (line: string) => void): Promise<ChosenPack[]> {
-  const chosen = await choosePacks(packsDir, repo);
-  const learnedDirs = chosen.packs.map((p) => `${join(p.dir, 'learned')}${sep}`);
-  for (const e of chosen.errors) {
-    // The engine's sentence for a line with a bad repository field holds its path and that field: it is logged below.
-    if (!learnedDirs.some((dir) => e.message.startsWith(dir))) log(`packs for ${repo}: ${e.message}`);
-  }
+async function chosenPacks(folders: PackFolders, repo: string, log: (line: string) => void): Promise<ChosenPack[]> {
+  const chosen = await choosePacks(folders.packsDir, repo);
+  for (const message of packMessagesForLog(chosen, folders)) log(`packs for ${repo}: ${message}`);
   const result: ChosenPack[] = [];
   for (const pack of chosen.packs) {
     let whole: Pack;
     try { whole = await loadPack(pack.dir); } catch (err) {
-      log(`packs for ${repo}: ${messageOf(err)}`);
+      log(`packs for ${repo}: ${packsLog(messageOf(err), folders)}`);
       continue;
     }
     for (const where of whole.learnedProblems ?? []) {
@@ -80,7 +94,7 @@ async function chosenPacks(packsDir: string, repo: string, log: (line: string) =
  */
 export async function listLearned(deps: Pick<DismissDeps, 'config' | 'log'>, repo: string): Promise<LearnedReply> {
   const lines: LearnedLine[] = [];
-  for (const { pack, lines: stored } of await chosenPacks(deps.config.packsDir, repo, deps.log)) {
+  for (const { pack, lines: stored } of await chosenPacks(deps.config, repo, deps.log)) {
     for (const l of stored) {
       lines.push({
         pack: pack.id, packTitle: pack.title, kind: l.kind, date: l.date, repo: forNoRepo(l.repo) ? null : l.repo, text: l.text,
@@ -109,7 +123,7 @@ function withoutLine(text: string, stored: string): string | null {
  */
 export async function removeLearnedLine(deps: DismissDeps, body: RemoveLearnedBody): Promise<RemoveLearnedReply> {
   return serialised(async () => {
-    const chosen = (await chosenPacks(deps.config.packsDir, body.repo, deps.log)).find((c) => c.pack.id === body.pack);
+    const chosen = (await chosenPacks(deps.config, body.repo, deps.log)).find((c) => c.pack.id === body.pack);
     if (chosen === undefined) throw new DismissError(404, 'Airlock does not use that pack for this repository.');
     const { pack } = chosen;
     if (pack.id === KIT_PACK) throw new DismissError(403, 'Lines of the team standard cannot be removed here.');

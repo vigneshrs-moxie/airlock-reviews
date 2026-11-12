@@ -24,6 +24,8 @@ export const FP_D = '5555555555555555';
 export const POST_ARGS = ['api', '--method', 'POST', `repos/${REPO}/pulls/${NUMBER}/reviews`, '--input', '-'];
 export const POST_LINE = `gh ${POST_ARGS.join(' ')}`;
 export const PULL_LINE = `gh api repos/${REPO}/pulls/${NUMBER}`;
+export const USER_LINE = 'gh api user --jq .login';
+export const REVIEWS_LINE = `gh api repos/${REPO}/pulls/${NUMBER}/reviews --paginate`;
 export const EXPIRED = 'This preview has expired. Open the preview again.';
 
 export interface ExecResult { stdout: string; stderr: string; code: number }
@@ -105,7 +107,10 @@ export async function startService(): Promise<Rig> {
   const calls: Call[] = [];
   const answers: Rig['answers'] = new Map<string, ExecResult | (() => Promise<ExecResult>)>([
     [PULL_LINE, { stdout: pull(), stderr: '', code: 0 }],
+    // The account the stored review was made as (its viewer is 'bob').
+    [USER_LINE, { stdout: 'bob\n', stderr: '', code: 0 }],
     [POST_LINE, POSTED],
+    [REVIEWS_LINE, { stdout: '[]', stderr: '', code: 0 }],
   ]);
   const engine: EngineDeps = {
     exec: async (cmd, args, opts) => {

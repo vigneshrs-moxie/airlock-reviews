@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -153,6 +153,20 @@ describe('GET /learned', () => {
     expect(s.logs.filter((l) => l.includes('generic/learned/wrong.md:3'))).toHaveLength(1);
     expect(s.logs.join('\n')).not.toContain('SECRET');
     expect(s.logs.join('\n')).not.toContain(s.home);
+  });
+
+  it('a learned file that cannot be read is logged by its place in the pack, never by an absolute path', async () => {
+    const s = await startService();
+    const wrong = join(s.packsDir, 'acme', 'learned', 'wrong.md');
+    await chmod(wrong, 0o000);
+    try {
+      expect((await s.call('GET', `/learned?repo=${REPO}`)).status).toBe(200);
+    } finally {
+      await chmod(wrong, 0o644);
+    }
+    expect(s.logs.some((l) => l.includes('EACCES') && l.includes('acme/learned/wrong.md'))).toBe(true);
+    expect(s.logs.join('\n')).not.toContain(s.home);
+    expect(s.logs.join('\n')).not.toContain(s.packsDir);
   });
 
   it('refuses a missing or malformed repo', async () => {

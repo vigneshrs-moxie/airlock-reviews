@@ -1,8 +1,10 @@
-import { rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ReviewRange } from '@airlock/shared';
 import { PROMPT_BOUNDARY } from '../../src/agent/prompt.js';
+import { renderReview } from '../../src/render/terminal.js';
 import { isSyncMerge } from '../../src/shape/detect.js';
 import { mergeNote, mergeNoteBlock, mergeRange } from '../../src/shape/merge-range.js';
 import { realExec, type Exec } from '../../src/util/exec.js';
@@ -84,6 +86,35 @@ describe('mergeRange', () => {
     expect(lines.filter((l) => l.kind === 'del').map((l) => l.text)).toEqual([
       expect.stringMatching(/^<<<<<<< /), 'feature two', '=======', 'main two', expect.stringMatching(/^>>>>>>> /),
     ]);
+  });
+
+  it('runs no merge driver from the person\'s own git configuration, and still gives the merge\'s tree and conflicts', async () => {
+    const r = await repo();
+    const { feature, main } = await twoSides(r);
+    const joined = await joinedBoth(r, feature, main);
+    const merge = await mergeByHand(r, { 'a.txt': 'one\nfeature and main two\nthree\n' });
+    const dir = await mkdtemp(join(tmpdir(), 'airlock-driver-'));
+    try {
+      // The person's global configuration names an attributes file that sends .txt files to a driver leaving a marker.
+      await writeFile(join(dir, 'attrs'), '*.txt merge=probe\n');
+      const config = async (name: string): Promise<string> => {
+        const path = join(dir, `${name}.gitconfig`);
+        await writeFile(path, `[core]\n\tattributesFile = ${join(dir, 'attrs')}\n[merge "probe"]\n\tdriver = touch ${join(dir, name)}; false\n`);
+        return path;
+      };
+      const asThePerson = (path: string): Exec => (cmd, args, opts) => realExec(cmd, args, { ...opts, env: { GIT_CONFIG_GLOBAL: path, ...opts?.env } });
+      // The driver is real: a merge-tree run as the person runs it.
+      await asThePerson(await config('sanity'))('git', ['--git-dir', gitDir(r), 'merge-tree', '--write-tree', feature, main]);
+      expect(await stat(join(dir, 'sanity')).then(() => true, () => false)).toBe(true);
+
+      const got = await mergeRange(asThePerson(await config('probe')), gitDir(r), range(joined, merge));
+      expect(await stat(join(dir, 'probe')).then(() => true, () => false)).toBe(false);
+      expect(got).toEqual({ kind: 'by-hand', baseSha: expect.stringMatching(/^[0-9a-f]{40}$/), headSha: merge, files: 1, unshown: [] });
+      if (got.kind !== 'by-hand') return;
+      expect(await r.git('show', `${got.baseSha}:a.txt`)).toMatch(/^<<<<<<< .*\nfeature two\n=======\nmain two\n>>>>>>> /m);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('a line changed by hand in a file without conflict is in the range, and what git merged by itself is not', async () => {
@@ -271,6 +302,7 @@ describe('runReview of a pull request that only merges its base in', () => {
     const { doc, calls, events } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: head }) });
     expect(calls).toEqual([]);
     expect(doc.range.kind).toBe('sync-merge');
+    expect(doc.mergeReview).toBe('nothing-by-hand');
     expect(doc.range.headSha).toBe(head);
     expect(doc.files).toEqual([]);
     expect(doc.stageErrors).toEqual([]);
@@ -293,6 +325,7 @@ describe('runReview of a pull request that only merges its base in', () => {
     expect(doc.range.baseSha).not.toBe(s.baseSha);
     expect(doc.files.map((f) => f.path)).toEqual(['src/a.ts']);
     expect(doc.verdict.label).not.toBe('incomplete');
+    expect(doc.mergeReview).toBe('by-hand');
 
     const roles = calls.map((c) => c.role);
     expect(roles).toContain('brief');
@@ -322,6 +355,7 @@ describe('runReview of a pull request that only merges its base in', () => {
     const two = await review({ s: twice.s, exec: fakeGh({ baseSha: twice.s.baseSha, headSha: head }) });
     expect(two.calls).toEqual([]);
     expect(two.doc.range.kind).toBe('sync-merge');
+    expect(two.doc.mergeReview).toBe('not-reviewed');
     expect(two.doc.verdict.label).toBe('incomplete');
     expect(two.doc.stageErrors).toEqual([{
       stage: 'shape', cohortId: null,
@@ -347,6 +381,7 @@ describe('runReview of a pull request that only merges its base in', () => {
     const octopus = await s.remote.git('rev-parse', 'HEAD');
     const octo = await review({ s, req: { explicit: { baseSha: mainTip, headSha: octopus } }, exec: fakeGh({ baseSha: mainTip, headSha: octopus }) });
     expect(octo.calls).toEqual([]);
+    expect(octo.doc.mergeReview).toBe('not-reviewed');
     expect(octo.doc.verdict.label).toBe('incomplete');
     expect(octo.doc.stageErrors).toEqual([{
       stage: 'shape', cohortId: null,
@@ -380,13 +415,14 @@ describe('runReview of a pull request that only merges its base in', () => {
     const { doc, calls } = await review({ s, req: { since: { reviewId: first.doc.id } }, exec: fakeGh({ baseSha: s.baseSha, headSha: head }), script });
     expect(doc.stageErrors).toEqual([]);
     expect(doc.range).toEqual({ baseSha: expect.stringMatching(/^[0-9a-f]{40}$/), headSha: head, kind: 'sync-merge' });
+    expect(doc.mergeReview).toBe('by-hand');
     // The mechanical merge was made in Airlock's own mirror, on the earlier head, and never in the remote.
     const mirror = join(home(), 'repos', 'acme__app.git');
     const parents = await realExec('git', ['--git-dir', mirror, 'rev-list', '--parents', '-n', '1', doc.range.baseSha]);
     expect(parents.stdout.trim()).toBe(`${doc.range.baseSha} ${s.headSha}`);
     expect((await realExec('git', ['cat-file', '-e', doc.range.baseSha], { cwd: s.remote.dir })).code).not.toBe(0);
     expect(doc.files.map((f) => f.path)).toEqual(['src/money.ts']);
-    expect(doc.previous).toEqual({ reviewId: first.doc.id, headSha: s.headSha });
+    expect(doc.previous).toEqual({ reviewId: first.doc.id, headSha: s.headSha, covered: 'merge' });
     expect(doc.notes).toContain('The push since the last review only merges the base branch main in, so only what was changed by hand in that merge was reviewed.');
     expect(Object.fromEntries(doc.findings.map((f) => [f.title, f.status]))).toEqual({
       [GOOD.title as string]: 'still-open', [RULED.title as string]: 'still-open',
@@ -431,6 +467,8 @@ describe('runReview of a pull request that only merges its base in', () => {
     );
     const { doc, calls } = await review({ s, req: given(joined, merge), exec: fakeGh({ baseSha: joined, headSha: merge }) });
     expect(calls).toEqual([]);
+    // Every conflict settled without markers: a merge Airlock could not review.
+    expect(doc.mergeReview).toBe('not-reviewed');
     expect(doc.verdict.label).toBe('incomplete');
     expect(doc.stageErrors).toEqual([{
       stage: 'shape', cohortId: null,
@@ -494,6 +532,59 @@ describe('runReview of a pull request that only merges its base in', () => {
       'This push only merges main into the branch. Git merged it without conflicts and nothing was changed by hand.',
     ]);
     expect(doc.stageErrors).toEqual([]);
+    expect(doc.mergeReview).toBe('nothing-by-hand');
+    expect(doc.previous).toEqual({ reviewId: first.doc.id, headSha: s.headSha, covered: 'merge' });
+    // Nothing was changed by hand, so no note says that what was changed by hand was reviewed.
+    expect(doc.notes ?? []).not.toContainEqual(expect.stringMatching(/by hand/));
+    expect(renderReview(doc).split('\n')[2])
+      .toBe('The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.');
+  }, SLOW);
+
+  it('a re-review whose push is a merge of the base Airlock could not review says it only merges the base, never that it was reviewed', async () => {
+    const first = await review();
+    const { s } = first;
+    // main deletes the file the pull request changed; the merge keeps the pull request's file as git left it, with no markers.
+    await s.remote.git('checkout', 'main');
+    await commitFiles(s.remote, { 'src/money.ts': null, 'README.md': 'main moved on\n' }, 'main deletes money.ts');
+    await s.remote.git('checkout', 'feature');
+    await s.remote.git('merge', '--no-commit', 'main').catch(() => undefined);
+    await s.remote.git('add', '--all');
+    await s.remote.git('commit', '--no-edit', '-m', 'Merge main into feature');
+    const head = await s.remote.git('rev-parse', 'HEAD');
+    const script = scenarioScript({ 'challenge:fixed:': () => { throw new Error('no fixed check was expected'); } });
+    const { doc } = await review({ s, req: { since: { reviewId: first.doc.id } }, exec: fakeGh({ baseSha: s.baseSha, headSha: head }), script });
+    expect(doc.mergeReview).toBe('not-reviewed');
+    expect(doc.previous).toEqual({ reviewId: first.doc.id, headSha: s.headSha, covered: 'merge' });
+    expect(doc.stageErrors.map((e) => e.stage)).toContain('shape');
+    expect(doc.notes).toContain('The push since the last review only merges the base branch main in.');
+    expect(doc.notes ?? []).not.toContainEqual(expect.stringMatching(/by hand/));
+    // No line of its own under the header: the stage error says what happened.
+    expect(renderReview(doc).split('\n')[2]).toBe('');
+  }, SLOW);
+
+  it('a pull request that is only a merge, reviewed again in full, tells every request the pull request\'s scope, not the push\'s', async () => {
+    const { s, head: merged } = await mergedIn({ 'src/a.ts': 'export const a = 2;\n' });
+    const script = scenarioScript({ mapper: () => ({ cohorts: [], standalone: ['src/a.ts'] }), seams: () => none });
+    const first = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: merged }), script });
+    expect(first.doc.mergeReview).toBe('by-hand');
+    // The branch is rewritten: the merge is made again with another change by hand.
+    await s.remote.git('reset', '--hard', s.baseSha);
+    await s.remote.git('merge', '--no-ff', '--no-commit', 'main');
+    await s.remote.write('src/a.ts', 'export const a = 3;\n');
+    await s.remote.git('add', '--all');
+    await s.remote.git('commit', '--no-edit', '-m', 'Merge main into feature again');
+    const head = await s.remote.git('rev-parse', 'HEAD');
+    const { doc, calls } = await review({
+      s, req: { since: { reviewId: first.doc.id } }, exec: fakeGh({ baseSha: s.baseSha, headSha: head }), script,
+    });
+    expect(doc.range.kind).toBe('sync-merge');
+    expect(doc.mergeReview).toBe('by-hand');
+    expect(doc.notes).toContainEqual(expect.stringMatching(/the whole pull request was reviewed again\.$/));
+    expect(doc.previous).toEqual({ reviewId: first.doc.id, headSha: merged, covered: 'everything' });
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) expect(c.instructions.endsWith(mergeNote('pull request'))).toBe(true);
+    // No merge line: reviewed again in full, and the note under Notes says why.
+    expect(renderReview(doc).split('\n')[2]).toBe(`Reviewed again in full since ${merged.slice(0, 7)}`);
   }, SLOW);
 
   it('a rule file with conflict markers on the base side is not used as rules, and the limits say so', async () => {

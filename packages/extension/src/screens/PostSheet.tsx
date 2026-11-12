@@ -3,11 +3,11 @@ import {
   type PostRecord,
 } from '@airlock/shared';
 import { useEffect, useId, useRef } from 'react';
-import { POST_NOT_LEARNED, POST_UNKNOWN, type PostReply, type UserAction } from '../state/reduce';
+import { isFor, POST_NOT_LEARNED, POST_UNKNOWN, type PostReply, type UserAction } from '../state/reduce';
 import { recordHolds } from '../state/selection';
 import type { SheetView } from './DismissSheet';
 import { useAnnounce } from './Frame';
-import { mentionNotice, whyNotPosting } from './PostedMark';
+import { ForgetAsk, mentionNotice, NO_POST_OFFLINE, WAIT, whyNotPosting } from './PostedMark';
 import { Sheet } from './Sheet';
 
 export const POST_ONE_REVIEW = 'Airlock posts these as one review with the Comment action. It never approves or requests changes.';
@@ -17,10 +17,15 @@ export const NO_PREVIEW = 'Airlock got no answer for the preview. Ask again when
 export const OFFLINE_KEPT_POST = 'Airlock could not reach its service. Your comments are kept.';
 export const NOT_THIS_REVIEW_POST = 'This review is no longer the one on screen, so these comments cannot be posted from it. Closing this loses the texts here.';
 export const WAITING_FOR_RECORD = 'Waiting to hear whether GitHub accepted the comments…';
+/** After a 404 on the post: a copy the browser sent earlier may have gone through. */
+export const CHECKING_FOR_RECORD = 'Checking whether this post already went through…';
 export const REVIEW_TEXT = "The review's own text, as it will be posted:";
 export const REVIEW_TEXT_OLD = 'Update preview to see this again.';
 export const PREVIEW_UPDATED = 'Preview updated.';
 export const TO_SUMMARY = 'Put in the summary instead';
+/** Over another pull request's review, while a post sent from this sheet had not been answered when the tab moved. */
+export const postElsewhere = (pr: { repo: string; number: number }): string =>
+  `A post of these comments to ${pr.repo}#${pr.number} was in flight when the tab moved. Go back to that pull request to see what happened.`;
 
 let tickets = 0;
 /** A number no earlier request of this panel used, so the sheet knows its own answer. */
@@ -41,12 +46,16 @@ export interface PendingPost {
   known: string[];
   /** For a preview: the findings asked to go in the summary. */
   toSummary: string[];
+  /** Whether a post had been sent from this sheet before this request, for a post that never left the panel. */
+  wasSent: boolean;
 }
 
 /** What the person has done in the post sheet. Kept by the panel screen, so it outlives the sheet being out of sight. */
 export interface PostDraft {
   /** The review the sheet was opened on; a preview is only ever asked of this one. */
   reviewId: string;
+  /** Its pull request: a request's ending is judged only against this pull request's records. */
+  pr: { repo: string; number: number };
   /** The findings asked for, by fingerprint, in order. */
   fingerprints: string[];
   /** Whose Post button opened the sheet: a finding's id, or the selection bar. */
@@ -69,8 +78,8 @@ export interface PostDraft {
   said: string | null;
   /** `said` asks the person to look at the pull request. */
   look: boolean;
-  /** The post in flight got no clear answer; the panel is reading the records until its record appears. */
-  waiting: boolean;
+  /** The post in flight got no clear answer; the panel is reading the records until its record appears, saying this. */
+  waiting: string | null;
   /** How many previews have come, so a fresh one after the first can be announced. */
   previews: number;
   /** A post was sent from this sheet, so it no longer says that nothing has been sent. */
@@ -79,12 +88,15 @@ export interface PostDraft {
   outcome: { record: PostRecord; message: string | null } | null;
 }
 
-/** A sheet just opened, waiting for the first preview asked for under `ticket`. */
-export function newPostDraft(fingerprints: string[], reviewId: string, opener: string | 'selected', ticket: number): PostDraft {
+/** A sheet just opened on `reviewId` of `pr`, waiting for the first preview asked for under `ticket`. */
+export function newPostDraft(
+  fingerprints: string[], reviewId: string, opener: string | 'selected', ticket: number, pr: { repo: string; number: number },
+): PostDraft {
   return {
-    reviewId, fingerprints, opener, preview: null, texts: {}, summary: '', summaryTyped: false, toSummary: [], previewToSummary: [], spent: false,
-    pending: { kind: 'preview', ticket, started: false, known: [], toSummary: [] }, said: null, look: false, waiting: false, previews: 0, sent: false,
-    outcome: null,
+    reviewId, pr: { repo: pr.repo, number: pr.number }, fingerprints, opener, preview: null, texts: {}, summary: '', summaryTyped: false,
+    toSummary: [], previewToSummary: [], spent: false,
+    pending: { kind: 'preview', ticket, started: false, known: [], toSummary: [], wasSent: false }, said: null, look: false, waiting: null,
+    previews: 0, sent: false, outcome: null,
   };
 }
 
@@ -93,7 +105,7 @@ export type PostSheetView = SheetView & { post?: PostReply | undefined; stale?: 
 
 /** The draft once the answer to its pending request has come. */
 function absorb(draft: PostDraft, pending: PendingPost, reply: Exclude<PostReply, { kind: 'waiting' }>): PostDraft {
-  const settled = { ...draft, pending: null, look: false, waiting: false };
+  const settled = { ...draft, pending: null, look: false, waiting: null };
   switch (reply.kind) {
     case 'preview': {
       const { preview } = reply;
@@ -105,10 +117,14 @@ function absorb(draft: PostDraft, pending: PendingPost, reply: Exclude<PostReply
       };
     }
     case 'refused': return { ...settled, said: reply.message, spent: draft.spent || pending.kind === 'post' };
+    // Nothing left the panel: the same preview can be posted again.
+    case 'unsent': return { ...settled, said: reply.message, sent: pending.wasSent };
     case 'posted': return { ...settled, said: null, outcome: { record: reply.record, message: null } };
     case 'unknown': return { ...settled, said: null, outcome: { record: reply.record, message: reply.message } };
     case 'unclear': return { ...settled, said: reply.message, look: true, spent: true };
     case 'forgotten': return { ...settled, said: null, outcome: null, spent: true };
+    // GitHub has the review: it was posted after all, and the service's sentence says so.
+    case 'found': return { ...settled, said: reply.message, outcome: { record: reply.record, message: null } };
   }
 }
 
@@ -116,12 +132,12 @@ function absorb(draft: PostDraft, pending: PendingPost, reply: Exclude<PostReply
 function unanswered(
   draft: PostDraft, pending: PendingPost, posts: readonly PostRecord[], findings: readonly Pick<Finding, 'fingerprint' | 'aliases'>[],
 ): PostDraft {
-  const settled = { ...draft, pending: null, look: false, waiting: false };
+  const settled = { ...draft, pending: null, look: false, waiting: null };
   if (pending.kind !== 'post') return draft.preview === null ? { ...settled, said: NO_PREVIEW } : settled;
-  // What the records say: one this post made, holding one of its findings, by the same rule as the marks.
+  // What the records say: one this post made, on its pull request, holding one of its findings, by the same rule as the marks.
   const sent = draft.preview?.items.map((item) => item.fingerprint) ?? draft.fingerprints;
   const posted = sent.map((fingerprint) => findings.find((f) => f.fingerprint === fingerprint) ?? { fingerprint });
-  const record = posts.find((r) => !pending.known.includes(r.id) && posted.some((f) => recordHolds(r, f)));
+  const record = posts.find((r) => isFor(r, draft.pr) && !pending.known.includes(r.id) && posted.some((f) => recordHolds(r, f)));
   if (record === undefined) return { ...settled, said: POST_NOT_LEARNED, look: true, spent: true };
   return { ...settled, said: null, outcome: { record, message: record.outcome === 'posted' ? null : POST_UNKNOWN } };
 }
@@ -182,16 +198,20 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
   const announce = useAnnounce();
   const busy = view.busy === true;
   const current = latest.document.id === draft.reviewId;
+  // The view is of another pull request (the tab moved): a request of this sheet is not judged by its records.
+  const elsewhere = !isFor(draft.pr, pr);
 
   // Takes the answer to this sheet's own request, or sees that the request ended without one.
   useEffect(() => {
     if (pending === null) return;
     const reply = view.post !== undefined && view.post.ticket === pending.ticket ? view.post : undefined;
     if (reply !== undefined && reply.kind !== 'waiting') onDraft(absorb(draft, pending, reply));
-    else if (reply !== undefined && !draft.waiting) onDraft({ ...draft, waiting: true, pending: { ...pending, started: true } });
+    else if (reply !== undefined && draft.waiting === null) {
+      onDraft({ ...draft, waiting: reply.checking === true ? CHECKING_FOR_RECORD : WAITING_FOR_RECORD, pending: { ...pending, started: true } });
+    }
     else if (!pending.started && (busy || offline)) onDraft({ ...draft, pending: { ...pending, started: true } });
-    else if (pending.started && !busy && !offline) onDraft(unanswered(draft, pending, latest.posts, latest.document.findings));
-  }, [draft, pending, view.post, busy, offline, latest.posts, latest.document.findings, onDraft]);
+    else if (pending.started && !busy && !offline && !elsewhere) onDraft(unanswered(draft, pending, latest.posts, latest.document.findings));
+  }, [draft, pending, view.post, busy, offline, elsewhere, latest.posts, latest.document.findings, onDraft]);
 
   const showing = outcome !== null ? (outcome.record.outcome === 'posted' ? 'posted' : 'unknown')
     : !current ? 'stale' : preview === null ? 'waiting' : 'form';
@@ -211,8 +231,9 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
     heading.current?.focus();
   }, [showing, active]);
 
-  // A post in flight cannot be left, offline included: its outcome is shown when it is known.
-  const inFlight = busy || pending?.kind === 'post';
+  // A post in flight cannot be left, offline included: its outcome is shown when it is known. Over another pull request
+  // it can: that pull request's own marks say what happened when the tab is back.
+  const inFlight = busy || (pending?.kind === 'post' && !elsewhere);
   const close = (): void => { if (!inFlight) onClose(); };
   const canSend = current && !busy && !offline && pending === null;
   // Why nothing can be posted from this review now, as it is on screen while the sheet is open.
@@ -246,7 +267,7 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
     const ticket = nextTicket();
     onDraft({
       ...draft, said: null, look: false, sent: draft.sent || kind === 'post',
-      pending: { kind, ticket, started: false, known: latest.posts.map((r) => r.id), toSummary: draft.toSummary },
+      pending: { kind, ticket, started: false, known: latest.posts.map((r) => r.id), toSummary: draft.toSummary, wasSent: draft.sent },
     });
     dispatch(action(ticket));
   };
@@ -305,6 +326,7 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
   if (showing === 'posted' && outcome !== null) {
     return shell(
       <>
+        {saidLine}
         <p>{posted}</p>
         {outcome.record.url !== null && <p><a href={outcome.record.url} target="_blank" rel="noopener noreferrer">Open on GitHub</a></p>}
         <div className="actions">
@@ -321,8 +343,8 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
         {pullLink}
         {saidLine}
         {offlineLine}
+        <ForgetAsk blocked={canSend ? null : offline ? NO_POST_OFFLINE : WAIT} onForget={forget} />
         <div className="actions">
-          <button type="button" className="btn" disabled={!canSend} onClick={forget}>It was not posted</button>
           <button type="button" className="btn" disabled={inFlight} onClick={onClose}>Close</button>
         </div>
       </>,
@@ -333,6 +355,8 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
     return shell(
       <>
         <p role="alert" className="notice">{NOT_THIS_REVIEW_POST}</p>
+        {pending?.kind === 'post' && elsewhere && <p className="notice">{postElsewhere(draft.pr)}</p>}
+        {saidLine}
         <div className="actions">
           <button type="button" className="btn" disabled={inFlight} onClick={onClose}>Close</button>
         </div>
@@ -405,7 +429,7 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
       <p>{POST_ONE_REVIEW}</p>
       {saidLine}
       {offlineLine}
-      {draft.waiting && pending?.kind === 'post' && <p role="status">{WAITING_FOR_RECORD}</p>}
+      {draft.waiting !== null && pending?.kind === 'post' && <p role="status">{draft.waiting}</p>}
       <div className="actions">
         {needsUpdate
           ? <button type="button" className="btn primary" ref={mainButton} disabled={mainDisabled} {...describedByBlock} onClick={update}>Update preview</button>

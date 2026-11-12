@@ -33,6 +33,11 @@ export interface Evidence {
   /** Every diff entry by path key (normalised, letter case ignored); two entries share a key when their paths differ only in case. */
   files: Map<string, FileDiff[]>;
   records: DecisionRecord[];
+  /**
+   * False when what the pull request touched is not known (a push re-review whose whole diff could not be worked out):
+   * then nothing is proved pre-existing, since code the pull request added before the last review would pass for it.
+   */
+  preExistingProvable: boolean;
 }
 
 type Item = Candidate & { anchor: Anchor };
@@ -70,11 +75,14 @@ function decisionRecords(packs: Pack[]): DecisionRecord[] {
   return [...entries, ...learned];
 }
 
-/** The evidence for one run: `read` is called at most once per side and path, and the diff is grouped by path key. */
-export function createEvidence(read: ReadFile, files: FileDiff[], packs: Pack[]): Evidence {
+/**
+ * The evidence for one run: `read` is called at most once per side and path, and the diff is grouped by path key. With
+ * `preExistingProvable` false, no refutation proves the ground `pre-existing`.
+ */
+export function createEvidence(read: ReadFile, files: FileDiff[], packs: Pack[], preExistingProvable = true): Evidence {
   const byKey = new Map<string, FileDiff[]>();
   for (const f of files) byKey.set(pathKey(f.path), [...(byKey.get(pathKey(f.path)) ?? []), f]);
-  return { read: readOnce(read), files: byKey, records: decisionRecords(packs) };
+  return { read: readOnce(read), files: byKey, records: decisionRecords(packs), preExistingProvable };
 }
 
 /** A leading list marker such as `- `, `* ` or `1. `; the challenger may copy it with a learned entry. */
@@ -216,7 +224,7 @@ export async function proveDrop(item: Item, ground: Ground, refutation: Refutati
     case 'guarded-elsewhere':
       return proveOnHead(item, refutation, evidence);
     case 'pre-existing':
-      return provePreExisting(item, refutation, evidence);
+      return evidence.preExistingProvable ? provePreExisting(item, refutation, evidence) : NO_PROOF;
     case 'documented-intent':
       return proveIntent(refutation, evidence);
     default:

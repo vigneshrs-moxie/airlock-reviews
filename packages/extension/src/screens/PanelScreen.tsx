@@ -164,7 +164,7 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, page
     const { pr, latest } = state;
     const fingerprints = findings.map((f) => f.fingerprint);
     const ticket = nextTicket();
-    setPostDraft(newPostDraft(fingerprints, latest.document.id, opener, ticket));
+    setPostDraft(newPostDraft(fingerprints, latest.document.id, opener, ticket, pr));
     dispatch({
       type: 'preview-post', ticket,
       body: { repo: pr.repo, number: pr.number, reviewId: latest.document.id, items: fingerprints.map((fingerprint) => ({ fingerprint })) },

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { realExec, type Exec } from '@airlock/engine';
 import { isGhRead } from '../../../engine/src/util/exec.js';
-import { readPull, sendReview, type ReviewPayload } from '../../src/posts/github.js';
+import { listReviews, readLogin, readPull, reviewToSend, sendReview, type ReviewPayload } from '../../src/posts/github.js';
 
 const WRITE_SUBCOMMANDS = 'pr|issue|repo|release|workflow|label|gist|secret';
 
@@ -147,6 +147,103 @@ describe('sendReview', () => {
     const noBody = await sendReview(fakeExec(answer('not json', 'gh: You have exceeded a secondary rate limit (HTTP 403)\n', 1)).exec, REPO, 7, payload);
     expect(noBody).toEqual({ kind: 'refused', status: 403, message: 'You have exceeded a secondary rate limit' });
   });
+
+  it("shows every entry of a validation refusal's errors list, as gh prints it (measured: exit 1, the body on standard output)", async () => {
+    const body = JSON.stringify({
+      message: 'Validation Failed',
+      errors: [
+        { resource: 'PullRequestReviewComment', field: 'line', code: 'invalid' },
+        'Line could not be resolved',
+        { resource: 'PullRequestReview', code: 'custom', field: 'pull_request_review_thread.path', message: 'Path could not be resolved' },
+        { resource: 'PullRequestReview', code: 'missing_field' },
+        { resource: 'PullRequestReview', field: 'body' },
+        {},
+      ],
+      documentation_url: 'https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request',
+      status: '422',
+    });
+    const refused = await sendReview(fakeExec(answer(body, 'gh: Validation Failed (HTTP 422)\n', 1)).exec, REPO, 7, payload);
+    expect(refused).toEqual({
+      kind: 'refused', status: 422,
+      message: 'Validation Failed: line: invalid; Line could not be resolved; Path could not be resolved; missing_field; body',
+    });
+  });
+});
+
+describe('reviewToSend', () => {
+  it('makes every check sendReview makes, before anything runs, and gives the payload as it will be sent', () => {
+    expect(reviewToSend(REPO, 7, payload)).toEqual(payload);
+    const many = { ...payload, comments: Array.from({ length: 31 }, () => payload.comments[0] as ReviewPayload['comments'][number]) };
+    expect(() => reviewToSend(REPO, 7, many)).toThrow('A post holds at most 30 comments.');
+    expect(() => reviewToSend('a/b/../c', 7, payload)).toThrow();
+    expect(() => reviewToSend(REPO, 0, payload)).toThrow();
+  });
+});
+
+describe('readLogin', () => {
+  it('reads the signed-in account with `gh api user --jq .login`, a read, within ten seconds', async () => {
+    const { exec, seen } = fakeExec(answer('Bob-2\n', '', 0));
+    expect(await readLogin(exec)).toBe('Bob-2');
+    expect(seen).toEqual([{ cmd: 'gh', args: ['api', 'user', '--jq', '.login'], input: undefined, timeoutMs: 10_000, allowGhWrite: undefined }]);
+    expect(isGhRead(seen[0]?.args ?? [])).toBe(true);
+    expect(await readLogin(fakeExec(answer('acme_corp-user\n', '', 0)).exec)).toBe('acme_corp-user');
+  });
+
+  it('gives null when the account cannot be read', async () => {
+    const cases: Array<() => Promise<{ stdout: string; stderr: string; code: number }>> = [
+      answer('', 'To get started with GitHub CLI, please run:  gh auth login', 4),
+      answer('{"message":"Bad credentials"}', 'gh: Bad credentials (HTTP 401)', 1),
+      answer('', 'timed out after 10 s', 124),
+      answer('', '', 0),
+      answer('bob smith\n', '', 0),
+      answer(`${'a'.repeat(101)}\n`, '', 0),
+      async () => { throw Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }); },
+    ];
+    for (const run of cases) expect(await readLogin(fakeExec(run).exec)).toBeNull();
+  });
+});
+
+describe('listReviews', () => {
+  const review = (id: number, login: string | null, body: string | null = 'Text.') =>
+    ({ id, user: login === null ? null : { login }, commit_id: 'c'.repeat(40), body, state: 'COMMENTED' });
+
+  it('lists the reviews with `gh api repos/<repo>/pulls/<number>/reviews --paginate`, a read, and joins the pages', async () => {
+    const pages = `${JSON.stringify([review(1, 'bob'), review(2, null)])}\n${JSON.stringify([review(3, 'carol', 'A ][ in the text, and "quotes" \\ too.')])}`;
+    const { exec, seen } = fakeExec(answer(pages, '', 0));
+    expect(await listReviews(exec, REPO, 7)).toEqual([
+      { id: 1, login: 'bob', commitId: 'c'.repeat(40), body: 'Text.' },
+      { id: 2, login: null, commitId: 'c'.repeat(40), body: 'Text.' },
+      { id: 3, login: 'carol', commitId: 'c'.repeat(40), body: 'A ][ in the text, and "quotes" \\ too.' },
+    ]);
+    expect(seen).toEqual([{
+      cmd: 'gh', args: ['api', `repos/${REPO}/pulls/7/reviews`, '--paginate'], input: undefined, timeoutMs: 30_000, allowGhWrite: undefined,
+    }]);
+    expect(isGhRead(seen[0]?.args ?? [])).toBe(true);
+    expect(await listReviews(fakeExec(answer('[]', '', 0)).exec, REPO, 7)).toEqual([]);
+    expect(await listReviews(fakeExec(answer(JSON.stringify([review(4, 'bob', null)]), '', 0)).exec, REPO, 7))
+      .toEqual([{ id: 4, login: 'bob', commitId: 'c'.repeat(40), body: '' }]);
+  });
+
+  it('gives null when the list cannot be read whole, and throws for an address that is not one before running anything', async () => {
+    const cases: Array<() => Promise<{ stdout: string; stderr: string; code: number }>> = [
+      answer('{"message":"Server Error"}', 'gh: Server Error (HTTP 500)', 1),
+      answer('{"message":"Not Found"}', 'gh: Not Found (HTTP 404)', 1),
+      answer('', 'timed out after 30 s', 124),
+      answer('not json', '', 0),
+      answer('[{"id":1}', '', 0),
+      answer(`${JSON.stringify([review(1, 'bob')])} x`, '', 0),
+      answer('{"id":1}', '', 0),
+      answer(JSON.stringify([{ id: 'one', user: null, commit_id: null, body: '' }]), '', 0),
+      async () => { throw new Error('spawn gh ENOENT'); },
+    ];
+    for (const run of cases) expect(await listReviews(fakeExec(run).exec, REPO, 7)).toBeNull();
+    const { exec, seen } = fakeExec(answer('[]', '', 0));
+    await expect(listReviews(exec, 'a/b/c', 7)).rejects.toThrow();
+    expect(seen).toEqual([]);
+  });
+});
+
+describe('sendReview (continued)', () => {
 
   it('calls anything without a status unknown, and never runs a second time', async () => {
     const cases: Array<() => Promise<{ stdout: string; stderr: string; code: number }>> = [

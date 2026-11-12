@@ -76,13 +76,22 @@ async function treeOf(exec: Exec, mirror: string, spec: string): Promise<string>
 }
 
 /**
+ * The person's and the system's git configuration kept out of the merge: a merge driver set there (`merge.<name>.driver`,
+ * chosen through `core.attributesFile`) would run a program of theirs on the pull request's files. The mirror's own
+ * configuration is Airlock's and names no driver, so attributes in the pull request's tree can then choose only git's own.
+ */
+const NO_OUTSIDE_CONFIG: Record<string, string> = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+
+/**
  * The tree of the merge git makes by itself of `ours` and `theirs`, and the paths it reported as conflicts (none for a
  * clean merge). With `--name-only -z` the output is the tree id and then each conflicted path, NUL-separated; the paths
  * are data only. Exit code 0 (clean) or 1 (conflicts) is an answer only when the first field is the id of a tree, since
- * a bad argument also exits 1.
+ * a bad argument also exits 1. Run with no configuration but the mirror's and no attributes file (NO_OUTSIDE_CONFIG).
  */
 async function mechanicalMerge(exec: Exec, mirror: string, ours: string, theirs: string): Promise<{ tree: string; conflicts: string[] | null }> {
-  const made = await exec('git', ['--git-dir', mirror, 'merge-tree', '--write-tree', '--no-messages', '--name-only', '-z', ours, theirs]);
+  const made = await exec('git', [
+    '-c', 'core.attributesFile=/dev/null', '--git-dir', mirror, 'merge-tree', '--write-tree', '--no-messages', '--name-only', '-z', ours, theirs,
+  ], { env: NO_OUTSIDE_CONFIG });
   const [first = '', ...rest] = made.stdout.split('\0');
   const tree = first.trim();
   if ((made.code === 0 || made.code === 1) && FULL_ID.test(tree)) {

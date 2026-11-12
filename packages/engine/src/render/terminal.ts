@@ -1,4 +1,4 @@
-import { STATUS_WORD, verdictWords } from '@airlock/shared';
+import { rereviewCovered, STATUS_WORD, verdictWords } from '@airlock/shared';
 import type { Finding, ReviewDocument, Severity, VerdictLabel } from '@airlock/shared';
 
 const WIDTH = 100;
@@ -124,15 +124,23 @@ function droppedItem(d: ReviewDocument['dropped'][number]): string[] {
 }
 
 /**
- * For a re-review, what it covered: what was changed by hand in a merge pushed since the earlier head; only the push,
- * when the range starts at the earlier head; otherwise the whole pull request again.
+ * For a re-review, what it covered, as the document says (`rereviewCovered`): the push; for a merge pushed since the
+ * earlier head, what was changed by hand in it when that was reviewed (`mergeReview` is `by-hand`), that git merged it by
+ * itself when nothing was changed by hand (naming no branch: the push may have merged one other than the base), and
+ * nothing for a merge Airlock could not review, whose stage error says what happened; or the whole pull request again,
+ * whose note under Notes says why.
  */
 function rereviewLine(doc: ReviewDocument): string[] {
-  if (doc.previous === undefined) return [];
+  const covered = rereviewCovered(doc);
+  if (doc.previous === undefined || covered === null) return [];
   const earlier = doc.previous.headSha.slice(0, 7);
-  if (doc.range.kind === 'sync-merge') return [`Review of the merge pushed since ${earlier}: only what was changed by hand was reviewed.`];
-  if (doc.range.baseSha === doc.previous.headSha) return [`Review of the push ${earlier} to ${doc.range.headSha.slice(0, 7)}`];
-  return [`Reviewed again in full since ${earlier}`];
+  if (covered === 'push') return [`Review of the push ${earlier} to ${doc.range.headSha.slice(0, 7)}`];
+  if (covered === 'everything') return [`Reviewed again in full since ${earlier}`];
+  if (doc.mergeReview === 'by-hand') return [`Review of the merge pushed since ${earlier}: only what was changed by hand was reviewed.`];
+  if (doc.mergeReview === 'nothing-by-hand') {
+    return ['The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.'];
+  }
+  return [];
 }
 
 function countsLine(doc: ReviewDocument): string {

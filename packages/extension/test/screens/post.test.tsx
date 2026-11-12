@@ -4,6 +4,7 @@ import type { Finding, PostPreviewReply } from '@airlock/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PanelScreen } from '../../src/screens/PanelScreen';
 import type { PanelState, PostReply, UserAction } from '../../src/state/reduce';
+import { CANNOT_ASK_GITHUB, GITHUB_HAS_IT } from '../helpers/fake-service';
 import { UNKNOWN_SENTENCE, previewItem, previewOf, recordOf } from '../helpers/post-fixtures';
 import { also, finding, reviewState, type ReviewOptions } from './review-fixtures';
 
@@ -199,6 +200,18 @@ describe('the post sheet', () => {
     expect(dialog().queryByText(names('@erin'))).toBeNull();
   });
 
+  it('after a 404 on the post, says it is checking whether the post already went through, then that the preview expired', () => {
+    const f = finding(1);
+    const m = previewed([f]);
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    m.answer({ kind: 'waiting', checking: true }, { busy: true });
+    expect(dialog().getByRole('status').textContent).toBe('Checking whether this post already went through…');
+    expect(dialog().queryByText('Waiting to hear whether GitHub accepted the comments…')).toBeNull();
+    m.answer({ kind: 'refused', message: 'This preview has expired. Open the preview again.' });
+    expect(dialog().getByText('This preview has expired. Open the preview again.')).toBeTruthy();
+    expect(dialog().queryByText('Checking whether this post already went through…')).toBeNull();
+  });
+
   it('says nothing has been sent only while that is true', () => {
     const f = finding(1);
     const m = previewed([f]);
@@ -335,8 +348,8 @@ describe('the post sheet', () => {
     expect(button('Post comment').disabled).toBe(true);
   });
 
-  it('an unknown outcome offers It was not posted, which forgets the record', () => {
-    const f = finding(1);
+  /** A post whose outcome is not known, in the sheet, after its texts were edited and previewed. */
+  function unknownInSheet(f: Finding) {
     const m = previewed([f]);
     type('Comment 1', 'Kept text.');
     fireEvent.click(button('Update preview'));
@@ -344,14 +357,86 @@ describe('the post sheet', () => {
     fireEvent.click(button('Post 1 comment to GitHub'));
     const record = recordOf([f.fingerprint], { outcome: 'unknown' });
     m.answer({ kind: 'unknown', message: UNKNOWN_SENTENCE, record }, { posts: [record] });
+    return { m, record };
+  }
+
+  it('an unknown outcome offers It was not posted, which asks first, as on the finding, then forgets the record', () => {
+    const f = finding(1);
+    const { m, record } = unknownInSheet(f);
     const d = dialog();
     expect(d.getByRole('alert').textContent).toBe(UNKNOWN_SENTENCE);
     expect((d.getByRole('link', { name: 'Open the pull request' }) as HTMLAnchorElement).getAttribute('href')).toBe('https://github.com/acme/widgets/pull/1');
+    const sent = m.dispatch.mock.calls.length;
+    // One press asks; Keep puts the question away and sends nothing.
+    fireEvent.click(d.getByRole('button', { name: 'It was not posted' }));
+    expect(d.getByText('Forget this record? Only do this after looking at the pull request.')).toBeTruthy();
+    expect(document.activeElement).toBe(d.getByRole('button', { name: 'Keep' }));
+    fireEvent.click(d.getByRole('button', { name: 'Keep' }));
+    expect(d.queryByText('Forget this record? Only do this after looking at the pull request.')).toBeNull();
+    expect(document.activeElement).toBe(d.getByRole('button', { name: 'It was not posted' }));
+    expect(m.dispatch.mock.calls.length).toBe(sent);
+    // Asked and answered: the record is forgotten.
+    fireEvent.click(d.getByRole('button', { name: 'It was not posted' }));
     fireEvent.click(d.getByRole('button', { name: 'It was not posted' }));
     expect(m.last()).toEqual({ type: 'forget-post', ticket: expect.any(Number), id: record.id });
+    expect(m.dispatch.mock.calls.length).toBe(sent + 1);
     m.answer({ kind: 'forgotten', id: record.id });
     expect(field('Comment 1').value).toBe('Kept text.');
     expect(button('Update preview').disabled).toBe(false);
+  });
+
+  it('It was not posted in the sheet is disabled with its reason while the service is away', () => {
+    const f = finding(1);
+    const { m, record } = unknownInSheet(f);
+    const shown = reviewState([f], { posts: [record] });
+    m.show({ kind: 'offline', review: { pr: shown.pr, latest: shown.latest, stale: false } });
+    const forget = dialog().getByRole('button', { name: 'It was not posted' }) as HTMLButtonElement;
+    expect(forget.disabled).toBe(true);
+    expect(document.getElementById(forget.getAttribute('aria-describedby')!)?.textContent).toBe('Posting needs the Airlock service, which is not answering.');
+  });
+
+  it('GitHub has the review after all: the sheet says so, shows it as posted, and nothing was forgotten', () => {
+    const f = finding(1);
+    const { m, record } = unknownInSheet(f);
+    fireEvent.click(dialog().getByRole('button', { name: 'It was not posted' }));
+    fireEvent.click(dialog().getByRole('button', { name: 'It was not posted' }));
+    const posted = { ...recordOf([f.fingerprint]), id: record.id };
+    m.answer({ kind: 'found', message: GITHUB_HAS_IT, record: posted }, { posts: [posted] });
+    const d = dialog();
+    expect(d.getByRole('alert').textContent).toBe(GITHUB_HAS_IT);
+    expect(d.getByText('Posted 1 comment.')).toBeTruthy();
+    expect((d.getByRole('link', { name: 'Open on GitHub' }) as HTMLAnchorElement).getAttribute('href')).toBe(posted.url);
+    fireEvent.click(button('Done'));
+    expect(screen.getByText('Posted', { selector: '.mark *' })).toBeTruthy();
+  });
+
+  it('GitHub could not be asked: the sheet says the record was kept, and It was not posted is still offered', () => {
+    const f = finding(1);
+    const { m, record } = unknownInSheet(f);
+    fireEvent.click(dialog().getByRole('button', { name: 'It was not posted' }));
+    fireEvent.click(dialog().getByRole('button', { name: 'It was not posted' }));
+    m.answer({ kind: 'refused', message: CANNOT_ASK_GITHUB }, { posts: [record] });
+    const d = dialog();
+    expect(d.getAllByRole('alert').map((a) => a.textContent)).toEqual([UNKNOWN_SENTENCE, CANNOT_ASK_GITHUB]);
+    expect(d.getByRole('button', { name: 'It was not posted' })).toBeTruthy();
+  });
+
+  it('a post never sent because the proof got no answer says so and offers the same post again', () => {
+    const f = finding(1);
+    const m = previewed([f]);
+    type('Comment 1', 'Kept text.');
+    fireEvent.click(button('Update preview'));
+    m.answer({ kind: 'preview', preview: previewOf([itemFor(f, { body: 'Kept text.' })]) });
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    m.answer({ kind: 'unsent', message: 'Airlock could not reach its service, so nothing was sent.' });
+    const d = dialog();
+    expect(d.getByRole('alert').textContent).toBe('Airlock could not reach its service, so nothing was sent.');
+    expect(d.queryByRole('link', { name: 'Open the pull request' })).toBeNull();
+    expect(field('Comment 1').value).toBe('Kept text.');
+    // Not a post whose outcome is unknown: the same preview can be posted again, and nothing has been sent.
+    expect(d.getByText('This is the exact text. Nothing has been sent yet.')).toBeTruthy();
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    expect(m.dispatch.mock.calls.filter(([a]) => a.type === 'post')).toHaveLength(2);
   });
 
   it('an unknown record shows its mark on the finding and its card', () => {
@@ -498,6 +583,37 @@ describe('the post sheet keeps its texts', () => {
     expect(dialog().getByText('Getting the preview…')).toBeTruthy();
   });
 
+  it('a post in flight when the tab moves is not judged by the other pull request\'s records, and is when the tab is back', () => {
+    const f = finding(1);
+    const m = previewed([f]);
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    m.show(reviewState([f], { busy: true }));
+    // The tab moves to pull request 2: its review, and a record of its own that holds a finding with the same fingerprint.
+    const elsewhere = recordOf([f.fingerprint], { number: 2, url: 'https://github.com/acme/widgets/pull/2#pullrequestreview-77' });
+    m.show(reviewState([f], { pr: { number: 2 }, doc: { id: 'r_0000000002' }, posts: [elsewhere] }));
+    const d = dialog();
+    expect(d.getByText('This review is no longer the one on screen, so these comments cannot be posted from it. Closing this loses the texts here.')).toBeTruthy();
+    expect(d.getByText('A post of these comments to acme/widgets#1 was in flight when the tab moved. Go back to that pull request to see what happened.')).toBeTruthy();
+    expect(d.queryByText(NOT_LEARNED)).toBeNull();
+    expect(d.queryByText('Posted 1 comment.')).toBeNull();
+    // Over the other pull request the sheet can be left.
+    expect(button('Close').disabled).toBe(false);
+    // Back on pull request 1, its own record is the outcome.
+    const record = recordOf([f.fingerprint]);
+    m.show(reviewState([f], { posts: [record] }));
+    expect(dialog().getByText('Posted 1 comment.')).toBeTruthy();
+  });
+
+  it('a post in flight, back on its pull request with no record of it there, says it could not learn what happened', () => {
+    const f = finding(1);
+    const m = previewed([f]);
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    m.show(reviewState([f], { busy: true }));
+    m.show(reviewState([f], { pr: { number: 2 }, doc: { id: 'r_0000000002' } }));
+    m.show(reviewState([f]));
+    expect(dialog().getByRole('alert').textContent).toBe(NOT_LEARNED);
+  });
+
   it('a review that is no longer the one on screen is not posted to', () => {
     const f = finding(1);
     const m = previewed([f]);
@@ -627,6 +743,20 @@ describe('an unknown record can be cleared from the finding', () => {
     m.answer({ kind: 'forgotten', id: unknownFor(f).id }, { posts: [] });
     expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Findings' }));
     expect(document.querySelector('[aria-live]')?.textContent).toBe('Record forgotten.');
+  });
+
+  it('GitHub has the review after all: the finding is marked Posted and the sentence is shown, with focus', () => {
+    const f = finding(1);
+    const m = mount([f], { posts: [unknownFor(f)] });
+    const card = within(document.querySelector<HTMLElement>('.finding-card')!);
+    fireEvent.click(card.getByRole('button', { name: 'It was not posted' }));
+    fireEvent.click(card.getByRole('button', { name: 'It was not posted' }));
+    const posted = { ...recordOf([f.fingerprint]), id: unknownFor(f).id };
+    m.answer({ kind: 'found', message: GITHUB_HAS_IT, record: posted }, { posts: [posted] });
+    expect(screen.getByText('Posted', { selector: '.finding-card *' })).toBeTruthy();
+    expect(screen.queryByText('Not known whether this was posted')).toBeNull();
+    expect(document.activeElement?.textContent).toBe(GITHUB_HAS_IT);
+    expect(document.querySelector('[aria-live]')?.textContent).toBe(GITHUB_HAS_IT);
   });
 
   it('a refusal is said where it was asked', () => {

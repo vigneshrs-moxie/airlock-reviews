@@ -1,4 +1,4 @@
-import { fixPrompt, POST_MAX_ITEMS, verdictWords, type Dismissal, type Finding, type ReviewDocument, type Tier } from '@airlock/shared';
+import { fixPrompt, POST_MAX_ITEMS, rereviewCovered, verdictWords, type Dismissal, type Finding, type ReviewDocument, type Tier } from '@airlock/shared';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Timers } from '../client/timers';
 import { listFindings, neighbours, postOf, selectedInOrder, toggled } from '../state/selection';
@@ -49,15 +49,29 @@ function ReviewAgain({ doc, disabled, dispatch, label = 'Review again' }: {
 
 const short = (sha: string): string => sha.slice(0, 7);
 
-/** The line under the verdict that says what a re-review or a merge review covered; nothing for a full review (its note says why). */
+/**
+ * The line under the verdict that says what a re-review covered, as the document says (`rereviewCovered`): the push; a
+ * pushed merge, said to be reviewed by hand only when the document says so (`mergeReview`) and naming no branch (the
+ * push may have merged one other than the base), and nothing for one Airlock could not review or a document that does
+ * not say (the stage error says what happened). Nothing for a full review (its note says why), nor when everything was
+ * reviewed again (its note is the only line).
+ */
 function rangeLine(doc: ReviewDocument): string | null {
-  if (doc.range.kind === 'sync-merge' && doc.previous !== undefined) {
-    return `Review of the merge pushed since ${short(doc.previous.headSha)}: only what was changed by hand was reviewed.`;
-  }
-  if (doc.range.kind === 'rereview' && doc.previous !== undefined) {
-    return `Review of the push ${short(doc.previous.headSha)} to ${short(doc.pr.headSha)}`;
+  const covered = rereviewCovered(doc);
+  if (doc.previous === undefined || covered === null || covered === 'everything') return null;
+  if (covered === 'push') return `Review of the push ${short(doc.previous.headSha)} to ${short(doc.pr.headSha)}`;
+  if (doc.mergeReview === 'by-hand') return `Review of the merge pushed since ${short(doc.previous.headSha)}: only what was changed by hand was reviewed.`;
+  if (doc.mergeReview === 'nothing-by-hand') {
+    return 'The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.';
   }
   return null;
+}
+
+/** For a first review of a merge, what its brief's heading says it covered; none unless the document says (`mergeReview`). */
+function mergeOf(doc: ReviewDocument): { base: string; kind: 'by-hand' | 'nothing-by-hand' } | undefined {
+  if (doc.range.kind !== 'sync-merge' || doc.previous !== undefined) return undefined;
+  if (doc.mergeReview !== 'by-hand' && doc.mergeReview !== 'nothing-by-hand') return undefined;
+  return { base: doc.pr.baseRef, kind: doc.mergeReview };
 }
 
 /** The finished review: the verdict, the findings and what sits around them; one finding in full when it is opened. */
@@ -81,6 +95,9 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const postWhy = useId();
   /** Forgets sent from a mark, by ticket, with the finding each was for. */
   const forgetting = useRef(new Map<number, string>());
+  /** The service's sentence when a forget sent from a mark found the review on GitHub, so nothing was forgotten. */
+  const [found, setFound] = useState<string | null>(null);
+  const foundLine = useRef<HTMLParagraphElement>(null);
 
   const chosen = selectedInOrder(lists.order, selected);
   const detail = openId === null ? undefined : lists.order.find((f) => f.id === openId);
@@ -95,6 +112,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const forgetBlocked = readOnly ? NO_POST_OFFLINE : state.busy === true ? WAIT : null;
   const forget = (record: Parameters<typeof UnknownMark>[0]['record'], findingId: string): number => {
     const ticket = nextTicket();
+    setFound(null);
     forgetting.current.set(ticket, findingId);
     dispatch({ type: 'forget-post', ticket, id: record.id });
     return ticket;
@@ -149,18 +167,26 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
     shownDetail.current = null;
   }, [detailId, folds, lists, visible]);
 
-  // A record forgotten from a mark: say so, and put focus on the finding's Post comment, or the list's heading.
+  // A record forgotten from a mark: say so, and put focus on the finding's Post comment, or the list's heading. One that
+  // GitHub has after all (found): its sentence is shown and has focus, and the finding's mark now says Posted.
   const reply = state.post;
   useEffect(() => {
-    if (reply?.kind !== 'forgotten') return;
+    if (reply?.kind !== 'forgotten' && reply?.kind !== 'found') return;
     const findingId = forgetting.current.get(reply.ticket);
     if (findingId === undefined) return;
     forgetting.current.delete(reply.ticket);
+    if (reply.kind === 'found') {
+      setFound(reply.message);
+      announce(reply.message);
+      return;
+    }
     announce(FORGOTTEN);
     const own = [...document.querySelectorAll<HTMLButtonElement>('[data-post-for]')].find((n) => n.getAttribute('data-post-for') === findingId);
     if (own !== undefined && !own.disabled) own.focus();
     else (findingsHeading.current ?? verdictHeading.current)?.focus();
   }, [reply, announce]);
+
+  useEffect(() => { if (found !== null) foundLine.current?.focus(); }, [found]);
 
   const empty = lists.order.length === 0;
   const unfinished = doc.verdict.label === 'incomplete';
@@ -190,6 +216,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
         </section>
       )}
       {state.notice !== undefined && <p role="alert" className="notice">{state.notice}</p>}
+      {found !== null && <p className="notice" tabIndex={-1} ref={foundLine}>{found}</p>}
     </>
   );
 
@@ -213,6 +240,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const tiers = new Map<string, Tier>(doc.files.map((f) => [f.path, f.tier]));
   const ran = doc.timings.some(tookTime);
   const line = rangeLine(doc);
+  const merge = mergeOf(doc);
   // A re-review's notes say why it covered what it did, so they sit under the verdict; a first review's stay folded.
   const notesUnderVerdict = doc.previous !== undefined && doc.notes !== undefined && doc.notes.length > 0;
   const fixed = doc.fixed ?? [];
@@ -300,7 +328,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
           <ol className="steps">{doc.checksAfterMerge.map((line, i) => <li key={i}>{line}</li>)}</ol>
         </section>
       )}
-      <BriefBlock brief={doc.brief} {...(doc.range.kind === 'sync-merge' && doc.previous === undefined ? { mergeOf: doc.pr.baseRef } : {})} />
+      <BriefBlock brief={doc.brief} {...(merge === undefined ? {} : { merge })} />
       {doc.selfReviewText.trim() !== '' && (
         <section className="card">
           <h2 className="label">Text for your pull request</h2>

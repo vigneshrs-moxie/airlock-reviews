@@ -16,9 +16,9 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['review', 'a/b#1', '--base', 'abc'])).toThrow(/--head/);
     expect(() => parseArgs(['review', 'a/b#1', '--head', 'abc'])).toThrow(/--base/);
   });
-  it('accepts --base and --head as 7 to 40 hex characters', () => {
-    const r = parseArgs(['review', 'a/b#1', '--base', 'abcdef1', '--head', 'A'.repeat(40)]);
-    expect(r).toMatchObject({ base: 'abcdef1', head: 'A'.repeat(40) });
+  it('accepts --base and --head as 7 to 40 hex characters, in lower case whatever case they were written in', () => {
+    const r = parseArgs(['review', 'a/b#1', '--base', 'AbCdEf1', '--head', 'A'.repeat(40)]);
+    expect(r).toMatchObject({ base: 'abcdef1', head: 'a'.repeat(40) });
   });
   it('rejects a sha that is too short, too long or not hex', () => {
     for (const bad of ['abcdef', 'a'.repeat(41), 'ghijklm']) {

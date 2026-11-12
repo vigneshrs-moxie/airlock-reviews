@@ -6,7 +6,7 @@ import { missingHelpers, namedHelpers } from '../packs/helpers-check.js';
 import { applyHoldout } from '../packs/holdout.js';
 import { attachKit, syncKit, type SyncedKit } from '../packs/kit-sync.js';
 import { loadPack } from '../packs/load.js';
-import { loadRepoRules } from '../packs/repo-rules.js';
+import { loadRepoRules, loadRepoRulesAt, type RepoRules } from '../packs/repo-rules.js';
 import { appliesToEveryRepo, selectPacks } from '../packs/select.js';
 import type { Holdout, Pack } from '../packs/types.js';
 import type { Exec } from '../util/exec.js';
@@ -101,7 +101,15 @@ export interface PackOptions {
   changedPaths: string[];
   /** The base worktree is a merge git made by itself, so a rule file there may hold conflict markers. */
   baseIsMerge?: boolean;
+  /**
+   * On a re-review of a push, whose base worktree is the pull request's own earlier code: read the rule files from the
+   * pull request's real base commit in the git folder instead, or, when `commit` is null, show none and say so.
+   */
+  rulesAt?: { gitDir: string; commit: string | null };
 }
+
+/** The limit sentence when a re-review has no base commit of the pull request to read the rule files from. */
+export const NO_BASE_RULES = 'The repository\'s rule files were not shown: Airlock could not find the base of this pull request.';
 
 /** A conflict as git leaves it in a file: a `<<<<<<<` line and, later, a `>>>>>>>` line. */
 const CONFLICT_MARKERS = /^<{7}(?: |$)[\s\S]*^>{7}(?: |$)/m;
@@ -117,11 +125,19 @@ export interface PreparedPacks {
 }
 
 /**
+<<<<<<< HEAD
  * Makes the selected packs ready for the review: attaches to each pack whose manifest names a kit that kit's files, applies
  * the hold-out to every pack, finds the helpers a kit's orbit.md names that the base no longer has, and reads the
  * repository's rule files from the base. A stale kit adds a question naming it. A kit that cannot be had, with no copy in
  * the cache, rejects with a sentence naming it (one per kit), so the review stops before any model call. After this, only
  * the returned packs are used: nothing is read from the packs folder again.
+=======
+ * Makes the selected packs ready for the review: attaches the team's kit to its pack, applies the hold-out to every pack,
+ * finds the helpers the kit names that the base no longer has, and reads the repository's rule files from the base (on a
+ * re-review of a push, from the pull request's base commit: see `rulesAt`).
+ * A kit that cannot be had drops its pack with a stage error; a stale kit adds a question. After this, only the returned
+ * packs are used: nothing is read from the packs folder again.
+>>>>>>> build/step-3-posting-rereview
  */
 export async function preparePacks(selected: Pack[], opts: PackOptions): Promise<PreparedPacks> {
   const errors: StageError[] = [];
@@ -162,13 +178,21 @@ export async function preparePacks(selected: Pack[], opts: PackOptions): Promise
 
   let repoRules: PreparedPacks['repoRules'] = [];
   const limits: string[] = [];
+  // From the base worktree; on a re-review of a push, from the pull request's base commit, or none when it is not known.
+  const readRules = async (): Promise<RepoRules | null> => {
+    if (opts.rulesAt === undefined) return loadRepoRules(opts.baseDir, opts.changedPaths, opts.exec);
+    const { gitDir, commit } = opts.rulesAt;
+    return commit === null ? null : loadRepoRulesAt(opts.exec, gitDir, commit, opts.changedPaths);
+  };
   try {
-    const loaded = await loadRepoRules(opts.baseDir, opts.changedPaths, opts.exec);
+    const loaded = await readRules();
+    if (loaded === null) limits.push(NO_BASE_RULES);
     // Both sides of a conflict are not rules anyone wrote: such a file is left out and named.
-    const conflicted = opts.baseIsMerge === true ? loaded.rules.filter((r) => CONFLICT_MARKERS.test(r.text)) : [];
-    repoRules = loaded.rules.filter((r) => !conflicted.includes(r));
+    const fromMerge = opts.baseIsMerge === true && opts.rulesAt === undefined;
+    const conflicted = loaded !== null && fromMerge ? loaded.rules.filter((r) => CONFLICT_MARKERS.test(r.text)) : [];
+    repoRules = (loaded?.rules ?? []).filter((r) => !conflicted.includes(r));
     limits.push(...conflicted.map((r) => `${r.path} has merge conflict markers on the base side and was not used as rules.`));
-    limits.push(...loaded.leftOut.map((l) => `repository rule file ${l.path} was not shown: ${l.reason}`));
+    limits.push(...(loaded?.leftOut ?? []).map((l) => `repository rule file ${l.path} was not shown: ${l.reason}`));
   } catch (err) {
     errors.push(packsError(`The repository's rule files could not be read: ${messageOf(err)}`));
   }

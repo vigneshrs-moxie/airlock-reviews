@@ -39,7 +39,9 @@ After loading, Airlock's card on `chrome://extensions` should show no **Errors**
 
 You do this once. The token stays on this Mac.
 
-Before the panel sends the token, it asks whatever answers on Airlock's port to prove it already holds the same token, without the token itself being sent. A proof is good for one second, so each action you take is checked again. If something else is listening on the port while Airlock is stopped, the panel shows the Pair screen saying "The service could not show that it holds this panel's token, so the token was not sent. If you replaced the token, paste the new one. If you did not, another program may be answering on Airlock's port." and sends nothing. `npm run service -- status` makes the same check.
+Before the panel sends the token, it asks whatever answers on Airlock's port to prove it already holds the same token, without the token itself being sent. The proof names the port, so a proof Airlock gave on another port does not count. A proof is good for one second: an action within a second of the last check is not checked again, and any action after that is. Pairing, and following a running review, always check first.
+
+If something else is listening on the port while Airlock is stopped, the panel never sends it the token. What you see depends on how that program answers. If it answers like Airlock but cannot give the proof, the panel shows the Pair screen saying "The service could not show that it holds this panel's token, so the token was not sent. If you replaced the token, paste the new one. If you did not, another program may be answering on Airlock's port." If it answers some other way, the panel shows "Airlock got a reply from its service that it does not understand." when it next loads, and until then the screen you had stays. `npm run service -- status` makes the same check.
 
 ### Replacing the token
 
@@ -70,7 +72,7 @@ Airlock writes to GitHub only when you press the post button described next, and
 ## Posting comments
 
 1. Open a finding and press **Post comment**. Or tick several findings and press **Post selected (n)** above the list. One post holds at most 30 comments.
-2. The **Post to GitHub** sheet shows each comment, the summary, and "The review's own text, as it will be posted:". It says "This is the exact text. Nothing has been sent yet."
+2. The **Post to GitHub** sheet shows each comment, the summary, and "The review's own text, as it will be posted:". It says "This is the exact text. Nothing has been sent yet." It also names the GitHub account the comments will be posted as ("Posts as …"): the account `gh` is signed in as when the preview is made.
 3. You can edit any comment and the summary. A comment GitHub cannot place on a line goes in the summary, and the sheet says why. You can also tick **Put in the summary instead**. After an edit, press **Update preview** to see the exact text again.
 4. Press **Post n comments to GitHub**. Nothing is posted until you press it.
 
@@ -78,7 +80,17 @@ Airlock posts them as one review with the **Comment** action, as the sheet says,
 
 In the text Airlock writes, a name gets a space after the `@` (`@ carol`), so GitHub notifies no one. If a comment or the summary you typed names someone, the sheet warns you with "GitHub notifies them unless the name is inside code."
 
-Airlock refuses to post, and says why, when the pull request is closed or merged, or has new commits since the review. After new commits, review the push first (see the next section), then post.
+Airlock refuses to post, and says why, when the pull request is closed or merged, or has new commits since the review. After new commits, review the push first (see the next section), then post. It also refuses, and sends nothing, when `gh` is signed in as another account than the one the preview named; open the preview again to post as the account `gh` is signed in as now.
+
+A post can take up to about two minutes when another post to the same pull request is in flight (from a second panel, for example): Airlock sends one at a time. The sheet then says "Waiting to hear whether GitHub accepted the comments…", and when the wait is over it shows what Airlock's record says.
+
+If the panel cannot reach the service when you press the post button, the sheet says "Airlock could not reach its service, so nothing was sent." Nothing went to GitHub; press the button again once the service answers.
+
+### The first time you post
+
+1. The comment should appear once, on its line, as one review with the **Comment** action.
+2. Whether GitHub lets you post a Comment review on your own pull request was not tried while Airlock was built. If GitHub refuses, the panel shows GitHub's sentence and nothing is posted.
+3. That the comments Airlock drafts notify nobody was checked with a Markdown renderer, not on GitHub. After your first post, check that nobody was notified.
 
 ### "Not known whether this was posted"
 
@@ -88,7 +100,9 @@ What to do:
 
 1. Press **Open the pull request** and look for the comments.
 2. If they are there, leave the mark as it is.
-3. If they are not there, press **It was not posted**. The panel asks "Forget this record? Only do this after looking at the pull request." Press **It was not posted** again. You can now post those findings again.
+3. If they are not there, press **It was not posted**, in the sheet or on the finding. The panel asks "Forget this record? Only do this after looking at the pull request." Press **It was not posted** again, or **Keep** to leave it. Nothing is forgotten before Airlock has asked GitHub, as the next paragraph says.
+
+Airlock then asks GitHub first. If GitHub has the review after all, the panel says "GitHub has this review: it was posted. Nothing was forgotten." and the findings show **Posted**. If GitHub cannot be asked, it says "Airlock could not ask GitHub whether this review exists, so the record was kept." Otherwise the record is forgotten and you can post those findings again.
 
 ## After a push
 
@@ -106,7 +120,15 @@ After **Review the push**, a line under the verdict says what was reviewed, for 
 
 A Block or Fix finding is marked Fixed only when Airlock finds, at the new commit, the line of code that fixes it, never on a model's word alone. When it cannot tell, the finding stays open. An Ask or Note whose code is gone is marked Fixed with "The quoted code is gone; not checked further."
 
-Sometimes Airlock reviews the whole pull request again instead, for example when the branch was rewritten. A sentence under the verdict says why. When the push is only a merge of the base branch, the line reads "Review of the merge pushed since 1a2b3c4: only what was changed by hand was reviewed."
+Sometimes Airlock reviews the whole pull request again instead, for example when the branch was rewritten. A sentence under the verdict says why, and it is the only line there.
+
+When the push is only a merge (usually of the base branch), the line says what was reviewed of it:
+
+- "Review of the merge pushed since 1a2b3c4: only what was changed by hand was reviewed." when the merge had changes made by hand, and those were reviewed.
+- "The push only merged another branch in; git merged it without conflicts and nothing was changed by hand." when there was nothing to review. It names no branch, because Airlock cannot always be sure which branch the push merged.
+- No line when Airlock could not review the merge. The verdict is Incomplete, and the error under it says why.
+
+A first review of a pull request that only merges its base branch in says the same in the heading above what it does.
 
 Findings you posted or dismissed keep that mark in the new review.
 
@@ -127,7 +149,7 @@ To take a line out:
 1. Press **Remove** under it.
 2. The panel asks "Remove this line? The reviewer stops following it from the next review." Press **Remove** again, or **Keep** to leave it.
 
-The finding you dismissed stays dismissed. Lines of the team's own pack say "Managed by the team; not edited here." and have no Remove button.
+The finding you dismissed stays dismissed. Lines of the team's own pack say "Managed by the team; not edited here." and have no Remove button. If the connection drops while a line is being removed, the panel says "Airlock got no answer from its service, so it cannot tell whether the line was removed. The list below is read again." and shows the lines as they are now.
 
 The lines are plain text files, so you can also edit them by hand (see the end of this guide). If a line you edited no longer reads as a learned line, Airlock skips that one line and still uses the rest of the pack.
 

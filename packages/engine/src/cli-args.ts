@@ -47,9 +47,10 @@ function isValueFlag(name: string): name is ValueFlag {
   return (VALUE_FLAGS as readonly string[]).includes(name);
 }
 
+/** A commit id as given, in lower case: git and the review document write ids in lower case. */
 function checkSha(flag: string, value: string): string {
   if (!/^[0-9a-fA-F]{7,40}$/.test(value)) fail(`${flag} must be 7 to 40 hexadecimal characters, got "${value}".`);
-  return value;
+  return value.toLowerCase();
 }
 
 export function parseArgs(argv: string[]): CliArgs {

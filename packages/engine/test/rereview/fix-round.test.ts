@@ -2,11 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ReviewDocument } from '@airlock/shared';
 import type { AgentRequest } from '../../src/agent/runner.js';
 import { PUSH_BASE_SIDE } from '../../src/challenge/challenge.js';
+import { fingerprint } from '../../src/anchor/fingerprint.js';
 import { renderReview } from '../../src/render/terminal.js';
 import { mergeNote } from '../../src/shape/merge-range.js';
+import { saveReview } from '../../src/store/store.js';
 import { commitFiles } from '../helpers/change-repo.js';
 import { block, rawCandidate } from '../helpers/lens-context.js';
-import { fakeGh, GOOD, HEAD_FILES, RULED, scenarioScript, useReviewHarness, type Scenario } from '../helpers/review-scenario.js';
+import {
+  BASE_FILES, fakeGh, GOOD, HEAD_FILES, RULED, scenarioScript, useReviewHarness, type Scenario,
+} from '../helpers/review-scenario.js';
 
 const SLOW = 30_000;
 const { scenario, review } = useReviewHarness();
@@ -110,6 +114,32 @@ describe('fix round 1', () => {
     // The re-raised one never reached the challenge: only the fixed check asked about it.
     expect(calls.filter((c) => c.role.startsWith('challenge:') && !c.role.startsWith('challenge:fixed:'))).toEqual([]);
     expect(doc.stageErrors).toEqual([]);
+  }, SLOW);
+
+  it('a new finding under the alias of a vanished earlier finding is that finding moved: not fixed, not new, and no request spent', async () => {
+    const { s, doc: earlier } = await first();
+    const ruled = earlier.findings.find((f) => f.title === RULED.title)!;
+    // In the last review RULED (here a Fix) absorbed a duplicate in pause.ts, whose fingerprint it carries as an alias.
+    const dupPrint = fingerprint({ source: { pack: 'core', lens: 'correctness', ruleId: null }, path: ON_PAUSE.path as string, quote: ON_PAUSE.quote as string });
+    const stored: ReviewDocument = {
+      ...earlier, id: 'r_ffffffffff',
+      findings: earlier.findings.map((f) => (f.id === ruled.id ? { ...f, severity: 'fix' as const, aliases: [dupPrint] } : f)),
+    };
+    await saveReview(stored);
+    // The push removes RULED's own lines (the refund) and writes the pause line, where the lens raises the duplicate again.
+    const head = await commitFiles(s.remote, {
+      'src/billing.ts': BASE_FILES['src/billing.ts']!, 'src/jobs/pause.ts': 'export function pauseJob(): void { audit(); }\n',
+    }, 'push');
+    const { doc, calls } = await again(s, stored.id, head, { paths: ['src/billing.ts', 'src/jobs/pause.ts'], correctness: [ON_PAUSE] });
+    expect(doc.stageErrors).toEqual([]);
+    expect(doc.fixed).toEqual([]);
+    const moved = doc.findings.find((f) => f.id === ruled.id)!;
+    expect(moved).toMatchObject({ status: 'moved', title: RULED.title, severity: 'fix', path: 'src/jobs/pause.ts', anchor: { status: 'in-diff', startLine: 1 } });
+    expect([moved.fingerprint, ...(moved.aliases ?? [])]).toEqual(expect.arrayContaining([ruled.fingerprint, dupPrint]));
+    expect(doc.findings.filter((f) => f.status === 'new')).toEqual([]);
+    expect(doc.dropped.filter((d) => d.mergedInto === ruled.id).map((d) => [d.stage, d.candidate.title])).toEqual([['merge', ON_PAUSE.title]]);
+    // Neither the fixed check nor the challenge was asked about it.
+    expect(calls.filter((c) => c.role.startsWith('challenge:'))).toEqual([]);
   }, SLOW);
 
   it('an earlier finding lost by selection is a stage error', async () => {
@@ -238,7 +268,7 @@ describe('fix round 1', () => {
     const { doc, calls } = await again(s, earlier.id, head, { paths: ['src/money.ts'], correctness: [byHand] });
     expect(doc.stageErrors).toEqual([]);
     expect(doc.range.kind).toBe('sync-merge');
-    expect(doc.previous).toEqual({ reviewId: earlier.id, headSha: s.headSha });
+    expect(doc.previous).toEqual({ reviewId: earlier.id, headSha: s.headSha, covered: 'merge' });
     const challenges = calls.filter((c) => c.role.startsWith('challenge:'));
     expect(challenges.length).toBeGreaterThan(0);
     for (const c of challenges) {

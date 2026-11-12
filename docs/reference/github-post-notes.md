@@ -28,7 +28,24 @@ standard output: {"message":"Not Found","documentation_url":"...","status":"404"
 standard error:  gh: Not Found (HTTP 404)
 ```
 
+Measured with a request GitHub refuses as a validation failure:
+
+```
+exit code: 1
+standard output: {"message":"Validation Failed","errors":[{"resource":"...","field":"...","code":"..."}],"documentation_url":"...","status":"422"}
+standard error:  gh: Validation Failed (HTTP 422)
+```
+
+So `gh` reports a 422 whose body carries an `errors` list the same way as the 404: exit code 1, the status at the end of the first line of standard error, and the body on standard output. The entries of `errors` are objects (`resource`, `field`, `code`, and sometimes `message`) or plain strings. Airlock's refusal sentence lists them after `message`: a string as it is, an object as its `message`, or as `<field>: <code>` when it has none. The sentence is cleaned of hidden characters and cut to fit, as before.
+
 So a refusal by GitHub is: exit code 1, a JSON body on standard output with `message` (and, for validation failures, an `errors` list), and `(HTTP <status>)` at the end of the first line of standard error. An exit code other than 0 with no `(HTTP <status>)` on standard error (a cut connection, a timeout, DNS) is not a refusal: GitHub may or may not have acted.
+
+## The reads around the one write
+
+- Before a post, two reads run side by side within the same ten seconds: the pull request (`gh api repos/<repo>/pulls/<number>`) and the account `gh` is signed in as (`gh api user --jq .login`). A post as another account than the one the preview named is refused, and nothing is sent.
+- A post record keeps the account it was posted as and the SHA-256 of the review's text, never the text.
+- Before the post carries the pairing token, the panel has the service prove it holds that token (unless it did less than a second before): the proof is the HMAC-SHA256 of `airlock-hello:<port>:<nonce>` and names the port, so a proof given on another port does not count and the token is not sent.
+- "It was not posted" on a record whose outcome is unknown first lists the pull request's reviews (`gh api repos/<repo>/pulls/<number>/reviews --paginate`, which prints one JSON array per page, one after another). A review by that account, at that commit, whose text has that hash, is the post: the record becomes posted and is kept. When the list cannot be read, the record is kept too.
 
 ## Not confirmed (needs a real post, which the build does not make)
 

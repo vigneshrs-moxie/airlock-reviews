@@ -77,7 +77,8 @@ describe('the real construction', () => {
     const fetchSpy = vi.fn(async (input: string) => {
       const nonce = new URL(input).searchParams.get('nonce');
       if (new URL(input).pathname !== '/hello' || nonce === null) return new Response('{}', { status: 500 });
-      const proof = createHmac('sha256', 'tok-123').update(`airlock-hello:${nonce}`).digest('hex');
+      // The proof names the port of SERVICE_URL, the address the real construction connects to.
+      const proof = createHmac('sha256', 'tok-123').update(`airlock-hello:${new URL(SERVICE_URL).port}:${nonce}`).digest('hex');
       return new Response(JSON.stringify({ airlock: true, version: '1.0.0', paired: true, proof }), { status: 200 });
     });
     vi.stubGlobal('fetch', fetchSpy);

@@ -32,18 +32,24 @@ export interface ReviewView {
  * - `refused`: nothing was done, in the service's words (a preview, a post or a forget).
  * - `posted` and `unknown`: the record a post made; `unknown` with the sentence to show.
  * - `waiting`: a post whose answer did not say what happened; the panel is reading the records until one appears. The
- *   post is still in flight.
+ *   post is still in flight. `checking` after a 404: the panel is checking whether a copy of this post the browser sent
+ *   earlier already went through, for a short while only.
+ * - `unsent`: a post that never left the panel, because the proof that comes first failed; it can be tried again.
  * - `unclear`: a post whose record did not appear while the panel waited.
  * - `forgotten`: the unknown record is gone.
+ * - `found`: asked to forget an unknown record, the service found the review on GitHub: the record, now posted, with
+ *   the service's sentence. Nothing was forgotten.
  */
 export type PostReply = { ticket: number } & (
   | { kind: 'preview'; preview: PostPreviewReply }
   | { kind: 'refused'; message: string }
   | { kind: 'posted'; record: PostRecord }
   | { kind: 'unknown'; message: string; record: PostRecord }
-  | { kind: 'waiting' }
+  | { kind: 'waiting'; checking?: true }
+  | { kind: 'unsent'; message: string }
   | { kind: 'unclear'; message: string }
   | { kind: 'forgotten'; id: string }
+  | { kind: 'found'; message: string; record: PostRecord }
 );
 
 /** Whether a post record is of this pull request (a repository name in any letter case, as on GitHub). */
@@ -98,8 +104,11 @@ export type Action =
   /** `startedAt`: when the run that was showing was started or attached, kept in `progress`. */
   | { type: 'offline'; startedAt?: number }
   | { type: 'unpaired'; message?: string }
-  /** `notice`: said on the screen it lands on (a running review was lost with the service). */
-  | { type: 'loaded'; pr: PrSummary; latest: LatestReply | null; notice?: string }
+  /**
+   * `notice`: said on the screen it lands on (a running review was lost with the service). `post`: an answer for the post
+   * sheet that could not be given while the review was away (a post never sent before the Pair screen).
+   */
+  | { type: 'loaded'; pr: PrSummary; latest: LatestReply | null; notice?: string; post?: PostReply }
   | { type: 'attached'; pr: PrSummary }
   /** The stage list to show, built by the runtime from the stream's stage events. */
   | { type: 'stages'; stages: StageLine[] }
@@ -186,7 +195,8 @@ export function reduce(state: PanelState, action: Action): PanelState {
     case 'unpaired':
       return action.message === undefined ? { kind: 'unpaired' } : { kind: 'unpaired', message: clip(action.message) };
     case 'loaded': {
-      const landed = action.latest === null ? { kind: 'ready' as const, pr: action.pr } : reviewOf(action.pr, action.latest);
+      const landed = action.latest === null ? { kind: 'ready' as const, pr: action.pr }
+        : { ...reviewOf(action.pr, action.latest), ...(action.post === undefined ? {} : { post: action.post }) };
       return action.notice === undefined ? landed : { ...landed, notice: clip(action.notice) };
     }
     case 'attached':
@@ -239,7 +249,7 @@ export function reduce(state: PanelState, action: Action): PanelState {
       // The post is still in flight: it stays busy.
       if (reply.kind === 'waiting') return { ...state, post: reply };
       let posts = state.latest.posts;
-      if (reply.kind === 'posted' || reply.kind === 'unknown') {
+      if (reply.kind === 'posted' || reply.kind === 'unknown' || reply.kind === 'found') {
         const { record } = reply;
         if (isFor(record, state.pr)) posts = [...posts.filter((p) => p.id !== record.id), record];
       }
