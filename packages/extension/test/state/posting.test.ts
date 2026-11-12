@@ -8,6 +8,7 @@ import type { TabWatcher } from '../../src/state/tab';
 import { BASE, FakeService, TOKEN, held, json, latestFor, prSummary, prUrl } from '../helpers/fake-service';
 import { FakeTimers } from '../helpers/fake-timers';
 import { UNKNOWN_SENTENCE, previewItem, previewOf, recordOf } from '../helpers/post-fixtures';
+import { finding } from '../screens/review-fixtures';
 
 const FP = '0000000000000001';
 const FP2 = '0000000000000002';
@@ -23,8 +24,15 @@ function settings(): SettingsStore {
   };
 }
 
-function tab(url: string): TabWatcher {
-  return { current: async () => ({ tabId: 3, url }), onChange: () => () => undefined };
+type MovableTab = TabWatcher & { go(url: string): void };
+
+function tab(url: string): MovableTab {
+  const listeners = new Set<(url: string | undefined) => void>();
+  return {
+    current: async () => ({ tabId: 3, url }),
+    onChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+    go: (next) => { for (const fn of listeners) fn(next); },
+  };
 }
 
 const panels: { stop(): void }[] = [];
@@ -40,9 +48,10 @@ function harness(prepare?: (svc: FakeService, latest: LatestReply) => void) {
   const client = new ServiceClient(BASE, async () => TOKEN, svc.fetch, new FakeTimers());
   const states: PanelState[] = [];
   const timers = new FakeTimers();
-  const panel = startPanel({ client, tab: tab(prUrl('acme/widgets', 1)), settings: settings(), timers, onState: (s) => states.push(s) });
+  const theTab = tab(prUrl('acme/widgets', 1));
+  const panel = startPanel({ client, tab: theTab, settings: settings(), timers, onState: (s) => states.push(s) });
   panels.push(panel);
-  return { svc, states, panel, latest, timers, last: () => states.at(-1) };
+  return { svc, states, panel, latest, timers, tab: theTab, last: () => states.at(-1) };
 }
 
 type Harness = ReturnType<typeof harness>;
@@ -241,6 +250,72 @@ describe('the panel posts through the service', () => {
     expect(postsCalled(h)).toBe(1);
   });
 
+  it('the record found after an unclear answer holds the finding by the same rule as the marks: by an alias, either way round', async () => {
+    const own = recordOf(['00000000000000aa'], { id: 'post_cccccccccccc' });
+    const h = harness((svc, latest) => {
+      latest.document.findings = [finding(1, { fingerprint: FP, aliases: ['00000000000000aa'] })];
+      svc.on('POST /posts', () => {
+        latest.posts = [own];
+        return json({ error: 'Airlock had a problem.' }, 500);
+      });
+    });
+    await reviewShown(h);
+    h.panel.dispatch({ type: 'post', ticket: 15, previewId: preview.previewId, fingerprints: [FP] });
+    const s = await recheckUntil(h, 15);
+    expect(s.post).toEqual({ ticket: 15, kind: 'posted', record: own });
+
+    const other = recordOf(['00000000000000bb'], { id: 'post_dddddddddddd', items: [{ fingerprint: '00000000000000bb', aliases: [FP2], placement: 'inline' }] });
+    const h2 = harness((svc, latest) => {
+      latest.document.findings = [finding(2, { fingerprint: FP2 })];
+      svc.on('POST /posts', () => {
+        latest.posts = [other];
+        return Promise.reject(new TypeError('Failed to fetch'));
+      });
+    });
+    await reviewShown(h2);
+    h2.panel.dispatch({ type: 'post', ticket: 16, previewId: preview.previewId, fingerprints: [FP2] });
+    expect((await recheckUntil(h2, 16)).post).toEqual({ ticket: 16, kind: 'posted', record: other });
+  });
+
+  it('a read that finds no stored review leaves the records on screen as they were', async () => {
+    const earlier = recordOf([FP2], { id: 'post_aaaaaaaaaaaa' });
+    const h = harness((svc, latest) => {
+      latest.posts = [earlier];
+      svc.on('POST /posts', () => {
+        svc.on('GET /reviews/latest', () => json({ error: 'Airlock has no review of this pull request yet.' }, 404));
+        return json({ error: UNKNOWN_SENTENCE }, 504);
+      });
+    });
+    await reviewShown(h);
+    h.panel.dispatch({ type: 'post', ticket: 17, previewId: preview.previewId, fingerprints: [FP] });
+    const s = await recheckUntil(h, 17);
+    expect(s.post).toEqual({ ticket: 17, kind: 'unclear', message: POST_NOT_LEARNED });
+    expect(s.latest.posts).toEqual([earlier]);
+  });
+
+  it.each([
+    ['the tab moves to another pull request', (h: Harness) => h.tab.go(prUrl('acme/widgets', 2))],
+    ['the panel stops', (h: Harness) => h.panel.stop()],
+  ])('the wait for a record ends when %s: no further read, and nothing set afterwards', async (_name, leave) => {
+    const h = harness((svc) => {
+      svc.addPr(prSummary({ number: 2 }));
+      svc.on('POST /posts', () => Promise.reject(new TypeError('Failed to fetch')));
+    });
+    await reviewShown(h);
+    h.panel.dispatch({ type: 'post', ticket: 18, previewId: preview.previewId, fingerprints: [FP] });
+    await until(h, (s) => s.kind === 'review' && s.post?.ticket === 18);
+    const readsOfOne = () => h.svc.requests.filter((r) => r.url.pathname === '/reviews/latest' && r.url.searchParams.get('number') === '1').length;
+    const before = readsOfOne();
+    leave(h);
+    for (let round = 0; round < 5; round++) {
+      h.timers.fire();
+      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    }
+    expect(readsOfOne()).toBe(before);
+    const afterLeaving = h.states.slice(h.states.findIndex((st) => st.kind === 'review' && st.post?.ticket === 18) + 1);
+    expect(afterLeaving.some((st) => st.kind === 'review' && st.pr.number === 1)).toBe(false);
+  });
+
   it('a second post while one is in flight sends nothing', async () => {
     const pending = held();
     const h = harness((svc) => svc.on('POST /posts', pending.reply));
@@ -275,17 +350,22 @@ describe('the panel posts through the service', () => {
     expect(h.svc.requests.find((r) => r.url.pathname === '/posts/forget')?.body).toEqual({ repo: 'acme/widgets', number: 1, id: unknown.id });
   });
 
-  it('a refused forget says why and keeps the record', async () => {
+  it('a refused forget says why, and reads the records again', async () => {
     const unknown = recordOf([FP], { outcome: 'unknown' });
     const h = harness((svc, latest) => {
       latest.posts = [unknown];
-      svc.on('POST /posts/forget', () => json({ error: 'This review was posted, so Airlock keeps its record.' }, 409));
+      svc.on('POST /posts/forget', () => {
+        // Already forgotten from another panel: the record is gone.
+        latest.posts = [];
+        return json({ error: 'Airlock cannot forget that record.' }, 409);
+      });
     });
     await reviewShown(h);
     h.panel.dispatch({ type: 'forget-post', ticket: 12, id: unknown.id });
-    const s = await reviewWith(h, 12);
-    expect(s.post).toEqual({ ticket: 12, kind: 'refused', message: 'This review was posted, so Airlock keeps its record.' });
-    expect(s.latest.posts).toEqual([unknown]);
+    await until(h, (s) => s.kind === 'review' && s.post?.ticket === 12 && s.busy !== true && s.latest.posts.length === 0);
+    const s = h.last() as Review;
+    expect(s.post).toEqual({ ticket: 12, kind: 'refused', message: 'Airlock cannot forget that record.' });
+    expect(h.svc.calls.filter((c) => c === 'GET /reviews/latest').length).toBe(2);
   });
 
   it('nothing is sent for posting while the panel is not on a review', async () => {

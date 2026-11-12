@@ -1,8 +1,10 @@
 import {
-  checkCommentText, COMMENT_MAX, mentionsIn, SUMMARY_MAX, type PostPreviewBody, type PostPreviewItem, type PostPreviewReply, type PostRecord,
+  checkCommentText, COMMENT_MAX, mentionsIn, SUMMARY_MAX, type Finding, type PostPreviewBody, type PostPreviewItem, type PostPreviewReply,
+  type PostRecord,
 } from '@airlock/shared';
 import { useEffect, useId, useRef } from 'react';
 import { POST_NOT_LEARNED, POST_UNKNOWN, type PostReply, type UserAction } from '../state/reduce';
+import { recordHolds } from '../state/selection';
 import type { SheetView } from './DismissSheet';
 import { useAnnounce } from './Frame';
 import { mentionNotice, whyNotPosting } from './PostedMark';
@@ -71,6 +73,8 @@ export interface PostDraft {
   waiting: boolean;
   /** How many previews have come, so a fresh one after the first can be announced. */
   previews: number;
+  /** A post was sent from this sheet, so it no longer says that nothing has been sent. */
+  sent: boolean;
   /** The record the last post made, and for one whose outcome is not known, the sentence to show. */
   outcome: { record: PostRecord; message: string | null } | null;
 }
@@ -79,7 +83,7 @@ export interface PostDraft {
 export function newPostDraft(fingerprints: string[], reviewId: string, opener: string | 'selected', ticket: number): PostDraft {
   return {
     reviewId, fingerprints, opener, preview: null, texts: {}, summary: '', summaryTyped: false, toSummary: [], previewToSummary: [], spent: false,
-    pending: { kind: 'preview', ticket, started: false, known: [], toSummary: [] }, said: null, look: false, waiting: false, previews: 0,
+    pending: { kind: 'preview', ticket, started: false, known: [], toSummary: [] }, said: null, look: false, waiting: false, previews: 0, sent: false,
     outcome: null,
   };
 }
@@ -109,12 +113,15 @@ function absorb(draft: PostDraft, pending: PendingPost, reply: Exclude<PostReply
 }
 
 /** The draft when its request ended with no answer for it (the service went away, or the pairing did). */
-function unanswered(draft: PostDraft, pending: PendingPost, posts: readonly PostRecord[]): PostDraft {
+function unanswered(
+  draft: PostDraft, pending: PendingPost, posts: readonly PostRecord[], findings: readonly Pick<Finding, 'fingerprint' | 'aliases'>[],
+): PostDraft {
   const settled = { ...draft, pending: null, look: false, waiting: false };
   if (pending.kind !== 'post') return draft.preview === null ? { ...settled, said: NO_PREVIEW } : settled;
-  // What the records say: one this post made, holding one of its findings.
+  // What the records say: one this post made, holding one of its findings, by the same rule as the marks.
   const sent = draft.preview?.items.map((item) => item.fingerprint) ?? draft.fingerprints;
-  const record = posts.find((r) => !pending.known.includes(r.id) && r.items.some((item) => sent.includes(item.fingerprint)));
+  const posted = sent.map((fingerprint) => findings.find((f) => f.fingerprint === fingerprint) ?? { fingerprint });
+  const record = posts.find((r) => !pending.known.includes(r.id) && posted.some((f) => recordHolds(r, f)));
   if (record === undefined) return { ...settled, said: POST_NOT_LEARNED, look: true, spent: true };
   return { ...settled, said: null, outcome: { record, message: record.outcome === 'posted' ? null : POST_UNKNOWN } };
 }
@@ -183,8 +190,8 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
     if (reply !== undefined && reply.kind !== 'waiting') onDraft(absorb(draft, pending, reply));
     else if (reply !== undefined && !draft.waiting) onDraft({ ...draft, waiting: true, pending: { ...pending, started: true } });
     else if (!pending.started && (busy || offline)) onDraft({ ...draft, pending: { ...pending, started: true } });
-    else if (pending.started && !busy && !offline) onDraft(unanswered(draft, pending, latest.posts));
-  }, [draft, pending, view.post, busy, offline, latest.posts, onDraft]);
+    else if (pending.started && !busy && !offline) onDraft(unanswered(draft, pending, latest.posts, latest.document.findings));
+  }, [draft, pending, view.post, busy, offline, latest.posts, latest.document.findings, onDraft]);
 
   const showing = outcome !== null ? (outcome.record.outcome === 'posted' ? 'posted' : 'unknown')
     : !current ? 'stale' : preview === null ? 'waiting' : 'form';
@@ -238,7 +245,7 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
   const request = (kind: PendingPost['kind'], action: (ticket: number) => UserAction): void => {
     const ticket = nextTicket();
     onDraft({
-      ...draft, said: null, look: false,
+      ...draft, said: null, look: false, sent: draft.sent || kind === 'post',
       pending: { kind, ticket, started: false, known: latest.posts.map((r) => r.id), toSummary: draft.toSummary },
     });
     dispatch(action(ticket));
@@ -348,13 +355,17 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
 
   const locked = pending !== null || busy;
   // Names for a fresh preview are the service's; a field with unsent edits counts its own.
-  const reviewNames = edited ? [] : mentionsIn(preview.reviewBody);
+  // The review's own text: the service's list for it, unless the summary or a comment placed in the summary has unsent
+  // edits; those fields then say their own names.
+  const reviewTextEdited = draft.summary !== preview.summary
+    || preview.items.some((item) => item.placement === 'summary' && draft.texts[item.fingerprint] !== item.body);
+  const reviewNames = reviewTextEdited ? [] : preview.reviewBodyMentions;
   const mainDisabled = !canSend || problems || blocked !== null;
   const describedByBlock = blocked === null ? {} : { 'aria-describedby': blockedId };
   return shell(
     <>
       <p>{`Posts as ${preview.viewer} on ${pr.repo}#${pr.number}.`}</p>
-      {!needsUpdate && <p className="muted">{EXACT_TEXT}</p>}
+      {!needsUpdate && pending === null && !draft.sent && <p className="muted">{EXACT_TEXT}</p>}
       {preview.items.map((item, i) => {
         const movable = item.placement === 'inline' || draft.previewToSummary.includes(item.fingerprint) || draft.toSummary.includes(item.fingerprint);
         return (

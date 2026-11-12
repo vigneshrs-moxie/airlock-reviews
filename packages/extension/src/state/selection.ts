@@ -30,9 +30,17 @@ export function dismissalOf(finding: Pick<Finding, 'fingerprint' | 'aliases'>, d
  * The one place this is decided.
  */
 export function postOf(finding: Pick<Finding, 'fingerprint' | 'aliases'>, posts: readonly PostRecord[]): PostRecord | undefined {
-  const keys = new Set([finding.fingerprint, ...(finding.aliases ?? [])]);
-  const holds = (r: PostRecord): boolean => r.items.some((item) => keys.has(item.fingerprint) || item.aliases.some((a) => keys.has(a)));
+  const holds = (r: PostRecord): boolean => recordHolds(r, finding);
   return posts.find((r) => r.outcome === 'posted' && holds(r)) ?? posts.find(holds);
+}
+
+/**
+ * Whether a post record holds a finding: one of its items' fingerprint or aliases equals the finding's fingerprint or one
+ * of its aliases. The one rule for the marks, the wait for a post's record, and the sheet's own look at the records.
+ */
+export function recordHolds(record: PostRecord, finding: Pick<Finding, 'fingerprint' | 'aliases'>): boolean {
+  const keys = new Set([finding.fingerprint, ...(finding.aliases ?? [])]);
+  return record.items.some((item) => keys.has(item.fingerprint) || item.aliases.some((a) => keys.has(a)));
 }
 
 /** Splits a document's findings into what is shown and what is dismissed. A dismissal for a finding not in the document is ignored. */

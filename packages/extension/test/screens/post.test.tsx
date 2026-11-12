@@ -173,16 +173,47 @@ describe('the post sheet', () => {
   it('a mention shows the notice with the names: the service\'s for a fresh preview, the typed ones for an edit', () => {
     const f = finding(1);
     // The service's list is shown as it is: the panel does not recount a fresh preview.
-    previewed([f], {}, previewOf([itemFor(f, { body: 'Plain text.', mentions: ['@dave'] })], { reviewBody: 'Thanks @erin.' }));
+    previewed([f], {}, previewOf([itemFor(f, { body: 'Plain text.', mentions: ['@dave'] })], { reviewBody: 'Thanks @frank.', reviewBodyMentions: ['@erin'] }));
     expect(dialog().getByText(names('@dave'))).toBeTruthy();
-    // The review's own text: the names in it as the service returned it.
+    // The review's own text: the service's list for it, not a count the panel makes.
     expect(dialog().getByText(names('@erin'))).toBeTruthy();
+    expect(dialog().queryByText(names('@frank'))).toBeNull();
     // mentionsIn reads no Markdown, so a name in backticks is listed too.
     type('Comment 1', 'Ask @alice and @acme/reviewers, not `@bob`.');
     expect(dialog().getByText(names('@alice, @acme/reviewers, @bob'))).toBeTruthy();
     expect(dialog().queryByText(names('@dave'))).toBeNull();
+    // An inline comment is not part of the review's own text: its list still stands.
+    expect(dialog().getByText(names('@erin'))).toBeTruthy();
     type('Summary', 'Thanks @carol.');
     expect(dialog().getByText(names('@carol'))).toBeTruthy();
+    // The summary has unsent edits: the service's list for the review text no longer applies.
+    expect(dialog().queryByText(names('@erin'))).toBeNull();
+  });
+
+  it('an edit to a comment placed in the summary also sets the service\'s list for the review text aside', () => {
+    const f = finding(1);
+    previewed([f], {}, previewOf([itemFor(f, { placement: 'summary', whySummary: 'The line is not part of the diff GitHub shows.' })], { reviewBodyMentions: ['@erin'] }));
+    expect(dialog().getByText(names('@erin'))).toBeTruthy();
+    type('Comment 1', 'Ask @gina.');
+    expect(dialog().getByText(names('@gina'))).toBeTruthy();
+    expect(dialog().queryByText(names('@erin'))).toBeNull();
+  });
+
+  it('says nothing has been sent only while that is true', () => {
+    const f = finding(1);
+    const m = previewed([f]);
+    const exact = 'This is the exact text. Nothing has been sent yet.';
+    expect(dialog().getByText(exact)).toBeTruthy();
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    expect(dialog().queryByText(exact)).toBeNull();
+    m.answer({ kind: 'waiting' }, { busy: true });
+    expect(dialog().queryByText(exact)).toBeNull();
+    expect(dialog().getByText('Waiting to hear whether GitHub accepted the comments…')).toBeTruthy();
+    m.answer({ kind: 'unclear', message: NOT_LEARNED });
+    fireEvent.click(button('Update preview'));
+    m.answer({ kind: 'preview', preview: previewOf([itemFor(f)], { previewId: 'pv_3333333333333333' }) });
+    // A post was sent from this sheet, and what came of it is not known: the line is not said again.
+    expect(dialog().queryByText(exact)).toBeNull();
   });
 
   it('shows the review\'s own text as the service returned it, greyed after an edit until the next preview', () => {
@@ -430,6 +461,15 @@ describe('the post sheet keeps its texts', () => {
     expect(dialog().getByText('Posted 1 comment.')).toBeTruthy();
   });
 
+  it('a post with no answer finds its record when the service is back by the same rule as the marks (an alias)', () => {
+    const f = finding(1, { aliases: ['00000000000000aa'] });
+    const m = previewed([f]);
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    m.show(offlineOf(reviewState([f])));
+    m.show(reviewState([f], { posts: [recordOf(['00000000000000aa'])] }));
+    expect(dialog().getByText('Posted 1 comment.')).toBeTruthy();
+  });
+
   it('a post with no answer and no record when the service is back says so and keeps the texts', () => {
     const f = finding(1);
     const m = previewed([f]);
@@ -560,6 +600,33 @@ describe('an unknown record can be cleared from the finding', () => {
     const m = mount([finding(1), f], { posts: [unknownFor(f)] });
     fireEvent.click(button('Also found'));
     expectClearable(within(screen.getByText('Problem 4', { selector: 'li .title' }).closest('li')!), m, unknownFor(f).id);
+  });
+
+  it('moves focus to Keep, back to It was not posted, and after the record is forgotten to Post comment, saying so', () => {
+    const f = finding(1);
+    const m = mount([f], { posts: [unknownFor(f)] });
+    openDetail('Problem 1');
+    const scope = within(document.querySelector<HTMLElement>('main')!);
+    fireEvent.click(scope.getByRole('button', { name: 'It was not posted' }));
+    expect(document.activeElement).toBe(scope.getByRole('button', { name: 'Keep' }));
+    fireEvent.click(scope.getByRole('button', { name: 'Keep' }));
+    expect(document.activeElement).toBe(scope.getByRole('button', { name: 'It was not posted' }));
+    fireEvent.click(scope.getByRole('button', { name: 'It was not posted' }));
+    fireEvent.click(scope.getByRole('button', { name: 'It was not posted' }));
+    m.answer({ kind: 'forgotten', id: unknownFor(f).id }, { posts: [] });
+    expect(document.activeElement).toBe(button('Post comment'));
+    expect(document.querySelector('[aria-live]')?.textContent).toBe('Record forgotten.');
+  });
+
+  it('from a card, after the record is forgotten focus goes to the Findings heading', () => {
+    const f = finding(1);
+    const m = mount([f], { posts: [unknownFor(f)] });
+    const card = within(document.querySelector<HTMLElement>('.finding-card')!);
+    fireEvent.click(card.getByRole('button', { name: 'It was not posted' }));
+    fireEvent.click(card.getByRole('button', { name: 'It was not posted' }));
+    m.answer({ kind: 'forgotten', id: unknownFor(f).id }, { posts: [] });
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Findings' }));
+    expect(document.querySelector('[aria-live]')?.textContent).toBe('Record forgotten.');
   });
 
   it('a refusal is said where it was asked', () => {

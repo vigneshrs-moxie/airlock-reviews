@@ -1,9 +1,10 @@
-import { prRefFromUrl, type Depth, type LatestReply, type PostRecord, type PrSummary, type ReviewDocument } from '@airlock/shared';
+import { prRefFromUrl, type Depth, type Finding, type LatestReply, type PostRecord, type PrSummary, type ReviewDocument } from '@airlock/shared';
 import { ServiceError, type ServiceClient } from '../client/service';
 import { realTimers, type Timers } from '../client/timers';
 import {
   isFor, POST_NOT_LEARNED, POST_UNKNOWN, reduce, withStage, type Action, type PanelState, type PostReply, type StageLine, type UserAction,
 } from './reduce';
+import { recordHolds } from './selection';
 import type { SettingsStore } from './settings';
 import type { TabWatcher } from './tab';
 
@@ -399,15 +400,17 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
    * read. A read that fails counts as a read with nothing in it; only a refused pairing stops the wait. With no record at
    * the end, the panel says it could not learn what happened, and nothing is sent again.
    */
-  const post = async (g: number, pr: PrSummary, known: ReadonlySet<string>, action: Extract<UserAction, { type: 'post' }>): Promise<void> => {
+  const post = async (
+    g: number, pr: PrSummary, known: ReadonlySet<string>, findings: readonly Pick<Finding, 'fingerprint' | 'aliases'>[],
+    action: Extract<UserAction, { type: 'post' }>,
+  ): Promise<void> => {
     const { ticket } = action;
     const sent = await client.post({ previewId: action.previewId });
     // A record for another pull request is not this post's answer: its address is not shown here.
     if (sent.outcome === 'posted' && isFor(sent.record, pr)) { answer(g, { ticket, kind: 'posted', record: sent.record }); return; }
     if (sent.outcome === 'refused') { answer(g, { ticket, kind: 'refused', message: sent.message }); return; }
     const said = sent.outcome === 'unclear' ? sent.message ?? POST_UNKNOWN : POST_UNKNOWN;
-    const mine = (r: PostRecord): boolean =>
-      isFor(r, pr) && !known.has(r.id) && r.items.some((item) => action.fingerprints.includes(item.fingerprint));
+    const mine = (r: PostRecord): boolean => isFor(r, pr) && !known.has(r.id) && findings.some((f) => recordHolds(r, f));
     for (let read = 0; ; read += 1) {
       if (read > 0) {
         await sleep(POST_RECHECK_MS);
@@ -429,7 +432,10 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     }
   };
 
-  /** The post records of the pull request; null when they could not be read. A refused pairing is thrown. */
+  /**
+   * The post records of the pull request; null when they could not be read, or when there is no stored review to read
+   * them with (the records on screen then stay as they are). A refused pairing is thrown.
+   */
   const readPosts = async (pr: PrSummary): Promise<PostRecord[] | null> => {
     let latest: LatestReply | null;
     try {
@@ -438,7 +444,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
       if (error instanceof ServiceError && error.kind === 'unpaired') throw error;
       return null;
     }
-    return latest === null ? [] : latest.posts.filter((r) => isFor(r, pr));
+    return latest === null ? null : latest.posts.filter((r) => isFor(r, pr));
   };
 
   const start = async (g: number, pr: PrSummary, depth: Depth, packIds: string[] | undefined, since?: 'last'): Promise<void> => {
@@ -500,7 +506,10 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
         if (state.kind === 'review') {
           const known = new Set(state.latest.posts.map((r) => r.id));
           const shown = state.pr;
-          act(shown, (g) => post(g, shown, known, action));
+          // The findings posted, with their aliases, as the review on screen knows them.
+          const { findings } = state.latest.document;
+          const posted = action.fingerprints.map((fingerprint) => findings.find((f) => f.fingerprint === fingerprint) ?? { fingerprint });
+          act(shown, (g) => post(g, shown, known, posted, action));
         }
         return;
       case 'forget-post':
@@ -510,12 +519,11 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
           act(shown, async (g) => {
             try {
               await client.forgetPost({ repo, number, id: action.id });
+              answer(g, { ticket: action.ticket, kind: 'forgotten', id: action.id });
             } catch (error) {
               refusedOr(g, action.ticket, error);
-              return;
             }
-            answer(g, { ticket: action.ticket, kind: 'forgotten', id: action.id });
-            // Then the records as the service now has them.
+            // Then, forgotten or refused, the records as the service now has them.
             const posts = await readPosts(shown);
             if (posts !== null && current(g)) apply({ type: 'posts', posts });
           });

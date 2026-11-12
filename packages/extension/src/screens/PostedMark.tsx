@@ -1,5 +1,5 @@
 import { POST_MAX_ITEMS, type PostRecord, type PrSummary } from '@airlock/shared';
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { PostReply } from '../state/reduce';
 
 export const POSTED_WORD = 'Posted';
@@ -14,6 +14,7 @@ export const TOO_MANY = `At most ${POST_MAX_ITEMS} comments go in one post.`;
 /** Beside a button disabled only because another action is in flight; for a screen reader. */
 export const WAIT = 'Wait for the current action to finish.';
 export const FORGET_ASK = 'Forget this record? Only do this after looking at the pull request.';
+export const FORGOTTEN = 'Record forgotten.';
 
 /** The notice under a text that names people. */
 export const mentionNotice = (names: readonly string[]): string => `Names ${names.join(', ')}: GitHub notifies them unless the name is inside code.`;
@@ -75,6 +76,19 @@ export function UnknownMark({ record, address, blocked, onForget, reply, id }: {
   const [asking, setAsking] = useState(false);
   const [ticket, setTicket] = useState<number | null>(null);
   const whyId = useId();
+  const askButton = useRef<HTMLButtonElement>(null);
+  const keepButton = useRef<HTMLButtonElement>(null);
+  // Focus follows the question: to Keep when it is asked, back to It was not posted when it is put away.
+  const moved = useRef(false);
+  useEffect(() => {
+    if (!moved.current) return;
+    moved.current = false;
+    (asking ? keepButton : askButton).current?.focus();
+  }, [asking]);
+  const ask = (open: boolean): void => {
+    moved.current = true;
+    setAsking(open);
+  };
   const refusal = reply !== undefined && reply.ticket === ticket && reply.kind === 'refused' ? reply.message : null;
   const described = blocked === null ? {} : { 'aria-describedby': whyId };
   const forget = (): void => {
@@ -91,11 +105,13 @@ export function UnknownMark({ record, address, blocked, onForget, reply, id }: {
           <p>{FORGET_ASK}</p>
           <div className="actions">
             <button type="button" className="btn small" disabled={blocked !== null} {...described} onClick={forget}>It was not posted</button>
-            <button type="button" className="btn small" onClick={() => setAsking(false)}>Keep</button>
+            <button type="button" className="btn small" ref={keepButton} onClick={() => ask(false)}>Keep</button>
           </div>
         </>
       ) : (
-        <button type="button" className="btn small" disabled={blocked !== null} {...described} onClick={() => setAsking(true)}>It was not posted</button>
+        <button type="button" className="btn small" ref={askButton} disabled={blocked !== null} {...described} onClick={() => ask(true)}>
+          It was not posted
+        </button>
       )}
       {blocked !== null && <Reason id={whyId} text={blocked} />}
       {refusal !== null && <p role="alert" className="notice">{refusal}</p>}

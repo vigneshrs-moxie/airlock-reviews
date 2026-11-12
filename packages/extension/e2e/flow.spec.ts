@@ -414,7 +414,8 @@ test('9. the service starts again: the panel returns to the review by itself, th
 const POST_ONE_REVIEW = 'Airlock posts these as one review with the Comment action. It never approves or requests changes.';
 const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
 const EDITED = 'Please call the guard before pausing; a paused account can still place an order.';
-const SUMMARY = 'Notes from my review of the pause change.';
+const SUMMARY = 'Notes from my review of the pause change, for @carol.';
+const NAMES_CAROL = 'Names @carol: GitHub notifies them unless the name is inside code.';
 const postBodies = () => bodiesOf('POST', '/posts').map((b) => PostBodySchema.parse(b));
 const previewBodies = () => bodiesOf('POST', '/posts/preview').map((b) => PostPreviewBodySchema.parse(b));
 
@@ -475,10 +476,20 @@ test('11. Post selected skips the posted finding; GitHub refuses, and every text
   await expect(comment).toHaveValue(commentBody(third));
   await expect(sheet.getByText('In the summary: The line is not part of the diff GitHub shows.')).toBeVisible();
   expect(previewBodies().at(-1)).toEqual({ repo: REPO, number: NUMBER, reviewId: document.id, items: [{ fingerprint: third.fingerprint }] });
+  // Airlock's own texts only: the service names no one in the drafted comment or the review text.
+  expect(svc().previews.at(-1)?.items[0]?.mentions).toEqual([]);
+  expect(svc().previews.at(-1)?.reviewBodyMentions).toEqual([]);
 
   await sheet.getByRole('textbox', { name: 'Summary' }).fill(SUMMARY);
+  // Unsent: the summary field says the name it holds.
+  await expect(sheet.getByText(NAMES_CAROL)).toHaveCount(1);
   await sheet.getByRole('button', { name: 'Update preview' }).click();
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  const post = sheet.getByRole('button', { name: 'Post 1 comment to GitHub' });
+  await expect(post).toBeEnabled();
+  // Sent and previewed: the service's list for the review's own text says it now.
+  expect(svc().previews.at(-1)?.reviewBodyMentions).toEqual(['@carol']);
+  await expect(sheet.locator('[data-review-body] ~ .notice')).toHaveText(NAMES_CAROL);
+  await post.click();
   await expect(sheet.getByRole('alert')).toHaveText('GitHub refused the comments: Line 13 is not part of the diff. Nothing was posted.');
   await expect(sheet.getByRole('textbox', { name: 'Summary' })).toHaveValue(SUMMARY);
   await expect(comment).toHaveValue(commentBody(third));

@@ -16,7 +16,7 @@ import type { Jump } from '../state/jump';
 import { FindingDetail, notConnected } from './FindingDetail';
 import { useAnnounce } from './Frame';
 import { MapBlock } from './MapBlock';
-import { ALL_POSTED, NO_POST_OFFLINE, pullAddress, Reason, TOO_MANY, UnknownMark, WAIT, whyNotPosting } from './PostedMark';
+import { ALL_POSTED, FORGOTTEN, NO_POST_OFFLINE, pullAddress, Reason, TOO_MANY, UnknownMark, WAIT, whyNotPosting } from './PostedMark';
 import { nextTicket } from './PostSheet';
 import { StageErrors } from './StageErrors';
 import { TimingTable, tookTime } from './TimingTable';
@@ -79,6 +79,8 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const verdictHeading = useRef<HTMLHeadingElement>(null);
   const findingsHeading = useRef<HTMLHeadingElement>(null);
   const postWhy = useId();
+  /** Forgets sent from a mark, by ticket, with the finding each was for. */
+  const forgetting = useRef(new Map<number, string>());
 
   const chosen = selectedInOrder(lists.order, selected);
   const detail = openId === null ? undefined : lists.order.find((f) => f.id === openId);
@@ -91,8 +93,9 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const barWhy = postBlocked ?? (postable.length === 0 ? ALL_POSTED : postable.length > POST_MAX_ITEMS ? TOO_MANY : state.busy === true ? WAIT : null);
   // A record whose outcome is not known is cleared where its finding is shown.
   const forgetBlocked = readOnly ? NO_POST_OFFLINE : state.busy === true ? WAIT : null;
-  const forget = (record: Parameters<typeof UnknownMark>[0]['record']): number => {
+  const forget = (record: Parameters<typeof UnknownMark>[0]['record'], findingId: string): number => {
     const ticket = nextTicket();
+    forgetting.current.set(ticket, findingId);
     dispatch({ type: 'forget-post', ticket, id: record.id });
     return ticket;
   };
@@ -101,7 +104,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
     if (record === undefined || record.outcome === 'posted') return null;
     return (
       <UnknownMark
-        record={record} address={pullAddress(pr)} blocked={forgetBlocked} onForget={forget} reply={state.post}
+        record={record} address={pullAddress(pr)} blocked={forgetBlocked} onForget={(r) => forget(r, f.id)} reply={state.post}
         {...(id === undefined ? {} : { id })}
       />
     );
@@ -145,6 +148,19 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
     (findingsHeading.current ?? verdictHeading.current)?.focus();
     shownDetail.current = null;
   }, [detailId, folds, lists, visible]);
+
+  // A record forgotten from a mark: say so, and put focus on the finding's Post comment, or the list's heading.
+  const reply = state.post;
+  useEffect(() => {
+    if (reply?.kind !== 'forgotten') return;
+    const findingId = forgetting.current.get(reply.ticket);
+    if (findingId === undefined) return;
+    forgetting.current.delete(reply.ticket);
+    announce(FORGOTTEN);
+    const own = [...document.querySelectorAll<HTMLButtonElement>('[data-post-for]')].find((n) => n.getAttribute('data-post-for') === findingId);
+    if (own !== undefined && !own.disabled) own.focus();
+    else (findingsHeading.current ?? verdictHeading.current)?.focus();
+  }, [reply, announce]);
 
   const empty = lists.order.length === 0;
   const unfinished = doc.verdict.label === 'incomplete';
