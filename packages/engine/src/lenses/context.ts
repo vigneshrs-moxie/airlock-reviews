@@ -241,27 +241,43 @@ export function mapCutSentence(stage: string, map: ChangeMap): string | null {
 export const MAX_FACTS_PER_CHECK = 20;
 
 /**
+ * The kind of a fact within its check: its first words, leaving out any word that holds a path, an address or a number
+ * (`An added line runs text`, `An added line has the`). One check gives facts of several kinds.
+ */
+const kindOf = (f: Fact): string =>
+  `${f.checkId} ${f.message.split(/\s+/).filter((w) => !/[/.:\d]/.test(w)).slice(0, 5).join(' ')}`;
+
+/**
  * One line per fact: `path:line check: message`, or `path check: message` when there is no line. Each block is given the
  * facts of one request (a cohort's), so a pull request with thousands of lines tripping one check cannot crowd the request:
- * past MAX_FACTS_PER_CHECK facts of one check, the rest are left out and one line after that check's last shown fact says
- * how many.
+ * at most MAX_FACTS_PER_CHECK facts of one check are shown, the first of each kind it gives always among them (so a rarer
+ * kind is never hidden behind many of another), the rest in order; one line after that check's last shown fact says how
+ * many were left out.
  */
 export function factsBlock(facts: Fact[]): string {
-  const shown = new Map<string, number>();
+  const shownOf = new Map<string, number>();
+  const shown = new Set<number>();
+  const kinds = new Set<string>();
+  const take = (i: number): void => { shown.add(i); shownOf.set(facts[i]!.checkId, (shownOf.get(facts[i]!.checkId) ?? 0) + 1); };
+  facts.forEach((f, i) => {
+    const kind = kindOf(f);
+    if (kinds.has(kind) || (shownOf.get(f.checkId) ?? 0) >= MAX_FACTS_PER_CHECK) return;
+    kinds.add(kind);
+    take(i);
+  });
+  facts.forEach((f, i) => { if (!shown.has(i) && (shownOf.get(f.checkId) ?? 0) < MAX_FACTS_PER_CHECK) take(i); });
   const left = new Map<string, number>();
-  const lines: { text: string; checkId: string }[] = [];
-  for (const f of facts) {
-    const n = shown.get(f.checkId) ?? 0;
-    if (n >= MAX_FACTS_PER_CHECK) { left.set(f.checkId, (left.get(f.checkId) ?? 0) + 1); continue; }
-    shown.set(f.checkId, n + 1);
-    lines.push({ text: `${f.path}${f.line === null ? '' : `:${f.line}`} ${f.checkId}: ${oneLine(f.message)}`, checkId: f.checkId });
-  }
+  const last = new Map<string, number>();
+  facts.forEach((f, i) => {
+    if (shown.has(i)) last.set(f.checkId, i);
+    else left.set(f.checkId, (left.get(f.checkId) ?? 0) + 1);
+  });
   const out: string[] = [];
-  lines.forEach((line, i) => {
-    out.push(line.text);
-    const more = left.get(line.checkId);
-    const last = !lines.slice(i + 1).some((l) => l.checkId === line.checkId);
-    if (more !== undefined && last) out.push(`… and ${count(more)} more ${line.checkId} ${more === 1 ? 'fact' : 'facts'} left out`);
+  facts.forEach((f, i) => {
+    if (!shown.has(i)) return;
+    out.push(`${f.path}${f.line === null ? '' : `:${f.line}`} ${f.checkId}: ${oneLine(f.message)}`);
+    const more = left.get(f.checkId);
+    if (more !== undefined && last.get(f.checkId) === i) out.push(`… and ${count(more)} more ${f.checkId} ${more === 1 ? 'fact' : 'facts'} left out`);
   });
   return asMaterial('facts', orNone(out));
 }

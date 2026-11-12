@@ -267,6 +267,18 @@ describe('runCohortLenses', () => {
     expect(many[20]).toBe('… and 980 more extension-html-injection facts left out');
   });
 
+  it('the cap keeps the first fact of each kind a check gives, so a rarer kind is never hidden behind twenty of another', async () => {
+    const address = (n: number) => ({ checkId: 'extension-remote-code', path: 'src/pause.ts', line: n, message: `An added line has the address http://x${n}.example.com/a, which is not https.` });
+    const evalFact = { checkId: 'extension-remote-code', path: 'src/pause.ts', line: 500, message: 'An added line runs text as code with eval.' };
+    const runner = createFakeRunner(empty);
+    await runCohortLenses(runner, ctx({ facts: [...Array.from({ length: 25 }, (_, i) => address(i + 1)), evalFact] }));
+    const lines = block(runner.calls[0]!.material, 'facts')!.split('\n');
+    expect(lines).toHaveLength(MAX_FACTS_PER_CHECK + 1);
+    expect(lines.filter((l) => l.includes('has the address'))).toHaveLength(MAX_FACTS_PER_CHECK - 1);
+    expect(lines.at(-2)).toBe('src/pause.ts:500 extension-remote-code: An added line runs text as code with eval.');
+    expect(lines.at(-1)).toBe('… and 6 more extension-remote-code facts left out');
+  });
+
   it('runs an onlyWhenAlone lens when its pack is the only one with lenses', async () => {
     const packs = [pack('generic', [lens('combined', { onlyWhenAlone: true }), lens('basic')]), pack('empty', [])];
     const runner = createFakeRunner(empty);
