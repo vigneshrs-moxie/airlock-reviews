@@ -42,7 +42,7 @@ export function Frame({ status, onOpenPacks, packsRef, timers = realTimers, chil
       <div className="panel">
         <header className="head">
           {/* The mark is a background, not an image element: the panel holds no img, so text from a review can never be one. */}
-          <span className="mark" aria-hidden="true" />
+          <span className="brand-mark" aria-hidden="true" />
           <h1 className="name">Airlock</h1>
           {status !== null && <span className="status" data-status={status}>{status}</span>}
           <button type="button" className="btn small packs" ref={packsRef} onClick={onOpenPacks}>Packs</button>
