@@ -56,7 +56,10 @@ function ServiceSection({ fetchStatus }: { fetchStatus: () => Promise<ServiceSta
 }
 
 /** Which packs apply and how the panel is connected; replaces the panel's content until Back. */
-export function Packs({ pr, packVersions, paired, fetchStatus, fetchLearned, removeLearned, removeBlocked = null, defaultDepth, onDefaultDepth, depthFailed = false, page = null, onBack, timers }: {
+export function Packs({
+  pr, packVersions, paired, fetchStatus, fetchLearned, removeLearned, removeBlocked = null, defaultDepth, onDefaultDepth, depthFailed = false,
+  showNotes = null, onShowNotes, notesFailed = false, page = null, onBack, timers,
+}: {
   pr: PrSummary | null;
   /** The packs of the review on screen with their versions; empty when no review is on screen. */
   packVersions: readonly PackRef[];
@@ -71,6 +74,11 @@ export function Packs({ pr, packVersions, paired, fetchStatus, fetchLearned, rem
   defaultDepth: Depth | null;
   onDefaultDepth: (depth: Depth | null) => void;
   depthFailed?: boolean;
+  /** Whether the review's notes are shown in the diff; null until the setting is read. */
+  showNotes?: boolean | null;
+  onShowNotes?: (on: boolean) => void;
+  /** Storing the notes setting failed, so the screen shows what is stored again and says so. */
+  notesFailed?: boolean;
   /** What the last jump found on the GitHub page; null before any jump. */
   page?: PageReport | null;
   onBack: () => void;
@@ -148,6 +156,17 @@ export function Packs({ pr, packVersions, paired, fetchStatus, fetchLearned, rem
           ))}
         </div>
         {depthFailed && <p role="alert" className="notice">Airlock could not save that setting.</p>}
+      </section>
+      <section className="card" aria-labelledby="packs-notes">
+        <h3 className="label" id="packs-notes">Notes</h3>
+        <label className="switch">
+          <input
+            type="checkbox" role="switch" checked={showNotes !== false} disabled={showNotes === null}
+            onChange={() => onShowNotes?.(showNotes === false)}
+          />
+          <span>Show notes in the diff</span>
+        </label>
+        {notesFailed && <p role="alert" className="notice">Airlock could not save that setting.</p>}
       </section>
       <section className="card" aria-labelledby="packs-page">
         <h3 className="label" id="packs-page">GitHub page</h3>

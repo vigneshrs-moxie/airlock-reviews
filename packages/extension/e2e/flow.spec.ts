@@ -9,12 +9,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { signal, startFakeService, type FakeService, type RunStep } from './fake-service';
+import { clickNode, insideNotes } from './note-dom';
 import { E2E_PORT } from './port';
 
 // The whole flow a person goes through, in the built extension beside the classic Files changed fixture, against the
-// fake service: pair, Ready, a running review whose brief arrives early, the verdict, a finding, the fix prompt, dismiss
-// and restore, the service stopping and coming back, and posting: a preview, an edit, the post and its mark, a refusal,
-// and a post whose outcome is not known. Each step is its own test; they share one browser and run in order.
+// fake service: pair, Ready, a running review whose brief arrives early, the verdict and its notes on the Files changed
+// page, a finding, the fix prompt, dismiss and restore, the service stopping and coming back, the notes setting and
+// Open in Airlock on a note, and posting: a preview, an edit, the post and its mark, a refusal, and a post whose outcome
+// is not known. Each step is its own test; they share one browser and run in order.
 test.describe.configure({ mode: 'serial' });
 
 const EXTENSION_ID = 'nbcmjckbkploiemllhkmhegjimgeimoa';
@@ -206,6 +208,11 @@ const bodiesOf = (method: string, path: string): unknown[] =>
 const frameStatus = () => panel.locator('header .status');
 const cards = () => panel.locator('.finding-card');
 const cardTitles = () => cards().locator('.title');
+/** Airlock's notes on the GitHub page, and one note by its finding's id. */
+const noteRows = () => github.locator('tr[data-airlock-note]');
+const noteRow = (id: string) => github.locator(`tr[data-airlock-note="${id}"]`);
+/** The small lines under the verdict. */
+const verdictLines = () => panel.locator('.verdict');
 
 test('1. not paired: the pairing screen, and the token typed into it pairs the panel', async () => {
   if (context === undefined) throw new Error('no browser');
@@ -288,6 +295,12 @@ test('4. the verdict: its words and sentence, three top findings in rank order, 
   await expect(frameStatus()).toHaveText('Connected');
   await expect(cardTitles()).toHaveText(top.map((f) => f.title));
   await expect(cards().locator('.sev')).toHaveText(['Block', 'Fix', 'Ask']);
+  // The notes: each open finding under its line on the Files changed page beside the panel. The fixture has no line 15,
+  // so the last one waits for its line.
+  await expect(noteRows()).toHaveCount(4);
+  for (const f of [...top, alsoFound[0]!]) await expect(noteRow(f.id)).toHaveCount(1);
+  await expect(noteRow(alsoFound[1]!.id)).toHaveCount(0);
+  await expect(verdictLines().getByText('4 shown, 1 waiting for their lines to load')).toBeVisible();
   await expect(cards().first()).toContainText('Also raised by 1 more');
   await expect(panel.getByRole('button', { name: 'Not shown to the reviewer' })).toHaveAttribute('aria-expanded', 'false');
   const notes = panel.getByRole('button', { name: 'Notes (1)' });
@@ -336,6 +349,9 @@ test('6. dismissed as Not now it leaves the list and Dismissed: 1 appears; Resto
   await expect(sheet).toHaveCount(0);
 
   await expect(cardTitles()).toHaveText([top[1]!.title, top[2]!.title]);
+  // Its note is gone from the page; the others stay.
+  await expect(noteRow(first.id)).toHaveCount(0);
+  await expect(noteRows()).toHaveCount(3);
   const dismissed = panel.getByRole('button', { name: 'Dismissed: 1' });
   await expect(dismissed).toBeVisible();
   expect(bodiesOf('POST', '/dismissals').map((b) => DismissBodySchema.parse(b))).toEqual([
@@ -346,6 +362,8 @@ test('6. dismissed as Not now it leaves the list and Dismissed: 1 appears; Resto
   await panel.getByRole('button', { name: `Restore ${first.title}` }).click();
   await expect(cardTitles()).toHaveText(top.map((f) => f.title));
   await expect(panel.getByRole('button', { name: /^Dismissed/ })).toHaveCount(0);
+  await expect(noteRow(first.id)).toHaveCount(1);
+  await expect(noteRows()).toHaveCount(4);
   expect(bodiesOf('POST', '/dismissals/restore').map((b) => RestoreBodySchema.parse(b))).toEqual([
     { repo: REPO, number: NUMBER, fingerprint: first.fingerprint },
   ]);
@@ -380,6 +398,8 @@ test('7. dismissed as Wrong: Save waits for a valid line, the service gets exact
   await sheet.getByRole('button', { name: 'Done' }).click();
   await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
   await expect(panel.getByRole('button', { name: 'Dismissed: 1' })).toBeVisible();
+  await expect(noteRow(second.id)).toHaveCount(0);
+  await expect(verdictLines().getByText('3 shown, 1 waiting for their lines to load')).toBeVisible();
 });
 
 test('8. the service stops: the frame says Not running, the offline message shows, the review stays readable', async () => {
@@ -391,6 +411,8 @@ test('8. the service stops: the frame says Not running, the offline message show
   await expect(panel.getByRole('heading', { name: verdictWords(document.verdict.label, document.pr.stage) })).toBeVisible();
   await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
   await expect(panel.getByRole('button', { name: 'Review again' })).toBeDisabled();
+  // The notes need no service: they stay with the review on screen.
+  await expect(noteRows()).toHaveCount(3);
 });
 
 test('9. the service starts again: the panel returns to the review by itself, the Wrong dismissal still there', async () => {
@@ -411,6 +433,44 @@ test('9. the service starts again: the panel returns to the review by itself, th
   expect(LatestReplySchema.shape.dismissals.parse(svc().dismissals(REPO, NUMBER))).toHaveLength(1);
 });
 
+test('10. notes: Show notes in the diff turned off removes them all and on brings them back; Open in Airlock on a note opens its finding', async () => {
+  if (context === undefined) throw new Error('no browser');
+  await expect(noteRows()).toHaveCount(3);
+  await panel.getByRole('button', { name: 'Packs' }).click();
+  const toggle = panel.getByRole('switch', { name: 'Show notes in the diff' });
+  await expect(toggle).toBeChecked();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect(noteRows()).toHaveCount(0);
+  await toggle.click();
+  await expect(noteRows()).toHaveCount(3);
+  await panel.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(verdictLines().getByText('3 shown, 1 waiting for their lines to load')).toBeVisible();
+
+  // The person presses Open in Airlock on the third finding's note: the panel opens that finding.
+  const third = top[2]!;
+  const { seen, cdp } = await insideNotes(context, github);
+  const note = seen.find((n) => n.id === third.id);
+  expect(note?.text).toBe(`Ask ${third.title} Open in Airlock`);
+  // This test's panel is a tab, so for Chrome the tab's side panel is closed: the worker opens it, inside the click.
+  const browserCdp = await context.newCDPSession(panel);
+  const panels = async (): Promise<number> => {
+    const { targetInfos } = await browserCdp.send('Target.getTargets') as { targetInfos: { type: string; url: string }[] };
+    return targetInfos.filter((t) => t.type === 'page' && t.url === `${ORIGIN}/sidepanel.html`).length;
+  };
+  expect(await panels()).toBe(1);
+  await clickNode(github, cdp, note!.buttonNodeId);
+  await expect(panel.getByRole('heading', { name: third.title })).toBeVisible();
+  await expect(panel.locator('[data-focus="detail"]')).toBeFocused();
+  await expect.poll(panels).toBe(2);
+  // The id the worker left was taken by a panel as it started (or at once), not kept.
+  await expect.poll(() => worker.evaluate(async () => (globalThis as unknown as { chrome: typeof browser }).chrome.storage.session.get(null))).toEqual({});
+  await panel.getByRole('button', { name: 'Back to the review' }).click();
+  await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
+  // Notes are private: nothing about them reached the service.
+  expect(svc().requests.filter((r) => /note/i.test(r.url))).toEqual([]);
+});
+
 const POST_ONE_REVIEW = 'Airlock posts these as one review with the Comment action. It never approves or requests changes.';
 const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
 const EDITED = 'Please call the guard before pausing; a paused account can still place an order.';
@@ -419,7 +479,7 @@ const NAMES_CAROL = 'Names @carol: GitHub notifies them unless the name is insid
 const postBodies = () => bodiesOf('POST', '/posts').map((b) => PostBodySchema.parse(b));
 const previewBodies = () => bodiesOf('POST', '/posts/preview').map((b) => PostPreviewBodySchema.parse(b));
 
-test('10. Post comment: the preview, an edit, Update preview, then the post; the finding is marked Posted', async () => {
+test('11. Post comment: the preview, an edit, Update preview, then the post; the finding is marked Posted', async () => {
   const first = top[0]!;
   await cards().first().getByRole('button').click();
   await expect(panel.getByRole('heading', { name: first.title })).toBeVisible();
@@ -470,7 +530,7 @@ test('10. Post comment: the preview, an edit, Update preview, then the post; the
   await expect(cards().first()).toContainText('Posted');
 });
 
-test('11. Post selected skips the posted finding; GitHub refuses, and every text is kept', async () => {
+test('12. Post selected skips the posted finding; GitHub refuses, and every text is kept', async () => {
   const third = top[2]!;
   svc().answerNextPost({ refuse: 'Line 13 is not part of the diff' });
   await panel.getByRole('checkbox', { name: `Select: ${top[0]!.title}`, exact: true }).check();
@@ -503,7 +563,7 @@ test('11. Post selected skips the posted finding; GitHub refuses, and every text
   expect(svc().sent).toHaveLength(2);
 });
 
-test('12. a post whose outcome is not known: the sentence and Open the pull request; It was not posted from the card forgets it', async () => {
+test('13. a post whose outcome is not known: the sentence and Open the pull request; It was not posted from the card forgets it', async () => {
   svc().answerNextPost({ unknown: true });
   const sheet = panel.getByRole('dialog');
   await sheet.getByRole('button', { name: 'Update preview' }).click();
@@ -533,7 +593,7 @@ test('12. a post whose outcome is not known: the sentence and Open the pull requ
   expect(svc().posts(REPO, NUMBER).map((r) => r.outcome)).toEqual(['posted']);
 });
 
-test('13. the post routes refuse a request without the extension Origin, and a preview body over 512 KB', async () => {
+test('14. the post routes refuse a request without the extension Origin, and a preview body over 512 KB', async () => {
   for (const path of ['/posts/preview', '/posts', '/posts/forget', '/learned/remove']) {
     const res = await fetch(`http://127.0.0.1:${E2E_PORT}${path}`, {
       method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
@@ -550,11 +610,13 @@ test('13. the post routes refuse a request without the extension Origin, and a p
   expect(await big.json()).toEqual({ error: 'The request body is too large.' });
 });
 
-test('14. a push: the banner, Review the push starts with since last, and the re-review shows what is new, still open, moved and fixed', async () => {
+test('15. a push: the banner, Review the push starts with since last, and the re-review shows what is new, still open, moved and fixed', async () => {
   svc().push(REPO, NUMBER, PUSHED_HEAD, rereviewScript);
   await panel.reload();
   await expect(panel.getByText('New commits since this review.')).toBeVisible();
   await expect(panel.getByRole('button', { name: 'Review everything again' })).toBeVisible();
+  // A review of an older commit: its lines may have moved, so its notes are taken off the page.
+  await expect(noteRows()).toHaveCount(0);
   await panel.getByRole('button', { name: 'Review the push' }).click();
   await expect.poll(() => bodiesOf('POST', '/reviews').length).toBe(2);
   expect(StartReviewBodySchema.parse(bodiesOf('POST', '/reviews').at(-1))).toEqual({ repo: REPO, number: NUMBER, depth: 'standard', since: 'last' });
@@ -564,6 +626,8 @@ test('14. a push: the banner, Review the push starts with since last, and the re
   await expect(panel.getByText(PUSH_NOTE)).toBeVisible();
   await expect(panel.getByText('New commits since this review.')).toHaveCount(0);
   await expect(cards()).toHaveCount(2);
+  // Neither finding's file is on the fixture page: both notes wait for their lines.
+  await expect(verdictLines().getByText('0 shown, 2 waiting for their lines to load')).toBeVisible();
   await expect(cards().nth(0).getByTestId('status')).toHaveText('Moved');
   await expect(cards().nth(1).getByTestId('status')).toHaveText('New');
   // The moved finding is the one posted earlier, found again by its alias.
@@ -582,7 +646,7 @@ test('14. a push: the banner, Review the push starts with since last, and the re
   expect(svc().sent).toHaveLength(3);
 });
 
-test('15. Packs shows the learned lines under their packs; Remove asks, removes and shows the note; a line already gone says so', async () => {
+test('16. Packs shows the learned lines under their packs; Remove asks, removes and shows the note; a line already gone says so', async () => {
   await panel.getByRole('button', { name: 'Packs' }).click();
   const generic = panel.locator('.packs-screen li').filter({ hasText: 'Generic' });
   const orbit = panel.locator('.packs-screen li').filter({ hasText: 'Orbit' });

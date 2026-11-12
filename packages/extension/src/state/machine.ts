@@ -1,8 +1,10 @@
 import { prRefFromUrl, type Depth, type Finding, type LatestReply, type PostRecord, type PrSummary, type ReviewDocument } from '@airlock/shared';
 import { ServiceError, type ServiceClient } from '../client/service';
 import { realTimers, type Timers } from '../client/timers';
+import type { PageNotes } from './notes';
 import {
-  isFor, POST_NOT_LEARNED, POST_UNKNOWN, reduce, withStage, type Action, type PanelState, type PostReply, type StageLine, type UserAction,
+  isFor, POST_NOT_LEARNED, POST_UNKNOWN, reduce, withStage, type Action, type PanelState, type PostReply, type ReviewView, type StageLine,
+  type UserAction,
 } from './reduce';
 import { recordHolds } from './selection';
 import type { SettingsStore } from './settings';
@@ -46,6 +48,8 @@ export interface PanelDeps {
   timers?: Timers;
   /** The clock, in milliseconds since 1970; `Date.now` unless a test passes its own. */
   now?: () => number;
+  /** The notes on the tab's page, told which review is on screen with every state. */
+  notes?: Pick<PageNotes, 'review'>;
 }
 
 type PrRef = { repo: string; number: number };
@@ -68,6 +72,17 @@ function finishedSince(latest: LatestReply | null, startedAt: number | null): bo
   if (latest === null || startedAt === null) return false;
   const created = Date.parse(latest.document.createdAt);
   return Number.isFinite(created) && created >= startedAt;
+}
+
+/**
+ * The review on screen, for the notes: the finished one, or the one kept while the service is away; null when none is;
+ * undefined while loading, when what comes next is not known yet (so the notes on the page stay as they are meanwhile).
+ */
+function reviewOnScreen(state: PanelState): ReviewView | null | undefined {
+  if (state.kind === 'loading') return undefined;
+  if (state.kind === 'review') return { pr: state.pr, latest: state.latest, stale: state.stale };
+  if (state.kind === 'offline') return state.review ?? null;
+  return null;
 }
 
 function prOf(state: PanelState): PrSummary | null {
@@ -105,6 +120,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     if (stopped || next === state) return;
     state = next;
     deps.onState(next);
+    deps.notes?.review(reviewOnScreen(next));
   };
   const apply = (action: Action): void => emit(reduce(state, action));
   const current = (g: number): boolean => g === generation && !stopped;

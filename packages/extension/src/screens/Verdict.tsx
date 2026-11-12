@@ -13,6 +13,7 @@ import { DroppedSheet } from './DroppedSheet';
 import { FindingCard } from './FindingCard';
 import { FixedList } from './FixedList';
 import type { Jump } from '../state/jump';
+import type { NotesLine } from '../state/notes';
 import { FindingDetail, notConnected } from './FindingDetail';
 import { useAnnounce } from './Frame';
 import { MapBlock } from './MapBlock';
@@ -34,7 +35,16 @@ export interface VerdictProps {
   onPost?: (findings: Finding[], opener: string) => void;
   /** For the Copy buttons' two seconds. */
   timers?: Timers;
+  /** What the notes on GitHub's page did, said under the verdict; null for nothing to say. */
+  notesLine?: NotesLine | null;
+  /** Reloads the GitHub tab and sends the notes again: the person pressed the line's button. */
+  onReloadNotes?: () => void;
+  /** The finding `Open in Airlock` asked for; a new `seq` asks again. Ignored when it is not an open finding of this review. */
+  openFinding?: OpenFinding | null;
 }
+
+/** A request to open one finding, numbered so the same finding can be asked for again. */
+export interface OpenFinding { id: string; seq: number }
 
 type Fold = 'limits' | 'notes' | 'also' | 'dismissed' | 'timing' | 'fixed';
 
@@ -61,7 +71,10 @@ function rangeLine(doc: ReviewDocument): string | null {
 }
 
 /** The finished review: the verdict, the findings and what sits around them; one finding in full when it is opened. */
-export function Verdict({ state, dispatch, readOnly = false, onJump = notConnected, onDismiss = noDismiss, onPost = noPost, timers }: VerdictProps) {
+export function Verdict({
+  state, dispatch, readOnly = false, onJump = notConnected, onDismiss = noDismiss, onPost = noPost, timers, notesLine = null,
+  onReloadNotes, openFinding = null,
+}: VerdictProps) {
   const { pr, latest, stale } = state;
   const doc = latest.document;
   const announce = useAnnounce();
@@ -131,6 +144,24 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
       return kept.length === was.size ? was : new Set(kept);
     });
   }, [lists.order]);
+
+  // `Open in Airlock` on a note: that finding, when it is open in this review. A request made before this review was
+  // shown (for an earlier one) is not acted on.
+  const askedOpen = useRef(openFinding?.seq ?? 0);
+  useEffect(() => {
+    if (openFinding === null || openFinding.seq === askedOpen.current) return;
+    askedOpen.current = openFinding.seq;
+    if (lists.order.some((f) => f.id === openFinding.id)) setOpenId(openFinding.id);
+  }, [openFinding, lists.order]);
+
+  // The notes line is said when it changes, not when the notes are sent again with the same counts.
+  const notesText = notesLine?.text ?? null;
+  const saidNotes = useRef<string | null>(null);
+  useEffect(() => {
+    if (notesText === saidNotes.current) return;
+    saidNotes.current = notesText;
+    if (notesText !== null) announce(notesText);
+  }, [announce, notesText]);
 
   // An open finding that is no longer shown (dismissed) is forgotten, so restoring it does not reopen it.
   useEffect(() => { if (openId !== null && detail === undefined) setOpenId(null); }, [openId, detail]);
@@ -230,6 +261,10 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
         )}
         {line !== null && <p>{line}</p>}
         {notesUnderVerdict && doc.notes!.map((note, i) => <p key={i}>{note}</p>)}
+        {notesLine !== null && <p>{notesLine.text}</p>}
+        {notesLine?.reload === true && (
+          <button type="button" className="btn small" onClick={() => onReloadNotes?.()}>Reload the GitHub tab</button>
+        )}
         <p className="muted">{`Reviewed at ${doc.pr.headSha.slice(0, 7)} · ${depthWord(doc.depth)}${titles === '' ? '' : ` · ${titles}`}`}</p>
       </section>
       {banners}

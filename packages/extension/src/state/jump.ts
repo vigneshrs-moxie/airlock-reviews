@@ -1,8 +1,9 @@
 import { blobUrl, diffAnchorId, filesUrl, prRefFromUrl, type Finding, type Place } from '@airlock/shared';
 import { z } from 'zod';
 import { realTimers, type Timers } from '../client/timers';
-import { PATH_MAX, type JumpReply, type JumpRequest } from '../page/protocol';
+import { PATH_MAX, type ClearNotesMessage, type JumpReply, type JumpRequest, type NotesMessage, type NotesReply, type NotesRefused } from '../page/protocol';
 import { clippedPath, placeText } from '../place-text';
+import { clip } from './reduce';
 
 /**
  * Where a jump goes. `changed`: the path is among the review's files and the line is expected on the Files changed page.
@@ -30,6 +31,15 @@ const JumpReplySchema: z.ZodType<JumpReply> = z.discriminatedUnion('ok', [
   z.object({ ok: z.literal(true), how: z.enum(['line', 'file', 'asked']), ...report }),
   z.object({ ok: z.literal(false), reason: z.enum(['not-files-page', 'file-not-on-page']), ...report }),
 ]);
+const count = z.number().int().nonnegative();
+/** The content script's reply to notes: the counts, or the sentence for a message it refused. */
+const NotesReplySchema: z.ZodType<NotesReply | NotesRefused> = z.union([
+  z.object({ placed: count, waiting: count, ...report }),
+  z.object({ error: z.string() }),
+]);
+
+/** Every message the panel sends to the content script of its tab. */
+export type PageMessage = JumpRequest | NotesMessage | ClearNotesMessage;
 
 /** How long to wait for the tab to finish loading. */
 export const LOAD_MS = 15_000;
@@ -44,7 +54,7 @@ export type Loaded = 'complete' | 'timeout' | 'closed';
 /** The Chrome calls a jump makes, and its clock, so tests can pass fakes. */
 export interface JumpChrome {
   /** Rejects when no content script is listening in the tab. */
-  sendMessage(tabId: number, message: JumpRequest): Promise<unknown>;
+  sendMessage(tabId: number, message: PageMessage): Promise<unknown>;
   /** The tab's address (undefined when Chrome does not show it); null when the tab no longer exists. Never rejects. */
   tabUrl(tabId: number): Promise<string | undefined | null>;
   updateTab(tabId: number, props: { url: string }): Promise<unknown>;
@@ -58,7 +68,7 @@ export interface JumpChrome {
 }
 
 export const COULD_NOT_JUMP = 'Airlock could not jump to that place.';
-const COULD_NOT_REACH = 'Airlock could not reach the GitHub page. Reload it, then try again.';
+export const COULD_NOT_REACH = 'Airlock could not reach the GitHub page. Reload it, then try again.';
 const TAB_CLOSED = 'Airlock could not jump: the GitHub tab was closed.';
 /** Never shown: the panel shows only the latest jump's result. */
 const REPLACED = 'Airlock stopped this jump for a newer one.';
@@ -101,12 +111,12 @@ function guarded(chrome: JumpChrome, signal: AbortSignal | undefined): JumpChrom
 }
 
 /** The page's reply; null when nothing is listening, nothing answers within `ANSWER_MS`, or the answer is not understood. */
-async function ask(chrome: JumpChrome, tabId: number, request: JumpRequest): Promise<JumpReply | null> {
+async function ask<T>(chrome: JumpChrome, tabId: number, message: PageMessage, schema: z.ZodType<T>): Promise<T | null> {
   let timer: unknown;
   const silence = new Promise<undefined>((resolve) => { timer = chrome.timers.setTimeout(() => resolve(undefined), ANSWER_MS); });
   try {
-    const answer = await Promise.race([chrome.sendMessage(tabId, request), silence]);
-    const reply = JumpReplySchema.safeParse(answer);
+    const answer = await Promise.race([chrome.sendMessage(tabId, message), silence]);
+    const reply = schema.safeParse(answer);
     return reply.success ? reply.data : null;
   } catch (error) {
     if (error === CANCELLED) throw error;
@@ -114,6 +124,17 @@ async function ask(chrome: JumpChrome, tabId: number, request: JumpRequest): Pro
   } finally {
     chrome.timers.clearTimeout(timer);
   }
+}
+
+/** `first`, or while nothing answers, the answer to `again` after each of `RETRY_MS`: a script may still be starting. */
+async function retried<T>(chrome: JumpChrome, signal: AbortSignal | undefined, first: T | null, again: () => Promise<T | null>): Promise<T | null> {
+  let reply = first;
+  for (const ms of RETRY_MS) {
+    if (reply !== null) break;
+    await sleep(chrome.timers, ms, signal);
+    reply = await again();
+  }
+  return reply;
 }
 
 const unreached = (reply: JumpReply | null): boolean => reply === null || (!reply.ok && reply.reason === 'not-files-page');
@@ -176,20 +197,17 @@ export async function jumpTo(
     };
 
     if (options.reload === true && !(await andLoad(() => chrome.reloadTab(tabId)))) return said(TAB_CLOSED);
-    let reply = await ask(chrome, tabId, request);
+    const again = (): Promise<JumpReply | null> => ask(chrome, tabId, request, JumpReplySchema);
+    let reply = await again();
     if (unreached(reply)) {
       // Moving to the same document with a new fragment would not load a script, so that tab is not navigated.
       const address = await chrome.tabUrl(tabId);
       if (address === null) return said(TAB_CLOSED);
       if (!onFilesPage(address, pr)) {
         if (!(await andLoad(() => chrome.updateTab(tabId, { url })))) return said(TAB_CLOSED);
-        reply = await ask(chrome, tabId, request);
+        reply = await again();
       }
-      for (const ms of RETRY_MS) {
-        if (reply !== null) break;
-        await sleep(chrome.timers, ms, signal);
-        reply = await ask(chrome, tabId, request);
-      }
+      reply = await retried(chrome, signal, reply, again);
       if (reply === null) return (await chrome.tabUrl(tabId)) === null ? said(TAB_CLOSED) : said(COULD_NOT_REACH, true);
     }
     if (reply === null || unreached(reply)) return said(COULD_NOT_REACH);
@@ -197,6 +215,46 @@ export async function jumpTo(
     return said(sentence(reply, place, line));
   } catch (error) {
     return said(error === CANCELLED ? REPLACED : COULD_NOT_JUMP);
+  }
+}
+
+/**
+ * What sending notes did. `shown`: the page's counts (zero and zero with no view when it is not that pull request's Files
+ * changed view). `refused`: the page's sentence. `unreached`: no page script answered, so the tab needs a reload, which
+ * only the person asks for. `gone`: nothing to say (the tab was closed, or a newer send replaced this one).
+ */
+export type NotesResult =
+  | ({ kind: 'shown'; placed: number; waiting: number } & PageReport)
+  | { kind: 'refused'; sentence: string }
+  | { kind: 'unreached' }
+  | { kind: 'gone' };
+
+/**
+ * Sends notes, or the message clearing them, to the content script of tab `tabId`, with the jump's handling of a tab
+ * with no live script: asked again after each of `RETRY_MS`, then `unreached`. The tab is reloaded first only when
+ * `options.reload` says the person asked for it, and never navigated. Once `options.signal` aborts it makes no further
+ * Chrome call. Never rejects.
+ */
+export async function sendToPage(
+  unguarded: JumpChrome, tabId: number, message: NotesMessage | ClearNotesMessage,
+  options: { reload?: boolean; signal?: AbortSignal } = {},
+): Promise<NotesResult> {
+  const { signal } = options;
+  const chrome = guarded(unguarded, signal);
+  try {
+    if (signal?.aborted === true) throw CANCELLED;
+    if (options.reload === true) {
+      const loaded = chrome.loaded(tabId);
+      await chrome.reloadTab(tabId);
+      if ((await loaded) === 'closed') return { kind: 'gone' };
+    }
+    const again = (): Promise<NotesReply | NotesRefused | null> => ask(chrome, tabId, message, NotesReplySchema);
+    const reply = await retried(chrome, signal, await again(), again);
+    if (reply === null) return (await chrome.tabUrl(tabId)) === null ? { kind: 'gone' } : { kind: 'unreached' };
+    if ('error' in reply) return { kind: 'refused', sentence: clip(reply.error) };
+    return { kind: 'shown', placed: reply.placed, waiting: reply.waiting, view: reply.view, missing: reply.missing };
+  } catch {
+    return { kind: 'gone' };
   }
 }
 

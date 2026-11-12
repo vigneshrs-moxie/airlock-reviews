@@ -21,6 +21,8 @@ function settings(): SettingsStore {
     async setToken() {},
     async getDefaultDepth() { return null; },
     async setDefaultDepth() {},
+    async getShowNotes() { return true; },
+    async setShowNotes() {},
   };
 }
 

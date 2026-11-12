@@ -174,12 +174,14 @@ test('the content script posts no message to the GitHub page', async () => {
   await panel.close();
 });
 
-test('the built worker is small and carries no schema library', async () => {
+test('the built worker is small, carries no schema library and makes no network request', async () => {
   const script = await readFile(join(BUILT, 'background.js'), 'utf8');
   // With zod it was about 94 KB.
   expect(Buffer.byteLength(script)).toBeLessThan(20 * 1024);
   expect(script).not.toMatch(/zod/i);
   expect(script).not.toContain('ReviewDocument');
+  // It opens the panel for a note and leaves the finding's id; it asks nothing of the network.
+  expect(script).not.toMatch(/\bfetch\(|XMLHttpRequest|WebSocket|sendBeacon|EventSource/);
 });
 
 test('the built content script is under 15 kB, imports no dependency, and sets no markup, fetches nothing, stores nothing', async () => {

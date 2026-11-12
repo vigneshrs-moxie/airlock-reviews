@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NotesMessage, PageNote } from '../src/page/protocol';
+import { clickNode, insideNotes } from './note-dom';
 
 // The content script's notes on the two fixture views, sent from the extension's worker as the panel will send them.
 // The page acts out GitHub's own re-rendering with fixtures/github-live.js.
@@ -88,45 +89,6 @@ const above = (github: Page, id: string) =>
   noteRow(github, id).evaluate((row) => row.previousElementSibling?.textContent?.replace(/\s+/g, ' ').trim());
 const spanOf = (github: Page, id: string) => noteRow(github, id).evaluate((row) => (row.firstElementChild as HTMLTableCellElement).colSpan);
 
-interface Seen { id: string; text: string; buttonNodeId: number }
-type Cdp = Awaited<ReturnType<BrowserContext['newCDPSession']>>;
-/**
- * What the person sees inside each note's closed shadow root, read through the DevTools protocol (the page's own scripts
- * cannot open the root; Playwright's locators do not either). The node ids are good for the returned session.
- */
-async function insideNotes(github: Page): Promise<{ seen: Seen[]; cdp: Cdp }> {
-  type DomNode = {
-    nodeId: number; nodeName: string; nodeType: number; nodeValue: string; attributes?: string[];
-    children?: DomNode[]; shadowRoots?: DomNode[];
-  };
-  const cdp = await context.newCDPSession(github);
-  const { root } = await cdp.send('DOM.getDocument', { depth: -1, pierce: true }) as { root: DomNode };
-  const seen: Seen[] = [];
-  const kids = (n: DomNode): DomNode[] => [...(n.shadowRoots ?? []), ...(n.children ?? [])];
-  const text = (n: DomNode): string => n.nodeName === 'STYLE' ? '' : n.nodeType === 3 ? n.nodeValue : kids(n).map(text).join(' ');
-  const find = (n: DomNode, name: string): DomNode | undefined =>
-    n.nodeName === name ? n : kids(n).map((k) => find(k, name)).find((k) => k !== undefined);
-  const walk = (n: DomNode): void => {
-    const attrs = n.attributes ?? [];
-    const at = attrs.indexOf('data-airlock-note');
-    if (n.nodeName === 'TR' && at >= 0) {
-      seen.push({ id: attrs[at + 1]!, text: text(n).replace(/\s+/g, ' ').trim(), buttonNodeId: find(n, 'BUTTON')!.nodeId });
-      return;
-    }
-    kids(n).forEach(walk);
-  };
-  walk(root);
-  return { seen, cdp };
-}
-
-/** Clicks a node at its place on screen, as the person would. */
-async function clickNode(github: Page, cdp: Cdp, nodeId: number): Promise<void> {
-  await cdp.send('DOM.scrollIntoViewIfNeeded', { nodeId });
-  const { model } = await cdp.send('DOM.getBoxModel', { nodeId }) as { model: { content: number[] } };
-  const [x1, y1, , , x3, y3] = model.content as [number, number, number, number, number, number];
-  await github.mouse.click((x1 + x3) / 2, (y1 + y3) / 2);
-}
-
 const seenByWorker = () => worker.evaluate(() => (globalThis as unknown as { airlockSeen: unknown[] }).airlockSeen.splice(0));
 
 for (const [view, url] of [['classic', CLASSIC_URL], ['react', REACT_URL]] as const) {
@@ -139,7 +101,7 @@ for (const [view, url] of [['classic', CLASSIC_URL], ['react', REACT_URL]] as co
     expect(await above(github, 'c_00000002')).toContain('code - 4');
     expect(await spanOf(github, 'c_00000001')).toBe(3);
 
-    const { seen, cdp } = await insideNotes(github);
+    const { seen, cdp } = await insideNotes(context, github);
     expect(seen.map((s) => [s.id, s.text])).toEqual([
       ['c_00000001', `Fix ${TITLE} Open in Airlock`],
       ['c_00000002', 'Block The guard is never read Open in Airlock'],

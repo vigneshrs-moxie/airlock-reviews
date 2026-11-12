@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createTabWatcher, type TabsLike } from '../../src/state/tab';
 
 type Tab = { id?: number; url?: string };
-type Listener = (tabId: number, changeInfo: { url?: string }, tab: Tab) => void;
+type Listener = (tabId: number, changeInfo: { url?: string; status?: string }, tab: Tab) => void;
 
 function fakeTabs(active: Tab[]) {
   const listeners = new Set<Listener>();
@@ -17,7 +17,7 @@ function fakeTabs(active: Tab[]) {
       removeListener: (fn) => void listeners.delete(fn),
     },
   };
-  const update = (tabId: number, tab: Tab, changeInfo: { url?: string } = {}) => {
+  const update = (tabId: number, tab: Tab, changeInfo: { url?: string; status?: string } = {}) => {
     for (const fn of listeners) fn(tabId, changeInfo, tab);
   };
   return { tabs, queries, listeners, update };
@@ -48,6 +48,19 @@ describe('tab watcher', () => {
     expect(fake.listeners.size).toBe(0);
     fake.update(7, { id: 7, url: 'https://github.com/acme/widgets/pull/4' });
     expect(seen).toHaveLength(2);
+  });
+
+  it('passes each update\'s load status, so a page loaded again at the same address can be told apart', async () => {
+    const fake = fakeTabs([{ id: 7, url: 'https://github.com/acme/widgets/pull/3' }]);
+    const watcher = createTabWatcher(fake.tabs);
+    const seen: [string | undefined, string | undefined][] = [];
+    watcher.onChange((url, status) => seen.push([url, status]));
+    await tick();
+    const url = 'https://github.com/acme/widgets/pull/3';
+    fake.update(7, { id: 7, url }, { status: 'loading' });
+    fake.update(7, { id: 7, url }, { status: 'complete' });
+    fake.update(7, { id: 7, url }, { url });
+    expect(seen).toEqual([[url, 'loading'], [url, 'complete'], [url, undefined]]);
   });
 
   it('a window with no active tab gives an id of -1 and no address, and no change is reported', async () => {

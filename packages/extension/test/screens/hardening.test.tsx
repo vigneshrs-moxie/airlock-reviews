@@ -69,6 +69,7 @@ describe('the real construction', () => {
     const settings: SettingsStore = {
       getToken: async () => 'tok-123', setToken: async () => undefined,
       getDefaultDepth: async () => null, setDefaultDepth: async () => undefined,
+      getShowNotes: async () => true, setShowNotes: async () => undefined,
     };
     const tab: TabWatcher = { current: async () => ({ tabId: 1, url: undefined }), onChange: () => noop };
     let seen: PanelDeps | undefined;
