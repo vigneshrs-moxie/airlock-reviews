@@ -100,6 +100,25 @@ describe('a file git calls binary', () => {
   }, SLOW);
 });
 
+describe('a review that read nothing closely', () => {
+  const NOTE = 'Nothing in this pull request was read closely: all 2 changed files are of kinds Airlock trusts (tests, documents, generated files).';
+
+  it('says so in a note when every changed file is trusted, and keeps its verdict', async () => {
+    const s = await scenario({ 'src/pay.ts': PAY }, { 'src/pay.test.ts': "import { pay } from './pay';\n", 'test/more.spec.ts': 'export {};\n' });
+    const { doc, calls } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha, changedFiles: 2 }), script: attributesScript() });
+    expect(calls.filter((c) => c.role.startsWith('lens:'))).toEqual([]);
+    expect(doc.notes).toEqual([NOTE]);
+    expect(doc.stageErrors).toEqual([]);
+    expect(doc.verdict.label).not.toBe('incomplete');
+  }, SLOW);
+
+  it('adds no such note when one file is skimmed', async () => {
+    const s = await scenario({ 'src/pay.ts': PAY }, { 'src/pay.test.ts': "import { pay } from './pay';\n", 'src/pay.ts': `${PAY}// paid\n` });
+    const { doc } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha, changedFiles: 2 }), script: attributesScript() });
+    expect(doc.notes ?? []).not.toContainEqual(expect.stringMatching(/^Nothing in this pull request was read closely/));
+  }, SLOW);
+});
+
 /** fakeGh, with the pull request's description replaced by `body`. */
 function withBody(inner: Exec, body: string): Exec {
   return async (cmd, args, opts) => {

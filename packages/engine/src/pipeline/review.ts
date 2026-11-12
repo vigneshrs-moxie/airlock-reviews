@@ -19,7 +19,7 @@ import { fetchPr } from '../intake/pr.js';
 import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
 import { runCohortLenses } from '../lenses/cohort-lens.js';
 import {
-  descriptionCutSentence, emptyResult, MAX_DESCRIPTION_CHARS, type LensContext, type LensStageResult,
+  descriptionCutSentence, emptyResult, MAX_DESCRIPTION_CHARS, tierOf, type LensContext, type LensStageResult,
 } from '../lenses/context.js';
 import { runSeams } from '../lenses/seams.js';
 import { placeablePaths } from '../map/check.js';
@@ -207,6 +207,17 @@ function notReviewed(files: FileDiff[], tiers: FileFact[]): string | null {
   const named = files.slice(0, MAX_UNREVIEWED_NAMED).map((f) => f.path).join(', ');
   const more = files.length > MAX_UNREVIEWED_NAMED ? '…' : '';
   return `${files.length === 1 ? '1 changed file was' : `${files.length} changed files were`} not reviewed: ${named}${more}`;
+}
+
+/**
+ * When every changed file is in the trust or ignored tier, so no lens request is made, the note saying nothing was read
+ * closely; otherwise null. An empty diff, and one where every file is ignored, have their own words (a stage error).
+ */
+function nothingReadNote(files: FileDiff[], tiers: FileFact[]): string | null {
+  if (files.length === 0 || notReviewed(files, tiers) !== null) return null;
+  const tier = tierOf(tiers);
+  if (!files.every((f) => tier(f.path) === 'trust' || tier(f.path) === 'ignored')) return null;
+  return `Nothing in this pull request was read closely: all ${files.length} changed files are of kinds Airlock trusts (tests, documents, generated files).`;
 }
 
 interface Settings { depth: Depth; models: ModelConfig; parallel: number; combine: 'never' | 'no-read-tier' }
@@ -413,7 +424,7 @@ async function reviewInWorkspace(
   return {
     range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
     dropped: [...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
-    notes: [...mergeNotes, ...selection.notes],
+    notes: [...(sync ? [] : [nothingReadNote(files, tiers)].filter((n) => n !== null)), ...mergeNotes, ...selection.notes],
   };
 }
 
