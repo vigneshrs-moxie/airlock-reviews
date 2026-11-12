@@ -17,6 +17,8 @@ export const NO_PREVIEW = 'Airlock got no answer for the preview. Ask again when
 export const OFFLINE_KEPT_POST = 'Airlock could not reach its service. Your comments are kept.';
 export const NOT_THIS_REVIEW_POST = 'This review is no longer the one on screen, so these comments cannot be posted from it. Closing this loses the texts here.';
 export const WAITING_FOR_RECORD = 'Waiting to hear whether GitHub accepted the comments…';
+/** After a 404 on the post: a copy the browser sent earlier may have gone through. */
+export const CHECKING_FOR_RECORD = 'Checking whether this post already went through…';
 export const REVIEW_TEXT = "The review's own text, as it will be posted:";
 export const REVIEW_TEXT_OLD = 'Update preview to see this again.';
 export const PREVIEW_UPDATED = 'Preview updated.';
@@ -76,8 +78,8 @@ export interface PostDraft {
   said: string | null;
   /** `said` asks the person to look at the pull request. */
   look: boolean;
-  /** The post in flight got no clear answer; the panel is reading the records until its record appears. */
-  waiting: boolean;
+  /** The post in flight got no clear answer; the panel is reading the records until its record appears, saying this. */
+  waiting: string | null;
   /** How many previews have come, so a fresh one after the first can be announced. */
   previews: number;
   /** A post was sent from this sheet, so it no longer says that nothing has been sent. */
@@ -93,7 +95,7 @@ export function newPostDraft(
   return {
     reviewId, pr: { repo: pr.repo, number: pr.number }, fingerprints, opener, preview: null, texts: {}, summary: '', summaryTyped: false,
     toSummary: [], previewToSummary: [], spent: false,
-    pending: { kind: 'preview', ticket, started: false, known: [], toSummary: [], wasSent: false }, said: null, look: false, waiting: false,
+    pending: { kind: 'preview', ticket, started: false, known: [], toSummary: [], wasSent: false }, said: null, look: false, waiting: null,
     previews: 0, sent: false, outcome: null,
   };
 }
@@ -103,7 +105,7 @@ export type PostSheetView = SheetView & { post?: PostReply | undefined; stale?: 
 
 /** The draft once the answer to its pending request has come. */
 function absorb(draft: PostDraft, pending: PendingPost, reply: Exclude<PostReply, { kind: 'waiting' }>): PostDraft {
-  const settled = { ...draft, pending: null, look: false, waiting: false };
+  const settled = { ...draft, pending: null, look: false, waiting: null };
   switch (reply.kind) {
     case 'preview': {
       const { preview } = reply;
@@ -130,7 +132,7 @@ function absorb(draft: PostDraft, pending: PendingPost, reply: Exclude<PostReply
 function unanswered(
   draft: PostDraft, pending: PendingPost, posts: readonly PostRecord[], findings: readonly Pick<Finding, 'fingerprint' | 'aliases'>[],
 ): PostDraft {
-  const settled = { ...draft, pending: null, look: false, waiting: false };
+  const settled = { ...draft, pending: null, look: false, waiting: null };
   if (pending.kind !== 'post') return draft.preview === null ? { ...settled, said: NO_PREVIEW } : settled;
   // What the records say: one this post made, on its pull request, holding one of its findings, by the same rule as the marks.
   const sent = draft.preview?.items.map((item) => item.fingerprint) ?? draft.fingerprints;
@@ -204,7 +206,9 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
     if (pending === null) return;
     const reply = view.post !== undefined && view.post.ticket === pending.ticket ? view.post : undefined;
     if (reply !== undefined && reply.kind !== 'waiting') onDraft(absorb(draft, pending, reply));
-    else if (reply !== undefined && !draft.waiting) onDraft({ ...draft, waiting: true, pending: { ...pending, started: true } });
+    else if (reply !== undefined && draft.waiting === null) {
+      onDraft({ ...draft, waiting: reply.checking === true ? CHECKING_FOR_RECORD : WAITING_FOR_RECORD, pending: { ...pending, started: true } });
+    }
     else if (!pending.started && (busy || offline)) onDraft({ ...draft, pending: { ...pending, started: true } });
     else if (pending.started && !busy && !offline && !elsewhere) onDraft(unanswered(draft, pending, latest.posts, latest.document.findings));
   }, [draft, pending, view.post, busy, offline, elsewhere, latest.posts, latest.document.findings, onDraft]);
@@ -425,7 +429,7 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
       <p>{POST_ONE_REVIEW}</p>
       {saidLine}
       {offlineLine}
-      {draft.waiting && pending?.kind === 'post' && <p role="status">{WAITING_FOR_RECORD}</p>}
+      {draft.waiting !== null && pending?.kind === 'post' && <p role="status">{draft.waiting}</p>}
       <div className="actions">
         {needsUpdate
           ? <button type="button" className="btn primary" ref={mainButton} disabled={mainDisabled} {...describedByBlock} onClick={update}>Update preview</button>

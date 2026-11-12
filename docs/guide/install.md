@@ -122,10 +122,10 @@ A Block or Fix finding is marked Fixed only when Airlock finds, at the new commi
 
 Sometimes Airlock reviews the whole pull request again instead, for example when the branch was rewritten. A sentence under the verdict says why, and it is the only line there.
 
-When the push is only a merge of the base branch, the line says what was reviewed of it:
+When the push is only a merge (usually of the base branch), the line says what was reviewed of it:
 
 - "Review of the merge pushed since 1a2b3c4: only what was changed by hand was reviewed." when the merge had changes made by hand, and those were reviewed.
-- "The push only merged main in; git merged it without conflicts and nothing was changed by hand." when there was nothing to review.
+- "The push only merged another branch in; git merged it without conflicts and nothing was changed by hand." when there was nothing to review. It names no branch, because Airlock cannot always be sure which branch the push merged.
 - No line when Airlock could not review the merge. The verdict is Incomplete, and the error under it says why.
 
 A first review of a pull request that only merges its base branch in says the same in the heading above what it does.

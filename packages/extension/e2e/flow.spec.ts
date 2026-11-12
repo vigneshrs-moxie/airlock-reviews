@@ -705,7 +705,11 @@ test('18. a post whose connection is cut before any answer: the panel waits, rea
   await panel.getByRole('button', { name: 'Post comment' }).click();
   const sheet = panel.getByRole('dialog');
   await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
-  await expect(sheet.getByText('Waiting to hear whether GitHub accepted the comments…')).toBeVisible();
+  // Chromium may send the cut post again by itself; that copy finds the preview taken (404), and the panel then checks
+  // whether the post already went through instead of waiting to hear. Either way it reads the records.
+  await expect(sheet.getByRole('status').filter({
+    hasText: /^(Waiting to hear whether GitHub accepted the comments…|Checking whether this post already went through…)$/,
+  })).toBeVisible();
   await expect(sheet.getByRole('button', { name: 'Cancel' })).toBeDisabled();
   await expect(sheet.getByText('Posted 1 comment.')).toBeVisible(RETRY_WAIT);
   // One press, one review: the panel read the records and sent nothing again.
@@ -806,7 +810,7 @@ test('20. a merge review says it reviewed what was changed by hand only when its
     10: { heading: 'What this does', line: null },
     11: { heading: 'What this does', line: null },
     12: { heading: 'What this does', line: `Review of the merge pushed since ${'f'.repeat(7)}: only what was changed by hand was reviewed.` },
-    13: { heading: 'What this does', line: 'The push only merged main in; git merged it without conflicts and nothing was changed by hand.' },
+    13: { heading: 'What this does', line: 'The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.' },
     // A pull request of only a merge reviewed again in full: its note is the only line, and no merge sentence.
     14: { heading: 'What this does', line: EVERYTHING_NOTE },
   };
@@ -830,14 +834,14 @@ test('21. a post the browser sent twice: the copy the panel hears is told the pr
   const doc = ReviewDocumentSchema.parse({
     ...document, id: 'r_0000000015', pr: { ...document.pr, number, title: twice.title, url: `https://github.com/${REPO}/pull/${number}` },
     verdict: { label: 'request-changes', sentence: 'One thing blocks this.', counts: { block: 1, fix: 0, ask: 0, note: 0 } },
-    findings: [top[0]],
+    findings: [top[0], top[1]],
   });
   svc().addPull({ pr: twice, latest: { document: doc, dismissals: [], posts: [] } });
   const classic = await readFile(join(FIXTURES, 'files-classic.html'), 'utf8');
   await context.route(address, (route) => route.fulfill({ contentType: 'text/html', body: classic }));
   await github.goto(address);
   await activate(address);
-  await expect(cards()).toHaveCount(1);
+  await expect(cards()).toHaveCount(2);
 
   svc().answerNextPost({ sentTwice: true, recordAfterMs: 2_000 });
   const before = svc().sent.length;
@@ -846,7 +850,7 @@ test('21. a post the browser sent twice: the copy the panel hears is told the pr
   await panel.getByRole('button', { name: 'Post comment' }).click();
   const sheet = panel.getByRole('dialog');
   await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
-  await expect(sheet.getByText('Waiting to hear whether GitHub accepted the comments…')).toBeVisible();
+  await expect(sheet.getByText('Checking whether this post already went through…')).toBeVisible();
   await expect(sheet.getByRole('button', { name: 'Cancel' })).toBeDisabled();
   await expect(sheet.getByText('Posted 1 comment.')).toBeVisible(RETRY_WAIT);
   // The 404 the panel heard was never shown: one press, one review, sent by the first copy.
@@ -856,4 +860,24 @@ test('21. a post the browser sent twice: the copy the panel hears is told the pr
   await sheet.getByRole('button', { name: 'Done' }).click();
   await panel.getByRole('button', { name: 'Back to the review' }).click();
   await expect(cards().first()).toContainText('Posted');
+});
+
+test('22. a preview that really expired: the panel checks for 20 seconds, finds no record, and says the preview expired', async () => {
+  test.setTimeout(90_000);
+  const number = 15;
+  svc().answerNextPost({ expired: true });
+  const before = svc().sent.length;
+  await cards().nth(1).getByRole('button').click();
+  await expect(panel.getByRole('heading', { name: top[1]!.title })).toBeVisible();
+  await panel.getByRole('button', { name: 'Post comment' }).click();
+  const sheet = panel.getByRole('dialog');
+  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await expect(sheet.getByText('Checking whether this post already went through…')).toBeVisible();
+  // A first read, then four more five seconds apart: the answer comes after about twenty seconds, not ninety.
+  const started = Date.now();
+  await expect(sheet.getByText('This preview has expired. Open the preview again.')).toBeVisible({ timeout: 40_000 });
+  expect(Date.now() - started).toBeLessThan(40_000);
+  await expect(sheet.getByText('Checking whether this post already went through…')).toHaveCount(0);
+  expect(svc().sent).toHaveLength(before);
+  expect(svc().posts(REPO, number)).toHaveLength(1);
 });

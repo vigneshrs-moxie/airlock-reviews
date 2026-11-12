@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { LatestReply, PostPreviewBody, PostRecord } from '@airlock/shared';
 import { ServiceClient } from '../../src/client/service';
-import { POST_NOT_LEARNED, POST_NOT_SENT_UNPROVEN, POST_RECHECKS, POST_RECHECK_MS, POST_UNKNOWN, startPanel } from '../../src/state/machine';
+import {
+  POST_NO_PREVIEW_RECHECKS, POST_NOT_LEARNED, POST_NOT_SENT_UNPROVEN, POST_RECHECKS, POST_RECHECK_MS, POST_UNKNOWN, startPanel,
+} from '../../src/state/machine';
 import { reduce, type PanelState, type PostReply } from '../../src/state/reduce';
 import type { SettingsStore } from '../../src/state/settings';
 import type { TabWatcher } from '../../src/state/tab';
@@ -316,7 +318,7 @@ describe('the panel posts through the service', () => {
   describe('a 404 on a post: the browser may have sent it twice, and the first copy taken the preview', () => {
     const EXPIRED = 'This preview has expired. Open the preview again.';
 
-    it('waits for the record as after a cut connection, and the post the first copy made is the answer', async () => {
+    it('checks for the record at once and every 5 seconds, and the post the first copy made is the answer', async () => {
       const earlier = recordOf([FP2], { id: 'post_aaaaaaaaaaaa' });
       const record = recordOf([FP], { id: 'post_cccccccccccc' });
       let reads = 0;
@@ -334,7 +336,7 @@ describe('the panel posts through the service', () => {
       await reviewShown(h);
       h.panel.dispatch({ type: 'post', ticket: 30, previewId: preview.previewId, fingerprints: [FP] });
       const waiting = await until(h, (s) => s.kind === 'review' && s.post?.ticket === 30) as Review;
-      expect(waiting.post).toEqual({ ticket: 30, kind: 'waiting' });
+      expect(waiting.post).toEqual({ ticket: 30, kind: 'waiting', checking: true });
       expect(waiting.busy).toBe(true);
       const s = await recheckUntil(h, 30);
       expect(s.post).toEqual({ ticket: 30, kind: 'posted', record });
@@ -358,7 +360,7 @@ describe('the panel posts through the service', () => {
       expect(postsCalled(h)).toBe(1);
     });
 
-    it('only when no record appears in 90 seconds does it say the preview expired, in the service words', async () => {
+    it('no record after 20 seconds of checks: the preview expired, never the 90-second wait of a cut connection', async () => {
       const earlier = recordOf([FP2], { id: 'post_aaaaaaaaaaaa' });
       let reads = 0;
       const h = harness((svc, latest) => {
@@ -375,7 +377,9 @@ describe('the panel posts through the service', () => {
       h.panel.dispatch({ type: 'post', ticket: 32, previewId: preview.previewId, fingerprints: [FP] });
       const s = await recheckUntil(h, 32);
       expect(s.post).toEqual({ ticket: 32, kind: 'refused', message: EXPIRED });
-      expect(reads).toBe(1 + POST_RECHECKS);
+      // A first read, then one every 5 seconds for 20 seconds.
+      expect(reads).toBe(1 + POST_NO_PREVIEW_RECHECKS);
+      expect(POST_NO_PREVIEW_RECHECKS * POST_RECHECK_MS).toBe(20_000);
       expect(s.latest.posts).toEqual([earlier]);
       expect(postsCalled(h)).toBe(1);
     });

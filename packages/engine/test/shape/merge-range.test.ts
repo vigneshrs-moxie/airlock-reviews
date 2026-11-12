@@ -537,7 +537,7 @@ describe('runReview of a pull request that only merges its base in', () => {
     // Nothing was changed by hand, so no note says that what was changed by hand was reviewed.
     expect(doc.notes ?? []).not.toContainEqual(expect.stringMatching(/by hand/));
     expect(renderReview(doc).split('\n')[2])
-      .toBe(`Review of the merge pushed since ${s.headSha.slice(0, 7)}: git merged it without conflicts and nothing was changed by hand.`);
+      .toBe('The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.');
   }, SLOW);
 
   it('a re-review whose push is a merge of the base Airlock could not review says it only merges the base, never that it was reviewed', async () => {
@@ -583,8 +583,8 @@ describe('runReview of a pull request that only merges its base in', () => {
     expect(doc.previous).toEqual({ reviewId: first.doc.id, headSha: merged, covered: 'everything' });
     expect(calls.length).toBeGreaterThan(0);
     for (const c of calls) expect(c.instructions.endsWith(mergeNote('pull request'))).toBe(true);
-    // No merge line and no line of its own: the note says why everything was reviewed again.
-    expect(renderReview(doc).split('\n')[2]).toBe('');
+    // No merge line: reviewed again in full, and the note under Notes says why.
+    expect(renderReview(doc).split('\n')[2]).toBe(`Reviewed again in full since ${merged.slice(0, 7)}`);
   }, SLOW);
 
   it('a rule file with conflict markers on the base side is not used as rules, and the limits say so', async () => {

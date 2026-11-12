@@ -200,6 +200,18 @@ describe('the post sheet', () => {
     expect(dialog().queryByText(names('@erin'))).toBeNull();
   });
 
+  it('after a 404 on the post, says it is checking whether the post already went through, then that the preview expired', () => {
+    const f = finding(1);
+    const m = previewed([f]);
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    m.answer({ kind: 'waiting', checking: true }, { busy: true });
+    expect(dialog().getByRole('status').textContent).toBe('Checking whether this post already went through…');
+    expect(dialog().queryByText('Waiting to hear whether GitHub accepted the comments…')).toBeNull();
+    m.answer({ kind: 'refused', message: 'This preview has expired. Open the preview again.' });
+    expect(dialog().getByText('This preview has expired. Open the preview again.')).toBeTruthy();
+    expect(dialog().queryByText('Checking whether this post already went through…')).toBeNull();
+  });
+
   it('says nothing has been sent only while that is true', () => {
     const f = finding(1);
     const m = previewed([f]);

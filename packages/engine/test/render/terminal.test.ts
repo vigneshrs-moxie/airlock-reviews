@@ -234,19 +234,20 @@ describe('renderReview', () => {
     const line = (doc: ReviewDocument): string => renderReview(doc).split('\n')[2]!;
     const EVERYTHING = 'The last review did not finish, so everything was reviewed again.';
 
-    it('says under the header what it covered, as the document says: the push, a pushed merge, and no line of its own for everything', () => {
+    it('says under the header what it covered, as the document says: the push, a pushed merge naming no branch, or everything again', () => {
       expect(line(covering('rereview', 'push'))).toBe('Review of the push ccccccc to bbbbbbb');
       expect(line(covering('sync-merge', 'merge', { mergeReview: 'by-hand' })))
         .toBe('Review of the merge pushed since ccccccc: only what was changed by hand was reviewed.');
+      // A pushed merge names no branch: the push may have merged a branch other than the base.
       expect(line(covering('sync-merge', 'merge', { mergeReview: 'nothing-by-hand' })))
-        .toBe('Review of the merge pushed since ccccccc: git merged it without conflicts and nothing was changed by hand.');
+        .toBe('The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.');
       // A merge Airlock could not review gets neither line (its stage error says what happened); nor does one that does not say.
       expect(line(covering('sync-merge', 'merge', { mergeReview: 'not-reviewed' }))).toBe('');
       expect(line(covering('sync-merge', 'merge'))).toBe('');
-      // Everything again: no line of its own, whatever the range; the note that says why is under Notes.
+      // Everything again, whatever the range: said in the header; the note that says why is under Notes.
       for (const kind of ['full', 'sync-merge'] as const) {
         const again = covering(kind, 'everything', { mergeReview: 'by-hand', notes: [EVERYTHING] });
-        expect(line(again)).toBe('');
+        expect(line(again)).toBe('Reviewed again in full since ccccccc');
         expect(renderReview(again)).toContain(`Notes\n\n- ${EVERYTHING}`);
       }
       expect(line(fullDocument())).toBe('');
@@ -256,16 +257,16 @@ describe('renderReview', () => {
       // A merge pushed since the earlier review whose notes happen to read like an everything-again note.
       expect(line(covering('sync-merge', 'merge', { mergeReview: 'by-hand', notes: [EVERYTHING] })))
         .toBe('Review of the merge pushed since ccccccc: only what was changed by hand was reviewed.');
-      // Everything again with a note worded in some other way: still no push or merge line.
-      expect(line(covering('sync-merge', 'everything', { mergeReview: 'by-hand', notes: ['Reviewed in full.'] }))).toBe('');
-      expect(line(covering('rereview', 'everything'))).toBe('');
+      // Everything again with a note worded in some other way, or none: still in full, never a push or merge line.
+      expect(line(covering('sync-merge', 'everything', { mergeReview: 'by-hand', notes: ['Reviewed in full.'] }))).toBe('Reviewed again in full since ccccccc');
+      expect(line(covering('rereview', 'everything'))).toBe('Reviewed again in full since ccccccc');
     });
 
     it('a stored document without the field is judged by its range, as before', () => {
       expect(line(covering('rereview'))).toBe('Review of the push ccccccc to bbbbbbb');
       expect(line(covering('sync-merge', undefined, { mergeReview: 'by-hand' })))
         .toBe('Review of the merge pushed since ccccccc: only what was changed by hand was reviewed.');
-      expect(line(covering('full'))).toBe('');
+      expect(line(covering('full'))).toBe('Reviewed again in full since ccccccc');
       // Where the range starts decides it: a push range whose kind says otherwise is still the push.
       const pushAsFull = { ...covering('full'), range: { baseSha: 'c'.repeat(40), headSha: 'b'.repeat(40), kind: 'full' as const } };
       expect(line(pushAsFull)).toBe('Review of the push ccccccc to bbbbbbb');

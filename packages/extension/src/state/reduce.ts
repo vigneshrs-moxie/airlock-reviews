@@ -32,7 +32,8 @@ export interface ReviewView {
  * - `refused`: nothing was done, in the service's words (a preview, a post or a forget).
  * - `posted` and `unknown`: the record a post made; `unknown` with the sentence to show.
  * - `waiting`: a post whose answer did not say what happened; the panel is reading the records until one appears. The
- *   post is still in flight.
+ *   post is still in flight. `checking` after a 404: the panel is checking whether a copy of this post the browser sent
+ *   earlier already went through, for a short while only.
  * - `unsent`: a post that never left the panel, because the proof that comes first failed; it can be tried again.
  * - `unclear`: a post whose record did not appear while the panel waited.
  * - `forgotten`: the unknown record is gone.
@@ -44,7 +45,7 @@ export type PostReply = { ticket: number } & (
   | { kind: 'refused'; message: string }
   | { kind: 'posted'; record: PostRecord }
   | { kind: 'unknown'; message: string; record: PostRecord }
-  | { kind: 'waiting' }
+  | { kind: 'waiting'; checking?: true }
   | { kind: 'unsent'; message: string }
   | { kind: 'unclear'; message: string }
   | { kind: 'forgotten'; id: string }

@@ -98,7 +98,8 @@ describe('what a merge review says it covered (the document\'s mergeReview)', ()
   const BY_HAND_HEADING = 'A merge of main: only what was changed by hand was reviewed';
   const CLEAN_HEADING = 'A merge of main: git merged it without conflicts and nothing was changed by hand.';
   const BY_HAND_LINE = `Review of the merge pushed since ${'a'.repeat(7)}: only what was changed by hand was reviewed.`;
-  const CLEAN_LINE = 'The push only merged main in; git merged it without conflicts and nothing was changed by hand.';
+  // A pushed merge names no branch: the push may have merged a branch other than the base.
+  const CLEAN_LINE = 'The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.';
   const anyMergeSentence = () => screen.queryAllByText(/changed by hand/);
 
   it('a first review of a merge reviewed by hand has the by-hand heading', () => {

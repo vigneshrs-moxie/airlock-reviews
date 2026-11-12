@@ -51,9 +51,10 @@ const short = (sha: string): string => sha.slice(0, 7);
 
 /**
  * The line under the verdict that says what a re-review covered, as the document says (`rereviewCovered`): the push; a
- * pushed merge, said to be reviewed by hand only when the document says so (`mergeReview`), and nothing for one Airlock
- * could not review or a document that does not say (the stage error says what happened). Nothing for a full review (its
- * note says why), nor when everything was reviewed again (its note is the only line).
+ * pushed merge, said to be reviewed by hand only when the document says so (`mergeReview`) and naming no branch (the
+ * push may have merged one other than the base), and nothing for one Airlock could not review or a document that does
+ * not say (the stage error says what happened). Nothing for a full review (its note says why), nor when everything was
+ * reviewed again (its note is the only line).
  */
 function rangeLine(doc: ReviewDocument): string | null {
   const covered = rereviewCovered(doc);
@@ -61,7 +62,7 @@ function rangeLine(doc: ReviewDocument): string | null {
   if (covered === 'push') return `Review of the push ${short(doc.previous.headSha)} to ${short(doc.pr.headSha)}`;
   if (doc.mergeReview === 'by-hand') return `Review of the merge pushed since ${short(doc.previous.headSha)}: only what was changed by hand was reviewed.`;
   if (doc.mergeReview === 'nothing-by-hand') {
-    return `The push only merged ${doc.pr.baseRef} in; git merged it without conflicts and nothing was changed by hand.`;
+    return 'The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.';
   }
   return null;
 }

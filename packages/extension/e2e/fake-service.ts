@@ -98,10 +98,11 @@ const ForgetReplySchema = z.object({ forgotten: z.boolean() });
  * - `sentTwice`: the browser sent the post twice by itself (Chromium does once, when a reused connection closes before
  *   any answer). The first copy took the preview and is still with GitHub, which takes the review; its record appears
  *   `recordAfterMs` later. The panel hears only the second copy's answer: 404, the preview has expired.
+ * - `expired`: the preview ran out before the post reached it: 404, and nothing is taken or sent.
  */
 export type GithubAnswer =
   | { accept: true } | { refuse: string } | { refuseKept: string } | { unknown: true } | { brokenRecords: true }
-  | { cut: true; recordAfterMs: number } | { sentTwice: true; recordAfterMs: number };
+  | { cut: true; recordAfterMs: number } | { sentTwice: true; recordAfterMs: number } | { expired: true };
 
 /**
  * What the service's forget finds when it asks GitHub first: nothing (the default: the record is forgotten), the review
@@ -533,6 +534,10 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       if ('sentTwice' in answer) throw new Refusal(404, EXPIRED);
       res.socket?.destroy();
       return;
+    }
+    if ('expired' in answer) {
+      stored.delete(held.previewId);
+      throw new Refusal(404, EXPIRED);
     }
     // Its records cannot be read: refused before anything is spent or sent.
     if ('brokenRecords' in answer) throw new Refusal(500, BROKEN);

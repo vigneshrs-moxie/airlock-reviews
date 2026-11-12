@@ -23,6 +23,10 @@ export const OFFLINE_RETRY_MS = 5_000;
 /** After a post whose answer did not say what happened, the records are read again this often, this many times (90 s). */
 export const POST_RECHECK_MS = 5_000;
 export const POST_RECHECKS = 18;
+/** After a 404 on a post, the records are read again only this many times (20 s): most such previews really expired. */
+export const POST_NO_PREVIEW_RECHECKS = 4;
+/** What a 404 on a post comes to when no record of it appears. */
+export const PREVIEW_EXPIRED = 'This preview has expired. Open the preview again.';
 /** While Ready or a review is on screen, how often the panel checks that the service still answers. */
 export const WATCH_MS = OFFLINE_RETRY_MS;
 /** Unanswered checks in a row before the panel says the service is not running: one missed beat changes nothing. */
@@ -433,9 +437,10 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
    * read. A read that fails counts as a read with nothing in it; only a refused pairing stops the wait. With no record at
    * the end, the panel says it could not learn what happened, and nothing is sent again.
    *
-   * A 404 (`no-preview`) is waited on the same way: the browser may have sent the post a second time by itself, and the
-   * first copy, which took the preview, may be posting or have posted. Only when no record appears is it said, in the
-   * service's words, that the preview expired.
+   * A 404 (`no-preview`) is checked the same way, but only for POST_NO_PREVIEW_RECHECKS more reads: the browser may have
+   * sent the post a second time by itself, and the first copy, which took the preview, may be posting or have posted.
+   * When no record appears the preview expired. A first copy that finishes later still shows: the records are read
+   * again on the next load and action, and the service refuses a new preview of findings a record holds.
    */
   const post = async (
     g: number, pr: PrSummary, known: ReadonlySet<string>, findings: readonly Pick<Finding, 'fingerprint' | 'aliases'>[],
@@ -461,8 +466,10 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     const said = sent.outcome === 'unclear' ? sent.message ?? POST_UNKNOWN : POST_UNKNOWN;
     // A server error that said something other than its 504: its sentence is kept for the end of the wait.
     const problem = sent.outcome === 'unclear' && sent.status !== undefined && sent.status !== 504 ? sent.message : undefined;
-    const noRecord: PostReply = sent.outcome === 'no-preview' ? { ticket, kind: 'refused', message: sent.message }
+    const checking = sent.outcome === 'no-preview';
+    const noRecord: PostReply = checking ? { ticket, kind: 'refused', message: PREVIEW_EXPIRED }
       : { ticket, kind: 'unclear', message: problem === undefined ? POST_NOT_LEARNED : `${problem} ${POST_NOT_LEARNED}` };
+    const rechecks = checking ? POST_NO_PREVIEW_RECHECKS : POST_RECHECKS;
     const mine = (r: PostRecord): boolean => isFor(r, pr) && !known.has(r.id) && findings.some((f) => recordHolds(r, f));
     for (let read = 0; ; read += 1) {
       if (read > 0) {
@@ -477,11 +484,11 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
         answer(g, record.outcome === 'posted' ? { ticket, kind: 'posted', record } : { ticket, kind: 'unknown', message: said, record });
         return;
       }
-      if (read >= POST_RECHECKS) {
+      if (read >= rechecks) {
         answer(g, noRecord);
         return;
       }
-      if (read === 0) answer(g, { ticket, kind: 'waiting' });
+      if (read === 0) answer(g, checking ? { ticket, kind: 'waiting', checking: true } : { ticket, kind: 'waiting' });
     }
   };
 
