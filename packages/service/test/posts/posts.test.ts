@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { saveReview, type Exec } from '@airlock/engine';
+import { isGhRead } from '../../../engine/src/util/exec.js';
 import {
   COMMENT_MAX, commentBody, CUT_NOTE, LatestReplySchema, MESSAGE_MAX, PostPreviewReplySchema, PostRecordSchema, REVIEW_BODY_MAX, summaryBody,
   type PostPreviewReply, type PostRecord,
@@ -196,6 +197,10 @@ describe('POST /posts', () => {
     expect(s.calls.map((c) => [c.line, c.timeoutMs])).toEqual([[PULL_LINE, 10_000], [USER_LINE, 10_000], [POST_LINE, 45_000]]);
     // The record keeps the account it was posted as and the hash of the review's text, not the text.
     expect(posted).toMatchObject({ postedAs: 'bob', bodyHash: sha256(p.reviewBody) });
+    // And the hash of its inline comments: each one's path, line, start line (null for one line) and text, in order.
+    expect(posted.commentsHash).toBe(sha256(JSON.stringify([
+      [FINDING_A.path, 12, null, p.items[0]?.body], [FINDING_C.path, 20, 18, p.items[2]?.body],
+    ])));
     const [write] = s.writes();
     expect(write?.args).toEqual(POST_ARGS);
     expect(write?.input).toBe(JSON.stringify({
@@ -569,7 +574,14 @@ describe('POST /posts', () => {
       stdout: `${JSON.stringify([theirs(11, { user: { login: 'alice' } }), theirs(12, { commit_id: 'c'.repeat(40) }), theirs(13, { body: 'Another text.' }), theirs(14, { user: null })])}${JSON.stringify([theirs(901, { user: { login: 'BOB' } })])}`,
       stderr: '', code: 0,
     });
+    // Its one inline comment, as GitHub gives it back; only this review's comments are read.
+    const commentsOf901 = `gh api repos/${REPO}/pulls/${NUMBER}/reviews/901/comments --paginate`;
+    s.answers.set(commentsOf901, {
+      stdout: JSON.stringify([{ id: 1, path: FINDING_A.path, line: 12, start_line: null, original_line: 12, original_start_line: null, body: p.items[0]?.body }]),
+      stderr: '', code: 0,
+    });
     const r = await s.call('POST', '/posts/forget', { repo: REPO, number: NUMBER, id: unknown!.id });
+    expect(s.calls.filter((c) => c.line.includes('/comments')).map((c) => c.line)).toEqual([commentsOf901]);
     expect(r.status).toBe(409);
     const reply = r.json as { error: string; record: PostRecord };
     expect(reply.error).toBe(FOUND);
@@ -620,6 +632,145 @@ describe('POST /posts', () => {
     const r = await s.call('POST', '/posts/forget', { repo: REPO, number: NUMBER, id: 'post_0123456789ab' });
     expect(r.json).toEqual({ forgotten: true });
     expect(s.calls).toEqual([]);
+  });
+
+  describe('"It was not posted" matches the inline comments too', () => {
+    const MANY = 'GitHub has more than one review that could be this post. Look at the pull request; the record was kept.';
+    const commentsLine = (id: number): string => `gh api repos/${REPO}/pulls/${NUMBER}/reviews/${id}/comments --paginate`;
+    const ok = (value: unknown): ExecResult => ({ stdout: JSON.stringify(value), stderr: '', code: 0 });
+    const theirs = (id: number, body: string) => ({ id, user: { login: 'bob' }, commit_id: HEAD, body, state: 'COMMENTED' });
+    let next = 1;
+    const ghComment = (path: string, line: number, startLine: number | null, body: string) =>
+      ({ id: next++, path, line, start_line: startLine, original_line: line, original_start_line: startLine, body });
+    const forgetOf = (s: Rig, id: string) => s.call('POST', '/posts/forget', { repo: REPO, number: NUMBER, id });
+    const commentReads = (s: Rig): string[] => s.calls.map((c) => c.line).filter((l) => /\/reviews\/\d+\/comments/.test(l));
+
+    /** Finding A posted alone (review 555), then finding C alone with no known outcome: both reviews' text is the same. */
+    async function twoSinglePosts(s: Rig) {
+      const a = await previewed(s, { items: [{ fingerprint: FP_A }] });
+      const first = PostRecordSchema.parse((await s.post(a.previewId)).json);
+      const c = await previewed(s, { items: [{ fingerprint: FP_C }] });
+      s.answers.set(POST_LINE, TIMED_OUT);
+      await s.post(c.previewId);
+      const unknown = (await latestPosts(s)).find((r) => r.outcome === 'unknown');
+      expect(unknown?.bodyHash).toBe(first.bodyHash);
+      expect(c.reviewBody).toBe(a.reviewBody);
+      return {
+        first, unknown: unknown!, body: a.reviewBody,
+        aComments: [ghComment(FINDING_A.path, 12, null, a.items[0]!.body)],
+        cComments: [ghComment(FINDING_C.path, 20, 18, c.items[0]!.body)],
+      };
+    }
+
+    it('two single-comment posts at one head, the second unknown, are never confused', async () => {
+      const s = await startService();
+      const { first, unknown, body, aComments, cComments } = await twoSinglePosts(s);
+      // Only the first post's review is on GitHub. The first record holds it, so its comments are not even read.
+      s.answers.set(REVIEWS_LINE, ok([theirs(555, body)]));
+      s.answers.set(commentsLine(555), ok(aComments));
+      expect((await forgetOf(s, unknown.id)).json).toEqual({ forgotten: true });
+      expect(commentReads(s)).toEqual([]);
+      expect(await latestPosts(s)).toEqual([first]);
+
+      // Posted again with no known outcome; GitHub also has a review with the same text whose comment is A's: not this post.
+      const c = await previewed(s, { items: [{ fingerprint: FP_C }] });
+      await s.post(c.previewId);
+      const again = (await latestPosts(s)).find((r) => r.outcome === 'unknown')!;
+      s.answers.set(REVIEWS_LINE, ok([theirs(555, body), theirs(556, body)]));
+      s.answers.set(commentsLine(556), ok(aComments));
+      expect((await forgetOf(s, again.id)).json).toEqual({ forgotten: true });
+      expect(commentReads(s)).toEqual([commentsLine(556)]);
+      expect(await latestPosts(s)).toEqual([first]);
+
+      // Once more, and this time GitHub has a review whose comment is C's: that one is this post.
+      const c2 = await previewed(s, { items: [{ fingerprint: FP_C }] });
+      await s.post(c2.previewId);
+      const third = (await latestPosts(s)).find((r) => r.outcome === 'unknown')!;
+      s.answers.set(REVIEWS_LINE, ok([theirs(555, body), theirs(556, body), theirs(557, body)]));
+      s.answers.set(commentsLine(557), ok(cComments));
+      const r = await forgetOf(s, third.id);
+      expect([r.status, (r.json as { error: string }).error]).toEqual([409, FOUND]);
+      const posted = { ...third, outcome: 'posted', githubReviewId: 557, url: `https://github.com/${REPO}/pull/${NUMBER}#pullrequestreview-557` };
+      expect(await latestPosts(s)).toEqual([first, posted]);
+      expect(s.writes()).toHaveLength(4);
+      // Every read stays inside the reads the engine lets through.
+      expect(s.calls.filter((call) => call.line !== POST_LINE).every((call) => isGhRead(call.args))).toBe(true);
+    });
+
+    it('keeps the record and says so when more than one review could be this post', async () => {
+      const s = await startService();
+      const { first, unknown, body, cComments } = await twoSinglePosts(s);
+      s.answers.set(REVIEWS_LINE, ok([theirs(555, body), theirs(801, body), theirs(802, body)]));
+      s.answers.set(commentsLine(801), ok(cComments));
+      s.answers.set(commentsLine(802), ok(cComments));
+      const r = await forgetOf(s, unknown.id);
+      expect([r.status, r.json]).toEqual([409, { error: MANY }]);
+      expect(await latestPosts(s)).toEqual([first, unknown]);
+      expect(commentReads(s).sort()).toEqual([commentsLine(801), commentsLine(802)]);
+    });
+
+    it('keeps the record when a candidate\'s comments cannot be read, and takes comments that do not parse as no match', async () => {
+      const s = await startService();
+      const { first, unknown, body, cComments } = await twoSinglePosts(s);
+      s.answers.set(REVIEWS_LINE, ok([theirs(801, body), theirs(802, body)]));
+      s.answers.set(commentsLine(801), { stdout: '', stderr: 'timed out after 20 s', code: 124 });
+      s.answers.set(commentsLine(802), ok(cComments));
+      const kept = await forgetOf(s, unknown.id);
+      expect([kept.status, kept.json]).toEqual([502, { error: NOT_ASKED }]);
+      expect(await latestPosts(s)).toEqual([first, unknown]);
+      expect(s.calls.filter((c) => c.line === commentsLine(801)).map((c) => c.timeoutMs)).toEqual([20_000]);
+
+      // A list that does not parse is not this post; the other review is.
+      s.answers.set(commentsLine(801), ok([{ id: 1, path: 'x' }]));
+      const r = await forgetOf(s, unknown.id);
+      expect([r.status, (r.json as { record: PostRecord }).record.githubReviewId]).toEqual([409, 802]);
+
+      // With only a list that does not parse, the record is forgotten.
+      const s2 = await startService();
+      const two = await twoSinglePosts(s2);
+      s2.answers.set(REVIEWS_LINE, ok([theirs(801, two.body)]));
+      s2.answers.set(commentsLine(801), { stdout: 'not json', stderr: '', code: 0 });
+      expect((await forgetOf(s2, two.unknown.id)).json).toEqual({ forgotten: true });
+    });
+
+    it('matches a comment GitHub now shows as outdated by the line it was posted at', async () => {
+      const s = await startService();
+      const { unknown, body, cComments } = await twoSinglePosts(s);
+      // After a push GitHub gives an outdated comment no line, and keeps the one it was posted at as its original line.
+      const outdated = cComments.map((c) => ({ ...c, line: null, start_line: null }));
+      s.answers.set(REVIEWS_LINE, ok([theirs(801, body)]));
+      s.answers.set(commentsLine(801), ok(outdated));
+      const r = await forgetOf(s, unknown.id);
+      expect([r.status, (r.json as { record: PostRecord }).record.githubReviewId]).toEqual([409, 801]);
+    });
+
+    it('matches a record kept before the comments hash as before, but never to a review another record holds', async () => {
+      const s = await startService();
+      const hash = sha256('Review notes from Airlock: 1 comment.');
+      const held = record({ bodyHash: hash, postedAs: 'bob', githubReviewId: 555, url: `https://github.com/${REPO}/pull/${NUMBER}#pullrequestreview-555` });
+      const old = record({
+        id: 'post_aaaaaaaaaaaa', outcome: 'unknown', githubReviewId: null, url: null, bodyHash: hash, postedAs: 'bob',
+        items: [{ fingerprint: FP_C, aliases: [FP_C_ALIAS], placement: 'inline' }],
+      });
+      const body = 'Review notes from Airlock: 1 comment.';
+      await s.writeRecords([held, old]);
+      s.answers.set(REVIEWS_LINE, ok([theirs(555, body)]));
+      expect((await forgetOf(s, old.id)).json).toEqual({ forgotten: true });
+      expect(await latestPosts(s)).toEqual([held]);
+
+      await s.writeRecords([held, old]);
+      s.answers.set(REVIEWS_LINE, ok([theirs(555, body), theirs(556, body)]));
+      const r = await forgetOf(s, old.id);
+      expect([r.status, (r.json as { record: PostRecord }).record.githubReviewId]).toEqual([409, 556]);
+
+      await s.writeRecords([held, old]);
+      s.answers.set(REVIEWS_LINE, ok([theirs(555, body), theirs(556, body), theirs(557, body)]));
+      const many = await forgetOf(s, old.id);
+      expect([many.status, many.json]).toEqual([409, { error: MANY }]);
+      expect(await latestPosts(s)).toEqual([held, old]);
+      // A record without the comments hash is matched by its text alone: no comment list is read for it.
+      expect(commentReads(s)).toEqual([]);
+    });
   });
 
   it('an expired preview and an unknown preview id are refused', async () => {

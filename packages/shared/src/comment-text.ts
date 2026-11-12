@@ -92,19 +92,18 @@ function seen(value: string): string {
 
 // An `@` directly followed by a letter or digit, in any script.
 const AT_BEFORE_NAME = /@(?=[\p{L}\p{N}])/gu;
-// A `#` directly followed by a digit: GitHub links `#12` and `owner/repo#12` to that issue or pull request.
-const HASH_BEFORE_NUMBER = /#(?=[0-9])/g;
-// The `#`s that start a line, before a digit: with the space put after them they would make a heading.
-const HASHES_OPENING_LINE = /^#+(?=[0-9])/gm;
+// The `#`s directly before a digit: GitHub links `#12` and `owner/repo#12` to that issue or pull request.
+const HASHES_BEFORE_NUMBER = /#+(?=[0-9])/g;
 
 /**
  * Text taken from a pull request, as prose that cannot notify anyone whatever stands around it: hidden characters out,
  * `&` and `<` as entities (no tag, comment or entity is live), every backslash doubled (none escapes what follows),
  * every `~` and `$` escaped and every line's leading white space dropped (no line can open a fence, a code block or
  * math), every backtick an apostrophe (no code span), and then a space after every `@` that is directly followed by a
- * letter or digit (`@alice` becomes `@ alice`), so no `@` stands directly before a name, and after every `#` that is
- * directly followed by a digit (`#12` becomes `# 12`), so the text makes no reference to another issue or pull request;
- * where such `#`s start a line the first is escaped (`#12` becomes `\# 12`), so the line is not made a heading.
+ * letter or digit (`@alice` becomes `@ alice`), so no `@` stands directly before a name. Every `#` directly followed by
+ * a digit is escaped and followed by a space, wherever it stands (`#12` becomes `\# 12`): `#<number>` and
+ * `owner/repo#<number>` are broken, and no line, quote or list item is made a heading. Other ways of referring to an
+ * issue or pull request are left as they are: `GH-12` and a full address still make a reference.
  */
 export function plainProse(value: string): string {
   return seen(value)
@@ -115,8 +114,7 @@ export function plainProse(value: string): string {
     .replace(/^[ \t]+/gm, '')
     .replace(/`/g, "'")
     .replace(AT_BEFORE_NAME, '@ ')
-    .replace(HASHES_OPENING_LINE, (hashes) => `\\${hashes} `)
-    .replace(HASH_BEFORE_NUMBER, '# ')
+    .replace(HASHES_BEFORE_NUMBER, (hashes) => `\\${hashes} `)
     .trim();
 }
 
@@ -221,9 +219,9 @@ function draftedParts(f: Finding): Part[] {
  * The comment drafted from a finding. It is built from prose parts (through `plainProse`), paths in code spans and
  * fenced code parts only, joined by blank lines. Prose holds no backtick, so the only backticks are those spans and
  * fences, each written whole here; and no `@` in prose stands directly before a letter or digit, nor `#` before a digit.
- * So text taken from the pull request cannot notify anyone or reference another issue (proven against a Markdown
- * renderer in the tests). A comment that would be longer than COMMENT_MAX is cut to fit: the parts that fit are kept
- * whole, the first that does not is cut (prose at a character, a fenced change inside its fence, the connected places
+ * So text taken from the pull request cannot notify anyone or make a `#<number>` reference (proven against a Markdown
+ * renderer in the tests); `GH-12` and a full issue address in it still make one. A comment that would be longer than
+ * COMMENT_MAX is cut to fit: the parts that fit are kept whole, the first that does not is cut (prose at a character, a fenced change inside its fence, the connected places
  * at a whole place), the rest are left out, and the last line is CUT_NOTE. So every drafted comment can be posted.
  */
 export function commentBody(f: Finding): string {
