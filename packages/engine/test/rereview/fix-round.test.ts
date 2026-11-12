@@ -3,7 +3,7 @@ import type { ReviewDocument } from '@airlock/shared';
 import type { AgentRequest } from '../../src/agent/runner.js';
 import { PUSH_BASE_SIDE } from '../../src/challenge/challenge.js';
 import { renderReview } from '../../src/render/terminal.js';
-import { MERGE_NOTE } from '../../src/shape/merge-range.js';
+import { mergeNote } from '../../src/shape/merge-range.js';
 import { commitFiles } from '../helpers/change-repo.js';
 import { block, rawCandidate } from '../helpers/lens-context.js';
 import { fakeGh, GOOD, HEAD_FILES, RULED, scenarioScript, useReviewHarness, type Scenario } from '../helpers/review-scenario.js';
@@ -242,7 +242,7 @@ describe('fix round 1', () => {
     const challenges = calls.filter((c) => c.role.startsWith('challenge:'));
     expect(challenges.length).toBeGreaterThan(0);
     for (const c of challenges) {
-      expect(c.instructions).toContain(MERGE_NOTE);
+      expect(c.instructions).toContain(mergeNote('push'));
       expect(c.instructions).not.toContain(PUSH_BASE_SIDE);
     }
     expect(renderReview(doc).split('\n')[2]).toBe(`Review of the merge pushed since ${s.headSha.slice(0, 7)}: only what was changed by hand was reviewed.`);

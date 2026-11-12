@@ -34,7 +34,7 @@ import { confirmFixed, fixedByCode, leftOpen, needsCheck, type FixedCheckResult 
 import type { RereviewPlan } from '../rereview/range.js';
 import { runSweep } from '../rules/sweep.js';
 import { decideVerdict, sameTextOnce, select, selfReviewText, type RereviewText, type SelectResult } from '../select/select.js';
-import { MERGE_NOTE, mergeNoteBlock } from '../shape/merge-range.js';
+import { mergeNote, mergeNoteBlock, settledSentence, type MergeScope } from '../shape/merge-range.js';
 import { reviewById, saveReview } from '../store/store.js';
 import type { Exec } from '../util/exec.js';
 import { limiter } from '../util/limit.js';
@@ -130,10 +130,12 @@ const SYNC_MERGE_BRIEF: Brief = {
 const EMPTY_SYNC_MERGE_BRIEF: Brief = {
   whatItDoes: ['This branch only merges its target branch into itself and changes no files.'], claims: [],
 };
-const cleanMergeBrief = (base: string): Brief => ({
-  whatItDoes: [`This pull request only merges ${base} into the branch. Git merged it without conflicts and nothing was changed by hand.`],
-  claims: [],
-});
+/** The brief of a merge git made without conflicts and nothing changed by hand; a given range names no branch. */
+function cleanMergeBrief(scope: MergeScope, base: string): Brief {
+  const what = scope === 'given range' ? 'This range is only a merge.'
+    : `${scope === 'push' ? 'This push' : 'This pull request'} only merges ${base} into the branch.`;
+  return { whatItDoes: [`${what} Git merged it without conflicts and nothing was changed by hand.`], claims: [] };
+}
 const EMPTY_BRIEF: Brief = { whatItDoes: [], claims: [] };
 const EMPTY_MAP: ChangeMap = { cohorts: [], standalone: [], links: [] };
 const NO_PACKS: PreparedPacks = { packs: [], missingHelpers: [], repoRules: [], questions: [], errors: [], limits: [] };
@@ -184,14 +186,14 @@ async function openWorkspace(exec: Exec, req: ReviewRequest, pr: PrInfo, reviewI
 
 /**
  * Wraps the runner for a review of what was changed by hand in a merge: every request is told so once, as the fixed
- * MERGE_NOTE after its own instructions (after the boundary, so the cached part is unchanged), with the two branch names
- * as material.
+ * mergeNote of its scope after its own instructions (after the boundary, so the cached part is unchanged), with the two
+ * branch names as material; a given range names none, since the pull request's branches may not be the ones merged.
  */
-function withMergeNote(inner: AgentRunner, pr: PrInfo): AgentRunner {
-  const names = mergeNoteBlock(pr.baseRef, pr.headRef);
+function withMergeNote(inner: AgentRunner, scope: MergeScope, pr: PrInfo): AgentRunner {
+  const note = mergeNote(scope);
+  const names = scope === 'given range' ? '' : `\n\n${mergeNoteBlock(pr.baseRef, pr.headRef)}`;
   return {
-    run: <T>(req: AgentRequest<T>) =>
-      inner.run({ ...req, instructions: `${req.instructions}\n\n${MERGE_NOTE}`, material: `${req.material}\n\n${names}` }),
+    run: <T>(req: AgentRequest<T>) => inner.run({ ...req, instructions: `${req.instructions}\n\n${note}`, material: `${req.material}${names}` }),
   };
 }
 
@@ -313,7 +315,8 @@ async function reviewInWorkspace(
   // A merge whose hand-made changes are reviewed is reviewed as any change, and every request is told what it is.
   const { merge } = ws;
   const { exec } = deps;
-  const runner = merge?.kind === 'by-hand' ? withMergeNote(deps.runner, pr) : deps.runner;
+  const scope: MergeScope = previous !== null ? 'push' : req.explicit !== undefined ? 'given range' : 'pull request';
+  const runner = merge?.kind === 'by-hand' ? withMergeNote(deps.runner, scope, pr) : deps.runner;
   // A re-review's push is a range Airlock chose, as an explicit one is: GitHub's file count is about the whole pull request.
   // So is a merge with nothing changed by hand, whose diff is left empty on purpose.
   const pushed = ws.range.kind === 'rereview';
@@ -346,6 +349,7 @@ async function reviewInWorkspace(
     rec.error(...chosen.errors);
     const p = await preparePacks(chosen.packs, {
       exec, kitDir: req.kitDir, kitSha: req.kitSha, holdout: req.holdout, baseDir: ws.baseDir, changedPaths: files.map((f) => f.path),
+      baseIsMerge: merge?.kind === 'by-hand',
     });
     rec.error(...p.errors);
     return p;
@@ -359,8 +363,14 @@ async function reviewInWorkspace(
   await log.run('shape', async (rec) => {
     if (ws.shapeError !== undefined) throw new Error(ws.shapeError);
     // A merge that changes no files leaves nothing unreviewed.
-    if (merge?.kind === 'unsupported' && files.length > 0) {
-      rec.error({ stage: 'shape', cohortId: null, message: `${unreviewedMerge(files.length)} ${merge.reason}` });
+    // Conflicts git settled without markers are never left unsaid, even when the diff is empty.
+    if (merge?.kind === 'unsupported' && (files.length > 0 || merge.conflicted !== undefined)) {
+      const message = files.length > 0 ? `${unreviewedMerge(files.length)} ${merge.reason}` : merge.reason;
+      rec.error({ stage: 'shape', cohortId: null, message });
+    }
+    // What was decided for those conflicts is not in the diff of a merge reviewed by hand either: named, so it is incomplete.
+    if (merge?.kind === 'by-hand' && merge.unshown.length > 0) {
+      rec.error({ stage: 'shape', cohortId: null, message: settledSentence(merge.unshown) });
     }
   });
   // A merge, a re-review's pushed merge too, is a sync-merge range; `previous` says whether it is a re-review.
@@ -394,7 +404,7 @@ async function reviewInWorkspace(
     log.skip('brief', skipWhy);
     // A merge with no files is one that changes nothing only when GitHub agrees (or the range was given explicitly).
     const nothingChanged = files.length === 0 && emptyDiff(files, pr, givenRange) === null;
-    brief = merge?.kind === 'nothing-by-hand' ? cleanMergeBrief(pr.baseRef)
+    brief = merge?.kind === 'nothing-by-hand' ? cleanMergeBrief(scope, pr.baseRef)
       : nothingChanged ? EMPTY_SYNC_MERGE_BRIEF : files.length === 0 ? EMPTY_BRIEF : SYNC_MERGE_BRIEF;
   } else {
     map = ((await limitedOut('map')) ? undefined : await log.run('map', async (rec) => {
@@ -691,7 +701,8 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
       const fetched = req.prText ? { ...live, title: req.prText.title, body: req.prText.body } : live;
       const ws = await openWorkspace(exec, req, fetched, id, previous);
       opened = ws;
-      const pr = req.explicit ? { ...fetched, baseSha: ws.range.baseSha, headSha: ws.range.headSha } : fetched;
+      // A given range's ids, not the commits reviewed: the merge git made by itself is only in the document's range.
+      const pr = req.explicit ? { ...fetched, baseSha: req.explicit.baseSha, headSha: req.explicit.headSha } : fetched;
       // A merge with nothing changed by hand has nothing to review, whatever its range's diff holds.
       const noFiles = { files: [] as FileDiff[], facts: [] as Fact[] };
       const loaded = ws.merge?.kind === 'nothing-by-hand' ? noFiles : await rec.attempt(async () => recheckBinary(

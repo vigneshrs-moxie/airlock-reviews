@@ -1,4 +1,5 @@
 import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ReviewRange } from '@airlock/shared';
 import { isSyncMerge } from '../../src/shape/detect.js';
@@ -37,7 +38,7 @@ describe('isSyncMerge', () => {
     const head = await r.git('rev-parse', 'HEAD');
     const base = await r.git('merge-base', 'main', head);
     expect(base).toBe(mainTip);
-    expect(await isSyncMerge(realExec, r.dir, range(base, head), null)).toBe(true);
+    expect(await isSyncMerge(realExec, join(r.dir, '.git'), range(base, head), null)).toBe(true);
   });
 
   it('is false when the branch has a commit of its own besides the merge', async () => {
@@ -47,13 +48,13 @@ describe('isSyncMerge', () => {
     await r.git('merge', '--no-ff', '-m', 'Merge main into feature', 'main');
     const head = await r.git('rev-parse', 'HEAD');
     const base = await r.git('merge-base', 'main', head);
-    expect(await isSyncMerge(realExec, r.dir, range(base, head), null)).toBe(false);
+    expect(await isSyncMerge(realExec, join(r.dir, '.git'), range(base, head), null)).toBe(false);
   });
 
   it('is false for an empty range', async () => {
     const r = await repo();
     const sha = await commitFiles(r, { 'a.txt': 'root\n' }, 'root');
-    expect(await isSyncMerge(realExec, r.dir, range(sha, sha), null)).toBe(false);
+    expect(await isSyncMerge(realExec, join(r.dir, '.git'), range(sha, sha), null)).toBe(false);
   });
 
   it('counts a commit already in the next stage as synced', async () => {
@@ -69,13 +70,13 @@ describe('isSyncMerge', () => {
     const head = await r.git('rev-parse', 'HEAD');
     const base = await r.git('merge-base', 'main', head);
     expect(base).not.toBe(root);
-    expect(await isSyncMerge(realExec, r.dir, range(base, head), null)).toBe(false);
-    expect(await isSyncMerge(realExec, r.dir, range(base, head), 'staging')).toBe(true);
+    expect(await isSyncMerge(realExec, join(r.dir, '.git'), range(base, head), null)).toBe(false);
+    expect(await isSyncMerge(realExec, join(r.dir, '.git'), range(base, head), 'staging')).toBe(true);
   });
 
   it('throws when git cannot list the range', async () => {
     const r = await repo();
     await commitFiles(r, { 'a.txt': 'root\n' }, 'root');
-    await expect(isSyncMerge(realExec, r.dir, range('0'.repeat(40), '1'.repeat(40)), null)).rejects.toThrow(/git rev-list/);
+    await expect(isSyncMerge(realExec, join(r.dir, '.git'), range('0'.repeat(40), '1'.repeat(40)), null)).rejects.toThrow(/git rev-list/);
   });
 });

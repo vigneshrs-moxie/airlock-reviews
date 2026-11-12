@@ -3,8 +3,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ReviewRange } from '@airlock/shared';
 import { PROMPT_BOUNDARY } from '../../src/agent/prompt.js';
-import { MERGE_NOTE, mergeNoteBlock, mergeRange } from '../../src/shape/merge-range.js';
-import { realExec } from '../../src/util/exec.js';
+import { isSyncMerge } from '../../src/shape/detect.js';
+import { mergeNote, mergeNoteBlock, mergeRange } from '../../src/shape/merge-range.js';
+import { realExec, type Exec } from '../../src/util/exec.js';
 import { commitFiles, diffOf } from '../helpers/change-repo.js';
 import { block } from '../helpers/lens-context.js';
 import { fakeGh, GOOD, RULED, scenarioScript, useReviewHarness } from '../helpers/review-scenario.js';
@@ -71,7 +72,7 @@ describe('mergeRange', () => {
     const joined = await joinedBoth(r, feature, main);
     const merge = await mergeByHand(r, { 'a.txt': 'one\nfeature and main two\nthree\n' });
     const got = await mergeRange(realExec, gitDir(r), range(joined, merge));
-    expect(got).toEqual({ kind: 'by-hand', baseSha: expect.stringMatching(/^[0-9a-f]{40}$/), headSha: merge, files: 1 });
+    expect(got).toEqual({ kind: 'by-hand', baseSha: expect.stringMatching(/^[0-9a-f]{40}$/), headSha: merge, files: 1, unshown: [] });
     if (got.kind !== 'by-hand') return;
     // The mechanical merge sits on the first parent, and holds the conflict as git left it.
     expect(await r.git('rev-list', '--parents', '-n', '1', got.baseSha)).toBe(`${got.baseSha} ${feature}`);
@@ -157,6 +158,96 @@ describe('mergeRange', () => {
     await expect(mergeRange(exec, '/nowhere', range('a'.repeat(40), 'abc1234'))).rejects.toThrow(/not a full commit id/);
     expect(calls).toEqual([]);
   });
+
+  /**
+   * main at root; then feature changes f, b.bin and (with `marker`) a.txt, while main deletes f, changes b.bin and (with
+   * `marker`) the same line of a.txt. Returns both tips.
+   */
+  async function settledSides(r: TempRepo, marker: boolean): Promise<{ feature: string; main: string }> {
+    await commitFiles(r, { 'a.txt': 'one\ntwo\nthree\n', f: 'a\n', 'b.bin': 'x\0root' }, 'root');
+    await r.git('checkout', '-b', 'feature');
+    const feature = await commitFiles(r, { f: 'a feature\n', 'b.bin': 'x\0feat', ...(marker ? { 'a.txt': 'one\nfeature two\nthree\n' } : {}) }, 'feature');
+    await r.git('checkout', 'main');
+    const main = await commitFiles(r, { f: null, 'b.bin': 'x\0main', ...(marker ? { 'a.txt': 'one\nmain two\nthree\n' } : {}) }, 'main');
+    return { feature, main };
+  }
+
+  const SETTLED = 'Git reported conflicts in this merge that it settled without markers (a file one side deleted and the other changed, or a binary file):';
+
+  it('a merge whose conflicts git settled without markers, kept as git left them, is never nothing-by-hand', async () => {
+    const r = await repo();
+    const { feature, main } = await settledSides(r, false);
+    const joined = await joinedBoth(r, feature, main);
+    const merge = await mergeByHand(r, {});
+    // The measured premise: the merge as committed has exactly the tree git made by itself.
+    expect(await r.git('rev-parse', `${merge}^{tree}`)).toBe((await r.git('merge-tree', '--write-tree', feature, main).catch((e: { stdout: string }) => e.stdout)).split('\n')[0]);
+    expect(await mergeRange(realExec, gitDir(r), range(joined, merge))).toEqual({
+      kind: 'unsupported', conflicted: ['b.bin', 'f'],
+      reason: `${SETTLED} b.bin, f. Airlock cannot show what was decided for them.`,
+    });
+  });
+
+  it('a marker conflict resolved by hand and a kept modify/delete: by-hand, with the kept path named as not shown', async () => {
+    const r = await repo();
+    const { feature, main } = await settledSides(r, true);
+    const joined = await joinedBoth(r, feature, main);
+    const merge = await mergeByHand(r, { 'a.txt': 'one\nboth two\nthree\n' });
+    expect(await mergeRange(realExec, gitDir(r), range(joined, merge))).toEqual({
+      kind: 'by-hand', baseSha: expect.stringMatching(/^[0-9a-f]{40}$/), headSha: merge, files: 1, unshown: ['b.bin', 'f'],
+    });
+  });
+
+  it('cuts the list of conflicted paths at ten', async () => {
+    const r = await repo();
+    const names = Array.from({ length: 12 }, (_, i) => `p${String(i + 1).padStart(2, '0')}.txt`);
+    await commitFiles(r, Object.fromEntries(names.map((n) => [n, 'root\n'])), 'root');
+    await r.git('checkout', '-b', 'feature');
+    const feature = await commitFiles(r, Object.fromEntries(names.map((n) => [n, 'feature\n'])), 'feature');
+    await r.git('checkout', 'main');
+    const main = await commitFiles(r, Object.fromEntries(names.map((n) => [n, null])), 'main');
+    const joined = await joinedBoth(r, feature, main);
+    const merge = await mergeByHand(r, {});
+    const got = await mergeRange(realExec, gitDir(r), range(joined, merge));
+    expect(got).toMatchObject({
+      kind: 'unsupported', reason: `${SETTLED} ${names.slice(0, 10).join(', ')} and 2 more. Airlock cannot show what was decided for them.`,
+    });
+  });
+
+  it('a merge-tree answer that is not a tree id is an error, never no conflicts', async () => {
+    const r = await repo();
+    await commitFiles(r, { 'a.txt': 'root\n' }, 'root');
+    await r.git('checkout', '-b', 'feature');
+    await r.git('checkout', 'main');
+    const main = await commitFiles(r, { 'b.txt': 'main moved on\n' }, 'main');
+    const merge = await mergeByHand(r, {});
+    const answering = (answer: (args: string[]) => { stdout: string; stderr: string; code: number } | null): Exec =>
+      async (cmd, args, opts) => (args.includes('merge-tree') ? answer(args) : null) ?? realExec(cmd, args, opts);
+    // A bad argument exits 1, as conflicts do, with no tree.
+    await expect(mergeRange(answering(() => ({ stdout: '', stderr: 'fatal: not something we can merge', code: 1 })), gitDir(r), range(main, merge)))
+      .rejects.toThrow(/git merge-tree .*not something we can merge/);
+    // A full id that is not a tree (here the merge commit itself) is not an answer either.
+    await expect(mergeRange(answering(() => ({ stdout: `${merge}\0`, stderr: '', code: 0 })), gitDir(r), range(main, merge)))
+      .rejects.toThrow(/git merge-tree/);
+  });
+
+  it('names the mirror with --git-dir, so safe.bareRepository=explicit cannot break the detection or the merge', async () => {
+    const r = await repo();
+    const { feature, main } = await twoSides(r);
+    const joined = await joinedBoth(r, feature, main);
+    const merge = await mergeByHand(r, { 'a.txt': 'one\nresolved\nthree\n' });
+    const mirror = `${r.dir}-mirror.git`;
+    await realExec('git', ['clone', '-q', '--bare', r.dir, mirror]);
+    const strictEnv = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.bareRepository', GIT_CONFIG_VALUE_0: 'explicit' };
+    try {
+      // The setting is in force: git run inside the bare mirror without --git-dir is refused.
+      expect((await realExec('git', ['rev-list', '-n', '1', merge], { cwd: mirror, env: strictEnv })).code).not.toBe(0);
+      const strict: Exec = (cmd, args, opts) => realExec(cmd, args, { ...opts, env: { ...opts?.env, ...strictEnv } });
+      expect(await isSyncMerge(strict, mirror, range(joined, merge), null)).toBe(true);
+      expect(await mergeRange(strict, mirror, range(joined, merge))).toMatchObject({ kind: 'by-hand', headSha: merge, files: 1 });
+    } finally {
+      await rm(mirror, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('runReview of a pull request that only merges its base in', () => {
@@ -186,7 +277,8 @@ describe('runReview of a pull request that only merges its base in', () => {
     expect(doc.brief.whatItDoes).toEqual([
       'This pull request only merges main into the branch. Git merged it without conflicts and nothing was changed by hand.',
     ]);
-    expect(doc.verdict.label).not.toBe('incomplete');
+    // The clean verdict for a reviewer who is not the author.
+    expect(doc.verdict.label).toBe('approve');
     expect(doc.findings).toEqual([]);
     const skipped = events.flatMap((e) => (e.type === 'stage' && e.status === 'done' && e.detail.startsWith('skipped') ? [e.stage] : []));
     expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge']);
@@ -206,6 +298,7 @@ describe('runReview of a pull request that only merges its base in', () => {
     expect(roles).toContain('brief');
     expect(roles.filter((r) => r.startsWith('lens:')).length).toBeGreaterThan(0);
     // The sentence is fixed text: neither branch name is in it.
+    const MERGE_NOTE = mergeNote('pull request');
     expect(MERGE_NOTE).not.toMatch(/\bmain\b|\bfeature\b/);
     const names = mergeNoteBlock('main', 'feature');
     expect(block(names, 'merge')).toBe('Merged in: main\nInto: feature');
@@ -301,6 +394,120 @@ describe('runReview of a pull request that only merges its base in', () => {
     expect(doc.fixed).toEqual([]);
     const lensCalls = calls.filter((c) => c.role.startsWith('lens:'));
     expect(lensCalls.length).toBeGreaterThan(0);
-    for (const c of calls) expect(c.instructions.endsWith(MERGE_NOTE)).toBe(true);
+    for (const c of calls) expect(c.instructions.endsWith(mergeNote('push'))).toBe(true);
+    expect(mergeNote('push')).toMatch(/the merge pushed since the last review/);
+  }, SLOW);
+
+  const SETTLED = 'Git reported conflicts in this merge that it settled without markers (a file one side deleted and the other changed, or a binary file):';
+  
+  /**
+   * A remote whose `feature` and `main` change `featureFiles` and `mainFiles` from `base`; a `joined` branch already holds
+   * both tips, and feature merges main with `resolved` written by hand. The given range joined..merge holds only the merge.
+   */
+  async function joinedMerge(
+    base: Record<string, string>, featureFiles: Record<string, string | null>, mainFiles: Record<string, string | null>,
+    resolved: Record<string, string>,
+  ) {
+    const s = await scenario(base, {});
+    const feature = await commitFiles(s.remote, featureFiles, 'feature');
+    await s.remote.git('checkout', 'main');
+    await commitFiles(s.remote, mainFiles, 'main');
+    await s.remote.git('checkout', '-b', 'joined');
+    await s.remote.git('merge', '--no-ff', '-s', 'ours', '-m', 'join', feature);
+    const joined = await s.remote.git('rev-parse', 'HEAD');
+    await s.remote.git('checkout', 'feature');
+    await s.remote.git('merge', '--no-ff', '--no-commit', 'main').catch(() => undefined);
+    for (const [path, text] of Object.entries(resolved)) await s.remote.write(path, text);
+    await s.remote.git('add', '--all');
+    await s.remote.git('commit', '--no-edit', '-m', 'Merge main into feature');
+    return { s, joined, merge: await s.remote.git('rev-parse', 'HEAD') };
+  }
+  const SETTLED_BASE = { 'src/a.ts': 'export const a = 1;\n', 'src/f.ts': 'export const f = 1;\n', 'img.png': 'x\0root' };
+  const given = (joined: string, merge: string) => ({ explicit: { baseSha: joined, headSha: merge } });
+
+  it('conflicts git settled without markers, kept as git left them, are incomplete with both paths named and no request', async () => {
+    const { s, joined, merge } = await joinedMerge(
+      SETTLED_BASE, { 'src/f.ts': 'export const f = 2;\n', 'img.png': 'x\0feat' }, { 'src/f.ts': null, 'img.png': 'x\0main' }, {},
+    );
+    const { doc, calls } = await review({ s, req: given(joined, merge), exec: fakeGh({ baseSha: joined, headSha: merge }) });
+    expect(calls).toEqual([]);
+    expect(doc.verdict.label).toBe('incomplete');
+    expect(doc.stageErrors).toEqual([{
+      stage: 'shape', cohortId: null,
+      message: 'This pull request only merges another branch in. Airlock did not review it: 2 changed files were not looked at. '
+        + `${SETTLED} img.png, src/f.ts. Airlock cannot show what was decided for them.`,
+    }]);
+    expect(doc.brief.whatItDoes.join(' ')).not.toMatch(/without conflicts/);
+  }, SLOW);
+
+  it('a marker conflict resolved by hand is reviewed and a kept modify/delete is named; a given range names no branch', async () => {
+    const { s, joined, merge } = await joinedMerge(
+      SETTLED_BASE,
+      { 'src/a.ts': 'export const a = 2;\n', 'src/f.ts': 'export const f = 2;\n', 'img.png': 'x\0feat' },
+      { 'src/a.ts': 'export const a = 3;\n', 'src/f.ts': null, 'img.png': 'x\0main' },
+      { 'src/a.ts': 'export const a = 4;\n' },
+    );
+    const script = scenarioScript({ mapper: () => ({ cohorts: [], standalone: ['src/a.ts'] }), seams: () => none });
+    const { doc, calls } = await review({ s, req: given(joined, merge), exec: fakeGh({ baseSha: joined, headSha: merge }), script });
+    expect(doc.files.map((f) => f.path)).toEqual(['src/a.ts']);
+    expect(calls.filter((c) => c.role.startsWith('lens:')).length).toBeGreaterThan(0);
+    expect(doc.stageErrors).toEqual([{
+      stage: 'shape', cohortId: null, message: `${SETTLED} img.png, src/f.ts. Airlock cannot show what was decided for them.`,
+    }]);
+    expect(doc.verdict.label).toBe('incomplete');
+    // A given range: the sentence names no branch and there is no branch block; the pull request keeps the given base.
+    expect(mergeNote('given range')).toMatch(/the two sides of the merge/);
+    for (const c of calls) {
+      expect(c.instructions.endsWith(mergeNote('given range'))).toBe(true);
+      expect(c.material).not.toContain('<material label="merge"');
+    }
+    expect(doc.pr.baseSha).toBe(joined);
+    expect(doc.pr.headSha).toBe(merge);
+    expect(doc.range.baseSha).not.toBe(joined);
+  }, SLOW);
+
+  it('a given range of a merge named by a shortened id is refused with a sentence that a full id is needed', async () => {
+    const { s, head } = await mergedIn({ 'src/a.ts': 'export const a = 2;\n' });
+    const mainTip = await s.remote.git('rev-parse', 'main');
+    const short = mainTip.slice(0, 12);
+    const { doc, calls } = await review({ s, req: given(short, head), exec: fakeGh({ baseSha: mainTip, headSha: head }) });
+    expect(calls).toEqual([]);
+    expect(doc.verdict.label).toBe('incomplete');
+    expect(doc.stageErrors).toEqual([{
+      stage: 'shape', cohortId: null,
+      message: 'This pull request only merges another branch in. Airlock did not review it: 1 changed file was not looked at. '
+        + `The given range names the commit "${short}" by a shortened id, and a full commit id (40 or 64 hexadecimal characters) is needed to review what was changed by hand in a merge.`,
+    }]);
+  }, SLOW);
+
+  it('a re-review whose push is a clean merge of the base says "This push"', async () => {
+    const first = await review();
+    const { s } = first;
+    await s.remote.git('checkout', 'main');
+    await commitFiles(s.remote, { 'README.md': 'main moved on\n' }, 'main advances');
+    await s.remote.git('checkout', 'feature');
+    await s.remote.git('merge', '--no-ff', '--no-edit', 'main');
+    const head = await s.remote.git('rev-parse', 'HEAD');
+    const script = scenarioScript({ 'challenge:fixed:': () => { throw new Error('no fixed check was expected'); } });
+    const { doc } = await review({ s, req: { since: { reviewId: first.doc.id } }, exec: fakeGh({ baseSha: s.baseSha, headSha: head }), script });
+    expect(doc.brief.whatItDoes).toEqual([
+      'This push only merges main into the branch. Git merged it without conflicts and nothing was changed by hand.',
+    ]);
+    expect(doc.stageErrors).toEqual([]);
+  }, SLOW);
+
+  it('a rule file with conflict markers on the base side is not used as rules, and the limits say so', async () => {
+    const { s, joined, merge } = await joinedMerge(
+      { 'src/a.ts': 'export const a = 1;\n', 'CLAUDE.md': 'Rules RULES_ROOT\n' },
+      { 'src/a.ts': 'export const a = 2;\n', 'CLAUDE.md': 'Rules RULES_FEATURE\n' },
+      { 'CLAUDE.md': 'Rules RULES_MAIN\n' },
+      { 'CLAUDE.md': 'Rules RULES_BOTH\n' },
+    );
+    const script = scenarioScript({ mapper: () => ({ cohorts: [], standalone: ['src/a.ts', 'CLAUDE.md'] }), seams: () => none });
+    const { doc, calls } = await review({ s, req: given(joined, merge), exec: fakeGh({ baseSha: joined, headSha: merge }), script });
+    expect(doc.range.kind).toBe('sync-merge');
+    expect(doc.limits).toContain('CLAUDE.md has merge conflict markers on the base side and was not used as rules.');
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) expect(c.material).not.toContain('<material label="repository rule file CLAUDE.md"');
   }, SLOW);
 });

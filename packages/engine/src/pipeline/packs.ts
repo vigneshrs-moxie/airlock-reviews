@@ -88,7 +88,12 @@ export interface PackOptions {
   holdout?: Holdout;
   baseDir: string;
   changedPaths: string[];
+  /** The base worktree is a merge git made by itself, so a rule file there may hold conflict markers. */
+  baseIsMerge?: boolean;
 }
+
+/** A conflict as git leaves it in a file: a `<<<<<<<` line and, later, a `>>>>>>>` line. */
+const CONFLICT_MARKERS = /^<{7}(?: |$)[\s\S]*^>{7}(?: |$)/m;
 
 export interface PreparedPacks {
   packs: Pack[];
@@ -147,7 +152,10 @@ export async function preparePacks(selected: Pack[], opts: PackOptions): Promise
   const limits: string[] = [];
   try {
     const loaded = await loadRepoRules(opts.baseDir, opts.changedPaths, opts.exec);
-    repoRules = loaded.rules;
+    // Both sides of a conflict are not rules anyone wrote: such a file is left out and named.
+    const conflicted = opts.baseIsMerge === true ? loaded.rules.filter((r) => CONFLICT_MARKERS.test(r.text)) : [];
+    repoRules = loaded.rules.filter((r) => !conflicted.includes(r));
+    limits.push(...conflicted.map((r) => `${r.path} has merge conflict markers on the base side and was not used as rules.`));
     limits.push(...loaded.leftOut.map((l) => `repository rule file ${l.path} was not shown: ${l.reason}`));
   } catch (err) {
     errors.push(packsError(`The repository's rule files could not be read: ${messageOf(err)}`));

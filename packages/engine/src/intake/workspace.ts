@@ -226,6 +226,16 @@ async function shapeOf(
       return { shapeError: messageOf(err) };
     }
   }
+  // A range given with a shortened id is a merge Airlock cannot make: it gives git full ids only.
+  const short = [range.baseSha, range.headSha].find((id) => !FULL_COMMIT_ID.test(id));
+  if (short !== undefined) {
+    return {
+      merge: {
+        kind: 'unsupported',
+        reason: `The given range names the commit ${JSON.stringify(short)} by a shortened id, and a full commit id (40 or 64 hexadecimal characters) is needed to review what was changed by hand in a merge.`,
+      },
+    };
+  }
   try {
     return { merge: plan?.kind === 'base-merge' ? await mergeCommitRange(exec, mirror, range.headSha) : await mergeRange(exec, mirror, range) };
   } catch (err) {

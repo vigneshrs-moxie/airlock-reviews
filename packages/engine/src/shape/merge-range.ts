@@ -5,19 +5,50 @@ import { must, type Exec } from '../util/exec.js';
 /**
  * What a range of merges only leaves to review. `by-hand`: what was changed by hand in its one merge, from `baseSha`, the
  * merge git makes by itself (a commit in the mirror that no ref points at), to `headSha`, the merge as committed; `files`
- * is how many files differ. `nothing-by-hand`: the merge is exactly what git makes by itself. `unsupported`: a shape
- * Airlock does not review (several merges, an octopus merge), and why, as a sentence.
+ * is how many files differ; `unshown` the paths git reported as conflicts that the diff does not show (git settled them
+ * without markers and they were kept as it left them). `nothing-by-hand`: git merged without conflicts and the merge is
+ * exactly what it makes by itself. `unsupported`: a shape Airlock does not review (several merges, an octopus merge, a
+ * merge whose conflicts all were settled without markers), and why, as a sentence; `conflicted` names those conflicts.
  */
 export type MergeRange =
-  | { kind: 'by-hand'; baseSha: string; headSha: string; files: number }
+  | { kind: 'by-hand'; baseSha: string; headSha: string; files: number; unshown: string[] }
   | { kind: 'nothing-by-hand' }
-  | { kind: 'unsupported'; reason: string };
+  | { kind: 'unsupported'; reason: string; conflicted?: string[] };
 
-/** Told to every model stage of a review of what was changed by hand in a merge; the branch names go in mergeNoteBlock. */
-export const MERGE_NOTE = 'This pull request only merges one branch into another (the two are named in the material labelled "merge"), '
-  + 'and this review covers what was changed by hand in that merge. The base side is the merge git produced by itself, with '
-  + 'conflict markers where it could not decide; the head side is what was committed. Review whether each resolution keeps '
-  + 'what both sides intended, and treat anything else changed by hand as a change to review.';
+/** What the review of a merge is part of: a first review, a re-review's push, or a range given to the engine. */
+export type MergeScope = 'pull request' | 'push' | 'given range';
+
+const MERGE_SIDES = 'The base side is the merge git produced by itself, with conflict markers where it could not decide; the head side '
+  + 'is what was committed. Review whether each resolution keeps what the two sides of the merge intended, and treat anything '
+  + 'else changed by hand as a change to review.';
+
+/**
+ * Told to every model stage of a review of what was changed by hand in a merge. Fixed text: the branch names, when the
+ * scope has them, go in mergeNoteBlock; a given range names no branch, since the pull request's may not be the ones merged.
+ */
+export function mergeNote(scope: MergeScope): string {
+  switch (scope) {
+    case 'pull request':
+      return 'This pull request only merges one branch into another (the two are named in the material labelled "merge"), '
+        + `and this review covers what was changed by hand in that merge. ${MERGE_SIDES}`;
+    case 'push':
+      return 'The push since the last review only merges one branch into this one (the two are named in the material labelled '
+        + `"merge"), and this review covers what was changed by hand in the merge pushed since the last review. ${MERGE_SIDES}`;
+    case 'given range':
+      return `This review covers what was changed by hand in one merge commit. ${MERGE_SIDES}`;
+  }
+}
+
+/** Most conflicted paths a sentence names; the rest are counted. */
+const MAX_NAMED = 10;
+
+/** The sentence for conflicts git settled without markers that the review cannot show, naming at most ten paths. */
+export function settledSentence(paths: string[]): string {
+  const named = paths.slice(0, MAX_NAMED).join(', ');
+  const more = paths.length > MAX_NAMED ? ` and ${paths.length - MAX_NAMED} more` : '';
+  return 'Git reported conflicts in this merge that it settled without markers (a file one side deleted and the other '
+    + `changed, or a binary file): ${named}${more}. Airlock cannot show what was decided for them.`;
+}
 
 /** The two branch names of a merge, as material: they come from the pull request. */
 export const mergeNoteBlock = (mergedIn: string, into: string): string => asMaterial('merge', `Merged in: ${mergedIn}\nInto: ${into}`);
@@ -45,15 +76,20 @@ async function treeOf(exec: Exec, mirror: string, spec: string): Promise<string>
 }
 
 /**
- * The tree of the merge git makes by itself of `ours` and `theirs`. Exit code 0 (clean) or 1 (conflicts, left in the tree
- * as markers) is an answer only when the first line is the id of a tree, since a bad argument also exits 1.
+ * The tree of the merge git makes by itself of `ours` and `theirs`, and the paths it reported as conflicts (none for a
+ * clean merge). With `--name-only -z` the output is the tree id and then each conflicted path, NUL-separated; the paths
+ * are data only. Exit code 0 (clean) or 1 (conflicts) is an answer only when the first field is the id of a tree, since
+ * a bad argument also exits 1.
  */
-async function mechanicalTree(exec: Exec, mirror: string, ours: string, theirs: string): Promise<string> {
-  const made = await exec('git', ['--git-dir', mirror, 'merge-tree', '--write-tree', '--no-messages', ours, theirs]);
-  const tree = made.stdout.split('\n')[0]?.trim() ?? '';
+async function mechanicalMerge(exec: Exec, mirror: string, ours: string, theirs: string): Promise<{ tree: string; conflicts: string[] | null }> {
+  const made = await exec('git', ['--git-dir', mirror, 'merge-tree', '--write-tree', '--no-messages', '--name-only', '-z', ours, theirs]);
+  const [first = '', ...rest] = made.stdout.split('\0');
+  const tree = first.trim();
   if ((made.code === 0 || made.code === 1) && FULL_ID.test(tree)) {
     const type = await exec('git', ['--git-dir', mirror, 'cat-file', '-t', tree]);
-    if (type.code === 0 && type.stdout.trim() === 'tree') return tree;
+    if (type.code === 0 && type.stdout.trim() === 'tree') {
+      return { tree, conflicts: made.code === 0 ? null : [...new Set(rest.filter((p) => p !== ''))] };
+    }
   }
   throw new Error(`git merge-tree ${ours} ${theirs}: ${made.stderr.trim() || 'no tree was written'}`);
 }
@@ -64,19 +100,26 @@ async function fromMerge(exec: Exec, mirror: string, merge: string, parents: str
     return { kind: 'unsupported', reason: `Its merge commit joins ${parents.length} branches, and Airlock reviews what was changed by hand only in a merge of two.` };
   }
   const [ours, theirs] = parents.map((p) => fullId('parent', p)) as [string, string];
-  const mechanical = await mechanicalTree(exec, mirror, ours, theirs);
+  const { tree: mechanical, conflicts } = await mechanicalMerge(exec, mirror, ours, theirs);
   const committed = await treeOf(exec, mirror, merge);
-  if (mechanical === committed) return { kind: 'nothing-by-hand' };
+  // A merge with conflicts is never "nothing by hand": git may have settled them without markers, and equal trees then
+  // only say the person kept what it left.
+  if (mechanical === committed) {
+    if (conflicts === null) return { kind: 'nothing-by-hand' };
+    return { kind: 'unsupported', reason: settledSentence(conflicts), conflicted: conflicts };
+  }
   const changed = must(
     await exec('git', ['--git-dir', mirror, 'diff-tree', '-r', '-z', '--no-renames', '--name-only', mechanical, committed]),
     `git diff-tree ${mechanical} ${committed}`,
-  ).split('\0').filter((p) => p !== '').length;
+  ).split('\0').filter((p) => p !== '');
+  const shown = new Set(changed);
+  const unshown = (conflicts ?? []).filter((p) => !shown.has(p));
   // No ref is made: the commit lives in the mirror only as long as a worktree or a later review needs it.
   const made = await exec(
     'git', ['--git-dir', mirror, 'commit-tree', '--no-gpg-sign', mechanical, '-p', ours, '-m', MECHANICAL_MESSAGE], { env: MECHANICAL_IDENTITY },
   );
   const commit = fullId('mechanical merge', must(made, `git commit-tree ${mechanical}`).trim());
-  return { kind: 'by-hand', baseSha: commit, headSha: merge, files: changed };
+  return { kind: 'by-hand', baseSha: commit, headSha: merge, files: changed.length, unshown };
 }
 
 /**
