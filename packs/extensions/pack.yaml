@@ -1,0 +1,67 @@
+id: extensions
+title: Extensions
+# Chrome extensions built by supervisors, one repository each. The extension's files sit at the top of the repository
+# (no build step, no app folder), and it arrives in a pull request from a builder's branch.
+repos:
+  - Moxie-Pest-Control-Phoenix/scheduling-tool-suite
+  - Moxie-Pest-Control-Phoenix/termites-tool-suite
+  - Moxie-Pest-Control-Phoenix/moxie-click-to-dial
+  - Moxie-Pest-Control-Phoenix/isales-audit-tool
+  - Moxie-Pest-Control-Phoenix/TI-route-snapshot
+stageRules:
+  - { default: true, stage: other }
+
+# No standards are listed here: the tech team's extension review kit is downloaded at review time (gh reads only),
+# cached by commit, and its files are attached to this pack as standards, in this order. calibration.md holds dated
+# entries: the hold-out and the challenger read it entry by entry.
+kit:
+  repo: Moxie-Pest-Control-Phoenix/moxie-ext-review-kit
+  files:
+    - skills/ext-review/standard.md
+    - skills/ext-review/conventions.md
+    - skills/ext-review/lens-rules.md
+    - skills/ext-review/calibration.md
+    - skills/ext-review/register.md
+    - skills/ext-review/fieldroutes.md
+  datedStandards:
+    - skills/ext-review/calibration.md
+
+# Read: the manifest, the background and content scripts, configuration, and whatever sends data out (Apps Script
+# receivers, files that wrap fetch or a Google or CRM call), at the top or one folder down (a feature such as
+# route-monitor/ may carry its own). The read tier wins over trust, so these globs leave out the tests folders.
+# Skimmed (the default): the popup, options and side panel pages, their scripts and the styles.
+# Trusted: tests and their fixtures, and the words for people (README, CHANGELOG, privacy notes, setup notes).
+tiers:
+  read:
+    - "manifest.json"
+    - "!(tests|test|__tests__)/manifest.json"
+    - "{background,service-worker,sw}*.js"
+    - "!(tests|test|__tests__)/{background,service-worker,sw}*.js"
+    - "*content*.js"
+    - "!(tests|test|__tests__)/*content*.js"
+    - "{config,settings,destinations}*.js"
+    - "!(tests|test|__tests__)/{config,settings,destinations}*.js"
+    - "*{api,fetch,http,request,network,sync,send,deliver,receiver,bridge,coordination,telemetry,upload,queue}*.js"
+    - "!(tests|test|__tests__)/*{api,fetch,http,request,network,sync,send,deliver,receiver,bridge,coordination,telemetry,upload,queue}*.js"
+    - "**/*.gs"
+    - ".github/**"
+    - "trufflehog-exclude.txt"
+  trust:
+    - "**/tests/**"
+    - "**/test/**"
+    - "**/fixtures/**"
+    - "**/*.md"
+
+codeChecks:
+  - extension-permissions
+  - extension-broad-hosts
+  - extension-version-changelog
+  - extension-remote-code
+  - extension-html-injection
+  - extension-large-files
+
+lenses:
+  - { id: security, title: Security, file: lenses/security.md }
+  - { id: data, title: Data, file: lenses/data.md }
+  - { id: office, title: Office, file: lenses/office.md }
+  - { id: quality, title: Quality, file: lenses/quality.md }

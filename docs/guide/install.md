@@ -110,6 +110,14 @@ Sometimes Airlock reviews the whole pull request again instead, for example when
 
 Findings you posted or dismissed keep that mark in the new review.
 
+## Which packs a repository gets
+
+Airlock picks the packs for a pull request by its repository, ignoring letter case:
+
+- **Orbit** (`Moxie-Pest-Control-Phoenix/moxie-portal` and `vigneshrs-moxie/moxie-portal-vrs`): your pack, the team's standard (downloaded from the team's review kit at review time), and Generic.
+- **The supervisors' Chrome extensions** (`scheduling-tool-suite`, `termites-tool-suite`, `moxie-click-to-dial`, `isales-audit-tool` and `TI-route-snapshot` under `Moxie-Pest-Control-Phoenix`): Extensions and Generic. Extensions downloads the tech team's extension review kit (`moxie-ext-review-kit`) at review time, as the team's standard does. If neither GitHub nor an earlier copy can supply it, the review stops before any model is asked and says so. Lines you save on these repositories go to `packs/extensions/learned/`.
+- **Any other repository**: Generic only.
+
 ## What Airlock learned
 
 When you dismiss a finding as Wrong or Intended, Airlock saves one line to a rule pack, and the reviewer follows it from the next review on. To see these lines, press **Packs** at the top of the panel. Under **Packs for this repository**, each pack lists its lines, newest first. Each line shows its date, its kind (**Wrong** or **Product fact**), and whether it applies to this repository.
