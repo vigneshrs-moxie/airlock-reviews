@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Brief, ChangeMap, Dismissal, ServiceEvent } from '@airlock/shared';
+import { NOT_PROVED } from '../../src/client/proof';
 import { NOT_UNDERSTOOD, ServiceClient } from '../../src/client/service';
 import { LOST_MESSAGE, NOT_A_TOKEN, OFFLINE_RETRY_MS, RUN_STOPPED, SHOWING_PROBLEM, TAB_UNREADABLE, WATCH_MS, startPanel } from '../../src/state/machine';
 import type { PanelState } from '../../src/state/reduce';
@@ -138,9 +139,9 @@ describe('startPanel: loading', () => {
     expect(h.last()).toEqual({ kind: 'offline' });
   });
 
-  it('goes unpaired on 401 and ready after pairing', async () => {
+  it('goes unpaired when the service cannot prove the stored token, and ready after pairing', async () => {
     const h = harness({ token: OTHER_TOKEN });
-    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired' });
+    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
 
     h.panel.dispatch({ type: 'pair', token: '  not a token ' });
     const odd = await until(h, 'unpaired', (s) => s.message !== undefined);
@@ -148,8 +149,18 @@ describe('startPanel: loading', () => {
     expect(h.svc.calls).not.toContain('POST /pair');
 
     h.panel.dispatch({ type: 'pair', token: 'c'.repeat(64) });
-    await until(h, 'unpaired', (s) => s.message === 'Airlock needs the pairing token. Run "npm run service -- token".');
+    await until(h, 'unpaired', (s) => s.message === NOT_PROVED);
+    expect(h.svc.calls).not.toContain('POST /pair');
     expect(h.settings.token).toBe(OTHER_TOKEN);
+
+    // A token that proves but is refused at pairing: the service's words.
+    h.svc.on('POST /pair', () => json({ error: 'Airlock needs the pairing token. Run "npm run service -- token".' }, 401));
+    h.panel.dispatch({ type: 'pair', token: TOKEN });
+    await until(h, 'unpaired', (s) => s.message === 'Airlock needs the pairing token. Run "npm run service -- token".');
+    h.svc.on('POST /pair', (req) => {
+      h.svc.paired = true;
+      return req.headers.get('authorization') === `Bearer ${TOKEN}` ? json({ paired: true, extension: 'new' }) : json({ error: 'no' }, 401);
+    });
 
     h.panel.dispatch({ type: 'pair', token: `${TOKEN}\n` });
     await until(h, 'ready');
@@ -328,6 +339,69 @@ describe('startPanel: noticing the service stop while nothing is running (Task 1
     await until(ready, 'ready');
     ready.panel.stop();
     expect(ready.timers.delays()).toEqual([]);
+  });
+});
+
+describe('startPanel: the proof before the token (Task 8)', () => {
+  const withToken = (h: Harness) => h.svc.requests.filter((r) => r.headers.has('authorization'));
+
+  it('a wrong proof shows the sentence and the token never leaves the panel', async () => {
+    for (const key of [OTHER_TOKEN, null]) {
+      const h = harness({ prepare: (svc) => { svc.proofKey = key; } });
+      expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+      // Pairing again with the stored token is checked the same way.
+      h.panel.dispatch({ type: 'pair', token: TOKEN });
+      await settle();
+      expect(h.last()).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+      expect(withToken(h)).toEqual([]);
+      expect(h.svc.calls).not.toContain('POST /pair');
+      expect(h.settings.token).toBe(TOKEN);
+    }
+  });
+
+  it('a periodic check with a wrong proof leaves the review for the sentence, and sends nothing more with the token', async () => {
+    const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary())) });
+    await until(h, 'review');
+    const sent = withToken(h).length;
+    h.svc.proofKey = OTHER_TOKEN;
+    h.timers.fire();
+    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+    expect(h.timers.delays()).toEqual([]);
+    expect(withToken(h)).toHaveLength(sent);
+    // Every check asked with its own nonce.
+    const nonces = h.svc.requests.filter((r) => r.url.pathname === '/hello').map((r) => r.url.searchParams.get('nonce'));
+    expect(nonces.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(nonces).size).toBe(nonces.length);
+  });
+
+  it('a wrong proof during an action is the sentence too, and the action is not sent', async () => {
+    const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary())) });
+    const shown = await until(h, 'review');
+    // One check goes unanswered (the review stays on screen), so the next call must prove again; what answers then cannot.
+    h.svc.down = true;
+    h.timers.fire();
+    await settle();
+    expect(h.last()).toBe(shown);
+    h.svc.down = false;
+    h.svc.proofKey = OTHER_TOKEN;
+    const sent = withToken(h).length;
+    h.panel.dispatch({ type: 'dismiss', body: dismissBody() });
+    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+    expect(h.svc.calls).not.toContain('POST /dismissals');
+    expect(withToken(h)).toHaveLength(sent);
+  });
+
+  it('after the token is replaced, the next check shows Pair, and the new token pairs the panel', async () => {
+    const h = harness();
+    await until(h, 'ready');
+    // `token --new`: the service now proves, and accepts, only the new token.
+    h.svc.token = OTHER_TOKEN;
+    h.timers.fire();
+    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+    h.panel.dispatch({ type: 'pair', token: OTHER_TOKEN });
+    await until(h, 'ready');
+    expect(h.settings.token).toBe(OTHER_TOKEN);
+    expect(withToken(h).filter((r) => r.headers.get('authorization') === `Bearer ${OTHER_TOKEN}`).length).toBeGreaterThan(0);
   });
 });
 

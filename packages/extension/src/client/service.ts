@@ -5,6 +5,7 @@ import {
   type RestoreReply, type ServiceEvent, type ServiceStatus, type StartReviewBody, type StartReviewReply,
 } from '@airlock/shared';
 import { EventDataError, readEventStream } from './event-stream';
+import { NOT_PROVED, newNonce, proves } from './proof';
 import { realTimers, type Timers } from './timers';
 
 export const NOT_UNDERSTOOD = 'Airlock got a reply from its service that it does not understand.';
@@ -20,10 +21,11 @@ export const STREAM_IDLE_MS = 45_000;
 
 /**
  * Why a call to the service failed, in the panel's terms: `offline` (no answer), `unpaired` (no token, or the
- * service refused it) or `problem` (anything else, with a sentence to show).
+ * service refused it), `unproven` (what answers could not prove it holds the token, so the token was not sent) or
+ * `problem` (anything else, with a sentence to show).
  */
 export class ServiceError extends Error {
-  constructor(readonly kind: 'offline' | 'unpaired' | 'problem', message: string) {
+  constructor(readonly kind: 'offline' | 'unpaired' | 'unproven' | 'problem', message: string) {
     super(message);
     this.name = 'ServiceError';
   }
@@ -42,9 +44,17 @@ const IDLE = new Error('the stream was silent too long');
 
 type Call = { method: 'GET' | 'POST'; path: string; query?: Record<string, string>; body?: unknown };
 
-/** The panel's only way to reach the local service. Every reply is checked against the shared contract. */
+/**
+ * The panel's only way to reach the local service. Every reply is checked against the shared contract.
+ *
+ * The token is sent only to an address that has just proved it holds it: `send`, the one place the Authorization
+ * header is added, first asks `/hello` with a fresh nonce and checks the proof, unless the same token was proved since
+ * the last network failure, 401 or failed check. A periodic `hello` always asks with a new nonce.
+ */
 export class ServiceClient {
   private readonly fetchFn: typeof fetch;
+  /** The token whose proof last matched; null after a network failure, a 401 or any hello that did not prove it. */
+  private proved: string | null = null;
 
   constructor(
     private readonly base: string,
@@ -56,26 +66,30 @@ export class ServiceClient {
     this.fetchFn = fetchFn ?? ((input, init) => fetch(input, init));
   }
 
-  /** `signal`, on this and the other reads, lets the panel drop a call for a pull request the tab has left. */
+  /**
+   * The periodic check. With a token stored it asks with a fresh nonce and checks the proof: a wrong or missing one
+   * throws `unproven`, and the token is not sent again until a proof matches. `signal`, on this and the other reads,
+   * lets the panel drop a call for a pull request the tab has left.
+   */
   async hello(signal?: AbortSignal): Promise<Hello | 'offline'> {
-    try {
-      return await this.timed(HELLO_TIMEOUT_MS, signal, async (both) => {
-        const res = await this.fetchFn(this.url('/hello'), { signal: both }).catch(() => {
-          throw new ServiceError('offline', OFFLINE);
-        });
-        if (!res.ok) throw await failure(res);
-        return parse(res, HelloSchema);
-      });
-    } catch (error) {
-      if (error instanceof ServiceError && error.kind === 'offline') return 'offline';
-      throw error;
-    }
+    const token = await this.token();
+    return this.ask(token === null || token === '' ? null : token, signal);
   }
 
-  /** Offers a token the person typed. Refusals come back as the service's words; only no answer at all throws. */
+  /**
+   * Offers a token the person typed, once what answers has proved it holds that token. Refusals, that one included, come
+   * back as words; only no answer at all throws.
+   */
   pair(token: string): Promise<PairReply | { error: string }> {
     return this.timed(CALL_TIMEOUT_MS, undefined, async (signal) => {
-      const res = await this.send({ method: 'POST', path: '/pair' }, token, signal);
+      let res: Response;
+      try {
+        res = await this.send({ method: 'POST', path: '/pair' }, token, signal);
+      } catch (error) {
+        // What answers could not prove it holds this token, or did not answer as Airlock: nothing was sent.
+        if (error instanceof ServiceError && error.kind !== 'offline') return { error: error.message };
+        throw error;
+      }
       if (res.ok) return parse(res, PairReplySchema);
       return { error: (await failure(res)).message };
     });
@@ -135,11 +149,13 @@ export class ServiceClient {
         watcher?.error(IDLE);
       }, STREAM_IDLE_MS);
     };
-    // Why a stream that stopped without its last event stopped.
-    const cut = (error: unknown): 'lost' | 'offline' =>
-      idle || signal.aborted || error instanceof EventDataError || (error instanceof ServiceError && error.kind === 'problem')
-        ? 'lost'
-        : 'offline';
+    // Why a stream that stopped without its last event stopped. Cut at the network level, the next call proves again.
+    const cut = (error: unknown): 'lost' | 'offline' => {
+      const lost = idle || signal.aborted || error instanceof EventDataError || (error instanceof ServiceError && error.kind === 'problem');
+      if (lost) return 'lost';
+      this.proved = null;
+      return 'offline';
+    };
 
     arm();
     try {
@@ -147,6 +163,7 @@ export class ServiceClient {
       try {
         res = await this.send({ method: 'GET', path: `/reviews/${runId}/events` }, token, AbortSignal.any([signal, silent.signal]));
       } catch (error) {
+        if (error instanceof ServiceError && error.kind !== 'offline') throw error;
         return cut(error);
       }
       if (!res.ok) {
@@ -227,18 +244,56 @@ export class ServiceClient {
     return token;
   }
 
+  /**
+   * Asks `/hello`. With a token, the nonce is new and the proof must match it: a match records the token as proved;
+   * anything else forgets any proof, and a wrong or missing proof throws `unproven`. No answer is `'offline'`.
+   */
+  private async ask(token: string | null, signal?: AbortSignal): Promise<Hello | 'offline'> {
+    const nonce = token === null ? null : newNonce();
+    try {
+      return await this.timed(HELLO_TIMEOUT_MS, signal, async (both) => {
+        const address = nonce === null ? this.url('/hello') : this.url('/hello', { nonce });
+        const res = await this.fetchFn(address, { signal: both }).catch(() => {
+          throw new ServiceError('offline', OFFLINE);
+        });
+        if (!res.ok) throw await failure(res);
+        const hello = await parse(res, HelloSchema);
+        if (token === null || nonce === null) return hello;
+        if (!(await proves(hello.proof, token, nonce))) throw new ServiceError('unproven', NOT_PROVED);
+        this.proved = token;
+        return hello;
+      });
+    } catch (error) {
+      if (token !== null) this.proved = null;
+      if (error instanceof ServiceError && error.kind === 'offline') return 'offline';
+      throw error;
+    }
+  }
+
+  /** The one gate before the token leaves the panel: a proof for this token, unless one has matched since the last failure. */
+  private async proven(token: string, signal: AbortSignal): Promise<void> {
+    if (this.proved === token) return;
+    if ((await this.ask(token, signal)) === 'offline') throw new ServiceError('offline', OFFLINE);
+  }
+
+  /** The only place the Authorization header is added, and only after `proven`. */
   private async send(call: Call, token: string, signal: AbortSignal): Promise<Response> {
+    await this.proven(token, signal);
     const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
     const init: RequestInit = { method: call.method, headers, signal };
     if (call.body !== undefined) {
       headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(call.body);
     }
+    let res: Response;
     try {
-      return await this.fetchFn(this.url(call.path, call.query), init);
+      res = await this.fetchFn(this.url(call.path, call.query), init);
     } catch {
+      this.proved = null;
       throw new ServiceError('offline', OFFLINE);
     }
+    if (res.status === 401) this.proved = null;
+    return res;
   }
 
   private url(path: string, query?: Record<string, string>): string {

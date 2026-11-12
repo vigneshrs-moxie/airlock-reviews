@@ -4,7 +4,7 @@ import {
   StartReviewReplySchema,
   type Dismissal, type LatestReply, type PrSummary, type ReviewDocument, type ServiceEvent,
 } from '@airlock/shared';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { E2E_PORT } from './port';
 
@@ -81,6 +81,11 @@ export interface FakeServiceOptions {
   token?: string;
   /** Start with no extension paired: `POST /pair` with the token, from an extension, pairs it. */
   unpaired?: boolean;
+  /**
+   * What `GET /hello?nonce=` proves with: the token by default, as the real service does; another key to play
+   * something else on the port that answers like Airlock; null for a hello with no proof.
+   */
+  proofKey?: string | null;
   /** The pull requests it knows. */
   pulls?: FakePull[];
 }
@@ -132,7 +137,8 @@ const today = (now: Date): string =>
   `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
 /**
- * A stand-in for the Airlock service that speaks its contract: the Host, Origin and token checks, `GET /hello`,
+ * A stand-in for the Airlock service that speaks its contract: the Host, Origin and token checks, `GET /hello` (with
+ * the proof that it holds the token, for a nonce),
  * `POST /pair`, `GET /status`, `GET /pr`, `POST /reviews`, `GET /reviews/running`, `GET /reviews/<runId>/events` (a real
  * event stream, written step by step from the pull request's script), `GET /reviews/latest`, `POST /dismissals` and
  * `POST /dismissals/restore`. Request bodies and query values are checked with the shared schemas, and every reply is
@@ -296,7 +302,17 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     if (known.length === 0) { refuse(res, 404, NOTHING_HERE); return; }
     if (!known.some((r) => r.method === method)) { refuse(res, 405, WRONG_METHOD); return; }
     if (method === 'GET' && url.pathname === '/hello') {
-      reply(res, HelloSchema, 200, { airlock: true, version: 'test', paired: pairedOrigin !== null });
+      // As the real service: a nonce, when given, is 32 lower-case hex characters, given once, and the reply proves the
+      // token with it.
+      const nonces = url.searchParams.getAll('nonce');
+      if (nonces.length > 1) { refuse(res, 400, 'A query value was given twice.'); return; }
+      const nonce = nonces[0];
+      if (nonce !== undefined && !/^[0-9a-f]{32}$/.test(nonce)) { refuse(res, 400, 'nonce: not a nonce'); return; }
+      const key = options.proofKey === undefined ? token : options.proofKey;
+      const proof = nonce === undefined || key === undefined || key === null
+        ? {}
+        : { proof: createHmac('sha256', key).update(`airlock-hello:${nonce}`).digest('hex') };
+      reply(res, HelloSchema, 200, { airlock: true, version: 'test', paired: pairedOrigin !== null, ...proof });
       return;
     }
     const origin = req.headers.origin ?? null;

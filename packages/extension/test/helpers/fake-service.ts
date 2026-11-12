@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { minimalDocument, type LatestReply, type PrSummary, type ServiceEvent } from '@airlock/shared';
 
 export const BASE = 'http://127.0.0.1:4611';
@@ -118,6 +119,11 @@ export class FakeService {
   down = false;
   paired = true;
   token = TOKEN;
+  /**
+   * What `GET /hello?nonce=` proves with: the token by default (as the real service does), another key to play
+   * something else on the port that answers like Airlock, or null for a hello with no proof.
+   */
+  proofKey: string | null | undefined = undefined;
   readonly calls: string[] = [];
   readonly requests: Request[] = [];
   readonly prs = new Map<string, PrSummary>();
@@ -166,7 +172,12 @@ export class FakeService {
   };
 
   private answer(route: string, req: Request): Response {
-    if (route === 'GET /hello') return json({ airlock: true, version: '0.1.0', paired: this.paired });
+    if (route === 'GET /hello') {
+      const nonce = req.url.searchParams.get('nonce');
+      const key = this.proofKey === undefined ? this.token : this.proofKey;
+      const proof = nonce === null || key === null ? {} : { proof: createHmac('sha256', key).update(`airlock-hello:${nonce}`).digest('hex') };
+      return json({ airlock: true, version: '0.1.0', paired: this.paired, ...proof });
+    }
     if (req.headers.get('authorization') !== `Bearer ${this.token}`) {
       return json({ error: 'Airlock needs the pairing token. Run "npm run service -- token".' }, 401);
     }
