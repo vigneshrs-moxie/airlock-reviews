@@ -821,3 +821,39 @@ test('20. a merge review says it reviewed what was changed by hand only when its
     await expect(sentences).toHaveCount(count);
   }
 });
+
+test('21. a post the browser sent twice: the copy the panel hears is told the preview expired, so the panel waits and shows Posted when the first copy\'s record appears', async () => {
+  if (context === undefined) throw new Error('no browser');
+  const number = 15;
+  const address = `https://github.com/${REPO}/pull/${number}/files`;
+  const twice = PrSummarySchema.parse({ ...pr, number, title: 'Let a person resume a subscription' });
+  const doc = ReviewDocumentSchema.parse({
+    ...document, id: 'r_0000000015', pr: { ...document.pr, number, title: twice.title, url: `https://github.com/${REPO}/pull/${number}` },
+    verdict: { label: 'request-changes', sentence: 'One thing blocks this.', counts: { block: 1, fix: 0, ask: 0, note: 0 } },
+    findings: [top[0]],
+  });
+  svc().addPull({ pr: twice, latest: { document: doc, dismissals: [], posts: [] } });
+  const classic = await readFile(join(FIXTURES, 'files-classic.html'), 'utf8');
+  await context.route(address, (route) => route.fulfill({ contentType: 'text/html', body: classic }));
+  await github.goto(address);
+  await activate(address);
+  await expect(cards()).toHaveCount(1);
+
+  svc().answerNextPost({ sentTwice: true, recordAfterMs: 2_000 });
+  const before = svc().sent.length;
+  await cards().first().getByRole('button').click();
+  await expect(panel.getByRole('heading', { name: top[0]!.title })).toBeVisible();
+  await panel.getByRole('button', { name: 'Post comment' }).click();
+  const sheet = panel.getByRole('dialog');
+  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await expect(sheet.getByText('Waiting to hear whether GitHub accepted the comments…')).toBeVisible();
+  await expect(sheet.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+  await expect(sheet.getByText('Posted 1 comment.')).toBeVisible(RETRY_WAIT);
+  // The 404 the panel heard was never shown: one press, one review, sent by the first copy.
+  await expect(sheet.getByText('This preview has expired. Open the preview again.')).toHaveCount(0);
+  expect(svc().sent).toHaveLength(before + 1);
+  expect(svc().posts(REPO, number)).toHaveLength(1);
+  await sheet.getByRole('button', { name: 'Done' }).click();
+  await panel.getByRole('button', { name: 'Back to the review' }).click();
+  await expect(cards().first()).toContainText('Posted');
+});

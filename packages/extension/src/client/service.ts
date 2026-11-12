@@ -75,6 +75,9 @@ export type ForgetOutcome = { forgotten: boolean; found?: { record: PostRecord; 
  * - `posted`: GitHub took the review; the record holds its address.
  * - `refused`: nothing was posted (the service refused it, or GitHub did), in the service's words.
  * - `unsent`: the proof that comes first failed, so the post never left the panel; `why` is how (`offline`: no answer).
+ * - `no-preview`: the service holds no such preview (404), in its words. It expired, or a copy of this post that the
+ *   browser sent again by itself (as Chromium does once when a connection closes before any answer) found it already
+ *   taken by the first copy, which may still be posting; only the post records can tell.
  * - `unclear`: the reply does not say (504, any other server error, no answer in time, a cut connection, a reply off the
  *   contract); only the post records can tell. `status` and `message`: a server error's, when it said something.
  */
@@ -82,6 +85,7 @@ export type PostOutcome =
   | { outcome: 'posted'; record: PostRecord }
   | { outcome: 'refused'; message: string }
   | { outcome: 'unsent'; why: ServiceError['kind']; message: string }
+  | { outcome: 'no-preview'; message: string }
   | { outcome: 'unclear'; message?: string; status?: number };
 
 /** Thrown inside the stream reader to stop it after a `done` or `failed` event. */
@@ -206,6 +210,7 @@ export class ServiceClient {
         }
         if (res.status === 401) throw await failure(res);
         const said = ApiErrorSchema.safeParse(await bodyOf(res));
+        if (res.status === 404) return { outcome: 'no-preview', message: said.success ? said.data.error : NOT_UNDERSTOOD };
         // A 4xx, or the 502 that says GitHub refused (or could not be read before anything was sent): nothing was posted.
         if (res.status < 500 || res.status === 502) return { outcome: 'refused', message: said.success ? said.data.error : NOT_UNDERSTOOD };
         return said.success ? { outcome: 'unclear', message: said.data.error, status: res.status } : { outcome: 'unclear', status: res.status };

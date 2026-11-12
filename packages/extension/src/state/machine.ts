@@ -432,6 +432,10 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
    * made (one not on screen before, holding one of its findings) appears. The records shown are always the ones last
    * read. A read that fails counts as a read with nothing in it; only a refused pairing stops the wait. With no record at
    * the end, the panel says it could not learn what happened, and nothing is sent again.
+   *
+   * A 404 (`no-preview`) is waited on the same way: the browser may have sent the post a second time by itself, and the
+   * first copy, which took the preview, may be posting or have posted. Only when no record appears is it said, in the
+   * service's words, that the preview expired.
    */
   const post = async (
     g: number, pr: PrSummary, known: ReadonlySet<string>, findings: readonly Pick<Finding, 'fingerprint' | 'aliases'>[],
@@ -457,6 +461,8 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     const said = sent.outcome === 'unclear' ? sent.message ?? POST_UNKNOWN : POST_UNKNOWN;
     // A server error that said something other than its 504: its sentence is kept for the end of the wait.
     const problem = sent.outcome === 'unclear' && sent.status !== undefined && sent.status !== 504 ? sent.message : undefined;
+    const noRecord: PostReply = sent.outcome === 'no-preview' ? { ticket, kind: 'refused', message: sent.message }
+      : { ticket, kind: 'unclear', message: problem === undefined ? POST_NOT_LEARNED : `${problem} ${POST_NOT_LEARNED}` };
     const mine = (r: PostRecord): boolean => isFor(r, pr) && !known.has(r.id) && findings.some((f) => recordHolds(r, f));
     for (let read = 0; ; read += 1) {
       if (read > 0) {
@@ -472,7 +478,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
         return;
       }
       if (read >= POST_RECHECKS) {
-        answer(g, { ticket, kind: 'unclear', message: problem === undefined ? POST_NOT_LEARNED : `${problem} ${POST_NOT_LEARNED}` });
+        answer(g, noRecord);
         return;
       }
       if (read === 0) answer(g, { ticket, kind: 'waiting' });

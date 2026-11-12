@@ -94,11 +94,14 @@ const ForgetReplySchema = z.object({ forgotten: z.boolean() });
  * - `unknown`: GitHub's answer is not known; the record says so (504).
  * - `brokenRecords`: the service cannot read its records of the pull request, so it posts nothing (500).
  * - `cut`: the connection is cut before any answer, while the service is still reading the pull request; GitHub takes the
- *   review and its record appears `recordAfterMs` later.
+ *   review and its record appears `recordAfterMs` later. A copy the browser sends again finds the preview spent (404).
+ * - `sentTwice`: the browser sent the post twice by itself (Chromium does once, when a reused connection closes before
+ *   any answer). The first copy took the preview and is still with GitHub, which takes the review; its record appears
+ *   `recordAfterMs` later. The panel hears only the second copy's answer: 404, the preview has expired.
  */
 export type GithubAnswer =
   | { accept: true } | { refuse: string } | { refuseKept: string } | { unknown: true } | { brokenRecords: true }
-  | { cut: true; recordAfterMs: number };
+  | { cut: true; recordAfterMs: number } | { sentTwice: true; recordAfterMs: number };
 
 /**
  * What the service's forget finds when it asks GitHub first: nothing (the default: the record is forgotten), the review
@@ -292,8 +295,6 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
   const lockedPacks = new Set<string>();
   const unmatched = new Set<string>();
   let helloCut = false;
-  /** Previews whose post was cut and is still with GitHub. */
-  const cutting = new Set<string>();
   let githubIds = 9000;
   let pairedOrigin: string | null = token !== undefined && !unpaired ? EXTENSION_ORIGIN : null;
   let closed = false;
@@ -503,9 +504,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
   function post(res: ServerResponse, body: unknown): void {
     // Strict, as the service's route: the request carries the preview id and nothing else.
     const asked = bodyOf(PostBodySchema.strict(), body);
-    // Chromium sends a request again by itself, once, when a reused connection closes before any answer. While a cut post
-    // is still with GitHub, that copy gets no answer either, as from a service that has stopped answering.
-    if (cutting.has(asked.previewId)) { res.socket?.destroy(); return; }
+    // A copy the browser sent again finds the preview the first copy took gone: 404, as from the service.
     const held = stored.get(asked.previewId);
     if (held === undefined || Date.now() >= held.expiresAt) throw new Refusal(404, EXPIRED);
     const pull = pullOf(held.repo, held.number);
@@ -523,16 +522,16 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       if (earlier !== undefined) throw new Refusal(409, blockedBy(earlier, item.title));
     }
     const answer = answers.shift() ?? { accept: true };
-    // As the service: a cut while it still reads the pull request leaves no answer and, as yet, no record.
-    if ('cut' in answer) {
-      res.socket?.destroy();
+    // As the service: a cut while it still reads the pull request leaves no answer and, as yet, no record. The preview is
+    // taken, and GitHub takes the review a little later.
+    if ('cut' in answer || 'sentTwice' in answer) {
       stored.delete(held.previewId);
-      cutting.add(held.previewId);
       setTimeout(() => {
-        cutting.delete(held.previewId);
         sent.push(held.review);
         pull.posts = [...pull.posts, postedRecord(held)];
       }, answer.recordAfterMs);
+      if ('sentTwice' in answer) throw new Refusal(404, EXPIRED);
+      res.socket?.destroy();
       return;
     }
     // Its records cannot be read: refused before anything is spent or sent.

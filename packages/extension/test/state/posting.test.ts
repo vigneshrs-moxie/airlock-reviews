@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { LatestReply, PostPreviewBody, PostRecord } from '@airlock/shared';
 import { ServiceClient } from '../../src/client/service';
-import { POST_NOT_LEARNED, POST_NOT_SENT_UNPROVEN, POST_RECHECKS, POST_RECHECK_MS, startPanel } from '../../src/state/machine';
+import { POST_NOT_LEARNED, POST_NOT_SENT_UNPROVEN, POST_RECHECKS, POST_RECHECK_MS, POST_UNKNOWN, startPanel } from '../../src/state/machine';
 import { reduce, type PanelState, type PostReply } from '../../src/state/reduce';
 import type { SettingsStore } from '../../src/state/settings';
 import type { TabWatcher } from '../../src/state/tab';
@@ -311,6 +311,83 @@ describe('the panel posts through the service', () => {
     expect(POST_RECHECKS * POST_RECHECK_MS).toBe(90_000);
     expect(s.latest.posts).toEqual([earlier, other]);
     expect(postsCalled(h)).toBe(1);
+  });
+
+  describe('a 404 on a post: the browser may have sent it twice, and the first copy taken the preview', () => {
+    const EXPIRED = 'This preview has expired. Open the preview again.';
+
+    it('waits for the record as after a cut connection, and the post the first copy made is the answer', async () => {
+      const earlier = recordOf([FP2], { id: 'post_aaaaaaaaaaaa' });
+      const record = recordOf([FP], { id: 'post_cccccccccccc' });
+      let reads = 0;
+      const h = harness((svc, latest) => {
+        latest.posts = [earlier];
+        svc.on('POST /posts', () => {
+          // The first copy is still with GitHub: its record comes on the second read.
+          svc.on('GET /reviews/latest', () => {
+            reads += 1;
+            return json({ ...latest, posts: reads >= 2 ? [earlier, record] : [earlier] });
+          });
+          return json({ error: EXPIRED }, 404);
+        });
+      });
+      await reviewShown(h);
+      h.panel.dispatch({ type: 'post', ticket: 30, previewId: preview.previewId, fingerprints: [FP] });
+      const waiting = await until(h, (s) => s.kind === 'review' && s.post?.ticket === 30) as Review;
+      expect(waiting.post).toEqual({ ticket: 30, kind: 'waiting' });
+      expect(waiting.busy).toBe(true);
+      const s = await recheckUntil(h, 30);
+      expect(s.post).toEqual({ ticket: 30, kind: 'posted', record });
+      expect(s.latest.posts).toEqual([earlier, record]);
+      expect(reads).toBe(2);
+      expect(postsCalled(h)).toBe(1);
+    });
+
+    it('a record whose outcome is not known is shown with the panel\'s sentence, never the expired one', async () => {
+      const unknown = recordOf([FP], { outcome: 'unknown' });
+      const h = harness((svc, latest) => {
+        svc.on('POST /posts', () => {
+          latest.posts = [unknown];
+          return json({ error: EXPIRED }, 404);
+        });
+      });
+      await reviewShown(h);
+      h.panel.dispatch({ type: 'post', ticket: 31, previewId: preview.previewId, fingerprints: [FP] });
+      const s = await reviewWith(h, 31);
+      expect(s.post).toEqual({ ticket: 31, kind: 'unknown', message: POST_UNKNOWN, record: unknown });
+      expect(postsCalled(h)).toBe(1);
+    });
+
+    it('only when no record appears in 90 seconds does it say the preview expired, in the service words', async () => {
+      const earlier = recordOf([FP2], { id: 'post_aaaaaaaaaaaa' });
+      let reads = 0;
+      const h = harness((svc, latest) => {
+        latest.posts = [earlier];
+        svc.on('POST /posts', () => {
+          svc.on('GET /reviews/latest', () => {
+            reads += 1;
+            return json(latest);
+          });
+          return json({ error: EXPIRED }, 404);
+        });
+      });
+      await reviewShown(h);
+      h.panel.dispatch({ type: 'post', ticket: 32, previewId: preview.previewId, fingerprints: [FP] });
+      const s = await recheckUntil(h, 32);
+      expect(s.post).toEqual({ ticket: 32, kind: 'refused', message: EXPIRED });
+      expect(reads).toBe(1 + POST_RECHECKS);
+      expect(s.latest.posts).toEqual([earlier]);
+      expect(postsCalled(h)).toBe(1);
+    });
+
+    it('a 404 on a preview is refused at once: nothing was sent, so there is no record to wait for', async () => {
+      const h = harness((svc) => svc.on('POST /posts/preview', () => json({ error: 'Airlock has no review r_0000000001 of this pull request.' }, 404)));
+      await reviewShown(h);
+      h.panel.dispatch({ type: 'preview-post', ticket: 33, body: previewBody });
+      const s = await reviewWith(h, 33);
+      expect(s.post).toEqual({ ticket: 33, kind: 'refused', message: 'Airlock has no review r_0000000001 of this pull request.' });
+      expect(h.states.some((x) => x.kind === 'review' && x.post?.kind === 'waiting')).toBe(false);
+    });
   });
 
   it.each([

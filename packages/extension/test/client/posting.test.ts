@@ -76,12 +76,22 @@ describe('posting through the client', () => {
   it.each([
     [502, 'GitHub refused the comments: Validation Failed. Nothing was posted.'],
     [409, 'The pull request has new commits since this review. Review the push, then post.'],
-    [404, 'This preview has expired. Open the preview again.'],
     [400, 'Bad.'],
   ])('post: a %i is refused, in the service words', async (status, error) => {
     const { svc, client } = setup();
     svc.on('POST /posts', () => json({ error }, status));
     expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'refused', message: error });
+  });
+
+  it('post: a 404 is no preview, with the service words, never a refusal: a copy the browser sent again gets it too', async () => {
+    const { svc, client } = setup();
+    const expired = 'This preview has expired. Open the preview again.';
+    svc.on('POST /posts', () => json({ error: expired }, 404));
+    expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'no-preview', message: expired });
+    // A 404 whose body is off the contract still says nothing was found; the panel's own sentence stands in.
+    svc.on('POST /posts', () => json({ nope: true }, 404));
+    expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'no-preview', message: NOT_UNDERSTOOD });
+    expect(svc.calls.filter((c) => c === 'POST /posts')).toHaveLength(2);
   });
 
   it('post: a 504 is unclear, with the service words', async () => {
