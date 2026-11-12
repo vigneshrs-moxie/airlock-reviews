@@ -4,7 +4,7 @@ import type { PrInfo, ReviewDocument, ReviewRange } from '@airlock/shared';
 import { planRereview, type RereviewPlan } from '../rereview/range.js';
 import { checkBranchName, FULL_COMMIT_ID, inMirror } from './git-ids.js';
 import { isSyncMerge } from '../shape/detect.js';
-import { mergeCommitRange, mergeRange, type MergeRange } from '../shape/merge-range.js';
+import { mergeCommitRange, mergeRange, NO_OUTSIDE_CONFIG, type MergeRange } from '../shape/merge-range.js';
 import { must, SLOW_EXEC_TIMEOUT_MS, STOPPED, TIMED_OUT, type Exec } from '../util/exec.js';
 import { airlockHome, repoSlug } from '../util/paths.js';
 
@@ -183,8 +183,15 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   };
   await mkdir(reviewDir, { recursive: true });
   // With core.symlinks=false a link is checked out as a small file holding its target, so no review read can leave the worktree.
-  const addWorktree = (dir: string, sha: string) =>
-    exec('git', ['-c', 'core.symlinks=false', '--git-dir', mirror, 'worktree', 'add', '--detach', dir, sha]);
+  // The checkout writes the pull request's files, which its own attributes could send to a filter (`filter.<name>.smudge`
+  // or `process`) set in the person's or the system's configuration, and it would run a `post-checkout` hook from a
+  // `core.hooksPath` set there, in the pull request's code. So it runs with neither configuration (NO_OUTSIDE_CONFIG),
+  // no attributes file and no hooks: only the mirror's own configuration, which names no filter. The clone and fetch keep
+  // the person's configuration (they need its credential helper and write no file of the pull request).
+  const addWorktree = (dir: string, sha: string) => exec('git', [
+    '-c', 'core.symlinks=false', '-c', 'core.attributesFile=/dev/null', '-c', 'core.hooksPath=/dev/null',
+    '--git-dir', mirror, 'worktree', 'add', '--detach', dir, sha,
+  ], { env: NO_OUTSIDE_CONFIG });
   try {
     must(await addWorktree(headDir, range.headSha), 'git worktree add (head)');
     must(await addWorktree(baseDir, range.baseSha), 'git worktree add (base)');

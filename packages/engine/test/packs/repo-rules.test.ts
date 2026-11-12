@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -143,6 +143,55 @@ describe('loadRepoRulesAt', () => {
       expect(capped.leftOut).toEqual([{ path: 'CLAUDE.md', reason: 'it would take the rule files past 64,000 bytes' }]);
       // Only a full commit id is given to git.
       await expect(loadRepoRulesAt(realExec, gitDir, '--output=x', [])).rejects.toThrow('is not a full commit id');
+    } finally {
+      await rm(r.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('finds rule files whose names are in another letter case, as a first review reads them from a checkout', async () => {
+    const r = await makeTempRepo();
+    try {
+      await r.write('Claude.md', 'MIXED CLAUDE');
+      await r.write('agents.md', 'LOWER AGENTS');
+      await r.write('.GitHub/Copilot-Instructions.md', 'COPILOT');
+      await r.write('a/b/claude.md', 'NESTED');
+      await r.write('a/b/c.ts', 'x');
+      const commit = await r.commit('rules in another case');
+      const got = await loadRepoRulesAt(realExec, join(r.dir, '.git'), commit, ['a/b/c.ts']);
+      expect(got).toEqual({
+        rules: [
+          { path: 'CLAUDE.md', text: 'MIXED CLAUDE' }, { path: 'AGENTS.md', text: 'LOWER AGENTS' },
+          { path: '.github/copilot-instructions.md', text: 'COPILOT' }, { path: 'a/b/CLAUDE.md', text: 'NESTED' },
+        ],
+        leftOut: [],
+      });
+      // On a disk that ignores letter case (this Mac's), a first review reads the same files from the checkout.
+      if (await stat(join(r.dir, 'CLAUDE.md')).then(() => true, () => false)) {
+        expect(await loadRepoRules(r.dir, ['a/b/c.ts'], realExec)).toEqual(got);
+      }
+    } finally {
+      await rm(r.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('of two names that differ only by case, reads the engine\'s own spelling, else the first in the tree', async () => {
+    const r = await makeTempRepo();
+    try {
+      // Built with git's own commands, since a disk that ignores case cannot hold both names.
+      const gitDir = join(r.dir, '.git');
+      const blob = async (text: string): Promise<string> =>
+        (await realExec('git', ['--git-dir', gitDir, 'hash-object', '-w', '--stdin'], { input: text })).stdout.trim();
+      const entries = [
+        ['Claude.md', 'MIXED CLAUDE'], ['CLAUDE.md', 'UPPER CLAUDE'], ['claude.md', 'LOWER CLAUDE'],
+        ['agents.md', 'LOWER AGENTS'], ['Agents.md', 'MIXED AGENTS'],
+      ];
+      const lines = await Promise.all(entries.map(async ([name, text]) => `100644 blob ${await blob(text!)}\t${name}\n`));
+      const tree = (await realExec('git', ['--git-dir', gitDir, 'mktree'], { input: lines.join('') })).stdout.trim();
+      const commit = (await realExec('git', ['--git-dir', gitDir, 'commit-tree', '-m', 'both', tree], {
+        env: { GIT_AUTHOR_NAME: 'A', GIT_AUTHOR_EMAIL: 'a@airlock.invalid', GIT_COMMITTER_NAME: 'A', GIT_COMMITTER_EMAIL: 'a@airlock.invalid' },
+      })).stdout.trim();
+      const { rules } = await loadRepoRulesAt(realExec, gitDir, commit, []);
+      expect(rules).toEqual([{ path: 'CLAUDE.md', text: 'UPPER CLAUDE' }, { path: 'AGENTS.md', text: 'MIXED AGENTS' }]);
     } finally {
       await rm(r.dir, { recursive: true, force: true });
     }

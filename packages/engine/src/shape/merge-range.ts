@@ -79,8 +79,9 @@ async function treeOf(exec: Exec, mirror: string, spec: string): Promise<string>
  * The person's and the system's git configuration kept out of the merge: a merge driver set there (`merge.<name>.driver`,
  * chosen through `core.attributesFile`) would run a program of theirs on the pull request's files. The mirror's own
  * configuration is Airlock's and names no driver, so attributes in the pull request's tree can then choose only git's own.
+ * The workspace checks the pull request out the same way, so no filter or hook of theirs runs either.
  */
-const NO_OUTSIDE_CONFIG: Record<string, string> = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+export const NO_OUTSIDE_CONFIG: Record<string, string> = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
 
 /**
  * The tree of the merge git makes by itself of `ours` and `theirs`, and the paths it reported as conflicts (none for a
