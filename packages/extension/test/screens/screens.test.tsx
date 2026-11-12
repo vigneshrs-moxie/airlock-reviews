@@ -7,21 +7,24 @@ import { brief, latestFor, map, prSummary, running } from './fixtures';
 
 afterEach(cleanup);
 
-function show(state: PanelState, onOpenPacks = vi.fn()) {
+function show(state: PanelState, onOpenSettings = vi.fn()) {
   const dispatch = vi.fn();
-  const view = render(<PanelScreen state={state} dispatch={dispatch} onOpenPacks={onOpenPacks} />);
-  return { dispatch, onOpenPacks, ...view };
+  const view = render(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={onOpenSettings} />);
+  return { dispatch, onOpenSettings, ...view };
 }
 
 const two = { packs: [{ id: 'orbit', title: 'Orbit' }, { id: 'generic', title: 'Generic' }] };
 
 describe('frame', () => {
-  it('names Airlock, the connection and a Packs button that calls onOpenPacks', () => {
-    const { onOpenPacks } = show({ kind: 'ready', pr: prSummary() });
+  it('names Airlock, the connection and a Settings button, with its gear hidden from screen readers, that calls onOpenSettings', () => {
+    const { onOpenSettings } = show({ kind: 'ready', pr: prSummary() });
     expect(screen.getByText('Airlock')).toBeTruthy();
     expect(screen.getByText('Connected')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Packs' }));
-    expect(onOpenPacks).toHaveBeenCalledTimes(1);
+    const button = screen.getByRole('button', { name: 'Settings' });
+    expect(button.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+    expect(document.querySelectorAll('header button')).toHaveLength(1);
+    fireEvent.click(button);
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
   });
   it('says Not running and Not paired', () => {
     show({ kind: 'offline' });

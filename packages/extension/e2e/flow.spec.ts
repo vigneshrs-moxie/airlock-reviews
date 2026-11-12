@@ -280,10 +280,12 @@ test('3. Running: stage lines arrive, and the brief and map are shown while a la
   expect(run?.written.some((item) => 'type' in item && item.type === 'done')).toBe(false);
   expect(run?.written).toContainEqual({ comment: 'keep-alive' });
 
-  // The service's status, seen from Packs, lists the running review; Back returns to it.
-  await panel.getByRole('button', { name: 'Packs' }).click();
+  // The service's status, seen from Settings' Service screen, lists the running review; Back and Back return to it.
+  await panel.getByRole('button', { name: 'Settings' }).click();
+  await panel.getByRole('button', { name: 'Service', exact: true }).click();
   await expect(panel.getByText('Running, version test')).toBeVisible();
   await expect(panel.getByText(`${REPO} #${NUMBER}`)).toBeVisible();
+  await panel.getByRole('button', { name: 'Back', exact: true }).click();
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(panel.getByRole('heading', { name: 'Reviewing' })).toBeVisible();
 
@@ -435,14 +437,14 @@ test('9. the service starts again: the panel returns to the review by itself, th
   expect(LatestReplySchema.shape.dismissals.parse(svc().dismissals(REPO, NUMBER))).toHaveLength(1);
 });
 
-test('10. notes: Show notes in the diff turned off removes them all and on brings them back; Open in Airlock on a note opens its finding', async () => {
+test('10. notes: Notes in the diff turned off removes them all and on brings them back; Open in Airlock on a note opens its finding', async () => {
   if (context === undefined) throw new Error('no browser');
   const stepStart = svc().requests.length;
   await expect(noteRows()).toHaveCount(3);
-  await panel.getByRole('button', { name: 'Packs' }).click();
-  const toggle = panel.getByRole('switch', { name: 'Show notes in the diff' });
+  await panel.getByRole('button', { name: 'Settings' }).click();
+  const toggle = panel.getByRole('switch', { name: 'Notes in the diff' });
   await expect(toggle).toBeChecked();
-  // The Packs screen's own reads are made before the notes are turned off and on.
+  // The Settings screen's own reads are made before the notes are turned off and on.
   const since = (from: number) => svc().requests.slice(from).map((r) => `${r.method} ${r.url.split('?')[0]}`);
   await expect.poll(() => since(stepStart)).toEqual(expect.arrayContaining(['GET /status', 'GET /learned']));
   const before = svc().requests.length;
@@ -838,7 +840,8 @@ test('19. a post whose connection is cut before any answer: the panel waits, rea
 });
 
 test('20. Packs shows the learned lines under their packs; Remove asks, removes and shows the note; a line already gone says so', async () => {
-  await panel.getByRole('button', { name: 'Packs' }).click();
+  await panel.getByRole('button', { name: 'Settings' }).click();
+  await panel.getByRole('button', { name: 'Packs and learned lines' }).click();
   const generic = panel.locator('.packs-screen li').filter({ hasText: 'Generic' });
   const orbit = panel.locator('.packs-screen li').filter({ hasText: 'Orbit' });
   await expect(generic.locator('.learned-line')).toHaveCount(2);
@@ -878,6 +881,7 @@ test('20. Packs shows the learned lines under their packs; Remove asks, removes 
   await last.getByRole('button', { name: 'Remove' }).click();
   await expect(panel.locator('.packs-screen .notice').first()).toHaveText("That line was no longer in Generic's product-knowledge.md; nothing was removed.");
   await expect(generic.getByText('Nothing learned yet.')).toBeVisible();
+  await panel.getByRole('button', { name: 'Back', exact: true }).click();
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
 });
 
@@ -1037,7 +1041,8 @@ test('24. an extension repository whose review kit cannot be had: Extensions and
 test('25. Packs on that repository: the Extensions pack\'s learned line has Remove, no pack there is managed by the team, and Remove takes it out', async () => {
   const line = learnedLine(4, { pack: 'extensions', packTitle: 'Extensions', repo: EXT_REPO, text: 'The popup reads the active tab on purpose.' });
   svc().learned.push(line);
-  await panel.getByRole('button', { name: 'Packs' }).click();
+  await panel.getByRole('button', { name: 'Settings' }).click();
+  await panel.getByRole('button', { name: 'Packs and learned lines' }).click();
   const extensions = panel.locator('.packs-screen li').filter({ hasText: 'Extensions' });
   await expect(extensions.locator('.learned-line')).toHaveCount(1);
   await expect(extensions.locator('.learned-line')).toContainText(line.text);
@@ -1049,5 +1054,6 @@ test('25. Packs on that repository: the Extensions pack\'s learned line has Remo
   await expect(panel.locator('.packs-screen .notice').first()).toHaveText('Removed.');
   await expect(extensions.getByText('Nothing learned yet.')).toBeVisible();
   expect(RemoveLearnedBodySchema.parse(bodiesOf('POST', '/learned/remove').at(-1))).toEqual({ repo: EXT_REPO, pack: 'extensions', kind: 'wrong', key: line.key });
+  await panel.getByRole('button', { name: 'Back', exact: true }).click();
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
 });

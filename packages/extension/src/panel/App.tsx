@@ -32,7 +32,7 @@ export function startRealPanel(
 
 /**
  * The real notes: sent to the tab the panel sits beside, through the jump's tab messaging. What the page says it
- * recognised comes back in the notes' state (`page`), which the App gives the Packs screen.
+ * recognised comes back in the notes' state (`page`), which the App gives the Service screen.
  */
 export function browserNotes(settings: SettingsStore, tab: TabWatcher): PageNotes {
   const chrome = browserJumpChrome(() => undefined);
@@ -41,7 +41,7 @@ export function browserNotes(settings: SettingsStore, tab: TabWatcher): PageNote
 
 /**
  * What the panel needs from outside it besides the running panel: the service's status and the stored default depth for
- * the Packs screen, and jumping to a place on GitHub (which tells `onReport` what it found on the page).
+ * Settings, and jumping to a place on GitHub (which tells `onReport` what it found on the page).
  */
 export interface PanelServices {
   settings: SettingsStore;
@@ -149,6 +149,7 @@ export function App({ start = (onState) => startRealPanel(onState), services }: 
       {...(services ? { fetchStatus: services.fetchStatus } : {})}
       {...(services?.fetchLearned ? { fetchLearned: services.fetchLearned } : {})}
       {...(services?.removeLearned ? { removeLearned: services.removeLearned } : {})}
+      {...(services?.size ? { size: services.size } : {})}
     />
   );
 }

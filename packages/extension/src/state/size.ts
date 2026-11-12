@@ -19,9 +19,9 @@ export function applySize(size: Size, root: HTMLElement = document.documentEleme
 }
 
 /** The hint, or Default when it is missing, is not one of the four, or storage cannot be read. */
-export function readSizeHint(storage?: Pick<Storage, 'getItem'>): Size {
+export function readSizeHint(pageStorage?: Pick<Storage, 'getItem'>): Size {
   try {
-    const value = (storage ?? window.localStorage).getItem(HINT_KEY);
+    const value = (pageStorage ?? window.localStorage).getItem(HINT_KEY);
     return isSize(value) ? value : DEFAULT_SIZE;
   } catch {
     return DEFAULT_SIZE;
@@ -29,9 +29,9 @@ export function readSizeHint(storage?: Pick<Storage, 'getItem'>): Size {
 }
 
 /** Writes the hint; a page that cannot store it opens at the stored size a moment later instead. */
-export function writeSizeHint(size: Size, storage?: Pick<Storage, 'setItem'>): void {
+export function writeSizeHint(size: Size, pageStorage?: Pick<Storage, 'setItem'>): void {
   try {
-    (storage ?? window.localStorage).setItem(HINT_KEY, size);
+    (pageStorage ?? window.localStorage).setItem(HINT_KEY, size);
   } catch {
     // The hint is only a copy of what the store keeps.
   }
@@ -54,16 +54,16 @@ export interface SizeSetting {
  */
 export function startSize(
   store: Pick<SettingsStore, 'getSize' | 'setSize'>,
-  { root, storage }: { root?: HTMLElement; storage?: Pick<Storage, 'getItem' | 'setItem'> } = {},
+  { root, pageStorage }: { root?: HTMLElement; pageStorage?: Pick<Storage, 'getItem' | 'setItem'> } = {},
 ): SizeSetting {
   const listeners = new Set<() => void>();
   const show = (next: SizeState): void => {
     state = next;
     applySize(next.size, root);
-    writeSizeHint(next.size, storage);
+    writeSizeHint(next.size, pageStorage);
     for (const listener of listeners) listener();
   };
-  const hint = readSizeHint(storage);
+  const hint = readSizeHint(pageStorage);
   let state: SizeState = { size: hint, failed: false };
   applySize(hint, root);
   /** What is known to be stored, to go back to. */

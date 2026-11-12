@@ -1,0 +1,55 @@
+/* Settings, Packs and Service, the text and button size, and the tour. The .ap-* rules come from
+   docs/design/panel-redesign/theme.css, scoped to these screens so the other screens' own copies cannot collide. */
+
+/* At Large and Largest the panel is narrower in CSS pixels than the side panel is wide: it never asks for more. */
+:root[data-size] .panel { min-width: 0; }
+/* A bottom sheet's height is a share of the panel, not of the viewport, so it still fits when the panel is zoomed. */
+.sheet.bottom .sheet-body { max-height: 90%; }
+
+/* The head: the Settings button sits at the far end, and the row wraps rather than overflow at a large size. */
+.head { flex-wrap: wrap; row-gap: 4px; }
+.head .settings { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; min-height: 32px; }
+.icon { flex: none; }
+
+/* The top of Settings, Packs and Service: Back, then the screen's name. */
+.screen-head { display: flex; align-items: center; gap: 8px; min-height: 32px; }
+.screen-head .title { margin: 0 0 0 auto; }
+.screen-back { display: inline-flex; align-items: center; gap: 2px; min-height: 32px; padding-left: 4px; }
+
+.settings-screen { display: flex; flex-direction: column; gap: 10px; }
+.settings-screen[hidden] { display: none; }
+.service-screen { display: contents; }
+.settings-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin-top: 4px; }
+.settings-group .label { margin: 0; }
+.settings-screen .ap-group { display: flex; flex-direction: column; gap: 6px; }
+
+/* The four sizes: one control, the chosen one filled. Each is a real radio button over its whole part. */
+.ap-seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.ap-seg > label { position: relative; flex: 1 1 0; min-width: 0; min-height: 32px; padding: 6px 2px; display: flex; align-items: center; justify-content: center; text-align: center; font-weight: 600; color: var(--muted); border-left: 1px solid var(--border); cursor: pointer; }
+.ap-seg > label:first-child { border-left: 0; }
+.ap-seg > label.on { background: var(--accent); color: var(--accent-fg); }
+.ap-seg input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.ap-seg > label:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: -3px; }
+
+/* The preview: one finding row and two buttons, drawn at the size on screen. */
+.ap-preview { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px dashed var(--border); border-radius: 8px; }
+.ap-preview .ap-row { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.ap-preview-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.ap-preview .btn { display: inline-flex; align-items: center; min-height: 32px; cursor: default; }
+.ap-preview .ap-sev, .tour .ap-sev { flex: 0 0 38px; padding-top: 1px; font-size: 11px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
+.ap-preview .ap-row-main, .tour .ap-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ap-preview .ap-row-title, .tour .ap-row-title { font-weight: 600; overflow-wrap: anywhere; }
+.ap-preview .ap-row-sub { color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.ap-preview .sev-fix, .tour .sev-fix { color: var(--warn); }
+.tour .sev-ask { color: var(--accent); }
+
+/* A row of Settings: a name, a line under it, and a switch or a chevron. */
+.ap-set { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 2px; font: inherit; color: inherit; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.ap-set .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; }
+.ap-set.ap-set-block { flex-direction: column; align-items: stretch; gap: 2px; cursor: default; }
+.ap-go { flex: none; display: inline-flex; color: var(--muted); }
+.ap-switch { appearance: none; position: relative; flex: none; width: 36px; height: 20px; margin: 0; border-radius: 999px; background: var(--border); cursor: pointer; }
+.ap-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--bg); }
+.ap-switch:checked { background: var(--accent); }
+.ap-switch:checked::after { left: 18px; background: var(--accent-fg); }
+.ap-switch:disabled { opacity: 0.55; cursor: not-allowed; }

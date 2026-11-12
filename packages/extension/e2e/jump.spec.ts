@@ -139,7 +139,8 @@ test('clicking Jump to line in the panel scrolls the newer-view fixture page to 
   await expect(row).toContainText('code - 11');
   await expect(row).toBeInViewport();
   await panel.getByRole('button', { name: 'Back to the review' }).click();
-  await panel.getByRole('button', { name: 'Packs' }).click();
+  await panel.getByRole('button', { name: 'Settings' }).click();
+  await panel.getByRole('button', { name: 'Service', exact: true }).click();
   await expect(panel.getByText('Recognised as the newer view.')).toBeVisible();
   await github.close();
   await panel.close();

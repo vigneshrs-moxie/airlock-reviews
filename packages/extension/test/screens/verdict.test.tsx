@@ -724,7 +724,7 @@ describe('focus stays in the dropped sheet', () => {
   it('sends focus back into the sheet when something behind it is focused, until it closes', () => {
     open();
     const dialog = screen.getByRole('dialog');
-    const behind = button('Packs');
+    const behind = button('Settings');
     behind.focus();
     expect(dialog.contains(document.activeElement)).toBe(true);
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));

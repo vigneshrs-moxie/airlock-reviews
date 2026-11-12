@@ -75,25 +75,25 @@ describe('the notes line under the verdict', () => {
   });
 });
 
-describe('the setting on the Packs screen', () => {
-  it('turns notes off and on with Show notes in the diff, on by default, and says when it could not be saved', async () => {
+describe('the setting in Settings', () => {
+  it('turns notes off and on with Notes in the diff, on by default, and says when it could not be saved', async () => {
     const onShowNotes = vi.fn();
     const s = show({ kind: 'ready', pr: prSummary() }, { showNotes: true, onShowNotes, fetchStatus: () => new Promise(() => undefined) });
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
-    const toggle = screen.getByRole('switch', { name: 'Show notes in the diff' });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Settings' })); });
+    const toggle = screen.getByRole('switch', { name: 'Notes in the diff' });
     expect((toggle as HTMLInputElement).checked).toBe(true);
     fireEvent.click(toggle);
     expect(onShowNotes).toHaveBeenCalledWith(false);
     s.again({ showNotes: false, onShowNotes });
-    expect((screen.getByRole('switch', { name: 'Show notes in the diff' }) as HTMLInputElement).checked).toBe(false);
-    fireEvent.click(screen.getByRole('switch', { name: 'Show notes in the diff' }));
+    expect((screen.getByRole('switch', { name: 'Notes in the diff' }) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole('switch', { name: 'Notes in the diff' }));
     expect(onShowNotes).toHaveBeenLastCalledWith(true);
     s.again({ showNotes: true, onShowNotes, notesFailed: true });
-    const section = screen.getByRole('region', { name: 'Notes' });
+    const section = screen.getByRole('region', { name: 'On GitHub' });
     expect(within(section).getByRole('alert').textContent).toBe('Airlock could not save that setting.');
     // Not read yet: shown on, and not to be changed until it is known.
     s.again({ showNotes: null, onShowNotes });
-    expect((screen.getByRole('switch', { name: 'Show notes in the diff' }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole('switch', { name: 'Notes in the diff' }) as HTMLInputElement).disabled).toBe(true);
   });
 });
 
@@ -151,14 +151,16 @@ describe('Open in Airlock in the panel', () => {
     a.press(finding(1).id);
     expect(detailHeading()?.textContent).toBe('Problem 1');
 
-    // Over the Packs screen: it goes back to the panel to show the finding.
+    // Over Settings (here its Packs screen): it goes back to the panel to show the finding.
     fireEvent.click(screen.getByRole('button', { name: 'Back to the review' }));
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Settings' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs and learned lines' })); });
     expect(document.querySelector('.packs-screen')).not.toBeNull();
     a.press('c_00000009');
     expect(document.querySelector('.packs-screen')).not.toBeNull();
     a.press(finding(2).id);
     expect(document.querySelector('.packs-screen')).toBeNull();
+    expect(document.querySelector('.settings-screen')).toBeNull();
     expect(detailHeading()?.textContent).toBe('Problem 2');
   });
 
@@ -181,11 +183,12 @@ describe('Open in Airlock in the panel', () => {
     expect(detailHeading()).toBeNull();
   });
 
-  it('gives the Packs screen what the page said it recognised when sent notes', async () => {
+  it('gives the Service screen what the page said it recognised when sent notes', async () => {
     const a = app();
     a.send(reviewState([finding(1), finding(2)]));
     a.setNotes({ on: true, line: null, failed: false, page: { view: 'react', missing: ['react-row'] } });
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Settings' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Service' })); });
     const section = within(screen.getByRole('region', { name: 'GitHub page' }));
     expect(section.getByText('Recognised as the newer view. Selectors that found nothing: react-row.')).toBeTruthy();
   });
@@ -198,8 +201,8 @@ describe('Open in Airlock in the panel', () => {
     a.setNotes({ on: true, line: { text: COULD_NOT_REACH_PAGE, reload: true }, failed: false });
     fireEvent.click(screen.getByRole('button', { name: 'Reload the GitHub tab' }));
     expect(a.notes.reload).toHaveBeenCalledTimes(1);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
-    fireEvent.click(screen.getByRole('switch', { name: 'Show notes in the diff' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Settings' })); });
+    fireEvent.click(screen.getByRole('switch', { name: 'Notes in the diff' }));
     expect(a.notes.setShown).toHaveBeenCalledWith(false);
   });
 });

@@ -80,7 +80,7 @@ Airlock writes to GitHub only when you press the post button described next, and
 While a review is on screen, each open finding also appears as a note on the pull request's **Files changed** page, under the line it is about. A note shows the finding's severity and title, and an **Open in Airlock** button that opens the finding in the panel. A finding you dismiss loses its note; restore it and the note comes back. Notes are drawn only on a page that shows the commit the review is of: once the page shows newer commits, the older review's notes are taken off until you review again.
 
 - Notes are private to this browser. Airlock draws them on the page itself: nothing about them is sent to the service or to GitHub, and they are never posted. Only the post button posts anything.
-- To turn them off, press **Packs** and switch off **Show notes in the diff**. Switch it on again to bring them back.
+- To turn them off, press **Settings** at the top of the panel and switch off **Notes in the diff**. Switch it on again to bring them back.
 - A line under the verdict says how many notes are on the page, for example "4 notes shown in the diff". "<n> shown, <m> waiting for their lines to load" means that m findings' lines are not on the page yet: GitHub loads files as you scroll, a file may be collapsed, or the line is in folded context or outside the diff. Each note appears when its line does; Airlock never puts a note anywhere else. At most 60 notes are shown, and the line then adds "(the first 60 findings)".
 - GitHub's newer Files changed view is not fully known to Airlock yet, so notes may not appear there. When Airlock still cannot place them after a minute, the panel says "Notes cannot be shown on this version of GitHub's page (…). Jump to line still works.", naming the parts of the page it could not find.
 - If the GitHub page was opened before the commit the review is of (you reviewed a push without reloading the page), the panel says "The GitHub page was opened before the commit this review is of, so the notes are hidden until you reload it." Press **Reload the GitHub tab** and the notes appear.
@@ -161,7 +161,7 @@ Airlock picks the packs for a pull request by its repository, ignoring letter ca
 
 ## What Airlock learned
 
-When you dismiss a finding as Wrong or Intended, Airlock saves one line to a rule pack, and the reviewer follows it from the next review on. To see these lines, press **Packs** at the top of the panel. Under **Packs for this repository**, each pack lists its lines, newest first. Each line shows its date, its kind (**Wrong** or **Product fact**), and whether it applies to this repository.
+When you dismiss a finding as Wrong or Intended, Airlock saves one line to a rule pack, and the reviewer follows it from the next review on. To see these lines, press **Settings** at the top of the panel, then **Packs and learned lines**. Under **Packs for this repository**, each pack lists its lines, newest first. Each line shows its date, its kind (**Wrong** or **Product fact**), and whether it applies to this repository.
 
 To take a line out:
 
@@ -181,7 +181,7 @@ The lines are plain text files, so you can also edit them by hand (see the end o
 | "The service could not show that it holds this panel's token, so the token was not sent." | If you just ran `npm run service -- token --new`, paste the new token. Otherwise run `npm run service -- status`: another program may hold the port while Airlock is stopped. |
 | "already paired with another copy of the extension" | Run `npm run service -- unpair`, then pair again. |
 | `Airlock could not reach the GitHub page` | Press **Reload the GitHub tab** in the panel. This happens after the extension itself is reloaded, or on a tab that was open before Airlock was loaded. |
-| A jump says "Asked GitHub to show…" and nothing is marked | GitHub's page changed in a way Airlock does not recognise yet. The Packs screen lists which parts it could not find. |
+| A jump says "Asked GitHub to show…" and nothing is marked | GitHub's page changed in a way Airlock does not recognise yet. In **Settings**, **Service** lists which parts it could not find, under GitHub page. |
 | The service will not start: "Port 4611 is already in use" | Another copy of Airlock is running. `npm run service -- status` shows it. |
 | "Port 4611 is in use by another program." | Something else holds the port. Stop that program, then start Airlock again. Started at login, Airlock tries again by itself every 30 seconds. |
 

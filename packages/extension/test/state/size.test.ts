@@ -86,7 +86,7 @@ describe('start-up', () => {
     const el = root();
     const storage = memoryStorage({ 'airlock.size': 'l' });
     const { store, release } = deferredStore();
-    const size = startSize(store, { root: el, storage });
+    const size = startSize(store, { root: el, pageStorage: storage });
     // Before the store has answered: the hint.
     expect(el.dataset.size).toBe('l');
     expect(size.current()).toEqual({ size: 'l', failed: false });
@@ -104,7 +104,7 @@ describe('start-up', () => {
   it('changes nothing when the store agrees with the hint', async () => {
     const el = root();
     const { store, release } = deferredStore();
-    const size = startSize(store, { root: el, storage: memoryStorage({ 'airlock.size': 's' }) });
+    const size = startSize(store, { root: el, pageStorage: memoryStorage({ 'airlock.size': 's' }) });
     const heard = vi.fn();
     size.subscribe(heard);
     release('s');
@@ -116,7 +116,7 @@ describe('start-up', () => {
   it('opens at Default and says nothing when neither the hint nor the store can be read', async () => {
     const el = root();
     const { store, refuse } = deferredStore();
-    const size = startSize(store, { root: el, storage: throwing });
+    const size = startSize(store, { root: el, pageStorage: throwing });
     refuse(new Error('storage error'));
     await settle();
     expect(el.dataset.size).toBe('m');
@@ -127,7 +127,7 @@ describe('start-up', () => {
   it('keeps a size chosen before the store answered', async () => {
     const el = root();
     const { store, release } = deferredStore();
-    const size = startSize(store, { root: el, storage: memoryStorage() });
+    const size = startSize(store, { root: el, pageStorage: memoryStorage() });
     size.choose('l');
     release('s');
     await settle();
@@ -141,7 +141,7 @@ describe('choosing a size', () => {
     const el = root();
     const storage = memoryStorage();
     const { store, release, setSize } = deferredStore();
-    const size = startSize(store, { root: el, storage });
+    const size = startSize(store, { root: el, pageStorage: storage });
     release('m');
     await settle();
     size.choose('xl');
@@ -156,7 +156,7 @@ describe('choosing a size', () => {
     const el = root();
     const storage = memoryStorage();
     const { store, release, setSize } = deferredStore();
-    const size = startSize(store, { root: el, storage });
+    const size = startSize(store, { root: el, pageStorage: storage });
     release('l');
     await settle();
     setSize.mockRejectedValueOnce(new Error('quota'));
@@ -173,7 +173,7 @@ describe('choosing a size', () => {
   it('ignores the failure of an earlier choice once a later one is made', async () => {
     const el = root();
     const { store, release, setSize } = deferredStore();
-    const size = startSize(store, { root: el, storage: memoryStorage() });
+    const size = startSize(store, { root: el, pageStorage: memoryStorage() });
     release('m');
     await settle();
     let refuseFirst: (e: Error) => void = () => undefined;

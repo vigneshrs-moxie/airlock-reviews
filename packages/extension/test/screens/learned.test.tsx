@@ -25,8 +25,13 @@ async function show(lines: LearnedReply | Error, extra: Partial<PanelScreenProps
     <PanelScreen state={state} dispatch={() => undefined} onOpenPacks={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))}
       fetchLearned={fetchLearned} removeLearned={removeLearned} {...extra} />,
   );
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
+  await openPacks();
   return { fetchLearned, removeLearned, ...view };
+}
+/** Settings, then its Packs and learned lines row. */
+async function openPacks() {
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Settings' })); });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs and learned lines' })); });
 }
 const pack = (title: string) => within(within(document.querySelector<HTMLElement>('.packs-screen')!).getByText(title).closest('li') as HTMLElement);
 const click = async (el: HTMLElement) => { await act(async () => { fireEvent.click(el); }); };
@@ -162,14 +167,14 @@ describe('learned lines under Packs', () => {
     render(
       <PanelScreen state={READY} dispatch={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))} fetchLearned={fetchLearned} />,
     );
-    await click(screen.getByRole('button', { name: 'Packs' }));
+    await openPacks();
     expect(screen.getByText('Loading what Airlock has learned…')).toBeTruthy();
     await act(async () => { release(reply([])); await slow; });
     expect(screen.queryByText('Loading what Airlock has learned…')).toBeNull();
     cleanup();
     fetchLearned.mockReset().mockRejectedValueOnce(new ServiceError('problem', 'The pack folder is unreadable.')).mockResolvedValue(reply([line(1)]));
     render(<PanelScreen state={READY} dispatch={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))} fetchLearned={fetchLearned} />);
-    await click(screen.getByRole('button', { name: 'Packs' }));
+    await openPacks();
     expect(screen.getByText('The pack folder is unreadable.')).toBeTruthy();
     await click(screen.getByRole('button', { name: 'Load again' }));
     expect(screen.getByText('Learned line 1.')).toBeTruthy();
@@ -206,7 +211,7 @@ describe('learned lines under Packs', () => {
         <PanelScreen state={READY} dispatch={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))} fetchLearned={fetchLearned} removeLearned={removeLearned} />
       </StrictMode>,
     );
-    await click(screen.getByRole('button', { name: 'Packs' }));
+    await openPacks();
     fetchLearned.mockResolvedValue(reply([line(2)]));
     const generic = pack('Generic');
     await click(generic.getAllByRole('button', { name: 'Remove' })[0]!);

@@ -597,7 +597,7 @@ describe('the sheet and focus (fix round 2)', () => {
     const { rerender } = open();
     fireEvent.click(radio('Intended'));
     rerender({ kind: 'unpaired' });
-    fireEvent.click(screen.getByRole('button', { name: 'Packs' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     rerender(reviewState([finding(1)]));
     expect(document.querySelector('.sheet')!.contains(document.activeElement)).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
