@@ -55,8 +55,8 @@ const PAIRED_ELSEWHERE =
 /** `?nonce=<32 lower-case hex>`, or nothing; anything else in the query is ignored, as before. */
 const HelloQuerySchema = z.object({ nonce: z.string().regex(NONCE_PATTERN, 'not a nonce').optional() });
 
-/** `tokens` gives the token keeper, which exists once the service listens. */
-function frontRoutes(deps: ServiceDeps, tokens: () => TokenKeeper): Route[] {
+/** `tokens` gives the token keeper, which exists once the service listens; `port` the port it really listens on. */
+function frontRoutes(deps: ServiceDeps, tokens: () => TokenKeeper, port: () => number): Route[] {
   const { home, version } = deps.config;
   return [
     {
@@ -65,7 +65,7 @@ function frontRoutes(deps: ServiceDeps, tokens: () => TokenKeeper): Route[] {
       handler: async (req) => {
         const nonce = req.query.get('nonce');
         const hello: Hello = { airlock: true, version, paired: (await pairedOrigin(home)) !== null };
-        if (nonce !== null) hello.proof = helloProof(await tokens().forProof(), nonce);
+        if (nonce !== null) hello.proof = helloProof(await tokens().forProof(), port(), nonce);
         return { status: 200, json: hello };
       },
     },
@@ -99,11 +99,12 @@ export function createServer(deps: ServiceDeps): Service {
   const reviews = reviewRoutes(
     { ...deps, dismissals: deps.dismissals ?? ((repo, number) => dismissalsFor(deps.config.home, repo, number)) }, hidePaths);
   let keeper: TokenKeeper | undefined;
+  let auth: Auth | undefined;
   const tokens = (): TokenKeeper => {
     if (keeper === undefined) throw new Error('The service is not listening yet.');
     return keeper;
   };
-  const routes = [...frontRoutes(deps, tokens), ...reviews.routes];
+  const routes = [...frontRoutes(deps, tokens, () => auth?.port ?? deps.config.port), ...reviews.routes];
   let server: http.Server | undefined;
   return {
     routes,
@@ -116,8 +117,9 @@ export function createServer(deps: ServiceDeps): Service {
       const found = await file.read();
       const token = 'token' in found ? found.token : made;
       keeper = keepToken({ token, signature }, file, deps.monotonic ?? (() => performance.now()), deps.log);
-      const auth: Auth = { tokens: keeper, port: deps.config.port, pairedOrigin: () => pairedOrigin(deps.config.home) };
-      const created = http.createServer({ connectionsCheckingInterval: 5_000 }, createRouter(routes, auth, deps.log, { hidePaths }));
+      const listening: Auth = { tokens: keeper, port: deps.config.port, pairedOrigin: () => pairedOrigin(deps.config.home) };
+      auth = listening;
+      const created = http.createServer({ connectionsCheckingInterval: 5_000 }, createRouter(routes, listening, deps.log, { hidePaths }));
       created.requestTimeout = deps.limits?.requestTimeoutMs ?? 30_000;
       created.headersTimeout = deps.limits?.headersTimeoutMs ?? 15_000;
       created.keepAliveTimeout = 5_000;
@@ -129,7 +131,7 @@ export function createServer(deps: ServiceDeps): Service {
         });
       });
       const bound = created.address() as AddressInfo;
-      auth.port = bound.port;
+      listening.port = bound.port;
       server = created;
       created.on('error', (e) => deps.log(`server error: ${e.message}`));
       return { port: bound.port, address: bound.address, family: bound.family };

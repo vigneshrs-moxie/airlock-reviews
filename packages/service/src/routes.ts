@@ -13,7 +13,7 @@ import { dismiss, DismissError, restore } from './dismissals.js';
 import { plainMessage, type Handler, type Req, type Res, type Route } from './http.js';
 import { buildPreview, PREVIEW_BODY_MAX, Previews } from './posts/preview.js';
 import { forget, FOUND_ON_GITHUB, post, PostError, postsFor, type PostDeps } from './posts/records.js';
-import { listLearned, removeLearnedLine } from './learned.js';
+import { listLearned, packMessagesForLog, removeLearnedLine } from './learned.js';
 import { LimitError, realTimers, Runs, type RunStart } from './runs.js';
 import type { ServiceDeps } from './server.js';
 import { RUN_GONE, runStream } from './sse.js';
@@ -109,6 +109,18 @@ export function reviewRoutes(
     discard: discardStored,
   });
 
+  // The pack messages `/pr` last logged for each repository: the panel asks `/pr` on every check, so they are logged once
+  // per change, not on every ask.
+  const packsLogged = new Map<string, string>();
+  const logPackMessages = (repo: string, messages: string[]): void => {
+    const key = repo.toLowerCase();
+    const now = messages.join('\n');
+    if (now === (packsLogged.get(key) ?? '')) return;
+    for (const m of messages) deps.log(`packs for ${repo}: ${m}`);
+    if (messages.length === 0) packsLogged.delete(key);
+    else packsLogged.set(key, now);
+  };
+
   let tools: { at: number; claude: boolean; gh: boolean } | null = null;
   const toolsFound = async (): Promise<{ claude: boolean; gh: boolean }> => {
     const now = deps.now().getTime();
@@ -162,7 +174,7 @@ export function reviewRoutes(
       handler: async (req) => {
         const { repo, number } = prOf(req);
         const chosen = await choosePacks(config.packsDir, repo);
-        for (const e of chosen.errors) deps.log(`packs for ${repo}: ${e.message}`);
+        logPackMessages(repo, packMessagesForLog(chosen, config));
         const read = await readPr(repo, number, chosen.packs);
         if ('refusal' in read) return read.refusal;
         const { pr } = read;
@@ -220,8 +232,10 @@ export function reviewRoutes(
         return runStream(() => runs.events(runId), timers);
       },
     },
+    // The routes that write learned lines, which later reviews are given as instructions, require the paired extension's
+    // Origin, not only the token (see Route.requiresOrigin for what that stops and what it does not).
     {
-      method: 'POST', path: '/dismissals', body: DismissBodySchema,
+      method: 'POST', path: '/dismissals', requiresOrigin: true, body: DismissBodySchema,
       handler: async (req) => {
         try {
           return reply<Dismissal>(DismissalSchema, 200, await dismiss(deps, req.body as DismissBody));
@@ -232,7 +246,7 @@ export function reviewRoutes(
       },
     },
     {
-      method: 'POST', path: '/dismissals/restore', body: RestoreBodySchema,
+      method: 'POST', path: '/dismissals/restore', requiresOrigin: true, body: RestoreBodySchema,
       handler: async (req) => {
         try {
           return reply<RestoreReply>(RestoreReplySchema, 200, await restore(deps, req.body as RestoreBody));
@@ -246,7 +260,7 @@ export function reviewRoutes(
       method: 'GET', path: '/learned', query: z.object({ repo: RepoSchema }),
       handler: async (req) => reply<LearnedReply>(LearnedReplySchema, 200, await listLearned(deps, req.query.get('repo') as string)),
     },
-    // The routes that can lead to the one GitHub write require the paired extension's Origin, not only the token.
+    // So do the routes that can lead to the one GitHub write, and the removal of a learned line.
     {
       method: 'POST', path: '/posts/preview', requiresOrigin: true, maxBodyBytes: PREVIEW_BODY_MAX, body: PostPreviewBodySchema,
       handler: posting(async (req) =>

@@ -512,6 +512,29 @@ describe('GET /pr', () => {
     expect(s.log.some((l) => l.includes('acme'))).toBe(false);
   });
 
+  it("logs a pack's message once per change, by its place in the packs folder, and never a learned line's own field", async () => {
+    const s = await startService();
+    const packs = join(s.home, 'packs');
+    await mkdir(join(packs, 'generic', 'learned'), { recursive: true });
+    await writeFile(join(packs, 'generic', 'learned', 'wrong.md'), `2026-11-02 · not a repository SECRET · Bad field.\n`);
+    await mkdir(join(packs, 'broken'), { recursive: true });
+    await writeFile(join(packs, 'broken', 'pack.yaml'), 'id: broken\n');
+    const said = (): string[] => s.log.filter((l) => l.startsWith('packs for'));
+    for (let i = 0; i < 3; i += 1) expect((await s.call('GET', `/pr?repo=${REPO}&number=7`)).status).toBe(200);
+    // Asked three times, as the panel asks on every check: said once.
+    expect(said()).toEqual([`packs for ${REPO}: broken/pack.yaml: missing "lenses"`]);
+    expect(s.log.join('\n')).not.toContain('SECRET');
+    expect(s.log.join('\n')).not.toContain(s.home);
+
+    // A change is said once more; the same messages again are not.
+    await writeFile(join(packs, 'broken', 'pack.yaml'), 'id: broken\nlenses: none\n');
+    for (let i = 0; i < 2; i += 1) await s.call('GET', `/pr?repo=${REPO}&number=7`);
+    expect(said()).toHaveLength(2);
+    expect(said()[1]).toMatch(/^packs for acme\/widgets: broken\/pack\.yaml: /);
+    expect(said()[1]).not.toBe(said()[0]);
+    expect(said()[1]).not.toContain(s.home);
+  });
+
   it('says standard for a large pull request, isOwn for the author, and the default stage for another base', async () => {
     const s = await startService();
     s.exec.set(`gh api repos/${REPO}/pulls/7`, {

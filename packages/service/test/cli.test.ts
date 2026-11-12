@@ -124,10 +124,13 @@ const waitFor = async (check: () => boolean): Promise<void> => {
   expect(check()).toBe(true);
 };
 
-/** A hello as the real service gives it to `status`: with the proof, for the nonce in the address, made with `token`. */
-function provedHello(url: string, hello: Record<string, unknown>, token = TOKEN): Response {
+/**
+ * A hello as the real service gives it to `status`: with the proof, for the port and nonce in the address (or `port`),
+ * made with `token`.
+ */
+function provedHello(url: string, hello: Record<string, unknown>, token = TOKEN, port = new URL(url).port): Response {
   const nonce = new URL(url).searchParams.get('nonce');
-  const proof = nonce === null ? {} : { proof: createHmac('sha256', token).update(`airlock-hello:${nonce}`).digest('hex') };
+  const proof = nonce === null ? {} : { proof: createHmac('sha256', token).update(`airlock-hello:${port}:${nonce}`).digest('hex') };
   return new Response(JSON.stringify({ ...hello, ...proof }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 }
 const isHello = (url: string): boolean => new URL(url).pathname === '/hello';
@@ -578,7 +581,8 @@ describe('status, honestly and read-only', () => {
     const answers: Array<[string, (url: string) => Response]> = [
       ['no proof', () => json(hello)],
       ['a proof made with another token', (url) => provedHello(url, hello, 'cd'.repeat(32))],
-      ['a proof for another nonce', () => provedHello(`http://127.0.0.1/hello?nonce=${'0'.repeat(32)}`, hello)],
+      ['a proof for another nonce', (url) => provedHello(`http://127.0.0.1:${new URL(url).port}/hello?nonce=${'0'.repeat(32)}`, hello)],
+      ['a proof for another port', (url) => provedHello(url, hello, TOKEN, String(Number(new URL(url).port) + 1))],
     ];
     for (const [what, answer] of answers) {
       const h = harness();

@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { EngineDeps } from '@airlock/engine';
 import { MESSAGE_MAX } from '@airlock/shared';
 import { pair, pairedOrigin, readOrCreateToken } from '../src/config.js';
-import { createRouter, type Auth, type Handler } from '../src/http.js';
+import { createRouter, MAX_BODY_BYTES, MAX_DRAINED_BYTES, type Auth, type Handler } from '../src/http.js';
 import { keepToken } from '../src/proof.js';
 import { createServer } from '../src/server.js';
 
@@ -42,6 +42,45 @@ function send(
     req.on('error', reject);
     if (opts.body !== undefined) req.write(opts.body);
     req.end();
+  });
+}
+
+/**
+ * Sends a body in pieces, the next one only once the last was handed to the socket and the event loop turned, and says
+ * what the client saw: the status and body of the answer, whether the answer came after the last piece was written, and
+ * any error on the request (a broken pipe, a reset).
+ */
+function sendInPieces(
+  port: number, headers: Record<string, string>, pieces: string[],
+): Promise<{ status: number; answeredAfterTheLastPiece: boolean; error: string | null; json: unknown }> {
+  return new Promise((resolve) => {
+    let wroteAll = false;
+    let afterAll = false;
+    let status = 0;
+    let error: string | null = null;
+    let json: unknown;
+    const done = (): void => resolve({ status, answeredAfterTheLastPiece: afterAll, error, json });
+    const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/things', agent: false, headers }, (res) => {
+      status = res.statusCode ?? 0;
+      afterAll = wroteAll;
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      // An error that comes after the answer (a reset while the client still writes) is seen before this resolves.
+      res.on('end', () => {
+        try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { json = undefined; }
+        setTimeout(done, 50);
+      });
+    });
+    req.on('error', (e) => { error = e.message; setTimeout(done, 50); });
+    const next = (i: number): void => {
+      if (i === pieces.length) {
+        wroteAll = true;
+        req.end();
+        return;
+      }
+      req.write(pieces[i] as string, () => setImmediate(() => next(i + 1)));
+    };
+    next(0);
   });
 }
 
@@ -275,20 +314,45 @@ describe('bodies', () => {
     expect(bad.json).toEqual({ error: 'The request body is not valid JSON.' });
   });
 
-  it('stops reading a chunked body that grows past 64 KB', async () => {
+  it('stops reading a chunked body that grows past the limit and the bound of what it discards, without waiting for its end', async () => {
     const { port } = await routerRig();
-    const status = await new Promise<number>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('no reply to the oversized chunked body')), 5_000);
+    // Past the bound the service answers 413 and closes while the client is still sending, so the client sees the 413
+    // or, when the close reaches it first, the closed connection: either is the end, and neither is waiting for the body.
+    const status = await new Promise<number | 'closed'>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('no reply to the oversized chunked body')), 10_000);
       const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/things', agent: false, headers: { 'Content-Type': 'application/json', ...bearer } }, (res) => {
         res.resume();
         clearTimeout(timer);
         resolve(res.statusCode ?? 0);
       });
-      req.on('error', () => undefined);
+      req.on('error', () => { clearTimeout(timer); resolve('closed'); });
       req.write('{"name":"');
-      for (let i = 0; i < 4; i += 1) req.write('y'.repeat(30_000));
+      // Never ended: past 64 KB and the 2 MiB discarded after it, the service stops reading and answers.
+      const piece = 'y'.repeat(30_000);
+      for (let i = 0; i * piece.length < MAX_BODY_BYTES + MAX_DRAINED_BYTES + 100_000; i += 1) req.write(piece);
     });
-    expect(status).toBe(413);
+    expect([413, 'closed']).toContain(status);
+  });
+
+  it('reads a body over the limit to its end, up to the bound, before it answers 413, so the client sees the answer and no broken pipe', async () => {
+    const { port } = await routerRig();
+    const piece = 'z'.repeat(10_000);
+    const pieces = ['{"name":"', ...Array.from({ length: 20 }, () => piece), '"}'];
+    const bytes = pieces.reduce((n, p) => n + Buffer.byteLength(p), 0);
+    expect(bytes).toBeGreaterThan(MAX_BODY_BYTES);
+    for (const announced of [false, true]) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json', ...bearer, ...(announced ? { 'Content-Length': String(bytes) } : {}) };
+      const seen = await sendInPieces(port, headers, pieces);
+      expect(seen, `Content-Length announced: ${announced}`).toEqual({ status: 413, answeredAfterTheLastPiece: true, error: null, json: { error: 'The request body is too large.' } });
+    }
+  });
+
+  it('answers 413 at once, reading nothing, when the announced Content-Length is past the limit and the bound', async () => {
+    const { port } = await routerRig();
+    const r = await send(port, 'POST', '/things', {
+      headers: { 'Content-Type': 'application/json', 'Content-Length': String(MAX_BODY_BYTES + MAX_DRAINED_BYTES + 1), ...bearer },
+    }).catch((e: Error) => ({ status: 0, error: e.message }));
+    expect(r.status).toBe(413);
   });
 
   it('refuses a Content-Type other than application/json with 415, and accepts a charset parameter', async () => {
