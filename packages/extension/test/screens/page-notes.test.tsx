@@ -271,7 +271,7 @@ describe('the GitHub tab loads again while a sheet is open', () => {
     const heads: string[] = [];
     const quiet: NotesState = { on: true, line: null, failed: false };
     const notes: PageNotes = {
-      review: vi.fn(), setShown: vi.fn(), reload: vi.fn(), stop: vi.fn(), head: (h) => void heads.push(h),
+      review: vi.fn(), setShown: vi.fn(), reload: vi.fn(), stop: vi.fn(), head: (h) => void heads.push(h.state),
       current: () => quiet, subscribe: () => () => undefined,
     };
     let stop = (): void => undefined;

@@ -77,12 +77,14 @@ Airlock writes to GitHub only when you press the post button described next, and
 
 ## Notes in the diff
 
-While a review is on screen, each open finding also appears as a note on the pull request's **Files changed** page, under the line it is about. A note shows the finding's severity and title, and an **Open in Airlock** button that opens the finding in the panel. A finding you dismiss loses its note; restore it and the note comes back. After new commits, the notes of the older review are taken off the page until you review again.
+While a review is on screen, each open finding also appears as a note on the pull request's **Files changed** page, under the line it is about. A note shows the finding's severity and title, and an **Open in Airlock** button that opens the finding in the panel. A finding you dismiss loses its note; restore it and the note comes back. Notes are drawn only on a page that shows the commit the review is of: once the page shows newer commits, the older review's notes are taken off until you review again.
 
 - Notes are private to this browser. Airlock draws them on the page itself: nothing about them is sent to the service or to GitHub, and they are never posted. Only the post button posts anything.
 - To turn them off, press **Packs** and switch off **Show notes in the diff**. Switch it on again to bring them back.
 - A line under the verdict says how many notes are on the page, for example "4 notes shown in the diff". "<n> shown, <m> waiting for their lines to load" means that m findings' lines are not on the page yet: GitHub loads files as you scroll, a file may be collapsed, or the line is in folded context or outside the diff. Each note appears when its line does; Airlock never puts a note anywhere else. At most 60 notes are shown, and the line then adds "(the first 60 findings)".
-- GitHub's newer Files changed view is not fully known to Airlock yet, so notes may not appear there. The panel then says "Notes cannot be shown on this version of GitHub's page (…). Jump to line still works.", naming the parts of the page it could not find.
+- GitHub's newer Files changed view is not fully known to Airlock yet, so notes may not appear there. When Airlock still cannot place them after a minute, the panel says "Notes cannot be shown on this version of GitHub's page (…). Jump to line still works.", naming the parts of the page it could not find.
+- If the GitHub page was opened before the commit the review is of (you reviewed a push without reloading the page), the panel says "The GitHub page was opened before the commit this review is of, so the notes are hidden until you reload it." Press **Reload the GitHub tab** and the notes appear.
+- If Airlock could not check which commit the page shows (for example, the service was not running when the page loaded), the panel says "Airlock could not check which commit the GitHub page shows, so the notes are hidden until you reload it." Press **Reload the GitHub tab** to try again.
 
 ## Posting comments
 

@@ -1,7 +1,7 @@
 import { diffAnchorId, prRefFromUrl, type Finding } from '@airlock/shared';
 import { NOTES_MAX, NOTE_ID, TITLE_MAX, type ClearNotesMessage, type NotesMessage, type PageNote } from '../page/protocol';
 import { realTimers, type Timers } from '../client/timers';
-import { FILES } from '../page/selectors';
+import { CLASSIC, REACT } from '../page/selectors';
 import { COULD_NOT_REACH, type NotesResult, type PageReport } from './jump';
 import type { ReviewView } from './reduce';
 import { listFindings } from './selection';
@@ -55,13 +55,21 @@ export async function notesFor(view: ReviewView): Promise<{ message: NotesMessag
 /** The line under the verdict; `reload`: it offers to reload the GitHub tab. */
 export interface NotesLine { text: string; reload: boolean }
 
+/** The selectors that place a note under its line: when one of them finds nothing, no note can be placed. */
+const PLACING: readonly string[] = [CLASSIC.newLineNumber.name, REACT.row.name, REACT.lineNumber.name];
+
+/** Said, with the Reload button, when the commit the page shows could not be read, so the notes were taken off. */
+export const PAGE_HEAD_UNKNOWN = 'Airlock could not check which commit the GitHub page shows, so the notes are hidden until you reload it.';
+/** Said, with the Reload button, when the page was loaded before the commit the review is of. */
+export const PAGE_OLDER = 'The GitHub page was opened before the commit this review is of, so the notes are hidden until you reload it.';
+
 /**
  * What to say about sending notes; null when there is nothing to say (no notes, or the page was not the Files changed
  * view). The page cannot show them when it recognises no view, or recognises one but none of the notes is placed and a
- * selector other than its files container's finds nothing: that sentence names those selectors. `viewPending`: a page
- * that recognises no view yet is still being asked again, so its notes count as waiting until it is not.
+ * selector that places notes (a row or line number) finds nothing: that sentence names those selectors. `pending`: the
+ * page is still being asked again within the recheck window, so until it is not, its notes count as waiting.
  */
-export function notesLine(result: NotesResult, left: number, viewPending = false): NotesLine | null {
+export function notesLine(result: NotesResult, left: number, pending = false): NotesLine | null {
   const said = (text: string, reload = false): NotesLine => ({ text, reload });
   switch (result.kind) {
     case 'refused': return said(result.sentence);
@@ -73,9 +81,9 @@ export function notesLine(result: NotesResult, left: number, viewPending = false
         said(`Notes cannot be shown on this version of GitHub's page (${names.join(', ')}). Jump to line still works.`);
       if (view === null && missing.length === 0) return null;
       if (placed + waiting === 0) return null;
-      if (view === null && !viewPending) return cannot(missing);
-      const notFound = view === null ? [] : missing.filter((name) => name !== FILES[view].name);
-      if (placed === 0 && notFound.length > 0) return cannot(notFound);
+      if (view === null && !pending) return cannot(missing);
+      const notFound = view === null ? [] : missing.filter((name) => PLACING.includes(name));
+      if (placed === 0 && notFound.length > 0 && !pending) return cannot(notFound);
       const cut = left > 0 ? ` (the first ${NOTES_MAX} findings)` : '';
       return said(waiting === 0
         ? `${placed} ${placed === 1 ? 'note' : 'notes'} shown in the diff${cut}`
@@ -91,11 +99,11 @@ export function notesLine(result: NotesResult, left: number, viewPending = false
 export interface NotesState { on: boolean | null; line: NotesLine | null; failed: boolean; page?: PageReport }
 
 /**
- * Whether the review's `stale` holds for the page. `reading`: the page loaded again and the pull request is being read
- * again, so notes wait. `unknown`: that read failed, so the page is cleared. `known`: the review's `stale` was worked
- * out from a read made since.
+ * Which commit the tab's page shows, as the panel knows it: the head read when the tab last loaded or moved within the
+ * pull request, or at the panel's first read of it. `reading`: being read (or not read yet), so notes wait. `unknown`:
+ * the read failed, so the page is cleared. `known`: notes are drawn only for a review of `sha`.
  */
-export type HeadState = 'reading' | 'known' | 'unknown';
+export type PageHead = { state: 'reading' } | { state: 'unknown' } | { state: 'known'; sha: string };
 
 /** Sends a message to the content script of tab `tabId`; `reload` when the person asked to reload the tab first. */
 export type SendNotes = (
@@ -124,8 +132,8 @@ export interface PageNotes {
   setShown(on: boolean): void;
   /** The person asked to reload the GitHub tab: it is reloaded, then the notes are sent again. */
   reload(): void;
-  /** What the panel knows of the pull request's head since the page last loaded; see `HeadState`. */
-  head(state: HeadState): void;
+  /** Which commit the page shows, as the panel knows it; see `PageHead`. */
+  head(page: PageHead): void;
   current(): NotesState;
   subscribe(fn: (state: NotesState) => void): () => void;
   stop(): void;
@@ -149,10 +157,11 @@ const sameReport = (a: PageReport | undefined, b: PageReport | undefined): boole
 
 /**
  * Keeps the notes on the tab's page in step with the panel. While a review is on screen, the setting is on and the review
- * is of the pull request's head, the notes for its open findings go to the tab when it shows that pull request's Files
- * changed view: again whenever the notes, the tab's address or the setting change, and when the page finishes loading
- * (a reload starts it empty; nothing is sent while it loads). After the panel says it is reading the pull request again
- * (`head('reading')`), notes wait until it says the head is known; when it could not be read, a clear goes instead.
+ * is of the commit the page shows (`head`), the notes for its open findings go to the tab when it shows that pull
+ * request's Files changed view: again whenever the notes, the tab's address or the setting change, and when the page
+ * finishes loading (a reload starts it empty; nothing is sent while it loads). While the page's commit is being read the
+ * notes wait; when it could not be read, or the review is of another commit, a clear goes instead, and the line says why
+ * with the Reload button when reloading the tab would bring them.
  * While the page says notes wait for their lines, or recognises no view yet, the same notes go again every `RECHECK_MS`
  * for at most `RECHECK_FOR_MS` from the first such answer for that list, address and page load, so the line follows the
  * page. Otherwise a clear message goes, while notes may still be there. Nothing is sent to a tab that is not that pull
@@ -183,8 +192,8 @@ export function startNotes({ tab, settings, send, timers = realTimers, now = Dat
   let recheckFor: string | null = null;
   let recheckUntil = 0;
 
-  /** The head as the panel last said; notes are sent only while it is known. */
-  let head: HeadState = 'known';
+  /** The commit the page shows, as the panel last said; nothing is drawn until it says. */
+  let head: PageHead = { state: 'reading' };
 
   const publish = (next: Partial<NotesState>): void => {
     const merged = { ...state, ...next };
@@ -204,24 +213,32 @@ export function startNotes({ tab, settings, send, timers = realTimers, now = Dat
     forced = { address: either('address'), reload: either('reload'), again: either('again') };
     const g = ++generation;
     const [shown, id, at] = [view, tabId, address];
-    const built = shown !== null && state.on && !shown.stale ? await notesFor(shown) : null;
+    const built = shown !== null && state.on ? await notesFor(shown) : null;
     if (g !== generation || stopped) return;
-    // The page loaded again and the pull request is being read again: the notes wait for it (what was asked carries over).
+    // The page loaded again or moved and its commit is being read: the notes wait for it (what was asked carries over).
     // Checked here, after the await, and not before it: the panel's tab listener and this module's both hear the same
     // update in the same tick, in either order, and the panel says `reading` synchronously. Whichever hears it first, the
     // hold is in place by the time this line runs.
-    if (built !== null && head === 'reading') return;
-    // It could not be read: the head is not known, so the review may be of an older commit and the page is cleared.
-    const wanted = head === 'unknown' ? null : built;
+    if (built !== null && head.state === 'reading') return;
+    // A note is drawn only on a page that shows the commit the review is of; otherwise the page is cleared, and the line
+    // says why when a reload of the tab would bring the notes: its commit could not be read, or it is older than the
+    // review's (a review of an older commit than the head says so in its own banner).
+    const reviewed = shown?.latest.document.pr.headSha.toLowerCase();
+    const why = built === null ? null
+      : head.state === 'unknown' ? PAGE_HEAD_UNKNOWN
+      : head.state === 'known' && head.sha.toLowerCase() !== reviewed ? (shown?.stale === true ? null : PAGE_OLDER)
+      : undefined;
+    const wanted = why === undefined ? built : null;
     const asked = forced;
     forced = {};
     let message: NotesMessage | ClearNotesMessage;
     if (wanted === null) {
       stopRecheck();
-      publish({ line: null });
       // The panel's pull request is the tab's, so with no review the tab's own Files changed view is the one to clear.
       const target = shown === null ? filesOf(at) !== null : isFilesOf(at, shown.pr);
-      if (!mayHold || !target) return;
+      publish({ line: target && typeof why === 'string' ? { text: why, reload: true } : null });
+      // The person's reload still reloads the tab, so the page's commit is read again.
+      if (!target || (!mayHold && asked.reload !== true)) return;
       message = CLEAR_NOTES;
     } else if (!isFilesOf(at, wanted.message.pr)) {
       stopRecheck();
@@ -337,9 +354,9 @@ export function startNotes({ tab, settings, send, timers = realTimers, now = Dat
       void update({ reload: true });
     },
     head(next) {
-      if (stopped || next === head) return;
+      if (stopped || JSON.stringify(next) === JSON.stringify(head)) return;
       head = next;
-      if (next !== 'reading') void update();
+      if (next.state !== 'reading') void update();
     },
     current: () => state,
     subscribe(fn) {

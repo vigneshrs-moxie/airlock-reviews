@@ -3,7 +3,7 @@ import type { Brief, ChangeMap, Dismissal, ServiceEvent } from '@airlock/shared'
 import { NOT_PROVED } from '../../src/client/proof';
 import { NOT_UNDERSTOOD, ServiceClient } from '../../src/client/service';
 import { LOST_MESSAGE, NOT_A_TOKEN, OFFLINE_RETRY_MS, RUN_STOPPED, SHOWING_PROBLEM, TAB_UNREADABLE, WATCH_MS, startPanel } from '../../src/state/machine';
-import type { HeadState } from '../../src/state/notes';
+import type { PageHead } from '../../src/state/notes';
 import type { PanelState } from '../../src/state/reduce';
 import { STAGE_WORDS } from '../../src/state/stage-words';
 import type { SettingsStore } from '../../src/state/settings';
@@ -61,8 +61,8 @@ function harness(opts: {
   url?: string; token?: string | null; failTabReads?: number; prepare?: (svc: FakeService) => void;
   /** Called before each state is recorded; a throw here is the panel's own listener failing. */
   onState?: (s: PanelState) => void;
-  /** Gets what the panel tells the notes of the pull request's head. */
-  heads?: HeadState[];
+  /** Gets what the panel tells the notes of the page's commit: its state, and `known:<first character of the sha>`. */
+  heads?: string[];
 } = {}) {
   const svc = new FakeService();
   opts.prepare?.(svc);
@@ -78,7 +78,7 @@ function harness(opts: {
   const heads = opts.heads;
   const panel = startPanel({
     client, tab, settings, timers, now: () => clock.now,
-    ...(heads === undefined ? {} : { notes: { review: () => undefined, head: (next: HeadState) => void heads.push(next) } }),
+    ...(heads === undefined ? {} : { notes: { review: () => undefined, head: (next: PageHead) => void heads.push(next.state === 'known' ? `known:${next.sha[0]}` : next.state) } }),
     onState: (s) => {
       states.push(s);
       opts.onState?.(s);
@@ -727,11 +727,13 @@ describe('startPanel: the tab moving', () => {
     });
     await until(h, 'running', (s) => s.stages.length === 1);
 
-    // Another page of the same pull request changes nothing.
+    // Another page of the same pull request: only the commit it shows is read, and the run goes on.
     const callsBefore = h.svc.calls.length;
+    const shown = h.states.length;
     h.tab.go(prUrl('acme/widgets', 1, '/files'));
     await settle();
-    expect(h.svc.calls.length).toBe(callsBefore);
+    expect(h.svc.calls.slice(callsBefore)).toEqual(['GET /pr']);
+    expect(h.states).toHaveLength(shown);
     expect(run.listeners.size).toBe(1);
 
     h.tab.go(prUrl('acme/widgets', 2));
@@ -837,7 +839,7 @@ describe('startPanel: reading the head again while a review is on screen', () =>
   const reads = (h: Harness): number => h.svc.calls.filter((c) => c === 'GET /pr').length;
 
   it('a move within the page to another tab of the same pull request reads it again; a fragment alone does not', async () => {
-    const heads: HeadState[] = [];
+    const heads: string[] = [];
     const h = harness({ heads, prepare: reviewed });
     await until(h, 'review');
     const before = reads(h);
@@ -846,7 +848,7 @@ describe('startPanel: reading the head again while a review is on screen', () =>
     h.tab.go(prUrl('acme/widgets', 1, '/files'));
     expect(await until(h, 'review', (s) => s.stale)).toMatchObject({ pr: { headSha: MOVED }, stale: true });
     expect(reads(h)).toBe(before + 1);
-    expect(heads.slice(-2)).toEqual(['reading', 'known']);
+    expect(heads.slice(-2)).toEqual(['reading', 'known:d']);
     // A jump changes only the fragment: the diff is the same, nothing is read.
     h.tab.go(prUrl('acme/widgets', 1, '/files#diff-abc'));
     // A page still loading is read when it is complete, once.
@@ -859,7 +861,7 @@ describe('startPanel: reading the head again while a review is on screen', () =>
   });
 
   it('a second trigger while a read is in flight: only the newest read\'s answer counts', async () => {
-    const heads: HeadState[] = [];
+    const heads: string[] = [];
     const h = harness({ heads, prepare: reviewed });
     await until(h, 'review');
     const first = held();
@@ -879,18 +881,18 @@ describe('startPanel: reading the head again while a review is on screen', () =>
     expect(h.states).toHaveLength(shown);
     expect(heads.at(-1)).toBe('reading');
     second.release(json(prSummary()));
-    await turnsUntil(() => heads.at(-1) === 'known');
+    await turnsUntil(() => heads.at(-1) === 'known:c');
     expect(h.states).toHaveLength(shown);
-    expect(heads.slice(-3)).toEqual(['reading', 'reading', 'known']);
+    expect(heads.slice(-3)).toEqual(['reading', 'reading', 'known:c']);
   });
 
-  it('a load the notes wait on that fails tells them the head is unknown', async () => {
-    const heads: HeadState[] = [];
+  it('the tab loading while the panel loads is read itself; a read that fails leaves the page\'s commit unknown', async () => {
+    const heads: string[] = [];
     const read = held();
     const h = harness({ heads, prepare: (svc) => { reviewed(svc); svc.on('GET /pr', read.reply); } });
     await until(h, 'loading');
     await turnsUntil(read.asked);
-    // The tab finishes loading while the panel is still loading: the load in progress is to answer for the head.
+    // The tab finishes loading while the panel is still loading: its commit is read, apart from the load.
     h.tab.go(prUrl('acme/widgets', 1), 'complete');
     expect(heads).toEqual(['reading']);
     read.release(json({ error: 'GitHub did not answer.' }, 502));
@@ -899,10 +901,63 @@ describe('startPanel: reading the head again while a review is on screen', () =>
   });
 
   it('a load nobody waits on that fails tells the notes nothing', async () => {
-    const heads: HeadState[] = [];
+    const heads: string[] = [];
     const h = harness({ heads, prepare: (svc) => svc.on('GET /pr', () => json({ error: 'GitHub did not answer.' }, 502)) });
     await until(h, 'problem');
     expect(heads).toEqual([]);
+  });
+
+  it('the first read is the page\'s commit; a load of the panel\'s own afterwards does not change it', async () => {
+    const heads: string[] = [];
+    const h = harness({ heads, prepare: reviewed });
+    await until(h, 'review');
+    expect(heads).toEqual(['known:c']);
+    // The service goes away and comes back after a push: the panel loads again quietly and learns of it.
+    h.svc.down = true;
+    for (let i = 0; i < 4 && h.last()?.kind !== 'offline'; i++) {
+      h.timers.fire();
+      await settle();
+    }
+    h.svc.down = false;
+    h.svc.addPr(prSummary({ headSha: MOVED }));
+    h.timers.fire();
+    await until(h, 'review', (s) => s.stale);
+    expect(heads).toEqual(['known:c']);
+  });
+
+  it('a read answered after the panel went offline does not say the commit is known', async () => {
+    const heads: string[] = [];
+    const h = harness({ heads, prepare: reviewed });
+    await until(h, 'review');
+    const read = held();
+    h.svc.on('GET /pr', read.reply);
+    h.tab.go(prUrl('acme/widgets', 1, '/files'));
+    await turnsUntil(read.asked);
+    // The checks that the service answers miss twice meanwhile.
+    h.svc.down = true;
+    for (let i = 0; i < 4 && h.last()?.kind !== 'offline'; i++) {
+      h.timers.fire();
+      await settle();
+    }
+    expect(h.last()?.kind).toBe('offline');
+    read.release(json(prSummary()));
+    await settle();
+    expect(heads.slice(-2)).toEqual(['reading', 'unknown']);
+  });
+
+  it('a run that finishes reads the pull request again: stale comes from that answer, and the page\'s commit stays', async () => {
+    const heads: string[] = [];
+    const h = harness({ heads, prepare: reviewed });
+    await until(h, 'review');
+    h.panel.dispatch({ type: 'start', depth: 'quick' });
+    await until(h, 'running');
+    h.svc.addPr(prSummary({ headSha: MOVED }));
+    const run = [...h.svc.runs.values()].at(-1)!;
+    const doc = { ...latestFor(prSummary()).document, id: 'r_0000000002' };
+    h.svc.latest.set('acme/widgets#1', { document: doc, dismissals: [], posts: [] });
+    run.emit({ type: 'done', document: doc });
+    expect(await until(h, 'review', (s) => s.stale)).toMatchObject({ pr: { headSha: MOVED }, stale: true });
+    expect(heads).toEqual(['known:c']);
   });
 });
 

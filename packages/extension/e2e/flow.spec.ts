@@ -8,7 +8,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { kitUnavailable, signal, startFakeService, type FakeService, type RunStep } from './fake-service';
+import { kitUnavailable, signal, startFakeService, type FakeService, type RecordedRequest, type RunStep } from './fake-service';
 import { clickNode, insideNotes, otherPages, type OtherPage } from './note-dom';
 import { E2E_PORT } from './port';
 
@@ -451,9 +451,18 @@ test('10. notes: Show notes in the diff turned off removes them all and on bring
   await expect(noteRows()).toHaveCount(0);
   await toggle.click();
   await expect(noteRows()).toHaveCount(3);
-  // Notes are private: turning them off and on asked the service nothing. The panel's check that the service still
-  // answers (GET /hello, every five seconds) is the only request that may fall in this window.
-  expect(since(before).filter((r) => r !== 'GET /hello')).toEqual([]);
+  // Notes are private: turning them off and on asked the service nothing. Only the panel's own reads may fall in this
+  // window: its check that the service still answers (GET /hello, every five seconds), and its read of the commit the
+  // GitHub tab shows (GET /pr, when Chrome reports the tab loaded or moved), which carries no body and names only the
+  // repository and the number.
+  const own = (r: RecordedRequest): boolean => {
+    const [path, query = ''] = r.url.split('?');
+    if (r.method === 'GET' && path === '/hello') return true;
+    const asked = [...new URLSearchParams(query).entries()];
+    return r.method === 'GET' && path === '/pr' && r.body === undefined
+      && JSON.stringify(asked) === JSON.stringify([['repo', REPO], ['number', String(NUMBER)]]);
+  };
+  expect(svc().requests.slice(before).filter((r) => !own(r)).map((r) => `${r.method} ${r.url}`)).toEqual([]);
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(verdictLines().getByText('3 shown, 1 waiting for their lines to load')).toBeVisible();
 
