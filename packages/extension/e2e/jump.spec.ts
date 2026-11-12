@@ -182,9 +182,14 @@ test('the built worker is small and carries no schema library', async () => {
   expect(script).not.toContain('ReviewDocument');
 });
 
-test('the built content script is small and carries no schema library', async () => {
+test('the built content script is under 15 kB, imports no dependency, and sets no markup, fetches nothing, stores nothing', async () => {
   const script = await readFile(join(BUILT, 'content-scripts', 'github.js'), 'utf8');
   expect(Buffer.byteLength(script)).toBeLessThan(15 * 1024);
   expect(script).not.toMatch(/zod/i);
   expect(script).not.toContain('ReviewDocument');
+  // No library came along: no module loading, no React, none of the shared words beyond the severities.
+  expect(script).not.toMatch(/\bimport\s*\(|\brequire\(|react-dom|useState|Still open|Request changes/);
+  expect(script).not.toMatch(/innerHTML|outerHTML\s*=|insertAdjacentHTML|document\.write/);
+  expect(script).not.toMatch(/\bfetch\(|XMLHttpRequest|WebSocket|sendBeacon|EventSource/);
+  expect(script).not.toMatch(/\.storage\b|localStorage|sessionStorage|indexedDB|document\.cookie/);
 });
