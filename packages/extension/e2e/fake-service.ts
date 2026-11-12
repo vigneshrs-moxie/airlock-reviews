@@ -402,7 +402,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     if (summaryProblem !== null) throw new Refusal(400, summaryProblem);
     const reviewBody = summaryBody(inSummary, summary);
     // The one rule for which names are warned about, as the service applies it.
-    const named = postMentions(texts, { text: summary, isDefault: summary === generated }, reviewBody);
+    const named = postMentions(texts, { isDefault: summary === generated }, reviewBody);
     named.items.forEach((list, i) => { (items[i] as PostPreviewItem).mentions = list; });
     const previewId = `pv_${randomBytes(8).toString('hex')}`;
     const expiresAt = Date.now() + PREVIEW_MS;
