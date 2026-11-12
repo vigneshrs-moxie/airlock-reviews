@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,8 +44,11 @@ function ghWritesIn(text: string): string[] {
   return found.sort((a, b) => a.at - b.at).map((f) => f.what);
 }
 
-/** Every source file the guard reads: each package's src and scripts, the extension's entrypoints, and config files. */
-async function guardedSources(): Promise<string[]> {
+/**
+ * Every source file the guard reads under `root`: each package's src and scripts, the extension's entrypoints, and
+ * config files. Entries directly under `packages/` that are not folders are skipped.
+ */
+async function guardedSources(root: string = ROOT): Promise<string[]> {
   const sources: string[] = [];
   const walk = async (dir: string): Promise<void> => {
     let entries;
@@ -59,8 +62,9 @@ async function guardedSources(): Promise<string[]> {
       else if (SOURCE.test(entry.name)) sources.push(path);
     }
   };
-  for (const pkg of await readdir(join(ROOT, 'packages'))) {
-    for (const folder of ['src', 'scripts', 'entrypoints']) await walk(join(ROOT, 'packages', pkg, folder));
+  const packages = (await readdir(join(root, 'packages'), { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+  for (const pkg of packages) {
+    for (const folder of ['src', 'scripts', 'entrypoints']) await walk(join(root, 'packages', pkg, folder));
   }
   // Config files at the root, in each package and one level below it (such as the extension's e2e folder).
   const configs = async (dir: string, depth: number): Promise<void> => {
@@ -72,8 +76,8 @@ async function guardedSources(): Promise<string[]> {
       }
     }
   };
-  await configs(ROOT, 0);
-  for (const pkg of await readdir(join(ROOT, 'packages'))) await configs(join(ROOT, 'packages', pkg), 1);
+  await configs(root, 0);
+  for (const pkg of packages) await configs(join(root, 'packages', pkg), 1);
   return [...new Set(sources)];
 }
 
@@ -179,6 +183,20 @@ describe('sendReview', () => {
   });
 });
 
+describe('the scan', () => {
+  it('skips a stray file directly under packages, such as .DS_Store', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'airlock-scan-root-'));
+    try {
+      await mkdir(join(root, 'packages', 'one', 'src'), { recursive: true });
+      await writeFile(join(root, 'packages', '.DS_Store'), 'not a folder');
+      await writeFile(join(root, 'packages', 'one', 'src', 'a.ts'), 'export const a = 1;\n');
+      expect((await guardedSources(root)).map((p) => relative(root, p))).toEqual([join('packages', 'one', 'src', 'a.ts')]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('readPull', () => {
   it('reads only the pull request, within ten seconds, as a read the engine lets through', async () => {
     const pullJson = JSON.stringify({ state: 'open', merged: false, head: { sha: 'c'.repeat(40) } });
@@ -190,7 +208,13 @@ describe('readPull', () => {
     expect(await readPull(fakeExec(answer('{"message":"Bad credentials"}', 'gh: Bad credentials (HTTP 401)', 1)).exec, REPO, 7))
       .toEqual({ kind: 'refused', status: 401, message: 'Bad credentials' });
     expect(await readPull(fakeExec(answer('', 'timed out after 10 s', 124)).exec, REPO, 7)).toEqual({ kind: 'no-answer' });
-    expect(await readPull(fakeExec(async () => { throw new Error('spawn gh ENOENT'); }).exec, REPO, 7)).toEqual({ kind: 'no-answer' });
+    const enoent = Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' });
+    expect(await readPull(fakeExec(async () => { throw enoent; }).exec, REPO, 7)).toEqual({ kind: 'unavailable' });
+    expect(await readPull(fakeExec(answer('', 'To get started with GitHub CLI, please run:  gh auth login', 4)).exec, REPO, 7)).toEqual({ kind: 'unavailable' });
+    expect(await readPull(fakeExec(async () => { throw new Error('The command was stopped.'); }).exec, REPO, 7)).toEqual({ kind: 'no-answer' });
+    for (const status of [500, 502, 503]) {
+      expect(await readPull(fakeExec(answer('{"message":"x"}', `gh: x (HTTP ${status})`, 1)).exec, REPO, 7)).toEqual({ kind: 'server-error', status });
+    }
     expect(await readPull(fakeExec(answer('{"state":"open"}', '', 0)).exec, REPO, 7)).toEqual({ kind: 'unreadable' });
     await expect(readPull(fakeExec(answer('{}', '', 0)).exec, 'a/b/c', 7)).rejects.toThrow();
   });

@@ -202,7 +202,16 @@ describe('POST /posts', () => {
       [{ stdout: '', stderr: 'timed out after 10 s', code: 124 }, 'GitHub did not answer when Airlock read the pull request. Nothing was posted.'],
       [{ stdout: '', stderr: 'error connecting to api.github.com', code: 1 }, 'GitHub did not answer when Airlock read the pull request. Nothing was posted.'],
       [{ stdout: 'not json', stderr: '', code: 0 }, 'Airlock could not read whether the pull request is open. Nothing was posted.'],
+      [{ stdout: '', stderr: 'To get started with GitHub CLI, please run:  gh auth login', code: 4 },
+        'Airlock could not run gh, or gh is not signed in. Nothing was posted.'],
+      [{ stdout: '{"message":"Server Error"}', stderr: 'gh: Server Error (HTTP 500)', code: 1 },
+        'GitHub had an error (HTTP 500) when Airlock read the pull request. Nothing was posted.'],
+      [{ stdout: '{"message":"Bad Gateway"}', stderr: 'gh: Bad Gateway (HTTP 502)', code: 1 },
+        'GitHub had an error (HTTP 502) when Airlock read the pull request. Nothing was posted.'],
     ];
+    s.answers.set(PULL_LINE, async () => { throw Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }); });
+    const missingGh = await s.post(p.previewId);
+    expect([missingGh.status, missingGh.json]).toEqual([502, { error: 'Airlock could not run gh, or gh is not signed in. Nothing was posted.' }]);
     for (const [answer, error] of reads) {
       s.answers.set(PULL_LINE, answer);
       const r = await s.post(p.previewId);

@@ -123,13 +123,18 @@ export type PullRead =
   | { kind: 'pull'; state: string | null; merged: boolean; headSha: string }
   | { kind: 'missing' }
   | { kind: 'refused'; status: number; message: string }
+  | { kind: 'server-error'; status: number }
+  | { kind: 'unavailable' }
   | { kind: 'no-answer' }
   | { kind: 'unreadable' };
 
+/** gh's exit code when it is not signed in. */
+const GH_NOT_SIGNED_IN = 4;
+
 /**
  * Reads the pull request before a post: `gh api repos/<repo>/pulls/<number>`, a read, within READ_TIMEOUT_MS. Says
- * which it was: the pull request, GitHub's 404, another refusal with GitHub's reason, no answer (a timeout, a cut
- * connection, no status), or an answer that is not a pull request. Throws, before running anything, for a repository
+ * which it was: the pull request; GitHub's 404; another 4xx with GitHub's reason; a 5xx; gh missing or not signed in
+ * (GitHub was never asked); no answer (a timeout, a cut connection, no status); or an answer that is not a pull request. Throws, before running anything, for a repository
  * name or number that is not one.
  */
 export async function readPull(exec: Exec, repo: string, number: number): Promise<PullRead> {
@@ -137,9 +142,10 @@ export async function readPull(exec: Exec, repo: string, number: number): Promis
   let result: { stdout: string; stderr: string; code: number };
   try {
     result = await exec('gh', ['api', `repos/${repo}/pulls/${number}`], { timeoutMs: READ_TIMEOUT_MS });
-  } catch {
-    return { kind: 'no-answer' };
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? { kind: 'unavailable' } : { kind: 'no-answer' };
   }
+  if (result.code === GH_NOT_SIGNED_IN) return { kind: 'unavailable' };
   if (result.code === 0) {
     try {
       const pull = PullSchema.safeParse(JSON.parse(result.stdout));
@@ -153,5 +159,6 @@ export async function readPull(exec: Exec, repo: string, number: number): Promis
   const status = STATUS.exec(firstErrorLine)?.[1];
   if (result.code !== 1 || status === undefined) return { kind: 'no-answer' };
   if (status === '404') return { kind: 'missing' };
+  if (status.startsWith('5')) return { kind: 'server-error', status: Number(status) };
   return { kind: 'refused', status: Number(status), message: reason(result.stdout, firstErrorLine) };
 }

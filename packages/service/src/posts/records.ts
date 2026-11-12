@@ -22,6 +22,7 @@ const CLOSED = 'The pull request is closed. Nothing was posted.';
 const MERGED = 'The pull request has been merged. Nothing was posted.';
 const STATE_UNREAD = 'Airlock could not read whether the pull request is open. Nothing was posted.';
 const READ_NO_ANSWER = 'GitHub did not answer when Airlock read the pull request. Nothing was posted.';
+const NO_GH = 'Airlock could not run gh, or gh is not signed in. Nothing was posted.';
 const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
 const KEPT = 'This review was posted, so Airlock keeps its record.';
 const BROKEN =
@@ -164,6 +165,10 @@ export async function post(deps: PostDeps, previewId: string): Promise<PostRecor
     if (pr.kind === 'refused') {
       throw new PostError(502, withReason('GitHub refused to show the pull request: ', pr.status, pr.message, '. Nothing was posted.'));
     }
+    if (pr.kind === 'server-error') {
+      throw new PostError(502, `GitHub had an error (HTTP ${pr.status}) when Airlock read the pull request. Nothing was posted.`);
+    }
+    if (pr.kind === 'unavailable') throw new PostError(502, NO_GH);
     if (pr.kind === 'no-answer') throw new PostError(502, READ_NO_ANSWER);
     if (pr.kind === 'unreadable') throw new PostError(502, STATE_UNREAD);
     if (pr.merged) throw new PostError(409, MERGED);
