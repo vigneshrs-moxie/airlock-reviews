@@ -11,7 +11,7 @@ import {
 import { z, type ZodType } from 'zod';
 import { dismiss, DismissError, restore } from './dismissals.js';
 import { plainMessage, type Handler, type Req, type Res, type Route } from './http.js';
-import { buildPreview, Previews } from './posts/preview.js';
+import { buildPreview, PREVIEW_BODY_MAX, Previews } from './posts/preview.js';
 import { forget, post, PostError, postsFor, type PostDeps } from './posts/records.js';
 import { LimitError, realTimers, Runs } from './runs.js';
 import type { ServiceDeps } from './server.js';
@@ -177,7 +177,7 @@ export function reviewRoutes(
         const document = await latestReview(repo, number);
         if (document === null) return refuse(404, NO_REVIEW);
         return reply<LatestReply>(LatestReplySchema, 200, {
-          document, dismissals: await dismissals(repo, number), posts: await postsFor(config.home, repo, number),
+          document, dismissals: await dismissals(repo, number), posts: await postsFor(config.home, repo, number, deps.log),
         });
       },
     },
@@ -214,7 +214,7 @@ export function reviewRoutes(
     },
     // The routes that can lead to the one GitHub write require the paired extension's Origin, not only the token.
     {
-      method: 'POST', path: '/posts/preview', requiresOrigin: true, body: PostPreviewBodySchema,
+      method: 'POST', path: '/posts/preview', requiresOrigin: true, maxBodyBytes: PREVIEW_BODY_MAX, body: PostPreviewBodySchema,
       handler: posting(async (req) =>
         reply<PostPreviewReply>(PostPreviewReplySchema, 200, await buildPreview(posts, req.body as PostPreviewBody))),
     },

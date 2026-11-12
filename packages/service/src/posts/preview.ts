@@ -11,6 +11,11 @@ import { blockingRecord, fit, keysOf, PostError, recordsOf, shown } from './reco
 export const PREVIEW_MS = 10 * 60_000;
 /** The most previews held; past this the oldest goes. */
 export const PREVIEWS_KEPT = 20;
+/** The preview route's body limit: 30 comments and a summary of 4,000 characters each, in any script, fit in it. */
+export const PREVIEW_BODY_MAX = 512 * 1024;
+/** The most aliases a record keeps for a finding. */
+const ALIASES_KEPT = 50;
+const FINGERPRINT = /^[0-9a-f]{16}$/;
 
 const NO_REVIEW = 'Airlock cannot find that review of this pull request.';
 const NOT_FOUND = 'Airlock cannot find that finding in the stored review.';
@@ -159,7 +164,7 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
     previewId, repo, number, reviewId: doc.id, headSha: doc.pr.headSha,
     payload: { commit_id: doc.pr.headSha, event: 'COMMENT', body: reviewBody, comments },
     items: chosen.map((f, i) => ({
-      fingerprint: f.fingerprint, aliases: [...(f.aliases ?? [])], placement: (items[i] as PostPreviewItem).placement, title: f.title,
+      fingerprint: f.fingerprint, aliases: (f.aliases ?? []).filter((a) => FINGERPRINT.test(a)).slice(0, ALIASES_KEPT), placement: (items[i] as PostPreviewItem).placement, title: f.title,
     })),
     expiresAt: now + PREVIEW_MS,
   };

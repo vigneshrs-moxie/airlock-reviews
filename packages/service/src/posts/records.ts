@@ -75,18 +75,38 @@ async function readRecords(path: string): Promise<PostRecord[] | null> {
   return null;
 }
 
-/** The records of a pull request for the panel; none when there is no file or it cannot be read. */
-export async function postsFor(home: string, repo: string, number: number): Promise<PostRecord[]> {
+/**
+ * The records of a pull request for the panel. A stored record that does not match the contract is left out and logged
+ * by its file and index (never its content), and the rest are returned; none when there is no file or it cannot be read.
+ */
+export async function postsFor(
+  home: string, repo: string, number: number, log: (line: string) => void = () => undefined,
+): Promise<PostRecord[]> {
+  let path = '';
   try {
-    return (await readRecords(await recordsPath(home, repo, number))) ?? [];
-  } catch {
+    path = await recordsPath(home, repo, number);
+    const raw: unknown = JSON.parse(await readFile(path, 'utf8'));
+    if (!Array.isArray(raw)) {
+      log(`the posts file ${path} is not a list; no post record was read from it`);
+      return [];
+    }
+    const kept: PostRecord[] = [];
+    for (const [index, entry] of raw.entries()) {
+      const parsed = PostRecordSchema.safeParse(entry);
+      if (parsed.success) kept.push(parsed.data);
+      else log(`the posts file ${path}: record ${index} does not match the contract and was left out`);
+    }
+    return kept;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') log(`the posts file ${path} could not be read; no post record was read from it`);
     return [];
   }
 }
 
 /**
- * The records of a pull request before a preview, a post or a forget. A file that cannot be read stops them (500): read
- * as empty, it could let a finding be posted twice.
+ * The records of a pull request before a preview, a post or a forget. A file that cannot be read, or holds one record
+ * that does not parse, stops them (500): read as empty it could let a finding be posted twice, and rewritten without the
+ * bad record it would lose it.
  */
 export async function recordsOf(home: string, repo: string, number: number): Promise<{ path: string; list: PostRecord[] }> {
   const path = await recordsPath(home, repo, number);

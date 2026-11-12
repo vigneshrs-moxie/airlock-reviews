@@ -33,7 +33,8 @@ export const SEND_TIMEOUT_MS = 45_000;
 /** The most characters of GitHub's reason that are kept. */
 export const REFUSAL_MAX = 300;
 
-const CreatedSchema = z.object({ id: z.number().int().positive() });
+/** Only the id is read from GitHub's reply; the review's address is built by code from it. */
+const CreatedSchema = z.object({ id: z.number().refine((n) => Number.isSafeInteger(n) && n > 0) });
 const RefusalSchema = z.object({
   message: z.string().optional(),
   errors: z.array(z.union([z.string(), z.object({ message: z.string().optional() })])).optional(),
@@ -66,9 +67,9 @@ function reason(stdout: string, firstErrorLine: string): string {
 /**
  * The one write Airlock makes to GitHub: `gh api --method POST repos/<repo>/pulls/<number>/reviews --input -`, the
  * payload as JSON on standard input, never in the arguments. The payload is rebuilt field by field, so the event is
- * always COMMENT and nothing but these fields can be sent. It runs once: a refusal (GitHub answered with a status) and an
- * outcome that cannot be known (a timeout, a cut connection, no status, a reply that cannot be read) are reported, never
- * retried. Throws, before running anything, for a repository name or number that is not one.
+ * always COMMENT and nothing but these fields can be sent. It runs once: a refusal (GitHub answered with a 4xx status)
+ * and an outcome that cannot be known (a 5xx, a timeout, a cut connection, no status, a reply without a usable id) are
+ * reported, never retried. The address of a posted review is built from the repository, the number and the id. Throws, before running anything, for a repository name or number that is not one.
  */
 export async function sendReview(exec: Exec, repo: string, number: number, payload: ReviewPayload): Promise<SendResult> {
   if (!isRepo(repo) || !PrNumberSchema.safeParse(number).success) throw new Error('Airlock will not post to that address.');
@@ -103,7 +104,8 @@ export async function sendReview(exec: Exec, repo: string, number: number, paylo
   }
   const firstErrorLine = result.stderr.split('\n')[0] ?? '';
   const status = STATUS.exec(firstErrorLine)?.[1];
-  if (result.code === 1 && status !== undefined) {
+  // Only a 4xx is a refusal. A 5xx can come after the review was made, so it is not known, like no status at all.
+  if (result.code === 1 && status !== undefined && status.startsWith('4')) {
     return { kind: 'refused', status: Number(status), message: reason(result.stdout, firstErrorLine) };
   }
   return { kind: 'unknown', message: clean(result.stderr) };

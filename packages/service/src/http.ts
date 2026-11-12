@@ -40,6 +40,8 @@ export interface Route {
    * lead to a GitHub write, so a local command without the extension's Origin cannot reach them.
    */
   requiresOrigin?: boolean;
+  /** The most bytes this route's body may have, in place of MAX_BODY_BYTES; checked while the body is read. */
+  maxBodyBytes?: number;
   body?: ZodType;
   query?: ZodType;
   handler: Handler;
@@ -101,8 +103,8 @@ function matchRoute(route: Route, segments: string[]): Record<string, string> | 
 
 type BodyResult = { ok: true; text: string } | { ok: false; status: 413 };
 
-/** Reads at most 64 KB. Past that it stops reading and reports 413; the caller answers and closes the connection. */
-function readBody(req: IncomingMessage): Promise<BodyResult> {
+/** Reads at most `limit` bytes. Past that it stops reading and reports 413; the caller answers and closes the connection. */
+function readBody(req: IncomingMessage, limit: number): Promise<BodyResult> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -114,7 +116,7 @@ function readBody(req: IncomingMessage): Promise<BodyResult> {
     };
     const onData = (chunk: Buffer): void => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         req.pause();
         done({ ok: false, status: 413 });
         return;
@@ -298,11 +300,12 @@ export function createRouter(
           writeJson(res, 415, { error: 'Airlock only accepts application/json.' }, { Connection: 'close' });
           return;
         }
-        if (length !== undefined && Number(length) > MAX_BODY_BYTES) {
+        const limit = route.maxBodyBytes ?? MAX_BODY_BYTES;
+        if (length !== undefined && Number(length) > limit) {
           writeJson(res, 413, { error: 'The request body is too large.' }, { Connection: 'close' });
           return;
         }
-        const read = await readBody(req);
+        const read = await readBody(req, limit);
         if (!read.ok) {
           res.once('finish', () => req.destroy());
           writeJson(res, 413, { error: 'The request body is too large.' }, { Connection: 'close' });

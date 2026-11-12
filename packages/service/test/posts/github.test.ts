@@ -69,6 +69,11 @@ describe('sendReview', () => {
     expect(long.kind).toBe('refused');
     expect([...(long as { message: string }).message].length).toBe(300);
 
+    for (const status of [403, 404, 422]) {
+      const r = await sendReview(fakeExec(answer('{"message":"No"}', `gh: No (HTTP ${status})`, 1)).exec, REPO, 7, payload);
+      expect(r, String(status)).toEqual({ kind: 'refused', status, message: 'No' });
+    }
+
     const noBody = await sendReview(fakeExec(answer('not json', 'gh: You have exceeded a secondary rate limit (HTTP 403)\n', 1)).exec, REPO, 7, payload);
     expect(noBody).toEqual({ kind: 'refused', status: 403, message: 'You have exceeded a secondary rate limit' });
   });
@@ -78,8 +83,18 @@ describe('sendReview', () => {
       answer('', 'timed out after 60 s', 124),
       answer('', 'error connecting to api.github.com', 1),
       answer('{"message":"Bad"}', 'gh: Bad (HTTP 422)', 2),
+      // A server error may come after the review was made: not a refusal.
+      answer('{"message":"Server Error"}', 'gh: Server Error (HTTP 500)', 1),
+      answer('{"message":"Bad Gateway"}', 'gh: Bad Gateway (HTTP 502)', 1),
+      answer('{"message":"Unavailable"}', 'gh: Unavailable (HTTP 503)', 1),
+      answer('{"message":"Moved"}', 'gh: Moved (HTTP 301)', 1),
       answer('not json', '', 0),
       answer('{"id":"seven"}', '', 0),
+      answer('{"id":0}', '', 0),
+      answer('{"id":-4}', '', 0),
+      answer('{"id":1.5}', '', 0),
+      answer(`{"id":${Number.MAX_SAFE_INTEGER + 2}}`, '', 0),
+      answer('{"html_url":"https://github.com/airlock-test-owner-zz9/none/pull/7#pullrequestreview-3"}', '', 0),
       async () => { throw new Error('spawn gh ENOENT'); },
     ];
     for (const run of cases) {

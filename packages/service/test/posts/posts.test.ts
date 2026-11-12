@@ -262,6 +262,49 @@ describe('POST /posts', () => {
     expect(error).toMatch(/^GitHub refused the comments: No very .*…\. Nothing was posted\.$/);
   });
 
+  it('only a 4xx answer is a refusal: 403, 404 and 422 keep nothing, 500, 502 and 503 leave an unknown record', async () => {
+    for (const status of [403, 404, 422]) {
+      const s = await startService();
+      const p = await previewed(s);
+      s.answers.set(POST_LINE, { stdout: '{"message":"No"}', stderr: `gh: No (HTTP ${status})`, code: 1 });
+      const r = await s.post(p.previewId);
+      expect([r.status, r.json], String(status)).toEqual([502, { error: 'GitHub refused the comments: No. Nothing was posted.' }]);
+      expect(await latestPosts(s)).toEqual([]);
+      s.answers.set(POST_LINE, POSTED);
+      expect((await s.post(p.previewId)).status, String(status)).toBe(200);
+    }
+    for (const status of [500, 502, 503]) {
+      const s = await startService();
+      const p = await previewed(s);
+      s.answers.set(POST_LINE, { stdout: '{"message":"Server trouble"}', stderr: `gh: Server trouble (HTTP ${status})`, code: 1 });
+      const r = await s.post(p.previewId);
+      expect([r.status, r.json], String(status)).toEqual([504, { error: UNKNOWN }]);
+      expect((await latestPosts(s)).map((x) => x.outcome)).toEqual(['unknown']);
+      expect((await s.preview()).status).toBe(409);
+      expect((await s.post(p.previewId)).json).toEqual({ error: EXPIRED });
+      expect(s.writes()).toHaveLength(1);
+    }
+  });
+
+  it("the record's address is built from the id, and a reply without a usable id leaves an unknown record", async () => {
+    const s = await startService();
+    const p = await previewed(s);
+    s.answers.set(POST_LINE, { stdout: JSON.stringify({ id: 81, html_url: 'https://evil.example/acme/widgets/pull/7#pullrequestreview-81' }), stderr: '', code: 0 });
+    const r = await s.post(p.previewId);
+    expect(PostRecordSchema.parse(r.json)).toMatchObject({
+      outcome: 'posted', githubReviewId: 81, url: `https://github.com/${REPO}/pull/${NUMBER}#pullrequestreview-81`,
+    });
+
+    for (const stdout of ['{"html_url":"https://github.com/acme/widgets/pull/7#pullrequestreview-9"}', '{"id":"9"}', '{"id":-1}', 'Created']) {
+      const t = await startService();
+      const q = await previewed(t);
+      t.answers.set(POST_LINE, { stdout, stderr: '', code: 0 });
+      const reply = await t.post(q.previewId);
+      expect([reply.status, reply.json], stdout).toEqual([504, { error: UNKNOWN }]);
+      expect(await latestPosts(t)).toMatchObject([{ outcome: 'unknown', githubReviewId: null, url: null }]);
+    }
+  });
+
   it('a timeout leaves an unknown record, blocks those findings, and is never retried', async () => {
     const s = await startService();
     const p = await previewed(s);
@@ -333,6 +376,39 @@ describe('POST /posts', () => {
     expect((await s.preview()).status).toBe(500);
     expect((await s.post(p.previewId)).status).toBe(500);
     expect(s.writes()).toEqual([]);
+  });
+
+  it('a stored record that does not parse is left out of the list and logged, and the rest are returned', async () => {
+    const s = await startService();
+    const good = record();
+    await s.writeRecords([{ ...record(), id: 'post_bad', outcome: 'maybe' }, good, 'not a record']);
+    expect(await latestPosts(s)).toEqual([good]);
+    const lines = s.log.filter((l) => l.includes('posts'));
+    expect(lines.length).toBeGreaterThanOrEqual(2);
+    expect(lines.some((l) => l.includes(`${NUMBER}.json`) && /\b0\b/.test(l))).toBe(true);
+    expect(lines.some((l) => l.includes(`${NUMBER}.json`) && /\b2\b/.test(l))).toBe(true);
+    expect(s.log.join('\n')).not.toContain('maybe');
+    expect(s.log.join('\n')).not.toContain('not a record');
+  });
+
+  it('the preview route takes a full-size body; other routes keep the 64 KB limit', async () => {
+    const s = await startService();
+    const many = Array.from({ length: 30 }, (_, i) => ({ ...FINDING_A, id: `c_000000${i.toString(16).padStart(2, '0')}`, fingerprint: `${'7'.repeat(14)}${i.toString(16).padStart(2, '0')}` }));
+    await saveReview({ ...review(), id: 'r_2222222222', findings: many });
+    // Each comment and the summary at 4,000 characters, each character three bytes in UTF-8.
+    const items = many.map((f) => ({ fingerprint: f.fingerprint, body: '€'.repeat(COMMENT_MAX) }));
+    const full = { repo: REPO, number: NUMBER, reviewId: 'r_2222222222', items, summary: '€'.repeat(4000) };
+    expect(Buffer.byteLength(JSON.stringify(full))).toBeGreaterThan(300 * 1024);
+    const r = await s.call('POST', '/posts/preview', full);
+    expect(r.status, JSON.stringify(r.json).slice(0, 200)).toBe(200);
+    expect(PostPreviewReplySchema.parse(r.json).items).toHaveLength(30);
+
+    const huge = await s.call('POST', '/posts/preview', { ...full, summary: 'x'.repeat(600 * 1024) });
+    expect([huge.status, huge.json]).toEqual([413, { error: 'The request body is too large.' }]);
+    const other = await s.call('POST', '/dismissals', {
+      repo: REPO, number: NUMBER, reviewId: REVIEW, findingId: 'c_aaaaaaaa', reason: 'not-now', text: 'x'.repeat(100 * 1024),
+    });
+    expect([other.status, other.json]).toEqual([413, { error: 'The request body is too large.' }]);
   });
 
   it('the post routes refuse a request without an Origin header even with the token', async () => {
