@@ -6,7 +6,7 @@ import {
   PackIdSchema, PrSummarySchema, RepoSchema, ReviewIdSchema, RestoreBodySchema, RunIdSchema, ServiceEventSchema,
   ServiceStatusSchema, SMALL_PR_LINES, StartReviewBodySchema, StartReviewReplySchema, checkLearnedText, isRepo,
   minimalDocument, prRefFromUrl, suggestedDepth, HelloSchema, LatestReplySchema, PostPreviewBodySchema, PostRecordSchema,
-  PostBodySchema, PreviewIdSchema, PostIdSchema, LearnedLineSchema, REVIEW_BODY_MAX,
+  PostBodySchema, PreviewIdSchema, PostIdSchema, LearnedLineSchema, REVIEW_BODY_MAX, PostPreviewReplySchema,
 } from '@airlock/shared';
 
 describe('suggestedDepth', () => {
@@ -288,6 +288,15 @@ describe('posting contract', () => {
     expect(parsed.lastReview).toBeNull();
     expect(PrSummarySchema.parse({ ...pr, state: 'merged' }).state).toBe('merged');
     expect(() => PrSummarySchema.parse({ ...pr, state: 'draft' })).toThrow();
+  });
+  it('a preview reply carries the names in the review body, an empty list when it does not say', () => {
+    const reply = {
+      previewId: 'pv_0123456789abcdef', headSha: 'a'.repeat(40), viewer: 'bob', items: [], summary: 's', reviewBody: 's',
+      expiresAt: '2026-11-11T10:10:00.000Z',
+    };
+    expect(PostPreviewReplySchema.parse(reply).reviewBodyMentions).toEqual([]);
+    expect(PostPreviewReplySchema.parse({ ...reply, reviewBodyMentions: ['@carol'] }).reviewBodyMentions).toEqual(['@carol']);
+    expect(() => PostPreviewReplySchema.parse({ ...reply, reviewBodyMentions: '@carol' })).toThrow();
   });
   it('start accepts since last only, and hello may carry a 64-hex proof', () => {
     expect(StartReviewBodySchema.parse({ repo: 'acme/widgets', number: 1, since: 'last' }).since).toBe('last');
