@@ -123,6 +123,29 @@ const script: RunStep[] = [
   { event: { type: 'done', document } },
 ];
 
+const PUSHED_HEAD = 'd'.repeat(40);
+const MOVED_FINDING = finding(1, {
+  // The same problem, now in another file: a new fingerprint that still answers to the old one, so its Posted mark stays.
+  status: 'moved', path: 'src/pause-rules.ts', fingerprint: '9'.repeat(16), aliases: [top[0]!.fingerprint],
+  severity: 'block', title: 'Pause skips the guard', happens: 'A paused account can still place an order.',
+  why: 'The guard is never asked when the account is paused.', suggestedChange: 'Call the guard before pausing.',
+  anchor: { status: 'in-diff', startLine: 11, endLine: 11 },
+});
+const NEW_FINDING = finding(6, { status: 'new', severity: 'fix', title: 'Pause limit is not saved', path: 'src/limit.ts', rank: 2 });
+const FIXED_FINDING = finding(3, {
+  status: 'fixed', bucket: 'also', rank: null, checked: 'The quoted code is gone; not checked further.',
+});
+const PUSH_NOTE = 'src/copy.ts changed in the push but was only skimmed.';
+const rereviewDocument = (): ReviewDocument => ReviewDocumentSchema.parse({
+  ...document, id: 'r_0123456790', pr: { ...document.pr, headSha: PUSHED_HEAD },
+  range: { ...document.range, headSha: PUSHED_HEAD, kind: 'rereview' },
+  previous: { reviewId: document.id, headSha: HEAD },
+  findings: [MOVED_FINDING, NEW_FINDING], fixed: [FIXED_FINDING],
+  verdict: { label: 'request-changes', sentence: 'One thing still blocks this.', counts: { block: 1, fix: 1, ask: 0, note: 0 } },
+  questions: [], notes: [PUSH_NOTE], limits: undefined,
+});
+const rereviewScript: RunStep[] = [stage('intake', 'start'), PAUSE, stage('intake', 'done', '1 file'), PAUSE, { event: { type: 'done', document: rereviewDocument() } }];
+
 let service: FakeService | undefined;
 let profile: string | undefined;
 let context: BrowserContext | undefined;
@@ -499,4 +522,36 @@ test('13. the post routes refuse a request without the extension Origin, and a p
   });
   expect(big.status).toBe(413);
   expect(await big.json()).toEqual({ error: 'The request body is too large.' });
+});
+
+test('14. a push: the banner, Review the push starts with since last, and the re-review shows what is new, still open, moved and fixed', async () => {
+  svc().push(REPO, NUMBER, PUSHED_HEAD, rereviewScript);
+  await panel.reload();
+  await expect(panel.getByText('New commits since this review.')).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Review everything again' })).toBeVisible();
+  await panel.getByRole('button', { name: 'Review the push' }).click();
+  await expect.poll(() => bodiesOf('POST', '/reviews').length).toBe(2);
+  expect(StartReviewBodySchema.parse(bodiesOf('POST', '/reviews').at(-1))).toEqual({ repo: REPO, number: NUMBER, depth: 'standard', since: 'last' });
+
+  const line = `Review of the push ${'b'.repeat(7)} to ${'d'.repeat(7)}`;
+  await expect(panel.getByText(line)).toBeVisible();
+  await expect(panel.getByText(PUSH_NOTE)).toBeVisible();
+  await expect(panel.getByText('New commits since this review.')).toHaveCount(0);
+  await expect(cards()).toHaveCount(2);
+  await expect(cards().nth(0).getByTestId('status')).toHaveText('Moved');
+  await expect(cards().nth(1).getByTestId('status')).toHaveText('New');
+  // The moved finding is the one posted earlier, found again by its alias.
+  await expect(cards().nth(0)).toContainText('Posted');
+  await expect(cards().nth(1)).not.toContainText('Posted');
+
+  const toggle = panel.getByRole('button', { name: 'Fixed since the last review (1)' });
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await toggle.click();
+  const fixed = toggle.locator('xpath=ancestor::section[1]');
+  await expect(fixed).toContainText(FIXED_FINDING.title);
+  await expect(fixed).toContainText('src/pause.ts:13');
+  await expect(fixed).toContainText('The quoted code is gone; not checked further.');
+  await expect(fixed.getByRole('checkbox')).toHaveCount(0);
+  await expect(fixed.getByRole('button')).toHaveCount(1);
+  expect(svc().sent).toHaveLength(3);
 });

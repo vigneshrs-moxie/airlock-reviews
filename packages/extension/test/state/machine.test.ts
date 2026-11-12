@@ -818,6 +818,21 @@ describe('startPanel: actions', () => {
     expect(h.states.some((s) => s.kind === 'review' && s.busy === true)).toBe(true);
   });
 
+  it('a start for the push alone sends since last, and a refusal of it is shown where a refused start is', async () => {
+    const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary())) });
+    await until(h, 'review');
+    const sent: unknown[] = [];
+    h.svc.on('POST /reviews', (req) => { sent.push(req.body); return json({ error: 'Nothing was pushed since the last review.' }, 409); });
+    h.panel.dispatch({ type: 'start', depth: 'deep', since: 'last' });
+    const refused = await until(h, 'review', (s) => s.notice === 'Nothing was pushed since the last review.');
+    expect(sent).toEqual([{ repo: 'acme/widgets', number: 1, depth: 'deep', since: 'last' }]);
+    expect(refused.busy).toBeUndefined();
+    h.svc.on('POST /reviews', (req) => { sent.push(req.body); return json({ error: 'There is no earlier review of this pull request.' }, 409); });
+    h.panel.dispatch({ type: 'start', depth: 'quick' });
+    await until(h, 'review', (s) => s.notice === 'There is no earlier review of this pull request.');
+    expect(sent[1]).toEqual({ repo: 'acme/widgets', number: 1, depth: 'quick' });
+  });
+
   it('a refused action that means not paired still goes to unpaired', async () => {
     const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary())) });
     await until(h, 'review');

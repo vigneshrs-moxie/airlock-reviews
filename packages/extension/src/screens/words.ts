@@ -10,6 +10,9 @@ const SIDE: Record<string, string> = {
   head: 'in the pull request', base: 'before the pull request', standard: "the team's corrections log", learned: 'a recorded decision',
 };
 
+const STATUS: Record<NonNullable<Finding['status']>, string> = { new: 'New', 'still-open': 'Still open', moved: 'Moved', fixed: 'Fixed' };
+
+export const statusWord = (status: NonNullable<Finding['status']>): string => STATUS[status];
 export const severityWord = (severity: Severity): string => SEVERITY[severity];
 export const dismissReasonWord = (reason: DismissReason): string => REASON[reason];
 export const depthWord = (depth: Depth): string => DEPTH[depth];

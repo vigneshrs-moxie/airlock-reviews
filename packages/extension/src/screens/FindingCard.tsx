@@ -1,7 +1,7 @@
 import type { Finding, PostRecord, PrSummary } from '@airlock/shared';
 import type { ReactNode } from 'react';
 import { PostedMark } from './PostedMark';
-import { fromText, locationText, severityWord } from './words';
+import { fromText, locationText, severityWord, statusWord } from './words';
 
 /** One top finding: a checkbox for the fix prompt, and a button (the rest of the card) that opens its detail. */
 export function FindingCard({ finding, rank, packs, selected, onToggle, onOpen, register, posted, after }: {
@@ -29,6 +29,7 @@ export function FindingCard({ finding, rank, packs, selected, onToggle, onOpen, 
         <span className="head-line">
           <span className="rank">{rank}</span>
           <span className="sev">{severityWord(finding.severity)}</span>
+          {finding.status !== null && <span className="status" data-testid="status">{statusWord(finding.status)}</span>}
         </span>
         <span className="title block">{finding.title}</span>
         <code className="path block">{locationText(finding)}</code>

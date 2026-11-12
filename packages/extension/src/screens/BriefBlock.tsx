@@ -3,13 +3,13 @@ import type { Brief } from '@airlock/shared';
 const VERDICT_WORDS = { 'not-supported': 'Not supported', unclear: 'Unclear' } as const;
 
 /** What the pull request does, and the claims that did not check out, each with its evidence. A part with nothing in it is left out. */
-export function BriefBlock({ brief }: { brief: Brief }) {
+export function BriefBlock({ brief, mergeOf }: { brief: Brief; /** The base branch, when this is a review of a merge of it: its heading says only the hand changes were reviewed. */ mergeOf?: string }) {
   const claims = brief.claims.flatMap((c) => (c.verdict === 'verified' ? [] : [{ ...c, word: VERDICT_WORDS[c.verdict] }]));
   return (
     <>
       {brief.whatItDoes.length > 0 && (
         <section className="card">
-          <h2 className="label">What this does</h2>
+          <h2 className="label">{mergeOf === undefined ? 'What this does' : `A merge of ${mergeOf}: only what was changed by hand was reviewed`}</h2>
           <ul className="plain">
             {brief.whatItDoes.map((line, i) => <li key={i}>{line}</li>)}
           </ul>

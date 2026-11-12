@@ -80,7 +80,8 @@ export type PanelState =
 
 export type UserAction =
   | { type: 'pair'; token: string }
-  | { type: 'start'; depth: Depth; packIds?: string[] }
+  /** `since: 'last'`: review only what was pushed since the last review. */
+  | { type: 'start'; depth: Depth; packIds?: string[]; since?: 'last' }
   | { type: 'dismiss'; body: DismissBody }
   | { type: 'restore'; fingerprint: string }
   /** The post sheet's requests; each answer comes back as the review's `post`, under the same ticket. */

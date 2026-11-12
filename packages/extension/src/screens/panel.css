@@ -72,6 +72,7 @@ p { margin: 4px 0; overflow-wrap: anywhere; }
 .verdict .title { font-size: 16px; }
 .banner { border-color: var(--accent); }
 .sev { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.status { font-size: 11px; font-weight: 600; margin-left: 8px; padding: 0 6px; border: 1px solid currentColor; border-radius: 8px; }
 [data-severity='block'] .sev { color: var(--danger); }
 .cards { display: flex; flex-direction: column; gap: 8px; }
 .finding-card { display: flex; gap: 8px; align-items: flex-start; }

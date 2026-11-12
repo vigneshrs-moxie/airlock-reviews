@@ -52,6 +52,8 @@ const NO_REVIEW_HERE = 'Airlock cannot find that review of this pull request.';
 const NOT_ON_DIFF = 'The line is not part of the diff GitHub shows.';
 const CHOSEN = 'You chose the summary.';
 const EXPIRED = 'This preview has expired. Open the preview again.';
+const NO_EARLIER = 'There is no earlier review of this pull request.';
+const NOTHING_PUSHED = 'Nothing was pushed since the last review.';
 const MOVED = 'The pull request has new commits since this review. Review the push, then post.';
 const CLOSED = 'The pull request is closed. Nothing was posted.';
 const MERGED = 'The pull request has been merged. Nothing was posted.';
@@ -140,6 +142,8 @@ export interface FakeService {
   dismissals(repo: string, number: number): Dismissal[];
   /** The post records of a pull request. */
   posts(repo: string, number: number): PostRecord[];
+  /** The pull request got a new head, and the next review started on it plays `script`. */
+  push(repo: string, number: number, headSha: string, script: RunStep[]): void;
   /** Every preview the fake answered with, in order. */
   previews: PostPreviewReply[];
   /** Every review sent to the fake's GitHub, one per post that reached it, in order. */
@@ -441,6 +445,11 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     if (existing !== undefined) { reply(res, StartReviewReplySchema, 200, { runId: existing.runId, reused: true }); return; }
     const pull = pullOf(asked.repo, asked.number);
     if (pull === undefined || pull.script === null) throw new Refusal(404, NO_SUCH_PR);
+    // As the real service answers a start for the push alone.
+    if (asked.since === 'last') {
+      if (pull.document === null) throw new Refusal(409, NO_EARLIER);
+      if (pull.document.pr.headSha === pull.pr.headSha) throw new Refusal(409, NOTHING_PUSHED);
+    }
     const run: LiveRun = { runId: `run_${randomBytes(6).toString('hex')}`, repo: asked.repo, number: asked.number, written: [], finished: false, streams: new Set() };
     runs.push(run);
     reply(res, StartReviewReplySchema, 200, { runId: run.runId, reused: false });
@@ -569,6 +578,12 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     runs,
     dismissals: (repo, number) => pullOf(repo, number)?.dismissals ?? [],
     posts: (repo, number) => pullOf(repo, number)?.posts ?? [],
+    push: (repo, number, headSha, script) => {
+      const pull = pullOf(repo, number);
+      if (pull === undefined) throw new Error(`the fake has no pull request ${repo}#${number}`);
+      pull.pr = { ...pull.pr, headSha };
+      pull.script = script;
+    },
     previews,
     sent,
     answerNextPost: (answer) => { answers.push(answer); },

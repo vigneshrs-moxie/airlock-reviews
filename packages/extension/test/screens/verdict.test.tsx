@@ -104,11 +104,12 @@ describe('stage errors, the notice and a stale review', () => {
     expect(follows(heading('Approve after fixes'), note)).toBe(true);
     expect(follows(note, heading('Findings'))).toBe(true);
   });
-  it('a stale review shows a banner and Review again starts a review at the document depth', () => {
+  it('a stale review shows a banner whose Review everything again starts a review at the document depth', () => {
     const { dispatch } = review([finding(1)], { stale: true, doc: { depth: 'deep' } });
-    expect(screen.getByText('This pull request has new commits since this review.')).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: 'Review again' })).toHaveLength(1);
-    fireEvent.click(button('Review again'));
+    expect(screen.getByText('New commits since this review.')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Review everything again' })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Review again' })).toBeNull();
+    fireEvent.click(button('Review everything again'));
     expect(dispatch).toHaveBeenCalledWith({ type: 'start', depth: 'deep' });
     expect(dispatch.mock.calls[0]![0]).not.toHaveProperty('packIds');
   });
@@ -121,7 +122,7 @@ describe('stage errors, the notice and a stale review', () => {
   });
   it('disables Review again while busy, banner or not', () => {
     review([], { stale: true, busy: true });
-    expect((button('Review again') as HTMLButtonElement).disabled).toBe(true);
+    expect((button('Review everything again') as HTMLButtonElement).disabled).toBe(true);
     cleanup();
     review([], { busy: true });
     expect((button('Review again') as HTMLButtonElement).disabled).toBe(true);
@@ -530,7 +531,7 @@ describe('offline with a kept review', () => {
     expect(screen.getByText('Shown from before the service stopped.')).toBeTruthy();
     expect(screen.getByText("Airlock's service on this Mac is not running.")).toBeTruthy();
     expect(heading('Approve after fixes')).toBeTruthy();
-    expect((button('Review again') as HTMLButtonElement).disabled).toBe(true);
+    expect((button('Review everything again') as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(button('Dismissed: 1'));
     expect((button(/Restore/) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(within(cards()[0]!).getByRole('button'));
@@ -610,8 +611,8 @@ describe('dismissing the open finding', () => {
     fireEvent.click(within(cards()[0]!).getByRole('button'));
     expect(heading('Problem 1')).toBeTruthy();
     expect(screen.getByText('Another review is running.')).toBeTruthy();
-    expect(screen.getByText('This pull request has new commits since this review.')).toBeTruthy();
-    expect(button('Review again')).toBeTruthy();
+    expect(screen.getByText('New commits since this review.')).toBeTruthy();
+    expect(button('Review everything again')).toBeTruthy();
   });
   it('disables both Previous and Next for a single finding', () => {
     review([finding(1)]);

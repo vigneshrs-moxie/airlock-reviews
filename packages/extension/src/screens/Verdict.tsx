@@ -11,6 +11,7 @@ import { useVisible } from './visible';
 import { DismissedList } from './DismissedList';
 import { DroppedSheet } from './DroppedSheet';
 import { FindingCard } from './FindingCard';
+import { FixedList } from './FixedList';
 import type { Jump } from '../state/jump';
 import { FindingDetail, notConnected } from './FindingDetail';
 import { useAnnounce } from './Frame';
@@ -35,13 +36,28 @@ export interface VerdictProps {
   timers?: Timers;
 }
 
-type Fold = 'limits' | 'notes' | 'also' | 'dismissed' | 'timing';
+type Fold = 'limits' | 'notes' | 'also' | 'dismissed' | 'timing' | 'fixed';
 
 const noDismiss = (): void => undefined;
 const noPost = (): void => undefined;
 
-function ReviewAgain({ doc, disabled, dispatch }: { doc: ReviewDocument; disabled: boolean; dispatch: VerdictProps['dispatch'] }) {
-  return <button type="button" className="btn" disabled={disabled} onClick={() => dispatch({ type: 'start', depth: doc.depth })}>Review again</button>;
+function ReviewAgain({ doc, disabled, dispatch, label = 'Review again' }: {
+  doc: ReviewDocument; disabled: boolean; dispatch: VerdictProps['dispatch']; label?: string;
+}) {
+  return <button type="button" className="btn" disabled={disabled} onClick={() => dispatch({ type: 'start', depth: doc.depth })}>{label}</button>;
+}
+
+const short = (sha: string): string => sha.slice(0, 7);
+
+/** The line under the verdict that says what a re-review or a merge review covered; nothing for a full review (its note says why). */
+function rangeLine(doc: ReviewDocument): string | null {
+  if (doc.range.kind === 'sync-merge' && doc.previous !== undefined) {
+    return `Review of the merge pushed since ${short(doc.previous.headSha)}: only what was changed by hand was reviewed.`;
+  }
+  if (doc.range.kind === 'rereview' && doc.previous !== undefined) {
+    return `Review of the push ${short(doc.previous.headSha)} to ${short(doc.pr.headSha)}`;
+  }
+  return null;
 }
 
 /** The finished review: the verdict, the findings and what sits around them; one finding in full when it is opened. */
@@ -146,8 +162,13 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
     <>
       {stale && (
         <section className="card banner">
-          <p>This pull request has new commits since this review.</p>
-          <ReviewAgain doc={doc} disabled={disabled} dispatch={dispatch} />
+          <p>New commits since this review.</p>
+          <div className="bar">
+            <button type="button" className="btn" disabled={disabled} onClick={() => dispatch({ type: 'start', depth: doc.depth, since: 'last' })}>
+              Review the push
+            </button>
+            <ReviewAgain doc={doc} disabled={disabled} dispatch={dispatch} label="Review everything again" />
+          </div>
         </section>
       )}
       {state.notice !== undefined && <p role="alert" className="notice">{state.notice}</p>}
@@ -173,6 +194,10 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const titles = doc.packs.map((p) => pr.packs.find((known) => known.id === p.id)?.title ?? p.id).join(', ');
   const tiers = new Map<string, Tier>(doc.files.map((f) => [f.path, f.tier]));
   const ran = doc.timings.some(tookTime);
+  const line = rangeLine(doc);
+  // A re-review's notes say why it covered what it did, so they sit under the verdict; a first review's stay folded.
+  const notesUnderVerdict = doc.previous !== undefined && doc.notes !== undefined && doc.notes.length > 0;
+  const fixed = doc.fixed ?? [];
 
   return (
     <>
@@ -185,6 +210,8 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
               : lists.dismissed.length > 0 ? `No open findings. ${lists.dismissed.length} dismissed.` : 'No findings.'}
           </p>
         )}
+        {line !== null && <p>{line}</p>}
+        {notesUnderVerdict && doc.notes!.map((note, i) => <p key={i}>{note}</p>)}
         <p className="muted">{`Reviewed at ${doc.pr.headSha.slice(0, 7)} · ${depthWord(doc.depth)}${titles === '' ? '' : ` · ${titles}`}`}</p>
       </section>
       {banners}
@@ -194,7 +221,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
           <ul className="plain">{doc.limits.map((line, i) => <li key={i}>{line}</li>)}</ul>
         </Collapsible>
       )}
-      {doc.notes !== undefined && doc.notes.length > 0 && (
+      {!notesUnderVerdict && doc.notes !== undefined && doc.notes.length > 0 && (
         <Collapsible title={`Notes (${doc.notes.length})`} open={folds.has('notes')} onToggle={() => fold('notes')}>
           <ul className="plain">{doc.notes.map((line, i) => <li key={i}>{line}</li>)}</ul>
         </Collapsible>
@@ -227,6 +254,11 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
           </ol>
         </section>
       )}
+      {fixed.length > 0 && (
+        <Collapsible title={`Fixed since the last review (${fixed.length})`} open={folds.has('fixed')} onToggle={() => fold('fixed')}>
+          <FixedList findings={fixed} />
+        </Collapsible>
+      )}
       {lists.also.length > 0 && (
         <Collapsible title="Also found" open={folds.has('also')} onToggle={() => fold('also')}>
           <AlsoFound findings={lists.also} onOpen={(f) => setOpenId(f.id)} register={register} postOf={recordOf} after={(f) => unknownMark(f)} />
@@ -250,7 +282,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
           <ol className="steps">{doc.checksAfterMerge.map((line, i) => <li key={i}>{line}</li>)}</ol>
         </section>
       )}
-      <BriefBlock brief={doc.brief} />
+      <BriefBlock brief={doc.brief} {...(doc.range.kind === 'sync-merge' && doc.previous === undefined ? { mergeOf: doc.pr.baseRef } : {})} />
       {doc.selfReviewText.trim() !== '' && (
         <section className="card">
           <h2 className="label">Text for your pull request</h2>

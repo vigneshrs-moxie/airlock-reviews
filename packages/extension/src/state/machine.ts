@@ -441,9 +441,9 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     return latest === null ? [] : latest.posts.filter((r) => isFor(r, pr));
   };
 
-  const start = async (g: number, pr: PrSummary, depth: Depth, packIds: string[] | undefined): Promise<void> => {
+  const start = async (g: number, pr: PrSummary, depth: Depth, packIds: string[] | undefined, since?: 'last'): Promise<void> => {
     const startedAt = now();
-    const reply = await client.start({ repo: pr.repo, number: pr.number, depth, ...(packIds === undefined ? {} : { packIds }) });
+    const reply = await client.start({ repo: pr.repo, number: pr.number, depth, ...(packIds === undefined ? {} : { packIds }), ...(since === undefined ? {} : { since }) });
     if (!current(g)) return;
     void follow(g, pr, reply.runId, startedAt).catch((error: unknown) => fail(g, error, pr));
   };
@@ -462,7 +462,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
         return;
       case 'start':
         if (pr !== null && (state.kind === 'ready' || state.kind === 'review' || state.kind === 'problem')) {
-          act(pr, (g) => start(g, pr, action.depth, action.packIds));
+          act(pr, (g) => start(g, pr, action.depth, action.packIds, action.since));
         }
         return;
       case 'dismiss':
