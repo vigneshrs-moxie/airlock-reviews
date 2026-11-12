@@ -109,16 +109,23 @@ export function reviewRoutes(
     discard: discardStored,
   });
 
-  // The pack messages `/pr` last logged for each repository: the panel asks `/pr` on every check, so they are logged once
-  // per change, not on every ask.
-  const packsLogged = new Map<string, string>();
-  const logPackMessages = (repo: string, messages: string[]): void => {
-    const key = repo.toLowerCase();
-    const now = messages.join('\n');
-    if (now === (packsLogged.get(key) ?? '')) return;
-    for (const m of messages) deps.log(`packs for ${repo}: ${m}`);
-    if (messages.length === 0) packsLogged.delete(key);
-    else packsLogged.set(key, now);
+  // The lines `/pr` (pack messages) and `/reviews/latest` (post records left out) last logged, by what they are about: the
+  // panel asks both on every check, so each is logged once per change, not on every ask.
+  const lastLogged = new Map<string, string>();
+  const logOncePerChange = (about: string, lines: readonly string[]): void => {
+    const now = lines.join('\n');
+    if (now === (lastLogged.get(about) ?? '')) return;
+    for (const line of lines) deps.log(line);
+    if (lines.length === 0) lastLogged.delete(about);
+    else lastLogged.set(about, now);
+  };
+  const logPackMessages = (repo: string, messages: string[]): void =>
+    logOncePerChange(`packs ${repo.toLowerCase()}`, messages.map((m) => `packs for ${repo}: ${m}`));
+  const postsOf = async (repo: string, number: number): Promise<PostRecord[]> => {
+    const lines: string[] = [];
+    const records = await postsFor(config.home, repo, number, (line) => lines.push(line));
+    logOncePerChange(`posts ${repo.toLowerCase()}#${number}`, lines);
+    return records;
   };
 
   let tools: { at: number; claude: boolean; gh: boolean } | null = null;
@@ -219,7 +226,7 @@ export function reviewRoutes(
         const document = await latestReview(repo, number);
         if (document === null) return refuse(404, NO_REVIEW);
         return reply<LatestReply>(LatestReplySchema, 200, {
-          document, dismissals: await dismissals(repo, number), posts: await postsFor(config.home, repo, number, deps.log),
+          document, dismissals: await dismissals(repo, number), posts: await postsOf(repo, number),
         });
       },
     },

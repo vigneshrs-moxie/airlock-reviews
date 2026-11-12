@@ -49,7 +49,9 @@ describe('plainProse', () => {
   it('breaks every # directly before a digit with a space, so no reference to an issue or pull request is made', () => {
     expect(plainProse('see #12, acme/widgets#3, # 4, #x, ##5, x#6 and &#64;')).toBe(
       'see # 12, acme/widgets# 3, # 4, #x, ## 5, x# 6 and &amp;# 64;');
-    expect(plainProse('#7 at the start')).toBe('# 7 at the start');
+    // At the start of a line it would be a heading: the first `#` is escaped, so it is shown as it is written.
+    expect(plainProse('#7 at the start')).toBe('\\# 7 at the start');
+    expect(plainProse('one\n#12 two\n  ##3 three\n# 4 four')).toBe('one\n\\# 12 two\n\\## 3 three\n# 4 four');
   });
 });
 
@@ -389,6 +391,20 @@ describe('commentBody against a Markdown renderer', () => {
       expect(liveNames(commentBody(finding({ happens: text, suggestedChange: `~~~\n${text}` }))), text).toEqual([]);
       expect(liveNames(commentBody(finding({ why: text, suggestedChange: `\`\n\n${text}\n\n\`` }))), text).toEqual([]);
     }
+  });
+  it('makes no heading of a line that starts with # and a number, and no live reference, in every field', () => {
+    const cases = ['#1 is the issue', '##12 twice', 'a\n#3 on a line', 'a\n   ###45 indented', '#6', '#7\n#8'];
+    const headings = (text: string): number =>
+      renderers.reduce((n, md) => n + md.parse(text, {}).filter((t) => t.type === 'heading_open').length, 0);
+    for (const text of cases) {
+      for (const f of [everywhere(text), finding({ happens: text, why: text, suggestedChange: text })]) {
+        const body = commentBody(f);
+        expect(headings(body), text).toBe(0);
+        expect(liveReferences(body), text).toEqual([]);
+      }
+    }
+    // The check can fail.
+    expect(headings('# 1 heading')).toBe(2);
   });
   it('leaves no live @name for an empty, blank or hidden path next to a chain of names (the second re-review\'s cases)', () => {
     const connected = (...places: [string, number | null, string][]): Finding =>

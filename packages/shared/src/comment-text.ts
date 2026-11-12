@@ -94,6 +94,8 @@ function seen(value: string): string {
 const AT_BEFORE_NAME = /@(?=[\p{L}\p{N}])/gu;
 // A `#` directly followed by a digit: GitHub links `#12` and `owner/repo#12` to that issue or pull request.
 const HASH_BEFORE_NUMBER = /#(?=[0-9])/g;
+// The `#`s that start a line, before a digit: with the space put after them they would make a heading.
+const HASHES_OPENING_LINE = /^#+(?=[0-9])/gm;
 
 /**
  * Text taken from a pull request, as prose that cannot notify anyone whatever stands around it: hidden characters out,
@@ -101,7 +103,8 @@ const HASH_BEFORE_NUMBER = /#(?=[0-9])/g;
  * every `~` and `$` escaped and every line's leading white space dropped (no line can open a fence, a code block or
  * math), every backtick an apostrophe (no code span), and then a space after every `@` that is directly followed by a
  * letter or digit (`@alice` becomes `@ alice`), so no `@` stands directly before a name, and after every `#` that is
- * directly followed by a digit (`#12` becomes `# 12`), so the text makes no reference to another issue or pull request.
+ * directly followed by a digit (`#12` becomes `# 12`), so the text makes no reference to another issue or pull request;
+ * where such `#`s start a line the first is escaped (`#12` becomes `\# 12`), so the line is not made a heading.
  */
 export function plainProse(value: string): string {
   return seen(value)
@@ -112,6 +115,7 @@ export function plainProse(value: string): string {
     .replace(/^[ \t]+/gm, '')
     .replace(/`/g, "'")
     .replace(AT_BEFORE_NAME, '@ ')
+    .replace(HASHES_OPENING_LINE, (hashes) => `\\${hashes} `)
     .replace(HASH_BEFORE_NUMBER, '# ')
     .trim();
 }

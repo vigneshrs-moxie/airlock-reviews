@@ -10,7 +10,7 @@ import {
 } from '@airlock/shared';
 import { readOrCreateToken } from '../../src/config.js';
 import { writeList } from '../../src/dismissals.js';
-import { Previews, type StoredPreview } from '../../src/posts/preview.js';
+import { buildPreview, Previews, type StoredPreview } from '../../src/posts/preview.js';
 import { post, type PostDeps } from '../../src/posts/records.js';
 import {
   cleanUp, EXPIRED, FINDING_A, FINDING_B, FINDING_C, FP_A, FP_B, FP_C, FP_C_ALIAS, FP_D, HEAD, NUMBER, POST_ARGS, POSTED, pull, PULL_LINE,
@@ -26,6 +26,8 @@ const NO_GH = 'Airlock could not run gh, or gh is not signed in. Nothing was pos
 const FOUND = 'GitHub has this review: it was posted. Nothing was forgotten.';
 const NOT_ASKED = 'Airlock could not ask GitHub whether this review exists, so the record was kept.';
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
+/** The commands run besides the read of the signed-in account that every preview makes. */
+const beyondAccount = (s: Rig): string[] => s.calls.map((c) => c.line).filter((line) => line !== USER_LINE);
 const TIMED_OUT: ExecResult = { stdout: '', stderr: 'timed out after 60 s', code: 124 };
 const REFUSED: ExecResult = {
   stdout: JSON.stringify({ message: 'Validation failed', errors: ['pull_request_review_thread.line must be part of the diff'], status: '422' }),
@@ -139,7 +141,7 @@ describe('POST /posts/preview', () => {
     const unknownOutcome = await s.preview({ items: [{ fingerprint: FP_A }] });
     expect(unknownOutcome.status).toBe(409);
     expect((unknownOutcome.json as { error: string }).error).toContain(FINDING_A.title);
-    expect(s.calls).toEqual([]);
+    expect(beyondAccount(s)).toEqual([]);
   });
 
   it('a finding whose drafted comment is over 4,000 characters is previewed cut to fit, saying so', async () => {
@@ -175,7 +177,9 @@ describe('POST /posts', () => {
       const refused = await s.call('POST', '/posts', { previewId: p.previewId, ...extra });
       expect(refused.status, JSON.stringify(extra)).toBe(400);
     }
-    expect(s.calls).toEqual([]);
+    // The preview read only the account it names.
+    expect(s.calls.map((c) => [c.line, c.timeoutMs])).toEqual([[USER_LINE, 10_000]]);
+    s.calls.splice(0);
     const r = await s.post(p.previewId);
     expect(r.status, JSON.stringify(r.json)).toBe(200);
     const posted = PostRecordSchema.parse(r.json);
@@ -294,6 +298,68 @@ describe('POST /posts', () => {
     }
     expect(s.writes()).toEqual([]);
     expect(await latestPosts(s)).toEqual([]);
+  });
+
+  it('the preview names the account gh is signed in as now, read within ten seconds, and its post goes out as that account', async () => {
+    const s = await startService();
+    // The stored review was made as bob; gh is now signed in as carol.
+    s.answers.set(USER_LINE, { stdout: 'carol\n', stderr: '', code: 0 });
+    const p = await previewed(s);
+    expect(p.viewer).toBe('carol');
+    expect(s.calls.map((c) => [c.line, c.timeoutMs])).toEqual([[USER_LINE, 10_000]]);
+    const r = await s.post(p.previewId);
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect(PostRecordSchema.parse(r.json).postedAs).toBe('carol');
+    expect(s.writes()).toHaveLength(1);
+  });
+
+  it('after a switch of account, a preview made before it is refused at post, and a new preview names and posts as the new account', async () => {
+    const s = await startService();
+    const before = await previewed(s);
+    expect(before.viewer).toBe('bob');
+    s.answers.set(USER_LINE, { stdout: 'alice\n', stderr: '', code: 0 });
+    const refused = await s.post(before.previewId);
+    expect([refused.status, refused.json]).toEqual([409, { error: 'gh is now signed in as alice, but this preview was made to post as bob. Open the preview again.' }]);
+    expect(s.writes()).toEqual([]);
+    const after = await previewed(s);
+    expect(after.viewer).toBe('alice');
+    const posted = await s.post(after.previewId);
+    expect(posted.status, JSON.stringify(posted.json)).toBe(200);
+    expect(PostRecordSchema.parse(posted.json).postedAs).toBe('alice');
+    expect(s.writes()).toHaveLength(1);
+  });
+
+  it('a preview is refused with the could-not-run-gh sentence when the account cannot be read, and nothing is stored', async () => {
+    const s = await startService();
+    class Counting extends Previews {
+      added = 0;
+      override add(preview: StoredPreview): void { this.added += 1; super.add(preview); }
+    }
+    const answers: Array<ExecResult | (() => Promise<ExecResult>)> = [
+      { stdout: '', stderr: 'To get started with GitHub CLI, please run:  gh auth login', code: 4 },
+      { stdout: '', stderr: 'timed out after 10 s', code: 124 },
+      { stdout: 'bob smith\n', stderr: '', code: 0 },
+      async () => { throw Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }); },
+    ];
+    for (const answer of answers) {
+      s.answers.set(USER_LINE, answer);
+      const r = await s.preview();
+      expect([r.status, r.json]).toEqual([502, { error: NO_GH }]);
+      // Called directly, nothing is added to the previews.
+      const previews = new Counting();
+      const exec: Exec = async (cmd, args) => {
+        const line = [cmd, ...args].join(' ');
+        const found = s.answers.get(line);
+        if (found === undefined) throw new Error(`no fake answer for ${line}`);
+        return typeof found === 'function' ? found() : found;
+      };
+      await expect(buildPreview(
+        { home: s.home, now: s.clock.date, previews, dismissals: async () => [], exec },
+        { repo: REPO, number: NUMBER, reviewId: REVIEW, items: [{ fingerprint: FP_A }] },
+      )).rejects.toThrow(NO_GH);
+      expect(previews.added).toBe(0);
+    }
+    expect(s.writes()).toEqual([]);
   });
 
   it('a finding dismissed since the preview is refused, and nothing is sent', async () => {
@@ -567,7 +633,7 @@ describe('POST /posts', () => {
     const first = await previewed(s);
     for (let i = 0; i < 20; i += 1) await previewed(s);
     expect((await s.post(first.previewId)).json).toEqual({ error: EXPIRED });
-    expect(s.calls).toEqual([]);
+    expect(beyondAccount(s)).toEqual([]);
   });
 
   it('a broken record file stops a preview and a post rather than being read as empty', async () => {
@@ -593,6 +659,21 @@ describe('POST /posts', () => {
     // By its place in the Airlock home, never an absolute path.
     expect(lines.every((l) => l.includes(`posts/acme__widgets/${NUMBER}.json`))).toBe(true);
     expect(s.log.join('\n')).not.toContain(s.home);
+
+    // The panel reads the latest review on every check: the same lines are not logged again, and a change is logged once.
+    const said = (): string[] => s.log.filter((l) => l.includes('posts file'));
+    const first = said();
+    for (let i = 0; i < 3; i += 1) expect(await latestPosts(s)).toEqual([good]);
+    expect(said()).toEqual(first);
+    await s.writeRecords([good, { not: 'a record' }]);
+    for (let i = 0; i < 3; i += 1) await latestPosts(s);
+    expect(said().slice(first.length)).toEqual([`the posts file posts/acme__widgets/${NUMBER}.json: record 1 does not match the contract and was left out`]);
+    // Once the file is good again, a later problem is logged again.
+    await s.writeRecords([good]);
+    await latestPosts(s);
+    await s.writeRecords([good, 'x']);
+    await latestPosts(s);
+    expect(said()).toHaveLength(first.length + 2);
   });
 
   it('the preview route takes a full-size body; other routes keep the 64 KB limit', async () => {
@@ -628,7 +709,7 @@ describe('POST /posts', () => {
       const r = await s.call('POST', path, body, bare);
       expect([r.status, r.json], path).toEqual([403, { error: 'Airlock does not accept requests from this page.' }]);
     }
-    expect(s.calls).toEqual([]);
+    expect(beyondAccount(s)).toEqual([]);
     // The other routes still answer a local command without an Origin.
     expect((await s.call('GET', `/reviews/latest?repo=${REPO}&number=${NUMBER}`, undefined, bare)).status).toBe(200);
   });

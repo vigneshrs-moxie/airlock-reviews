@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, relative } from 'node:path';
-import { repoSlug, type Exec } from '@airlock/engine';
+import { repoSlug } from '@airlock/engine';
 import { MESSAGE_MAX, PostRecordSchema, visibleText, type ForgetPostBody, type PostRecord } from '@airlock/shared';
 import { z } from 'zod';
 import { writeList } from '../dismissals.js';
@@ -24,7 +24,7 @@ const CLOSED = 'The pull request is closed. Nothing was posted.';
 const MERGED = 'The pull request has been merged. Nothing was posted.';
 const STATE_UNREAD = 'Airlock could not read whether the pull request is open. Nothing was posted.';
 const READ_NO_ANSWER = 'GitHub did not answer when Airlock read the pull request. Nothing was posted.';
-const NO_GH = 'Airlock could not run gh, or gh is not signed in. Nothing was posted.';
+export const NO_GH = 'Airlock could not run gh, or gh is not signed in. Nothing was posted.';
 const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
 const KEPT = 'This review was posted, so Airlock keeps its record.';
 const BROKEN =
@@ -143,7 +143,6 @@ function inQueue<T>(repo: string, number: number, work: () => Promise<T>): Promi
 
 /** What posting needs from the service. */
 export interface PostDeps extends PreviewDeps {
-  exec: Exec;
   log: (line: string) => void;
   /** Writes a records file whole; `writeList` by default. */
   write?: (path: string, list: readonly unknown[]) => Promise<void>;
