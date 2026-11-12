@@ -15,6 +15,7 @@ import type { Depth, Finding, LearnedReply, PackRef, PrSummary, RemoveLearnedBod
 import { DismissSheet, focusAfterClose, newDraft, type SheetDraft, type SheetView } from './DismissSheet';
 import { NO_REMOVE_OFFLINE, NO_REMOVE_UNPAIRED } from './LearnedList';
 import { Settings } from './Settings';
+import { Tour, tourMayOpen, type TourStep } from './Tour';
 import { focusAfterPost, newPostDraft, nextTicket, PostSheet, type PostDraft, type PostSheetView } from './PostSheet';
 import { PanelVisible } from './visible';
 import { DEFAULT_SIZE, type SizeSetting } from '../state/size';
@@ -55,6 +56,10 @@ export interface PanelScreenProps {
   openFinding?: OpenFinding | null;
   /** The text and button size; without it Settings shows Default and changes nothing. */
   size?: SizeSetting;
+  /** Whether the tour was finished or skipped; null until it is read, and then the tour does not open by itself. */
+  tourSeen?: boolean | null;
+  /** The person ended the tour (Skip, Done, Escape): it is not to open by itself again. */
+  onTourSeen?: () => void;
 }
 
 const DEFAULT_SHOWN = { size: DEFAULT_SIZE, failed: false } as const;
@@ -163,7 +168,7 @@ function FinishedAnnouncer({ kind }: { kind: PanelState['kind'] }) {
 export function PanelScreen({
   state, dispatch, onOpenSettings, onOpenPacks, timers, onJump, pageReport = null, fetchStatus = unreachable, fetchLearned = unreachable,
   removeLearned = unreachable, defaultDepth = null, onDefaultDepth, depthFailed = false, notesLine = null, onReloadNotes,
-  showNotes = null, onShowNotes, notesFailed = false, openFinding = null, size = FIXED_SIZE,
+  showNotes = null, onShowNotes, notesFailed = false, openFinding = null, size = FIXED_SIZE, tourSeen = null, onTourSeen,
 }: PanelScreenProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   // `Open in Airlock` for a finding on screen: Settings goes, so the finding is what the person sees.
@@ -218,6 +223,18 @@ export function PanelScreen({
   const postView: PostSheetView | null = state.kind === 'review' && sheetView !== null ? { ...sheetView, post: state.post, stale: state.stale }
     : state.kind === 'offline' && state.review !== undefined && sheetView !== null ? { ...sheetView, stale: state.review.stale } : null;
   const known = knownOf(state);
+  // The tour: by itself the first time a finished review is on screen with no sheet over it, or from Settings over any
+  // screen. It goes, without being marked seen, when the screen it opened over goes (a push, the service away).
+  const [tour, setTour] = useState<{ step: TourStep; over: PanelState['kind']; replay: boolean } | null>(null);
+  const tourEnded = useRef(false);
+  const mayOpen = tourMayOpen(state, { seen: tourSeen, ended: tourEnded.current, sheetOpen: draft !== null || postDraft !== null, settingsOpen });
+  useEffect(() => {
+    if (tour === null && mayOpen) setTour({ step: 1, over: 'review', replay: false });
+  }, [tour, mayOpen]);
+  useEffect(() => {
+    if (tour !== null && tour.over !== state.kind) setTour(null);
+  }, [tour, state.kind]);
+  const endTour = (): void => { tourEnded.current = true; setTour(null); onTourSeen?.(); };
   useEffect(() => {
     const finding = closing.current;
     if (draft !== null || finding === null) return;
@@ -252,6 +269,13 @@ export function PanelScreen({
           defaultDepth={defaultDepth} onDefaultDepth={onDefaultDepth ?? (() => undefined)} depthFailed={depthFailed} page={pageReport}
           showNotes={showNotes} {...(onShowNotes ? { onShowNotes } : {})} notesFailed={notesFailed} size={size}
           onBack={() => setSettingsOpen(false)} {...(timers ? { timers } : {})}
+          onTour={() => { setSettingsOpen(false); setTour({ step: 1, over: state.kind, replay: true }); }}
+        />
+      )}
+      {tour !== null && (
+        <Tour
+          step={tour.step} onStep={(step) => setTour({ ...tour, step })} onEnd={endTour}
+          {...(tour.replay ? { returnFocusTo: settingsButton } : {})}
         />
       )}
     </Frame>

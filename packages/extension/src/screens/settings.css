@@ -53,3 +53,21 @@
 .ap-switch:checked { background: var(--accent); }
 .ap-switch:checked::after { left: 18px; background: var(--accent-fg); }
 .ap-switch:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* The tour: three steps in a bottom sheet. */
+.tour { display: flex; flex-direction: column; gap: 12px; }
+.tour .label { margin: 0; }
+.tour .ap-sheet-title { margin: 0; font-size: 15px; font-weight: 700; overflow-wrap: anywhere; }
+.tour p { margin: 0; }
+.tour .ap-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.tour .ap-chip { display: inline-flex; align-items: center; padding: 2px 9px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; border-radius: 999px; background: var(--bg); }
+.tour .ap-row { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.tour-actions { display: flex; flex-direction: column; gap: 8px; }
+.tour .ap-where { display: flex; align-items: flex-start; gap: 8px; }
+.tour .ap-where .icon { margin-top: 1px; color: var(--muted); }
+.tour .ap-dots { display: flex; justify-content: center; gap: 6px; }
+.tour .ap-dots i { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
+.tour .ap-dots i.on { background: var(--accent); }
+.tour-buttons { display: flex; gap: 8px; }
+.tour-buttons .btn { min-height: 40px; }
+.tour-buttons .btn.primary { flex: 1; }

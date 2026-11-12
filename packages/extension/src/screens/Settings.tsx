@@ -51,6 +51,8 @@ export interface SettingsProps {
   page?: PageReport | null;
   size: SizeSetting;
   onBack: () => void;
+  /** Show the tour again: Settings closes and the tour opens at its first step. */
+  onTour?: () => void;
   timers?: Timers;
 }
 
@@ -108,8 +110,8 @@ function SizeControl({ size }: { size: SizeSetting }) {
 /** The Settings list itself: Display, On GitHub, Reviews and Help. */
 function SettingsList({
   defaultDepth, onDefaultDepth, depthFailed = false, showNotes = null, onShowNotes, notesFailed = false, size, onBack,
-  packsLineText, serviceLineText, onPacks, onService, packsRow, serviceRow,
-}: Pick<SettingsProps, 'defaultDepth' | 'onDefaultDepth' | 'depthFailed' | 'showNotes' | 'onShowNotes' | 'notesFailed' | 'size' | 'onBack'> & {
+  onTour, packsLineText, serviceLineText, onPacks, onService, packsRow, serviceRow,
+}: Pick<SettingsProps, 'defaultDepth' | 'onDefaultDepth' | 'depthFailed' | 'showNotes' | 'onShowNotes' | 'notesFailed' | 'size' | 'onBack' | 'onTour'> & {
   packsLineText: string;
   serviceLineText: string;
   onPacks: () => void;
@@ -158,6 +160,7 @@ function SettingsList({
       </section>
       <section className="settings-group" aria-labelledby={ids.help}>
         <h3 className="label" id={ids.help}>Help</h3>
+        {onTour && <OpenRow title="Show the tour again" line="Three short steps." onOpen={onTour} />}
         <OpenRow title="Service" line={serviceLineText} onOpen={onService} rowRef={serviceRow} />
       </section>
     </>

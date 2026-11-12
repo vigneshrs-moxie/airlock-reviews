@@ -91,7 +91,8 @@ async function besideReview(url: string): Promise<{ github: Page; panel: Page }>
   await panel.goto(`chrome-extension://${EXTENSION_ID}/sidepanel.html`);
   await panel.evaluate(async (token) => {
     const chrome = (globalThis as unknown as { chrome: typeof browser }).chrome;
-    await chrome.storage.local.set({ 'airlock.token': token });
+    // Paired, and the tour already seen, so it does not open over the review.
+    await chrome.storage.local.set({ 'airlock.token': token, 'airlock.tourSeen': true });
   }, TOKEN);
   await github.bringToFront();
   await activate(url);

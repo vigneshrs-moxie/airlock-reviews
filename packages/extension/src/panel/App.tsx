@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { LearnedReply, RemoveLearnedBody, RemoveLearnedReply, ServiceStatus } from '@airlock/shared';
 import { ServiceClient } from '../client/service';
 import { realTimers } from '../client/timers';
@@ -114,8 +114,25 @@ function useOpenFinding(state: PanelState, noteOpen: PanelServices['noteOpen']):
   return asked;
 }
 
+/** Whether the tour was seen: read once when the panel starts; null until then, or when it cannot be read. */
+function useTourSeen(settings: SettingsStore | undefined): { seen: boolean | null; markSeen: () => void } {
+  const [seen, setSeen] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    settings?.getTourSeen().then((value) => { if (live) setSeen((was) => was ?? value); }, () => undefined);
+    return () => { live = false; };
+  }, [settings]);
+  // Seen for the rest of this panel even if it cannot be stored; it may then show again next time.
+  const markSeen = useCallback((): void => {
+    setSeen(true);
+    settings?.setTourSeen().catch(() => undefined);
+  }, [settings]);
+  return { seen, markSeen };
+}
+
 export function App({ start = (onState) => startRealPanel(onState), services }: { start?: StartPanel; services?: PanelServices }) {
   const { state, dispatch } = usePanel(start);
+  const tour = useTourSeen(services?.settings);
   const { depth, failed, setDepth } = useDefaultDepth(services?.settings);
   const notes = services?.notes;
   const notesState = useSyncExternalStore(notes?.subscribe ?? noSubscribe, notes?.current ?? noNotes);
@@ -150,6 +167,7 @@ export function App({ start = (onState) => startRealPanel(onState), services }: 
       {...(services?.fetchLearned ? { fetchLearned: services.fetchLearned } : {})}
       {...(services?.removeLearned ? { removeLearned: services.removeLearned } : {})}
       {...(services?.size ? { size: services.size } : {})}
+      tourSeen={tour.seen} onTourSeen={tour.markSeen}
     />
   );
 }

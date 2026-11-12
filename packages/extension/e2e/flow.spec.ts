@@ -295,6 +295,8 @@ test('3. Running: stage lines arrive, and the brief and map are shown while a la
 test('4. the verdict: its words and sentence, three top findings in rank order, Also found collapsed with two', async () => {
   const words = verdictWords(document.verdict.label, document.pr.stage);
   await expect(panel.getByRole('heading', { name: words })).toBeVisible();
+  // The tour opens over the first finished review; Skip ends it for good (settings.spec.ts walks it).
+  await panel.getByRole('dialog', { name: 'Start at the top' }).getByRole('button', { name: 'Skip' }).click();
   await expect(panel.getByText(document.verdict.sentence)).toBeVisible();
   await expect(frameStatus()).toHaveText('Connected');
   await expect(cardTitles()).toHaveText(top.map((f) => f.title));
