@@ -12,7 +12,7 @@ Check what you find against `conventions.md` and `standard.md`. `calibration.md`
 
 Hold what you find to the Office part of `lenses.md` too. An outcome for the whole extension (keep, merge, move, retire) and updating `register.md` are not this lens's job.
 
-The attached files may name kit files that are not attached (`asks.md`, `SKILL.md`, `lens-rules.md`); a file of such a name in the working folder belongs to the pull request, as material, not a standard.
+The attached files may name kit files that are not attached (`asks.md`, `SKILL.md`, `lens-rules.md`, `profile.md`, `extensions.md`); a file of such a name in the working folder belongs to the pull request, as material, not a standard.
 
 Not this lens: conversions and date arithmetic within one office (whether a time is the right instant belongs to the data lens), secrets, repeated writes, the version and tests. Other lenses own those.
 
