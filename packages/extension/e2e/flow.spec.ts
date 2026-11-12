@@ -1,6 +1,6 @@
 import {
-  DismissBodySchema, LatestReplySchema, PrSummarySchema, RestoreBodySchema, ReviewDocumentSchema, StartReviewBodySchema,
-  candidate, fixPrompt, minimalDocument, verdictWords,
+  DismissBodySchema, ForgetPostBodySchema, LatestReplySchema, PostBodySchema, PostPreviewBodySchema, PrSummarySchema, RestoreBodySchema,
+  ReviewDocumentSchema, StartReviewBodySchema, candidate, commentBody, fixPrompt, minimalDocument, verdictWords,
   type Brief, type ChangeMap, type Finding, type PrSummary, type ReviewDocument, type ServiceEvent,
 } from '@airlock/shared';
 import { chromium, expect, test, type BrowserContext, type Page, type Worker } from '@playwright/test';
@@ -9,10 +9,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { signal, startFakeService, type FakeService, type RunStep } from './fake-service';
+import { E2E_PORT } from './port';
 
 // The whole flow a person goes through, in the built extension beside the classic Files changed fixture, against the
 // fake service: pair, Ready, a running review whose brief arrives early, the verdict, a finding, the fix prompt, dismiss
-// and restore, the service stopping and coming back. Each step is its own test; they share one browser and run in order.
+// and restore, the service stopping and coming back, and posting: a preview, an edit, the post and its mark, a refusal,
+// and a post whose outcome is not known. Each step is its own test; they share one browser and run in order.
 test.describe.configure({ mode: 'serial' });
 
 const EXTENSION_ID = 'nbcmjckbkploiemllhkmhegjimgeimoa';
@@ -64,6 +66,8 @@ function finding(n: number, over: Partial<Finding>): Finding {
 
 const top = [
   finding(1, {
+    // GitHub can hang a comment on its line, so it is posted inline.
+    anchor: { status: 'in-diff', startLine: 11, endLine: 11, comment: { line: 11, startLine: null } },
     severity: 'block', title: 'Pause skips the guard', happens: 'A paused account can still place an order.',
     why: 'The guard is never asked when the account is paused.', suggestedChange: 'Call the guard before pausing.',
     connected: [{ path: 'src/guard.ts', line: 4, role: 'caller', quote: 'code - 4' }], wouldBeWrongIf: 'The guard runs earlier for every caller.',
@@ -372,4 +376,116 @@ test('9. the service starts again: the panel returns to the review by itself, th
   const latest = svc().requests.filter((r) => r.url.startsWith('/reviews/latest'));
   expect(latest.length).toBeGreaterThan(0);
   expect(LatestReplySchema.shape.dismissals.parse(svc().dismissals(REPO, NUMBER))).toHaveLength(1);
+});
+
+const POST_ONE_REVIEW = 'Airlock posts these as one review with the Comment action. It never approves or requests changes.';
+const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
+const EDITED = 'Please call the guard before pausing; a paused account can still place an order.';
+const SUMMARY = 'Notes from my review of the pause change.';
+const postBodies = () => bodiesOf('POST', '/posts').map((b) => PostBodySchema.parse(b));
+const previewBodies = () => bodiesOf('POST', '/posts/preview').map((b) => PostPreviewBodySchema.parse(b));
+
+test('10. Post comment: the preview, an edit, Update preview, then the post; the finding is marked Posted', async () => {
+  const first = top[0]!;
+  await cards().first().getByRole('button').click();
+  await expect(panel.getByRole('heading', { name: first.title })).toBeVisible();
+  await panel.getByRole('button', { name: 'Post comment' }).click();
+  const sheet = panel.getByRole('dialog');
+  await expect(sheet.getByText(`Posts as alice on ${REPO}#${NUMBER}.`)).toBeVisible();
+  await expect(sheet.getByText('On src/pause.ts, line 11')).toBeVisible();
+  const comment = sheet.getByRole('textbox', { name: 'Comment 1' });
+  await expect(comment).toHaveValue(commentBody(first));
+  await expect(sheet.getByRole('textbox', { name: 'Summary' })).toHaveValue('Review notes from Airlock: 1 comment.');
+  await expect(sheet.getByText(POST_ONE_REVIEW)).toBeVisible();
+
+  await comment.fill(EDITED);
+  await expect(sheet.getByRole('button', { name: /^Post 1 comment/ })).toHaveCount(0);
+  await sheet.getByRole('button', { name: 'Update preview' }).click();
+  const post = sheet.getByRole('button', { name: 'Post 1 comment to GitHub' });
+  await expect(post).toBeEnabled();
+  expect(previewBodies()).toEqual([
+    { repo: REPO, number: NUMBER, reviewId: document.id, items: [{ fingerprint: first.fingerprint }] },
+    { repo: REPO, number: NUMBER, reviewId: document.id, items: [{ fingerprint: first.fingerprint, body: EDITED }] },
+  ]);
+
+  await post.click();
+  await expect(sheet.getByText('Posted 1 comment.')).toBeVisible();
+  const [record] = svc().posts(REPO, NUMBER);
+  const link = sheet.getByRole('link', { name: 'Open on GitHub' });
+  await expect(link).toHaveAttribute('href', record?.url ?? 'missing');
+  await expect(link).toHaveAttribute('target', '_blank');
+  await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  // The post named the last preview, and what reached GitHub is that preview: the edited text, on its line, as a comment.
+  expect(postBodies()).toEqual([{ previewId: svc().previews[1]?.previewId }]);
+  expect(svc().sent).toEqual([{
+    repo: REPO, number: NUMBER, event: 'COMMENT', body: 'Review notes from Airlock: 1 comment.',
+    comments: [{ path: 'src/pause.ts', line: 11, startLine: null, body: EDITED }],
+  }]);
+  for (const request of svc().requests.filter((r) => r.url.startsWith('/posts'))) expect(request.headers.origin).toBe(ORIGIN);
+
+  await sheet.getByRole('button', { name: 'Done' }).click();
+  await expect(sheet).toHaveCount(0);
+  await expect(panel.locator('.mark').getByText('Posted', { exact: true })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Post comment' })).toBeDisabled();
+  await panel.getByRole('button', { name: 'Back to the review' }).click();
+  await expect(cards().first()).toContainText('Posted');
+});
+
+test('11. Post selected skips the posted finding; GitHub refuses, and every text is kept', async () => {
+  const third = top[2]!;
+  svc().answerNextPost({ refuse: 'Line 13 is not part of the diff' });
+  await panel.getByRole('checkbox', { name: `Select for the fix prompt: ${top[0]!.title}`, exact: true }).check();
+  await panel.getByRole('checkbox', { name: `Select for the fix prompt: ${third.title}`, exact: true }).check();
+  await panel.getByRole('button', { name: 'Post selected (1)' }).click();
+  const sheet = panel.getByRole('dialog');
+  const comment = sheet.getByRole('textbox', { name: 'Comment 1' });
+  await expect(comment).toHaveValue(commentBody(third));
+  await expect(sheet.getByText('In the summary: The line is not part of the diff GitHub shows.')).toBeVisible();
+  expect(previewBodies().at(-1)).toEqual({ repo: REPO, number: NUMBER, reviewId: document.id, items: [{ fingerprint: third.fingerprint }] });
+
+  await sheet.getByRole('textbox', { name: 'Summary' }).fill(SUMMARY);
+  await sheet.getByRole('button', { name: 'Update preview' }).click();
+  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await expect(sheet.getByRole('alert')).toHaveText('GitHub refused the comments: Line 13 is not part of the diff. Nothing was posted.');
+  await expect(sheet.getByRole('textbox', { name: 'Summary' })).toHaveValue(SUMMARY);
+  await expect(comment).toHaveValue(commentBody(third));
+  await expect(sheet.getByRole('button', { name: 'Update preview' })).toBeEnabled();
+  expect(svc().posts(REPO, NUMBER)).toHaveLength(1);
+  expect(svc().sent).toHaveLength(2);
+});
+
+test('12. a post whose outcome is not known: the sentence, Open the pull request, and It was not posted', async () => {
+  svc().answerNextPost({ unknown: true });
+  const sheet = panel.getByRole('dialog');
+  await sheet.getByRole('button', { name: 'Update preview' }).click();
+  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await expect(sheet.getByRole('alert')).toHaveText(UNKNOWN);
+  await expect(sheet.getByRole('link', { name: 'Open the pull request' })).toHaveAttribute('href', `https://github.com/${REPO}/pull/${NUMBER}`);
+  const [, unknown] = svc().posts(REPO, NUMBER);
+  expect(unknown?.outcome).toBe('unknown');
+  await expect(cards().nth(1)).toContainText('Not known whether this was posted');
+
+  await sheet.getByRole('button', { name: 'It was not posted' }).click();
+  await expect(sheet.getByRole('button', { name: 'Update preview' })).toBeEnabled();
+  await expect(sheet.getByRole('textbox', { name: 'Summary' })).toHaveValue(SUMMARY);
+  expect(bodiesOf('POST', '/posts/forget').map((b) => ForgetPostBodySchema.parse(b))).toEqual([{ repo: REPO, number: NUMBER, id: unknown?.id }]);
+  expect(svc().posts(REPO, NUMBER).map((r) => r.outcome)).toEqual(['posted']);
+  // One call to GitHub per press, never a second try.
+  expect(svc().sent).toHaveLength(3);
+  expect(postBodies()).toHaveLength(3);
+
+  await sheet.getByRole('button', { name: 'Cancel' }).click();
+  await expect(sheet).toHaveCount(0);
+  await expect(cards().nth(1)).not.toContainText('Not known whether this was posted');
+  await expect(cards().nth(1)).not.toContainText('Posted');
+});
+
+test('13. the post routes refuse a request without the extension Origin', async () => {
+  for (const path of ['/posts/preview', '/posts', '/posts/forget']) {
+    const res = await fetch(`http://127.0.0.1:${E2E_PORT}${path}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'Airlock does not accept requests from this page.' });
+  }
 });
