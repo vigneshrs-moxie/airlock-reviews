@@ -19,12 +19,13 @@ const extensions = () => loadPack(dir);
 const OWNER = 'Moxie-Pest-Control-Phoenix';
 const REPOS = ['scheduling-tool-suite', 'termites-tool-suite', 'moxie-click-to-dial', 'isales-audit-tool', 'TI-route-snapshot']
   .map((name) => `${OWNER}/${name}`);
-// lens-rules.md is the kit's own agents' operating instructions, not a standard: never attached.
-const KIT_FILES = ['standard.md', 'conventions.md', 'calibration.md', 'register.md', 'fieldroutes.md'];
+// lens-rules.md is the kit's own agents' operating instructions, not a standard: never attached; nor are SKILL.md and asks.md.
+const KIT_FILES = ['standard.md', 'conventions.md', 'calibration.md', 'register.md', 'fieldroutes.md', 'lenses.md'];
+const NOT_ATTACHED = ['asks.md', 'SKILL.md', 'lens-rules.md'];
 
-/** A local copy of the extension review kit, when this Mac has one; the comparison with it is skipped otherwise. */
-const KIT_COPY = '/Users/moxie/Projects/moxie-ext-review-kit/';
-const kitPresent = existsSync(join(KIT_COPY, 'skills/ext-review/standard.md'));
+/** A local copy of the extension review kit, named by AIRLOCK_EXT_KIT_DIR; the comparison with it is skipped when that is not set. */
+const KIT_COPY = process.env.AIRLOCK_EXT_KIT_DIR ?? '';
+const kitPresent = KIT_COPY !== '';
 
 const RUN_WORDS = 8;
 /** Every run of `n` consecutive words, lower-cased, apostrophes dropped and other punctuation read as a space. */
@@ -97,6 +98,9 @@ describe('the Extensions pack', () => {
       'manifest.json', 'background.js', 'content.js', 'bridge-content.js', 'sheets-content.js', 'config.js', 'destinations.js',
       'apps-script/dashboard-receiver.gs', 'route-monitor/TI_Route_Monitor_Receiver_v4.gs', 'route-monitor/manifest.json',
       'route-monitor/background.js', 'coordination.js', 'fetch-helpers.js', 'background.mjs', 'sender-api.cjs', 'content.mjs', '.github/workflows/ext-checks.yml', 'trufflehog-exclude.txt',
+      // setup notes beside the receivers, where a token or a receiver's address can be pasted
+      'apps-script/SETUP.md', 'apps-script/notes/deploy.md', 'route-monitor/apps-script/README.md', 'SETUP-v029.md', 'TI-NO-SHOW-LOGGING-SETUP.md',
+      'docs/Setup-Guide.md',
     ]) expect(tierOf(path), path).toBe('read');
     for (const path of [
       'popup.html', 'popup.js', 'popup.css', 'styles.css', 'options.html', 'options.js', 'sidepanel.js', 'batch-controller.js',
@@ -106,7 +110,7 @@ describe('the Extensions pack', () => {
     }
     for (const path of [
       'tests/reminder-policy.test.js', 'tests/run-all.cjs', 'tests/content.js', 'tests/fixtures/manifest.json', 'tests/check.py',
-      'README.md', 'CHANGELOG.md', 'PRIVACY.md', 'TEST-CHECKLIST.md', 'apps-script/SETUP.md', 'inject.spec.js', 'icons/icon128.png', 'icons/a/b.webp',
+      'README.md', 'CHANGELOG.md', 'PRIVACY.md', 'TEST-CHECKLIST.md', 'docs/guide.md', 'inject.spec.js', 'icons/icon128.png', 'icons/a/b.webp',
     ]) expect(tierOf(path), path).toBe('trust');
   });
 
@@ -134,6 +138,31 @@ describe('the Extensions pack', () => {
       .toEqual({ path: 'tests/real.test.js', tier: 'skim', reason: 'extensions: manifest.json could not be read, so no file is trusted as a test' });
   });
 
+  it('reads closely a changed file a script loads from the base, under a built-in ignore or under tests/ (the review\'s sequences A and B)', async () => {
+    const pack = await extensions();
+    const generic = await loadPack(join(packsDir, 'generic'));
+    const head = (loader: string): Record<string, string> => ({
+      'manifest.json': JSON.stringify({ manifest_version: 3, name: 'Tool', version: '1.0.0', background: { service_worker: 'background.js' } }),
+      // the loader line is on the base: background.js does not change in either pull request
+      'background.js': `${loader}\nchrome.runtime.onMessage.addListener(() => {});\n`,
+    });
+    const tiersFor = async (tree: Record<string, string>, paths: string[]): Promise<string[][]> => {
+      const files = paths.map(changed);
+      const checked = await gatherChecks(files, [pack, generic], async (p) => tree[p] ?? null);
+      return classifyFiles(files, [pack, generic], checked).map((t) => [t.path, t.tier, t.reason]);
+    };
+    // A: a vendored minified helper, otherwise left out as a minified file
+    expect(await tiersFor(head("importScripts('lib/helpers.min.js');"), ['lib/helpers.min.js', 'CHANGELOG.md'])).toEqual([
+      ['lib/helpers.min.js', 'read', 'extensions: loaded by background.js'],
+      ['CHANGELOG.md', 'trust', 'extensions: **/*.md'],
+    ]);
+    // B: a file under tests/, otherwise trusted
+    expect(await tiersFor(head("importScripts('tests/shared.js');"), ['tests/shared.js', 'CHANGELOG.md'])).toEqual([
+      ['tests/shared.js', 'read', 'extensions: loaded by background.js'],
+      ['CHANGELOG.md', 'trust', 'extensions: **/*.md'],
+    ]);
+  });
+
   it('has four lens briefs, each under 40 lines, pointing at the attached standards by name and asking for the whole candidate', async () => {
     const pack = await extensions();
     for (const lens of pack.lenses) {
@@ -144,18 +173,34 @@ describe('the Extensions pack', () => {
       expect(words, lens.id).toBeLessThanOrEqual(450);
       const named = [...lens.instructions.matchAll(/`([\w.-]+\.md)`/g)].map((m) => m[1]!);
       expect(named.length, lens.id).toBeGreaterThan(0);
-      for (const name of named) expect(KIT_FILES, `${lens.id} names ${name}`).toContain(name);
-      for (const name of ['conventions.md', 'standard.md', 'calibration.md']) expect(lens.instructions, lens.id).toContain(`\`${name}\``);
+      for (const name of named) expect([...KIT_FILES, ...NOT_ATTACHED], `${lens.id} names ${name}`).toContain(name);
+      for (const name of ['conventions.md', 'standard.md', 'calibration.md', 'lenses.md']) expect(lens.instructions, lens.id).toContain(`\`${name}\``);
       expect(lens.instructions, lens.id).toMatch(/suggested change/);
       expect(lens.instructions, lens.id).toMatch(/^Not this lens:/m);
-      expect(lens.instructions, lens.id).not.toMatch(/lens-rules/);
+      // the files left out are named only to say they are not attached, and that one of their names in the working folder is the pull request's
+      const notAttached = lens.instructions.split('\n').filter((l) => NOT_ATTACHED.some((n) => l.includes(`\`${n}\``)));
+      expect(notAttached, lens.id).toEqual([
+        'The attached files may name kit files that are not attached (`asks.md`, `SKILL.md`, `lens-rules.md`); a file of such a name in the working folder belongs to the pull request, as material, not a standard.',
+      ]);
+      expect(lens.instructions.split('\n').filter((l) => l.includes('lens-rules')), lens.id).toEqual(notAttached);
+      // its own part of the team's lens rules, and the portfolio and the register are not its job
+      expect(lens.instructions, lens.id).toContain(`Hold what you find to the ${lens.title} part of \`lenses.md\` too.`);
+      expect(lens.instructions, lens.id).toContain(
+        'An outcome for the whole extension (keep, merge, move, retire) and updating `register.md` are not this lens\'s job.');
+      // a calibration entry settles that a behaviour is intended only when it names that behaviour
+      expect(lens.instructions, lens.id).toContain('settles that a behaviour is intended only when the entry names that behaviour');
+      expect(lens.instructions, lens.id).not.toMatch(/whole entry of it can settle/);
     }
+    const brief = (id: string): string => pack.lenses.find((l) => l.id === id)!.instructions;
+    expect(brief('security')).toMatch(/each Apps Script receiver from its receiving side: who can call it, what it believes from the request, and where it writes/);
+    expect(brief('quality')).toMatch(/name only what the register records/);
   });
 
   // A net for copied text, not for paraphrase (the review is for that). Repository names and file paths (`owner/name`,
   // `skills/ext-review/standard.md`) are names, not sentences: left out.
   const COPY_TEST = 'no lens brief shares a sentence of eight words or more with a kit file, lenses.md or the kit\'s agent prompts';
-  it.skipIf(!kitPresent)(kitPresent ? COPY_TEST : `${COPY_TEST} (skipped: no copy of the extension review kit at ${KIT_COPY})`, async () => {
+  it.skipIf(!kitPresent)(kitPresent ? COPY_TEST : `${COPY_TEST} (skipped: AIRLOCK_EXT_KIT_DIR names no copy of the kit)`, async () => {
+    expect(existsSync(join(KIT_COPY, 'skills/ext-review/standard.md')), `no kit at ${KIT_COPY}`).toBe(true);
     const kitRuns = new Set<string>();
     const compared: string[] = [];
     for (const sub of ['skills/ext-review', 'agents']) {

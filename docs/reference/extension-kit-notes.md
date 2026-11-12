@@ -30,7 +30,9 @@ There is no build step and no `src` folder: the files Chrome loads are at the to
 | Words for people | `README.md`, `CHANGELOG.md`, `PRIVACY.md`, `TEST-CHECKLIST.md` |
 | Icons | `icons/*.png` |
 
-So for the pack's tiers: the manifest, the background script, the content scripts, `config.js`, anything that sends data out (`apps-script/*.gs`, files that call `fetch` or Google's APIs) are read closely; the popup's files and styles are skimmed; tests, fixtures, icons, the changelog and the other words for people are trusted.
+So for the pack's tiers: the manifest, the background script, the content scripts, `config.js`, anything that sends data out (`apps-script/*.gs`, files that call `fetch` or Google's APIs) and the setup notes beside the receivers (every `.md` under an `apps-script/` folder at any depth, and every `.md` whose name holds "setup" in any letter case, since a token or a receiver's address can be pasted there) are read closely; the popup's files and styles are skimmed; the top-level `tests/` folder (the fixtures under it included), the image files under `icons/` (not other files there), the changelog and the other words for people are trusted.
+
+On top of the tiers, every changed file the extension loads is read closely whatever its tier, ignored and trusted included: what `manifest.json` names, the local scripts its pages pull in, and what those scripts load in turn (`importScripts`, `import`, `new Worker`, `executeScript`, `registerContentScripts` and `updateContentScripts`, an offscreen page), followed through the whole chain from the head. With no build step, a `*.min.js`, `dist/` or `*.generated.*` file is committed by hand, so one that nothing is seen to load is still named in a fact.
 
 ## The kit
 
@@ -41,5 +43,8 @@ So for the pack's tiers: the manifest, the background script, the content script
 - `calibration.md` (dated entries from past reviews)
 - `register.md`
 - `fieldroutes.md` (facts about the FieldRoutes API the extensions use)
+- `lenses.md` (the team's rules for each of its four lenses, which are Airlock's four: what blocks a pull request and what is asked about)
 
-Not fetched by Airlock: `SKILL.md`, `lenses.md`, `asks.md`, the templates, the agents and the scripts. `lens-rules.md` is left out too: it tells the kit's own agents which tools to use, where to write and how to reply, which contradicts Airlock's own output contract. Airlock's four lens briefs for this pack are its own, as its briefs for the team kit are.
+Airlock attaches these six, in this order, with `calibration.md` the only dated one. Copies are cached by the kit's ref and commit. Each brief tells its lens to hold what it finds to its own part of `lenses.md`, and that the portfolio outcome for the extension and updating `register.md` are not a lens's job.
+
+Not fetched by Airlock: `SKILL.md`, `asks.md`, the templates, the agents and the scripts. `lens-rules.md` is left out too: it tells the kit's own agents which tools to use, where to write and how to reply, which contradicts Airlock's own output contract. The attached files name some of these, so each brief says that a file of such a name in the working folder belongs to the pull request. Airlock's four lens briefs for this pack are its own, as its briefs for the team kit are.

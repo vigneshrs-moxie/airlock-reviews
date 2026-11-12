@@ -237,10 +237,33 @@ export function mapCutSentence(stage: string, map: ChangeMap): string | null {
   return total > MAX_MAP_FILES ? `${stage}: the change map listed ${count(MAX_MAP_FILES)} of ${count(total)} files` : null;
 }
 
-/** One line per fact: `path:line check: message`, or `path check: message` when there is no line. */
+/** A facts block holds at most this many facts of one check; the rest of that check are counted on one line. */
+export const MAX_FACTS_PER_CHECK = 20;
+
+/**
+ * One line per fact: `path:line check: message`, or `path check: message` when there is no line. Each block is given the
+ * facts of one request (a cohort's), so a pull request with thousands of lines tripping one check cannot crowd the request:
+ * past MAX_FACTS_PER_CHECK facts of one check, the rest are left out and one line after that check's last shown fact says
+ * how many.
+ */
 export function factsBlock(facts: Fact[]): string {
-  const lines = facts.map((f) => `${f.path}${f.line === null ? '' : `:${f.line}`} ${f.checkId}: ${oneLine(f.message)}`);
-  return asMaterial('facts', orNone(lines));
+  const shown = new Map<string, number>();
+  const left = new Map<string, number>();
+  const lines: { text: string; checkId: string }[] = [];
+  for (const f of facts) {
+    const n = shown.get(f.checkId) ?? 0;
+    if (n >= MAX_FACTS_PER_CHECK) { left.set(f.checkId, (left.get(f.checkId) ?? 0) + 1); continue; }
+    shown.set(f.checkId, n + 1);
+    lines.push({ text: `${f.path}${f.line === null ? '' : `:${f.line}`} ${f.checkId}: ${oneLine(f.message)}`, checkId: f.checkId });
+  }
+  const out: string[] = [];
+  lines.forEach((line, i) => {
+    out.push(line.text);
+    const more = left.get(line.checkId);
+    const last = !lines.slice(i + 1).some((l) => l.checkId === line.checkId);
+    if (more !== undefined && last) out.push(`… and ${count(more)} more ${line.checkId} ${more === 1 ? 'fact' : 'facts'} left out`);
+  });
+  return asMaterial('facts', orNone(out));
 }
 
 /** One line per candidate: `severity | title | path`. */

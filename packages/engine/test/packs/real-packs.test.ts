@@ -10,7 +10,8 @@ import { loadPack } from '../../src/packs/load.js';
 import type { Pack } from '../../src/packs/types.js';
 
 const packsDir = fileURLToPath(new URL('../../../../packs/', import.meta.url));
-const KIT_DIR = '/Users/moxie/research_notes/AI code review extension research/moxie-review-kit-copy/skills/moxie-review/';
+/** A local copy of the team kit's skills/moxie-review/ folder, named by AIRLOCK_TEAM_KIT_DIR; the comparisons with it are skipped when that is not set. */
+const KIT_DIR = process.env.AIRLOCK_TEAM_KIT_DIR ?? '';
 const PACK_IDS = ['generic', 'raj-standard', 'orbit-mine'] as const;
 const SPEC_CHECKS: [string, string][] = [
   ['migration-without-schema', 'file-pair'], ['feature-without-seed', 'file-pair'],
@@ -28,7 +29,7 @@ async function filesUnder(dir: string): Promise<string[]> {
   return out.sort();
 }
 
-const kitPresent = existsSync(KIT_DIR);
+const kitPresent = KIT_DIR !== '';
 const normalise = (line: string): string => line.trim().replace(/\s+/g, ' ');
 const RUN_WORDS = 8;
 /** Every run of `n` (default 8) consecutive words, lower-cased, apostrophes dropped and other punctuation read as a space. */
@@ -120,6 +121,7 @@ describe('the packs in this repository', () => {
   });
 
   it.skipIf(!kitPresent)('no pack file contains a line or an 8-word run copied from the team kit', async () => {
+    expect(existsSync(KIT_DIR), `no kit at ${KIT_DIR}`).toBe(true);
     const kitLines = new Set<string>();
     const kitRuns = new Set<string>();
     for (const path of await filesUnder(KIT_DIR)) {
@@ -147,6 +149,7 @@ describe('the packs in this repository', () => {
   });
 
   it.skipIf(!kitPresent)('no engine prompt shares a run of 7 words with the team kit', async () => {
+    expect(existsSync(KIT_DIR), `no kit at ${KIT_DIR}`).toBe(true);
     const kitRuns = new Set<string>();
     for (const path of await filesUnder(KIT_DIR)) for (const run of wordRuns(await readFile(path, 'utf8'), 7)) kitRuns.add(run);
     const shared: string[] = [];

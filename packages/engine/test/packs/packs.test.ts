@@ -197,6 +197,14 @@ describe('loadPack validation', () => {
     expect(Object.hasOwn(await loadPack(await withYaml('')), 'kit')).toBe(false);
   });
 
+  it('a bare kit: with nothing under it is refused with a sentence naming the pack, not read as no kit', async () => {
+    for (const bare of ['kit:\n', 'kit: \n', 'kit: ~\n', 'kit: null\n']) {
+      const dir = await withYaml(bare);
+      await expect(loadPack(dir), JSON.stringify(bare)).rejects.toThrow(
+        `${join(dir, 'pack.yaml')}: the pack v has "kit:" with nothing under it; name the kit's repo and files, or remove the line.`);
+    }
+  });
+
   it('a kit repository that is not owner/name, and a file path with .. or a leading slash, are refused', async () => {
     const refused = async (extra: string, message: RegExp) => {
       const dir = await withYaml(extra);
