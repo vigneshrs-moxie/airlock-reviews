@@ -45,6 +45,8 @@ export interface FindingDetailProps {
   /** The mark for a record whose outcome is not known, with its controls; `id` names its words. */
   unknownMark?: (id: string) => ReactNode;
   timers?: Timers;
+  /** The finding's 1-based place among the open findings in list order, and their number. */
+  position?: { index: number; total: number };
 }
 
 /** One finding in full. Keyed by the caller on the finding's id, so each finding starts with its own focus and notes. */

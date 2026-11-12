@@ -8,6 +8,7 @@ import type { PanelState, PostReply, UserAction } from '../../src/state/reduce';
 import { CANNOT_ASK_GITHUB, GITHUB_HAS_IT } from '../helpers/fake-service';
 import { UNKNOWN_SENTENCE, previewItem, previewOf, recordOf } from '../helpers/post-fixtures';
 import { also, finding, reviewState, type ReviewOptions } from './review-fixtures';
+import { fold, tab, tick } from './review-dom';
 
 afterEach(cleanup);
 
@@ -44,7 +45,6 @@ const button = (name: string | RegExp) => screen.getByRole('button', { name }) a
 const field = (name: string) => screen.getByRole('textbox', { name }) as HTMLTextAreaElement;
 const type = (name: string, value: string) => fireEvent.change(field(name), { target: { value } });
 const openDetail = (title: string) => fireEvent.click(screen.getByText(title, { selector: '.finding-card .title' }));
-const tick = (title: string) => fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(`${title}$`) }));
 
 const names = (list: string): string => `Names ${list}: GitHub notifies them unless the name is inside code.`;
 const WAIT = 'Wait for the current action to finish.';
@@ -100,13 +100,13 @@ describe('the post sheet', () => {
     expect(dialog().getAllByRole('checkbox', { name: 'Put in the summary instead' })).toHaveLength(1);
   });
 
-  it('Post selected sends the ticked findings and skips posted ones', () => {
+  it('Comment on GitHub sends the ticked findings and skips posted ones', () => {
     const [a, b, c] = [finding(1), finding(2), finding(3)];
     const m = mount([a, b, c], { posts: [recordOf([b.fingerprint])] });
     tick('Problem 1');
     tick('Problem 2');
     tick('Problem 3');
-    fireEvent.click(button('Post selected (2)'));
+    fireEvent.click(button('Comment on GitHub (2)'));
     expect(m.last()).toMatchObject({
       type: 'preview-post',
       body: { items: [{ fingerprint: a.fingerprint }, { fingerprint: c.fingerprint }] },
@@ -114,11 +114,11 @@ describe('the post sheet', () => {
     expect(screen.getByRole('dialog')).toBeTruthy();
   });
 
-  it('Post selected is disabled with its reason when every ticked finding is posted', () => {
+  it('Comment on GitHub is disabled with its reason when every ticked finding is posted', () => {
     const [a, b] = [finding(1), finding(2)];
     mount([a, b], { posts: [recordOf([a.fingerprint])] });
     tick('Problem 1');
-    expect(button('Post selected (0)').disabled).toBe(true);
+    expect(button('Comment on GitHub (0)').disabled).toBe(true);
     expect(screen.getByText('The selected findings are already posted.')).toBeTruthy();
   });
 
@@ -476,7 +476,7 @@ describe('the post sheet', () => {
   ])('posting is disabled with its reason on %s', (_name, opts, reason) => {
     mount([finding(1)], opts);
     tick('Problem 1');
-    expect(button('Post selected (1)').disabled).toBe(true);
+    expect(button('Comment on GitHub (1)').disabled).toBe(true);
     expect(screen.getByText(reason)).toBeTruthy();
     openDetail('Problem 1');
     expect(button('Post comment').disabled).toBe(true);
@@ -488,7 +488,7 @@ describe('the post sheet', () => {
     const m = mount([finding(1)]);
     tick('Problem 1');
     m.show({ kind: 'offline', review: { pr: shown.pr, latest: shown.latest, stale: false } });
-    expect(button('Post selected (1)').disabled).toBe(true);
+    expect(button('Comment on GitHub (1)').disabled).toBe(true);
     expect(screen.getByText('Posting needs the Airlock service, which is not answering.')).toBeTruthy();
   });
 
@@ -728,7 +728,7 @@ describe('an unknown record can be cleared from the finding', () => {
   it('from its Also found entry', () => {
     const f = also(4);
     const m = mount([finding(1), f], { posts: [unknownFor(f)] });
-    fireEvent.click(button('Also found'));
+    fireEvent.click(fold('Also found'));
     expectClearable(within(screen.getByText('Problem 4', { selector: 'li .title' }).closest('li')!), m, unknownFor(f).id);
   });
 
@@ -748,14 +748,14 @@ describe('an unknown record can be cleared from the finding', () => {
     expect(document.querySelector('[aria-live]')?.textContent).toBe('Record forgotten.');
   });
 
-  it('from a card, after the record is forgotten focus goes to the Findings heading', () => {
+  it('from a card, after the record is forgotten focus goes to the Findings tab', () => {
     const f = finding(1);
     const m = mount([f], { posts: [unknownFor(f)] });
     const card = within(document.querySelector<HTMLElement>('.finding-card')!);
     fireEvent.click(card.getByRole('button', { name: 'It was not posted' }));
     fireEvent.click(card.getByRole('button', { name: 'It was not posted' }));
     m.answer({ kind: 'forgotten', id: unknownFor(f).id }, { posts: [] });
-    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Findings' }));
+    expect(document.activeElement).toBe(tab('Findings'));
     expect(document.querySelector('[aria-live]')?.textContent).toBe('Record forgotten.');
   });
 
@@ -801,7 +801,7 @@ describe('the Post buttons', () => {
   it('while another action is in flight say to wait, for a screen reader', () => {
     mount([finding(1)], { busy: true });
     tick('Problem 1');
-    const bar = button('Post selected (1)');
+    const bar = button('Comment on GitHub (1)');
     expect(bar.disabled).toBe(true);
     expect(document.getElementById(bar.getAttribute('aria-describedby')!)?.textContent).toBe(WAIT);
     openDetail('Problem 1');
@@ -809,13 +809,13 @@ describe('the Post buttons', () => {
     expect(document.getElementById(one.getAttribute('aria-describedby')!)?.textContent).toBe(WAIT);
   });
 
-  it.each([1, 2])('focus goes back to Post selected when the sheet was opened from the bar (%i ticked)', (n) => {
+  it.each([1, 2])('focus goes back to Comment on GitHub when the sheet was opened from the bar (%i ticked)', (n) => {
     const findings = [finding(1), finding(2)];
     mount(findings);
     for (const f of findings.slice(0, n)) tick(f.title);
-    fireEvent.click(button(`Post selected (${n})`));
+    fireEvent.click(button(`Comment on GitHub (${n})`));
     fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(screen.queryByRole('dialog')).toBeNull();
-    expect(document.activeElement).toBe(button(`Post selected (${n})`));
+    expect(document.activeElement).toBe(button(`Comment on GitHub (${n})`));
   });
 });

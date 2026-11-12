@@ -1,0 +1,80 @@
+/* The review screen: the verdict strip, the three tabs, one row per finding, folds and the pinned bar. The .ap-* rules are
+   the redesign's, from docs/design/panel-redesign/theme.css, made to fit the panel's real elements (buttons, lists). */
+
+/* Kind and state colours: always a second cue beside a word. */
+.sev-block { color: var(--danger); }
+.sev-fix { color: var(--warn); }
+.sev-ask { color: var(--accent); }
+.sev-note { color: var(--muted); }
+.sev-ok { color: var(--ok); }
+
+/* The verdict strip. */
+.ap-verdict { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 10px; }
+.ap-verdict p { margin: 0; }
+.ap-vword { margin: 0; font-size: 17px; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+.ap-headline { font-size: 13px; }
+.ap-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ap-chips > li.ap-chip { display: inline-flex; align-items: center; padding: 2px 9px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; border-radius: 999px; background: var(--bg); }
+.ap-verdict .label { margin: 0; }
+.ap-start { align-self: flex-start; }
+.ap-banner { display: flex; flex-direction: column; gap: 8px; border-color: var(--accent); background: var(--tint); }
+.ap-banner p, .ap-banner .bar { margin: 0; }
+
+/* The tabs. */
+.ap-tabs { display: flex; margin: 0 -12px; padding: 0 12px; border-bottom: 1px solid var(--border); }
+.ap-tab { flex: 1 1 0; min-width: 0; min-height: 40px; padding: 9px 4px 8px; font: inherit; font-weight: 600; color: var(--muted); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: none; border: 0; border-bottom: 2px solid transparent; cursor: pointer; }
+.ap-tab.on { color: var(--fg); border-bottom-color: var(--accent); }
+.ap-panel { gap: 8px; }
+.ap-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ap-group > .label, .ap-group > p { margin: 0; }
+.ap-short { font-size: 14px; }
+.ap-label-gap { margin: 6px 0 0; }
+
+/* One row per finding. */
+.ap-list { display: flex; flex-direction: column; }
+.ap-item { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0 10px; padding: 0; border-bottom: 1px solid var(--border); scroll-margin-bottom: 72px; }
+.plain > li.ap-item { padding: 0; }
+.ap-item > .mark, .ap-item > :not(.ap-pick):not(.ap-row) { flex: 1 0 100%; padding-bottom: 8px; }
+.ap-pick { flex: none; width: 18px; height: 18px; margin: 12px 0 0 2px; accent-color: var(--accent); }
+.ap-row { flex: 1 1 0; min-width: 0; display: flex; align-items: flex-start; gap: 10px; min-height: 56px; padding: 10px 2px; font: inherit; color: inherit; text-align: left; background: none; border: 0; cursor: pointer; }
+.ap-row.still { cursor: default; align-items: flex-start; }
+.ap-row.still > .btn { flex: none; }
+.ap-sev { flex: 0 0 44px; white-space: nowrap; padding-top: 1px; font-size: 11px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
+.ap-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ap-row-main p { margin: 0; }
+.ap-row-title { font-weight: 600; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ap-row-title.whole { display: block; -webkit-line-clamp: none; overflow: visible; }
+.ap-row-sub { display: flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--muted); }
+.ap-row-sub .path { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+.ap-tag { flex: none; display: inline-block; padding: 0 6px; font-size: 11px; font-weight: 700; line-height: 1.5; border: 1px solid currentColor; border-radius: 4px; white-space: nowrap; }
+.ap-go { flex: none; align-self: center; width: 7px; height: 7px; margin-right: 4px; border-top: 2px solid var(--muted); border-right: 2px solid var(--muted); transform: rotate(45deg); }
+
+/* Folds. */
+.ap-fold-section { min-width: 0; }
+.ap-fold-heading { margin: 0; font-size: inherit; }
+.ap-fold { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 2px; font: inherit; font-weight: 600; color: inherit; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.ap-fold-title { min-width: 0; overflow-wrap: anywhere; }
+.ap-fold .n { margin-left: auto; flex: none; font-weight: 400; font-size: 12px; color: var(--muted); }
+.ap-arrow { flex: none; width: 7px; height: 7px; margin: 0 3px; border-top: 2px solid var(--muted); border-right: 2px solid var(--muted); transform: rotate(45deg); transition: transform 0.15s; }
+.ap-fold[aria-expanded='true'] .ap-arrow { transform: rotate(135deg); }
+.ap-folded { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 8px 2px 12px; border-bottom: 1px solid var(--border); }
+.ap-folded p, .ap-folded .quote { margin: 0; }
+.ap-folded .ap-list { margin-top: -8px; }
+.ap-folded .ap-list > .ap-item:last-child { border-bottom: 0; }
+.ap-part { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ap-part > .label { margin: 0; }
+.ap-points { display: flex; flex-direction: column; gap: 6px; }
+.plain.ap-points > li { display: flex; gap: 8px; padding: 0; }
+.plain.ap-points > li::before { content: '•'; flex: none; color: var(--muted); }
+
+/* The bar fixed to the bottom of the panel, as wide as the panel; .ap-bar-room keeps the end of the review clear of it. */
+.ap-bar-room { flex: none; margin-top: -10px; }
+.ap-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; max-width: 420px; min-width: 320px; margin: 0 auto; padding: 8px 12px 10px; background: var(--bg); border-top: 1px solid var(--border); }
+.ap-bar .btn { min-height: 40px; padding: 4px 10px; font-size: 13px; white-space: normal; line-height: 1.2; }
+.ap-bar > .btn { flex: 0 1 auto; }
+.ap-bar > .btn.ap-bar-main, .ap-bar-main { flex: 1 1 0; min-width: 0; }
+.ap-bar-main { display: flex; flex-direction: column; gap: 6px; }
+.ap-bar-main > .btn { width: 100%; }
+.ap-primary > .btn { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
+.ap-bar .block .quote { max-height: 30vh; overflow: auto; }
+.ap-bar-why { flex: 1 0 100%; margin: 0; }

@@ -5,6 +5,7 @@ import { PanelScreen } from '../../src/screens/PanelScreen';
 import type { PanelState } from '../../src/state/reduce';
 import { prSummary } from './fixtures';
 import { finding, reviewState } from './review-fixtures';
+import { tick } from './review-dom';
 
 afterEach(cleanup);
 
@@ -15,7 +16,6 @@ function mount(state: PanelState) {
   return { dispatch, flip };
 }
 
-const tick = (title: string) => fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(`${title}$`) }));
 const ticked = (): string[] =>
   screen.getAllByRole('checkbox').filter((c) => (c as HTMLInputElement).checked).map((c) => c.getAttribute('aria-label') ?? '');
 const backButton = () => screen.queryByRole('button', { name: 'Back to the review' });

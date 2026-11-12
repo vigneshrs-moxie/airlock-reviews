@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PanelScreen } from '../../src/screens/PanelScreen';
 import type { PanelState } from '../../src/state/reduce';
 import { also, dismissal, finding, reviewState, type ReviewOptions } from './review-fixtures';
+import { chooseTab, fold, queryFold, rows, tick } from './review-dom';
 
 afterEach(cleanup);
 
@@ -18,21 +19,25 @@ function show(findings: Finding[], opts: ReviewOptions = {}) {
 const button = (name: string | RegExp) => screen.getByRole('button', { name });
 const queryButton = (name: string | RegExp) => screen.queryByRole('button', { name });
 const heading = (name: string | RegExp) => screen.getByRole('heading', { name });
-const cards = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>('.finding-card')];
+const cards = rows;
+const openDropped = (n: number) => { chooseTab('More'); fireEvent.click(button(`Dropped: ${n}`)); };
 const follows = (a: HTMLElement, b: HTMLElement) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
 
 describe('what the reviewer was not shown', () => {
   const LIMITS = ['The diff of src/big.ts was cut at 4,000 lines.', 'The rule file docs/rules.md was left out: <b>too long</b>.'];
 
-  it('is a collapsed section after the stage errors and before the findings, listing each limit when opened', () => {
+  it('is a collapsed fold on the More tab, after Review again, listing each limit when opened', () => {
     show([finding(1)], {
       doc: { limits: LIMITS, stageErrors: [{ stage: 'lenses', cohortId: null, message: 'Timed out' }] },
     });
-    const toggle = button('Not shown to the reviewer');
+    expect(queryFold('Not shown to the reviewer')).toBeNull();
+    chooseTab('More');
+    const toggle = fold('Not shown to the reviewer');
+    expect(toggle.textContent).toBe('Not shown to the reviewer 2');
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByText(LIMITS[0]!)).toBeNull();
     expect(follows(heading('Stage errors'), toggle)).toBe(true);
-    expect(follows(toggle, heading('Findings'))).toBe(true);
+    expect(follows(button('Review again'), toggle)).toBe(true);
     fireEvent.click(toggle);
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByText(LIMITS[0]!)).toBeTruthy();
@@ -40,29 +45,33 @@ describe('what the reviewer was not shown', () => {
     expect(screen.getByText(LIMITS[1]!)).toBeTruthy();
     expect(document.querySelector('b')).toBeNull();
   });
-  it('sits after the verdict when there are no stage errors', () => {
-    show([finding(1)], { doc: { limits: [LIMITS[0]!] } });
-    expect(follows(heading('Approve after fixes'), button('Not shown to the reviewer'))).toBe(true);
-    expect(follows(button('Not shown to the reviewer'), heading('Findings'))).toBe(true);
+  it('is the first fold on the More tab', () => {
+    show([finding(1)], { doc: { limits: [LIMITS[0]!], notes: ['A note.'] } });
+    chooseTab('More');
+    expect(follows(fold('Not shown to the reviewer'), fold('Notes from the review'))).toBe(true);
   });
   it('is absent when the list is empty or missing', () => {
     show([finding(1)], { doc: { limits: [] } });
-    expect(queryButton('Not shown to the reviewer')).toBeNull();
+    chooseTab('More');
+    expect(queryFold('Not shown to the reviewer')).toBeNull();
     cleanup();
     show([finding(1)]);
-    expect(queryButton('Not shown to the reviewer')).toBeNull();
+    chooseTab('More');
+    expect(queryFold('Not shown to the reviewer')).toBeNull();
   });
 });
 
 describe('the review\'s notes (second round)', () => {
   const NOTES = ['The kit was a day old.', 'Two files were <img src=x onerror=alert(1)> skipped [click](javascript:alert(1)).'];
 
-  it('is a collapsed section Notes (n) directly after Not shown to the reviewer, one item per note, as text', () => {
+  it('is a collapsed fold Notes from the review directly after Not shown to the reviewer, one item per note, as text', () => {
     show([finding(1)], { doc: { limits: ['The diff was cut.'], notes: NOTES } });
-    const toggle = button('Notes (2)');
+    chooseTab('More');
+    const toggle = fold('Notes from the review');
+    expect(toggle.textContent).toBe('Notes from the review 2');
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByText(NOTES[0]!)).toBeNull();
-    const limits = button('Not shown to the reviewer');
+    const limits = fold('Not shown to the reviewer');
     expect(follows(limits, toggle)).toBe(true);
     // Directly after: no other section between the two.
     expect(limits.closest('section')?.nextElementSibling).toBe(toggle.closest('section'));
@@ -72,15 +81,18 @@ describe('the review\'s notes (second round)', () => {
     expect(document.querySelector('img')).toBeNull();
     expect(document.querySelector('a')).toBeNull();
   });
-  it('sits before the findings when nothing was left out', () => {
+  it('follows Review again when nothing was left out', () => {
     show([finding(1)], { doc: { notes: [NOTES[0]!] } });
-    expect(follows(button('Notes (1)'), heading('Findings'))).toBe(true);
+    chooseTab('More');
+    expect(follows(button('Review again'), fold('Notes from the review'))).toBe(true);
   });
   it('is absent when there are no notes or the field is missing', () => {
     show([finding(1)], { doc: { notes: [] } });
+    chooseTab('More');
     expect(queryButton(/^Notes/)).toBeNull();
     cleanup();
     show([finding(1)]);
+    chooseTab('More');
     expect(queryButton(/^Notes/)).toBeNull();
   });
 });
@@ -91,10 +103,10 @@ describe('a finding also raised by other lenses and rules', () => {
     aliases: ['00000000000000aa'],
   });
 
-  it('says how many more on its card', () => {
+  it('keeps its row to the kind, the title and the place: who else raised it is in the finding', () => {
     show([merged, finding(2)]);
-    expect(within(cards()[0]!).getByText('Also raised by 3 more')).toBeTruthy();
-    expect(within(cards()[1]!).queryByText(/Also raised by/)).toBeNull();
+    expect(within(cards()[0]!).queryByText(/Also raised by/)).toBeNull();
+    expect(within(cards()[0]!).getByRole('button').textContent).toBe('FixProblem 1src/file1.ts:10');
   });
   it('lists each one in its detail as the pack title and the lens or rule', () => {
     show([merged]);
@@ -120,7 +132,8 @@ describe('a dismissal made under one of a finding\'s aliases', () => {
   it('takes the finding out of the list and into Dismissed, where Restore sends the dismissal\'s fingerprint', () => {
     const { dispatch } = show([merged, finding(2)], { dismissals: [underAlias] });
     expect(cards()).toHaveLength(1);
-    fireEvent.click(button('Dismissed: 1'));
+    chooseTab('More');
+    fireEvent.click(fold('Dismissed'));
     fireEvent.click(button('Restore Problem 1'));
     expect(dispatch).toHaveBeenCalledWith({ type: 'restore', fingerprint: ALIAS });
   });
@@ -144,10 +157,13 @@ describe('a dismissal made under one of a finding\'s aliases', () => {
   });
   it('drops the finding from the selection and the fix prompt bar', () => {
     const { rerender } = show([merged, finding(2)]);
-    fireEvent.click(screen.getByRole('checkbox', { name: /Problem 1$/ }));
-    expect(button('Copy fix prompt for 1 selected')).toBeTruthy();
+    expect(button('Copy fix prompt for the 2 fixes')).toBeTruthy();
+    tick('Problem 1');
+    expect(button('Copy fix prompt (1)')).toBeTruthy();
     rerender(reviewState([merged, finding(2)], { dismissals: [underAlias] }));
-    expect(queryButton(/Copy fix prompt for/)).toBeNull();
+    expect(button('Copy fix prompt (0)')).toBeTruthy();
+    fireEvent.click(button('Done'));
+    expect(button('Copy fix prompt for the 1 fix')).toBeTruthy();
   });
 });
 
@@ -159,12 +175,12 @@ describe('a dropped duplicate', () => {
 
   it('says it was dropped as a duplicate', () => {
     show([finding(1), finding(2)], { doc: { dropped: [duplicate()] } });
-    fireEvent.click(button('Dropped: 1'));
+    openDropped(1);
     expect(within(screen.getByRole('dialog')).getByText('Dropped as a duplicate: Same place and cause as another finding.')).toBeTruthy();
   });
   it('shows the finding it was merged into: the sheet closes and that finding\'s detail opens', () => {
     show([finding(1), finding(2)], { doc: { dropped: [duplicate()] } });
-    fireEvent.click(button('Dropped: 1'));
+    openDropped(1);
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Show the finding it was merged into' }));
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(heading('Problem 2')).toBeTruthy();
@@ -173,7 +189,7 @@ describe('a dropped duplicate', () => {
   });
   it('opens a merged-into finding that is in Also found', () => {
     show([finding(1), also(2)], { doc: { dropped: [duplicate()] } });
-    fireEvent.click(button('Dropped: 1'));
+    openDropped(1);
     fireEvent.click(button('Show the finding it was merged into'));
     expect(heading('Problem 2')).toBeTruthy();
   });
@@ -190,7 +206,7 @@ describe('a dropped duplicate', () => {
       },
       dismissals: [dismissal(f2)],
     });
-    fireEvent.click(button('Dropped: 4'));
+    openDropped(4);
     expect(within(screen.getByRole('dialog')).queryByRole('button', { name: 'Show the finding it was merged into' })).toBeNull();
     expect(within(screen.getByRole('dialog')).getByText('Dropped in the challenge: Same place and cause as another finding.')).toBeTruthy();
   });

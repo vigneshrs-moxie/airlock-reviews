@@ -6,6 +6,7 @@ import { App, browserNotes, realServices, startRealPanel } from '../../src/panel
 import { browserSettings } from '../../src/state/settings';
 import { browserTab } from '../../src/state/tab';
 import '../../src/screens/panel.css';
+import '../../src/screens/review.css';
 
 // One store, one tab watcher and one set of notes, so the panel, its jumps and its notes read the same tab.
 const settings = browserSettings();

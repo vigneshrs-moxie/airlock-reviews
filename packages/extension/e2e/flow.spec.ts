@@ -215,6 +215,11 @@ const noteRows = () => github.locator('tr[data-airlock-note]');
 const noteRow = (id: string) => github.locator(`tr[data-airlock-note="${id}"]`);
 /** The small lines under the verdict. */
 const verdictLines = () => panel.locator('.verdict');
+/** One of the review's three tabs, and a fold by its title (its name goes on with its count). */
+const reviewTab = (name: 'Findings' | 'The change' | 'More') => panel.getByRole('tab', { name: name === 'Findings' ? /^Findings · / : name });
+const foldButton = (title: string) => panel.getByRole('button', { name: new RegExp(`^${title}( |$)`) });
+/** The rows inside an open fold (Also found). */
+const foldedRows = () => panel.locator('.ap-folded .finding-card button.open');
 
 test('1. not paired: the pairing screen, and the token typed into it pairs the panel', async () => {
   if (context === undefined) throw new Error('no browser');
@@ -296,28 +301,29 @@ test('4. the verdict: its words and sentence, three top findings in rank order, 
   await expect(panel.getByText(document.verdict.sentence)).toBeVisible();
   await expect(frameStatus()).toHaveText('Connected');
   await expect(cardTitles()).toHaveText(top.map((f) => f.title));
-  await expect(cards().locator('.sev')).toHaveText(['Block', 'Fix', 'Ask']);
+  await expect(cards().locator('.ap-sev')).toHaveText(['Block', 'Fix', 'Ask']);
   // The notes: each open finding under its line on the Files changed page beside the panel. The fixture has no line 15,
   // so the last one waits for its line.
   await expect(noteRows()).toHaveCount(4);
   for (const f of [...top, alsoFound[0]!]) await expect(noteRow(f.id)).toHaveCount(1);
   await expect(noteRow(alsoFound[1]!.id)).toHaveCount(0);
   await expect(verdictLines().getByText('4 shown, 1 waiting for their lines to load')).toBeVisible();
-  await expect(cards().first()).toContainText('Also raised by 1 more');
-  await expect(panel.getByRole('button', { name: 'Not shown to the reviewer' })).toHaveAttribute('aria-expanded', 'false');
-  const notes = panel.getByRole('button', { name: 'Notes (1)' });
+  await reviewTab('More').click();
+  await expect(foldButton('Not shown to the reviewer')).toHaveAttribute('aria-expanded', 'false');
+  const notes = panel.getByRole('button', { name: 'Notes from the review 1' });
   await expect(notes).toHaveAttribute('aria-expanded', 'false');
   await expect(panel.getByText(NOTE, { exact: true })).toHaveCount(0);
   await notes.click();
   await expect(panel.getByText(NOTE, { exact: true })).toBeVisible();
   await notes.click();
   await expect(notes).toHaveAttribute('aria-expanded', 'false');
+  await reviewTab('Findings').click();
 
-  const fold = panel.getByRole('button', { name: 'Also found' });
+  const fold = foldButton('Also found');
   await expect(fold).toHaveAttribute('aria-expanded', 'false');
   await expect(panel.getByText(alsoFound[0]!.title)).toHaveCount(0);
   await fold.click();
-  await expect(panel.locator('button.line .title')).toHaveText(alsoFound.map((f) => f.title));
+  await expect(foldedRows().locator('.title')).toHaveText(alsoFound.map((f) => f.title));
   await fold.click();
   await expect(fold).toHaveAttribute('aria-expanded', 'false');
 });
@@ -333,6 +339,7 @@ test('5. the first finding: its fields, and Copy fix prompt puts exactly its pro
   }
   await expect(panel.locator('pre.quote code')).toHaveText(first.quote);
   await expect(panel.getByRole('button', { name: /src\/guard\.ts:4/ })).toBeVisible();
+  await expect(panel.getByRole('heading', { name: 'Also raised by' })).toBeVisible();
 
   await panel.getByRole('button', { name: 'Copy fix prompt' }).click();
   await expect(panel.getByRole('button', { name: 'Copied' })).toBeVisible();
@@ -354,16 +361,18 @@ test('6. dismissed as Not now it leaves the list and Dismissed: 1 appears; Resto
   // Its note is gone from the page; the others stay.
   await expect(noteRow(first.id)).toHaveCount(0);
   await expect(noteRows()).toHaveCount(3);
-  const dismissed = panel.getByRole('button', { name: 'Dismissed: 1' });
-  await expect(dismissed).toBeVisible();
+  await reviewTab('More').click();
+  const dismissed = foldButton('Dismissed');
+  await expect(dismissed).toHaveText('Dismissed 1');
   expect(bodiesOf('POST', '/dismissals').map((b) => DismissBodySchema.parse(b))).toEqual([
     { repo: REPO, number: NUMBER, reviewId: document.id, findingId: first.id, reason: 'not-now', text: '' },
   ]);
 
   await dismissed.click();
   await panel.getByRole('button', { name: `Restore ${first.title}` }).click();
-  await expect(cardTitles()).toHaveText(top.map((f) => f.title));
   await expect(panel.getByRole('button', { name: /^Dismissed/ })).toHaveCount(0);
+  await reviewTab('Findings').click();
+  await expect(cardTitles()).toHaveText(top.map((f) => f.title));
   await expect(noteRow(first.id)).toHaveCount(1);
   await expect(noteRows()).toHaveCount(4);
   expect(bodiesOf('POST', '/dismissals/restore').map((b) => RestoreBodySchema.parse(b))).toEqual([
@@ -399,7 +408,9 @@ test('7. dismissed as Wrong: Save waits for a valid line, the service gets exact
 
   await sheet.getByRole('button', { name: 'Done' }).click();
   await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
-  await expect(panel.getByRole('button', { name: 'Dismissed: 1' })).toBeVisible();
+  await reviewTab('More').click();
+  await expect(foldButton('Dismissed')).toHaveText('Dismissed 1');
+  await reviewTab('Findings').click();
   await expect(noteRow(second.id)).toHaveCount(0);
   await expect(verdictLines().getByText('3 shown, 1 waiting for their lines to load')).toBeVisible();
 });
@@ -412,7 +423,9 @@ test('8. the service stops: the frame says Not running, the offline message show
   await expect(panel.getByText('Shown from before the service stopped.')).toBeVisible();
   await expect(panel.getByRole('heading', { name: verdictWords(document.verdict.label, document.pr.stage) })).toBeVisible();
   await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
+  await reviewTab('More').click();
   await expect(panel.getByRole('button', { name: 'Review again' })).toBeDisabled();
+  await reviewTab('Findings').click();
   // The notes need no service: they stay with the review on screen.
   await expect(noteRows()).toHaveCount(3);
 });
@@ -424,7 +437,8 @@ test('9. the service starts again: the panel returns to the review by itself, th
   await expect(panel.getByRole('heading', { name: verdictWords(document.verdict.label, document.pr.stage) })).toBeVisible();
   await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
   // The Dismissed fold was left open in step 6, and the review is the same one on screen, so it is still open.
-  await expect(panel.getByRole('button', { name: 'Dismissed: 1' })).toHaveAttribute('aria-expanded', 'true');
+  await reviewTab('More').click();
+  await expect(foldButton('Dismissed')).toHaveAttribute('aria-expanded', 'true');
   await expect(panel.getByText(top[1]!.title, { exact: true })).toBeVisible();
   await expect(panel.getByText('Wrong', { exact: true })).toBeVisible();
   await expect(panel.getByText(WRONG_LINE, { exact: true })).toBeVisible();
@@ -584,9 +598,10 @@ test('11. Post comment: the preview, an edit, Update preview, then the post; the
 test('12. Post selected skips the posted finding; GitHub refuses, and every text is kept', async () => {
   const third = top[2]!;
   svc().answerNextPost({ refuse: 'Line 13 is not part of the diff' });
+  await panel.getByRole('button', { name: 'Select', exact: true }).click();
   await panel.getByRole('checkbox', { name: `Select: ${top[0]!.title}`, exact: true }).check();
   await panel.getByRole('checkbox', { name: `Select: ${third.title}`, exact: true }).check();
-  await panel.getByRole('button', { name: 'Post selected (1)' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub (1)' }).click();
   const sheet = panel.getByRole('dialog');
   const comment = sheet.getByRole('textbox', { name: 'Comment 1' });
   await expect(comment).toHaveValue(commentBody(third));
@@ -693,8 +708,8 @@ test('14. GitHub has the review after all: It was not posted finds it, nothing i
 
 test('15. a post whose proof gets no answer was never sent: it says so, and the same post goes through once the service answers', async () => {
   const fourth = alsoFound[0]!;
-  await panel.getByRole('button', { name: 'Also found' }).click();
-  await panel.locator('button.line').filter({ hasText: fourth.title }).click();
+  await foldButton('Also found').click();
+  await foldedRows().filter({ hasText: fourth.title }).click();
   await expect(panel.getByRole('heading', { name: fourth.title })).toBeVisible();
   await panel.getByRole('button', { name: 'Post comment' }).click();
   const sheet = panel.getByRole('dialog');
@@ -723,7 +738,7 @@ test('15. a post whose proof gets no answer was never sent: it says so, and the 
 test('16. GitHub refuses a post and the service cannot clear its record: the records are read again, so It was not posted is offered', async () => {
   const fifth = alsoFound[1]!;
   svc().answerNextPost({ refuseKept: 'Validation Failed' });
-  await panel.locator('button.line').filter({ hasText: fifth.title }).click();
+  await foldedRows().filter({ hasText: fifth.title }).click();
   await expect(panel.getByRole('heading', { name: fifth.title })).toBeVisible();
   await panel.getByRole('button', { name: 'Post comment' }).click();
   const sheet = panel.getByRole('dialog');
@@ -777,7 +792,10 @@ test('18. a push: the banner, Review the push starts with since last, and the re
 
   const line = `Review of the push ${'b'.repeat(7)} to ${'d'.repeat(7)}`;
   await expect(panel.getByText(line)).toBeVisible();
+  await reviewTab('More').click();
+  await foldButton('Notes from the review').click();
   await expect(panel.getByText(PUSH_NOTE)).toBeVisible();
+  await reviewTab('Findings').click();
   await expect(panel.getByText('New commits since this review.')).toHaveCount(0);
   await expect(cards()).toHaveCount(2);
   // Neither finding's file is on the fixture page: both notes wait for their lines.
@@ -788,7 +806,7 @@ test('18. a push: the banner, Review the push starts with since last, and the re
   await expect(cards().nth(0)).toContainText('Posted');
   await expect(cards().nth(1)).not.toContainText('Posted');
 
-  const toggle = panel.getByRole('button', { name: 'Fixed since the last review (1)' });
+  const toggle = panel.getByRole('button', { name: 'Fixed since the last review 1' });
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await toggle.click();
   const fixed = toggle.locator('xpath=ancestor::section[1]');
@@ -922,25 +940,39 @@ test('21. a merge review says it reviewed what was changed by hand only when its
     svc().addPull(mergePull(one));
     await context.route(`https://github.com/${REPO}/pull/${one.number}/files`, (route) => route.fulfill({ contentType: 'text/html', body: classic }));
   }
-  const expected: Record<number, { heading: string; line: string | null }> = {
+  // `heading`: the merge's heading in What it does, on The change tab; null for the brief under its usual name.
+  const expected: Record<number, { heading: string | null; line: string | null; note?: string }> = {
     8: { heading: 'A merge of main: only what was changed by hand was reviewed', line: null },
     9: { heading: 'A merge of main: git merged it without conflicts and nothing was changed by hand.', line: null },
-    10: { heading: 'What this does', line: null },
-    11: { heading: 'What this does', line: null },
-    12: { heading: 'What this does', line: `Review of the merge pushed since ${'f'.repeat(7)}: only what was changed by hand was reviewed.` },
-    13: { heading: 'What this does', line: 'The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.' },
-    // A pull request of only a merge reviewed again in full: its note is the only line, and no merge sentence.
-    14: { heading: 'What this does', line: EVERYTHING_NOTE },
+    10: { heading: null, line: null },
+    11: { heading: null, line: null },
+    12: { heading: null, line: `Review of the merge pushed since ${'f'.repeat(7)}: only what was changed by hand was reviewed.` },
+    13: { heading: null, line: 'The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.' },
+    // A pull request of only a merge reviewed again in full: no line, its note under More, and no merge sentence.
+    14: { heading: null, line: null, note: EVERYTHING_NOTE },
   };
   for (const { number } of MERGE_PULLS) {
+    // A new review on screen starts on the Findings tab, which says this pull request's review has replaced the last one.
+    await reviewTab('More').click();
     await github.goto(`https://github.com/${REPO}/pull/${number}/files`);
     await activate(`https://github.com/${REPO}/pull/${number}/files`);
     const want = expected[number]!;
-    await expect(panel.getByRole('heading', { name: want.heading })).toBeVisible();
+    await expect(reviewTab('Findings')).toHaveAttribute('aria-selected', 'true');
+    await reviewTab('The change').click();
+    await foldButton('What it does').click();
+    await expect(panel.getByText('This branch only merges its target branch into itself.', { exact: true })).toHaveCount(2);
+    if (want.heading !== null) await expect(panel.getByRole('heading', { name: want.heading })).toBeVisible();
+    else await expect(panel.getByRole('heading', { name: /^A merge of/ })).toHaveCount(0);
     const sentences = panel.locator('main').getByText(/changed by hand/);
     if (want.line !== null) await expect(panel.getByText(want.line, { exact: true })).toBeVisible();
-    const count = (want.heading.includes('by hand') ? 1 : 0) + (want.line?.includes('by hand') === true ? 1 : 0);
+    const count = (want.heading?.includes('by hand') === true ? 1 : 0) + (want.line?.includes('by hand') === true ? 1 : 0);
     await expect(sentences).toHaveCount(count);
+    if (want.note !== undefined) {
+      await reviewTab('More').click();
+      await foldButton('Notes from the review').click();
+      await expect(panel.getByText(want.note, { exact: true })).toBeVisible();
+      await expect(sentences).toHaveCount(0);
+    }
   }
 });
 

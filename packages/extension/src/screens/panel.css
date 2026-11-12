@@ -76,20 +76,12 @@ p { margin: 4px 0; overflow-wrap: anywhere; }
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .masked { -webkit-text-security: disc; }
 .row { flex-wrap: wrap; }
-.verdict .title { font-size: 16px; }
 .banner { border-color: var(--accent); }
 .sev { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
 .status { font-size: 11px; font-weight: 600; margin-left: 8px; padding: 0 6px; border: 1px solid currentColor; border-radius: 8px; }
-[data-severity='block'] .sev { color: var(--danger); }
-.cards { display: flex; flex-direction: column; gap: 8px; }
-.finding-card { display: flex; gap: 8px; align-items: flex-start; }
-.pick { flex: 0 0 auto; margin: 3px 0 0; }
 .open, .line, .place, .fold { font: inherit; color: inherit; text-align: left; background: none; border: 0; padding: 0; cursor: pointer; }
 .open { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .line, .place { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; width: 100%; padding: 3px 0; overflow-wrap: anywhere; }
-.fold { font-size: inherit; font-weight: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; }
-.head-line { display: flex; gap: 8px; align-items: baseline; }
-.rank { font-size: 11px; font-weight: 700; color: var(--muted); }
 .bar, .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 6px 0; }
 .action { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
 .part { margin-top: 8px; }

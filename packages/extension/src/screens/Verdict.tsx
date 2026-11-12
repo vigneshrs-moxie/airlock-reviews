@@ -1,14 +1,12 @@
-import { fixPrompt, POST_MAX_ITEMS, rereviewCovered, verdictWords, type Dismissal, type Finding, type ReviewDocument, type Tier } from '@airlock/shared';
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { fixPrompt, rereviewCovered, type Dismissal, type Finding, type ReviewDocument } from '@airlock/shared';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Timers } from '../client/timers';
 import { listFindings, neighbours, postOf, selectedInOrder, toggled } from '../state/selection';
 import { pushReviewable, type PostReply, type ReviewView, type UserAction } from '../state/reduce';
 import { AlsoFound } from './AlsoFound';
-import { BriefBlock } from './BriefBlock';
+import { ChangeTab, type ChangeFold } from './ChangeTab';
 import { Collapsible } from './Collapsible';
-import { CopyButton } from './CopyButton';
 import { useVisible } from './visible';
-import { DismissedList } from './DismissedList';
 import { DroppedSheet } from './DroppedSheet';
 import { FindingCard } from './FindingCard';
 import { FixedList } from './FixedList';
@@ -16,12 +14,13 @@ import type { Jump } from '../state/jump';
 import type { NotesLine } from '../state/notes';
 import { FindingDetail, notConnected } from './FindingDetail';
 import { useAnnounce } from './Frame';
-import { MapBlock } from './MapBlock';
-import { ALL_POSTED, FORGOTTEN, NO_POST_OFFLINE, pullAddress, Reason, TOO_MANY, UnknownMark, WAIT, whyNotPosting } from './PostedMark';
+import { MoreTab, type MoreFold } from './MoreTab';
+import { FORGOTTEN, NO_POST_OFFLINE, pullAddress, UnknownMark, WAIT, whyNotPosting } from './PostedMark';
 import { nextTicket } from './PostSheet';
+import { ReviewBar } from './ReviewBar';
 import { StageErrors } from './StageErrors';
-import { TimingTable, tookTime } from './TimingTable';
-import { depthWord } from './words';
+import { Tabs, type TabItem } from './Tabs';
+import { VerdictStrip } from './VerdictStrip';
 
 export interface VerdictProps {
   state: ReviewView & { notice?: string; busy?: boolean; post?: PostReply };
@@ -35,7 +34,7 @@ export interface VerdictProps {
   onPost?: (findings: Finding[], opener: string) => void;
   /** For the Copy buttons' two seconds. */
   timers?: Timers;
-  /** What the notes on GitHub's page did, said under the verdict; null for nothing to say. */
+  /** What the notes on GitHub's page did, said in the verdict strip; null for nothing to say. */
   notesLine?: NotesLine | null;
   /** Reloads the GitHub tab and sends the notes again: the person pressed the line's button. */
   onReloadNotes?: () => void;
@@ -46,7 +45,8 @@ export interface VerdictProps {
 /** A request to open one finding, numbered so the same finding can be asked for again. */
 export interface OpenFinding { id: string; seq: number }
 
-type Fold = 'limits' | 'notes' | 'also' | 'dismissed' | 'timing' | 'fixed';
+type Tab = 'findings' | 'change' | 'more';
+type Fold = 'also' | 'fixed' | ChangeFold | MoreFold;
 
 const noDismiss = (): void => undefined;
 const noPost = (): void => undefined;
@@ -54,17 +54,17 @@ const noPost = (): void => undefined;
 function ReviewAgain({ doc, disabled, dispatch, label = 'Review again' }: {
   doc: ReviewDocument; disabled: boolean; dispatch: VerdictProps['dispatch']; label?: string;
 }) {
-  return <button type="button" className="btn" disabled={disabled} onClick={() => dispatch({ type: 'start', depth: doc.depth })}>{label}</button>;
+  return <button type="button" className="btn ap-start" disabled={disabled} onClick={() => dispatch({ type: 'start', depth: doc.depth })}>{label}</button>;
 }
 
 const short = (sha: string): string => sha.slice(0, 7);
 
 /**
- * The line under the verdict that says what a re-review covered, as the document says (`rereviewCovered`): the push; a
+ * The line in the verdict strip that says what a re-review covered, as the document says (`rereviewCovered`): the push; a
  * pushed merge, said to be reviewed by hand only when the document says so (`mergeReview`) and naming no branch (the
  * push may have merged one other than the base), and nothing for one Airlock could not review or a document that does
  * not say (the stage error says what happened). Nothing for a full review (its note says why), nor when everything was
- * reviewed again (its note is the only line).
+ * reviewed again (its note, under More, says why).
  */
 function rangeLine(doc: ReviewDocument): string | null {
   const covered = rereviewCovered(doc);
@@ -84,7 +84,15 @@ function mergeOf(doc: ReviewDocument): { base: string; kind: 'by-hand' | 'nothin
   return { base: doc.pr.baseRef, kind: doc.mergeReview };
 }
 
-/** The finished review: the verdict, the findings and what sits around them; one finding in full when it is opened. */
+/** What scrolls the panel. */
+const scroller = (): Element => document.scrollingElement ?? document.documentElement;
+/** The Findings tab, which the sheets' focus helpers also look for; none when no finding is open. */
+const findingsTab = (): HTMLElement | null => document.querySelector<HTMLElement>('[data-focus="findings"]');
+
+/**
+ * The finished review: the verdict strip, what must be seen at once (the stale banner, the notice, the stage errors), then
+ * three tabs (the findings, the change, more) and a bar pinned to the bottom; one finding in full when it is opened.
+ */
 export function Verdict({
   state, dispatch, readOnly = false, onJump = notConnected, onDismiss = noDismiss, onPost = noPost, timers, notesLine = null,
   onReloadNotes, openFinding = null,
@@ -97,15 +105,18 @@ export function Verdict({
   const lists = useMemo(() => listFindings(doc.findings, latest.dismissals), [doc.findings, latest.dismissals]);
   const changedPaths = useMemo(() => new Set(doc.files.map((f) => f.path)), [doc.files]);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [selecting, setSelecting] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>('findings');
   const [folds, setFolds] = useState<ReadonlySet<string>>(new Set());
   const [sheet, setSheet] = useState(false);
   const droppedButton = useRef<HTMLButtonElement>(null);
+  const selectButton = useRef<HTMLButtonElement>(null);
   const nodes = useRef(new Map<string, HTMLButtonElement>());
   const shownDetail = useRef<string | null>(null);
+  /** Where the panel was scrolled when a finding was opened, put back when the review is shown again. */
+  const scrolledTo = useRef<number | null>(null);
   const verdictHeading = useRef<HTMLHeadingElement>(null);
-  const findingsHeading = useRef<HTMLHeadingElement>(null);
-  const postWhy = useId();
   /** Forgets sent from a mark, by ticket, with the finding each was for. */
   const forgetting = useRef(new Map<number, string>());
   /** The service's sentence when a forget sent from a mark found the review on GitHub, so nothing was forgotten. */
@@ -120,7 +131,6 @@ export function Verdict({
   const postBlocked = whyNotPosting(pr, stale, readOnly);
   // Ticked findings already posted (or whose post is not known) are left out of a post.
   const postable = chosen.filter((f) => recordOf(f) === undefined);
-  const barWhy = postBlocked ?? (postable.length === 0 ? ALL_POSTED : postable.length > POST_MAX_ITEMS ? TOO_MANY : state.busy === true ? WAIT : null);
   // A record whose outcome is not known is cleared where its finding is shown.
   const forgetBlocked = readOnly ? NO_POST_OFFLINE : state.busy === true ? WAIT : null;
   const forget = (record: Parameters<typeof UnknownMark>[0]['record'], findingId: string): number => {
@@ -140,6 +150,12 @@ export function Verdict({
       />
     );
   };
+
+  /** Opens a finding, keeping where the review was scrolled to. */
+  const open = useCallback((id: string): void => {
+    if (shownDetail.current === null) scrolledTo.current = scroller().scrollTop;
+    setOpenId(id);
+  }, []);
 
   const register = useCallback((id: string, node: HTMLButtonElement | null): void => {
     if (node === null) nodes.current.delete(id);
@@ -169,8 +185,8 @@ export function Verdict({
   useEffect(() => {
     if (openFinding === null || openFinding.seq === askedOpen.current) return;
     askedOpen.current = openFinding.seq;
-    if (lists.order.some((f) => f.id === openFinding.id)) setOpenId(openFinding.id);
-  }, [openFinding, lists.order]);
+    if (lists.order.some((f) => f.id === openFinding.id)) open(openFinding.id);
+  }, [openFinding, lists.order, open]);
 
   // The notes line is said when it changes, not when the notes are sent again with the same counts.
   const notesText = notesLine?.text ?? null;
@@ -184,21 +200,34 @@ export function Verdict({
   // An open finding that is no longer shown (dismissed) is forgotten, so restoring it does not reopen it.
   useEffect(() => { if (openId !== null && detail === undefined) setOpenId(null); }, [openId, detail]);
 
-  // Opening a finding is announced by the focus on its heading. Leaving it puts focus back on the line that opened it (opening
-  // Also found when the line is in it), or on the Findings heading, or the verdict, when that finding is gone.
+  // Back from a finding, the review is where it was scrolled to before the finding was opened.
+  useLayoutEffect(() => {
+    if (detailId !== null || scrolledTo.current === null || !visible) return;
+    scroller().scrollTop = scrolledTo.current;
+    scrolledTo.current = null;
+  }, [detailId, visible]);
+
+  // Opening a finding is announced by the focus on its heading. Leaving it puts focus back on the row that opened it (opening
+  // Also found when the row is in it), or on the Findings tab, or the verdict, when that finding is gone; on the More tab,
+  // from a finding the dropped sheet showed, on Dropped.
   useEffect(() => {
     if (detailId !== null) { shownDetail.current = detailId; return; }
     const id = shownDetail.current;
     // Out of sight, the move waits and is not used up; it happens when the panel is in sight again.
     if (id === null || !visible) return;
     const node = nodes.current.get(id);
-    if (node) { node.focus(); shownDetail.current = null; return; }
-    if (lists.also.some((f) => f.id === id) && !folds.has('also')) { setFolds((was) => toggled(was, 'also')); return; }
-    (findingsHeading.current ?? verdictHeading.current)?.focus();
+    if (node) {
+      node.focus({ preventScroll: true });
+      node.scrollIntoView?.({ block: 'nearest' });
+      shownDetail.current = null;
+      return;
+    }
+    if (tab === 'findings' && lists.also.some((f) => f.id === id) && !folds.has('also')) { setFolds((was) => toggled(was, 'also')); return; }
+    ((tab === 'more' ? droppedButton.current : null) ?? findingsTab() ?? verdictHeading.current)?.focus();
     shownDetail.current = null;
-  }, [detailId, folds, lists, visible]);
+  }, [detailId, folds, lists, visible, tab]);
 
-  // A record forgotten from a mark: say so, and put focus on the finding's Post comment, or the list's heading. One that
+  // A record forgotten from a mark: say so, and put focus on the finding's Post comment, or the Findings tab. One that
   // GitHub has after all (found): its sentence is shown and has focus, and the finding's mark now says Posted.
   const reply = state.post;
   useEffect(() => {
@@ -214,27 +243,38 @@ export function Verdict({
     announce(FORGOTTEN);
     const own = [...document.querySelectorAll<HTMLButtonElement>('[data-post-for]')].find((n) => n.getAttribute('data-post-for') === findingId);
     if (own !== undefined && !own.disabled) own.focus();
-    else (findingsHeading.current ?? verdictHeading.current)?.focus();
+    else (findingsTab() ?? verdictHeading.current)?.focus();
   }, [reply, announce]);
 
   useEffect(() => { if (found !== null) foundLine.current?.focus(); }, [found]);
+
+  // Select puts focus on the first checkbox; Done puts it back on Select.
+  const modeMoved = useRef<'pick' | 'select' | null>(null);
+  useEffect(() => {
+    const to = modeMoved.current;
+    modeMoved.current = null;
+    if (to === 'pick') document.querySelector<HTMLElement>('.ap-pick')?.focus();
+    else if (to === 'select') selectButton.current?.focus();
+  }, [selecting]);
 
   const empty = lists.order.length === 0;
   const unfinished = doc.verdict.label === 'incomplete';
   const allDismissed = empty && !unfinished && lists.dismissed.length > 0;
   useEffect(() => { if (allDismissed) setFolds((was) => (was.has('dismissed') ? was : toggled(was, 'dismissed'))); }, [allDismissed]);
+  // With nothing open there is nothing to select.
+  useEffect(() => { if (empty) setSelecting(false); }, [empty]);
 
   const fold = (key: Fold): void => setFolds((was) => toggled(was, key));
   const closeSheet = useCallback((): void => setSheet(false), []);
   const shownIds = useMemo(() => new Set(lists.order.map((f) => f.id)), [lists.order]);
-  const showMerged = useCallback((id: string): void => { setSheet(false); setOpenId(id); }, []);
+  const showMerged = useCallback((id: string): void => { setSheet(false); open(id); }, [open]);
   const restore = (d: Dismissal): void => dispatch({ type: 'restore', fingerprint: d.fingerprint });
-  const promptFor = (findings: Finding[]) => (): string => fixPrompt(doc, findings);
+  const promptFor = (findings: readonly Finding[]) => (): string => fixPrompt(doc, [...findings]);
 
   const banners = (
     <>
       {stale && (
-        <section className="card banner">
+        <section className="card banner ap-banner">
           <p>New commits since this review.</p>
           <div className="bar">
             {pushReviewable(pr) && (
@@ -253,139 +293,88 @@ export function Verdict({
 
   if (detail !== undefined) {
     const { previous, next } = neighbours(lists.order, detail.id);
+    const position = { index: lists.order.indexOf(detail) + 1, total: lists.order.length };
     return (
       <>
       {banners}
       <FindingDetail
         key={detail.id} finding={detail} packs={pr.packs} previous={previous} next={next} canDismiss={!disabled}
-        fixPrompt={promptFor([detail])} onBack={() => setOpenId(null)} onOpen={(f) => setOpenId(f.id)}
+        fixPrompt={promptFor([detail])} onBack={() => setOpenId(null)} onOpen={(f) => open(f.id)}
         onJump={(place, options) => onJump(doc.pr, place, options)} changedPaths={changedPaths} onDismiss={onDismiss}
         posted={recordOf(detail)} postBlocked={postBlocked} canPost={state.busy !== true} onPost={(f) => onPost([f], f.id)}
-        unknownMark={(id) => unknownMark(detail, id)} {...t}
+        unknownMark={(id) => unknownMark(detail, id)} position={position} {...t}
       />
       </>
     );
   }
 
   const titles = doc.packs.map((p) => pr.packs.find((known) => known.id === p.id)?.title ?? p.id).join(', ');
-  const tiers = new Map<string, Tier>(doc.files.map((f) => [f.path, f.tier]));
-  const ran = doc.timings.some(tookTime);
-  const line = rangeLine(doc);
-  const merge = mergeOf(doc);
-  // A re-review's notes say why it covered what it did, so they sit under the verdict; a first review's stay folded.
-  const notesUnderVerdict = doc.previous !== undefined && doc.notes !== undefined && doc.notes.length > 0;
   const fixed = doc.fixed ?? [];
+  const showStatus = doc.previous !== undefined;
+  const fixes = lists.order.filter((f) => f.severity === 'block' || f.severity === 'fix');
+  const emptySentence = !empty ? null
+    : unfinished ? 'The review did not finish, so nothing here is cleared.'
+      : lists.dismissed.length > 0 ? `No open findings. ${lists.dismissed.length} dismissed.` : 'No findings.';
+  const toggle = (f: Finding): void => setSelected((was) => toggled(was, f.id));
+  const tabs: TabItem<Tab>[] = [
+    { key: 'findings', label: `Findings · ${lists.order.length}`, ...(empty ? {} : { focusName: 'findings' }) },
+    { key: 'change', label: 'The change' },
+    { key: 'more', label: 'More' },
+  ];
 
   return (
     <>
-      <section className="card verdict">
-        <h2 className="title" tabIndex={-1} data-focus="verdict" ref={verdictHeading}>{verdictWords(doc.verdict.label, doc.pr.stage)}</h2>
-        <p>{doc.verdict.sentence}</p>
-        {empty && (
-          <p>
-            {unfinished ? 'The review did not finish, so nothing here is cleared.'
-              : lists.dismissed.length > 0 ? `No open findings. ${lists.dismissed.length} dismissed.` : 'No findings.'}
-          </p>
-        )}
-        {line !== null && <p>{line}</p>}
-        {notesUnderVerdict && doc.notes!.map((note, i) => <p key={i}>{note}</p>)}
-        {notesLine !== null && <p>{notesLine.text}</p>}
-        {notesLine?.reload === true && (
-          <button type="button" className="btn small" onClick={() => onReloadNotes?.()}>Reload the GitHub tab</button>
-        )}
-        <p className="muted">{`Reviewed at ${doc.pr.headSha.slice(0, 7)} · ${depthWord(doc.depth)}${titles === '' ? '' : ` · ${titles}`}`}</p>
-      </section>
+      <VerdictStrip
+        doc={doc} open={lists.order} empty={emptySentence} range={rangeLine(doc)} notesLine={notesLine} onReloadNotes={onReloadNotes}
+        headingRef={verdictHeading}
+      />
       {banners}
       <StageErrors errors={doc.stageErrors} map={doc.map} />
-      {doc.limits !== undefined && doc.limits.length > 0 && (
-        <Collapsible title="Not shown to the reviewer" open={folds.has('limits')} onToggle={() => fold('limits')}>
-          <ul className="plain">{doc.limits.map((line, i) => <li key={i}>{line}</li>)}</ul>
-        </Collapsible>
+      <Tabs label="The review" items={tabs} chosen={tab} onChoose={setTab}>
+        {tab === 'findings' && (
+          <>
+            {lists.top.length > 0 && (
+              <ol className="plain ap-list" aria-label="Top findings">
+                {lists.top.map((f) => (
+                  <FindingCard
+                    key={f.id} finding={f} showStatus={showStatus} selecting={selecting} selected={selected.has(f.id)} posted={recordOf(f)}
+                    after={unknownMark(f)} onToggle={() => toggle(f)} onOpen={() => open(f.id)} register={register}
+                  />
+                ))}
+              </ol>
+            )}
+            {lists.also.length > 0 && (
+              <Collapsible title="Also found" count={String(lists.also.length)} open={folds.has('also')} onToggle={() => fold('also')}>
+                <AlsoFound
+                  findings={lists.also} showStatus={showStatus} selecting={selecting} selected={selected} onToggle={toggle}
+                  onOpen={(f) => open(f.id)} register={register} postOf={recordOf} after={(f) => unknownMark(f)}
+                />
+              </Collapsible>
+            )}
+            {fixed.length > 0 && (
+              <Collapsible title="Fixed since the last review" count={String(fixed.length)} open={folds.has('fixed')} onToggle={() => fold('fixed')}>
+                <FixedList findings={fixed} />
+              </Collapsible>
+            )}
+          </>
+        )}
+        {tab === 'change' && <ChangeTab doc={doc} merge={mergeOf(doc)} folds={folds} onFold={fold} {...t} />}
+        {tab === 'more' && (
+          <MoreTab
+            doc={doc} packTitles={titles} reviewAgain={stale ? null : <ReviewAgain doc={doc} disabled={disabled} dispatch={dispatch} />}
+            dismissed={lists.dismissed} canRestore={!disabled} onRestore={restore} folds={folds} onFold={fold}
+            droppedRef={droppedButton} onDropped={() => setSheet(true)}
+          />
+        )}
+      </Tabs>
+      {!empty && (
+        <ReviewBar
+          selecting={selecting} fixes={fixes} ticked={chosen} postable={postable} blocked={postBlocked} busy={state.busy === true}
+          prompt={promptFor} selectRef={selectButton} onPost={() => onPost(postable, 'selected')} {...t}
+          onSelect={() => { modeMoved.current = 'pick'; setTab('findings'); setSelecting(true); }}
+          onDone={() => { modeMoved.current = 'select'; setSelecting(false); setSelected(new Set()); }}
+        />
       )}
-      {!notesUnderVerdict && doc.notes !== undefined && doc.notes.length > 0 && (
-        <Collapsible title={`Notes (${doc.notes.length})`} open={folds.has('notes')} onToggle={() => fold('notes')}>
-          <ul className="plain">{doc.notes.map((line, i) => <li key={i}>{line}</li>)}</ul>
-        </Collapsible>
-      )}
-      {lists.top.length > 0 && (
-        <section>
-          <h2 className="label" tabIndex={-1} data-focus="findings" ref={findingsHeading}>Findings</h2>
-          {count > 0 && (
-            <div className="bar">
-              <CopyButton key={chosen.map((f) => f.id).join()} text={promptFor(chosen)} label={`Copy fix prompt for ${count} selected`} {...t} />
-              <div className="action">
-                <button
-                  type="button" className="btn small" data-post-selected disabled={barWhy !== null}
-                  {...(barWhy === null ? {} : { 'aria-describedby': postWhy })} onClick={() => onPost(postable, 'selected')}
-                >
-                  {`Post selected (${postable.length})`}
-                </button>
-                {barWhy !== null && <Reason id={postWhy} text={barWhy} />}
-              </div>
-              <button type="button" className="btn small" onClick={() => setSelected(new Set())}>Clear</button>
-            </div>
-          )}
-          <ol className="plain cards">
-            {lists.top.map((f, i) => (
-              <FindingCard
-                key={f.id} finding={f} rank={i + 1} packs={pr.packs} selected={selected.has(f.id)} posted={recordOf(f)} after={unknownMark(f)}
-                onToggle={() => setSelected((was) => toggled(was, f.id))} onOpen={() => setOpenId(f.id)} register={register}
-              />
-            ))}
-          </ol>
-        </section>
-      )}
-      {fixed.length > 0 && (
-        <Collapsible title={`Fixed since the last review (${fixed.length})`} open={folds.has('fixed')} onToggle={() => fold('fixed')}>
-          <FixedList findings={fixed} />
-        </Collapsible>
-      )}
-      {lists.also.length > 0 && (
-        <Collapsible title="Also found" open={folds.has('also')} onToggle={() => fold('also')}>
-          <AlsoFound findings={lists.also} onOpen={(f) => setOpenId(f.id)} register={register} postOf={recordOf} after={(f) => unknownMark(f)} />
-        </Collapsible>
-      )}
-      {doc.questions.length > 0 && (
-        <section className="card">
-          <h2 className="label">Questions</h2>
-          <ul className="plain">{doc.questions.map((q, i) => <li key={i}>{q.text}</li>)}</ul>
-        </section>
-      )}
-      {doc.whoseCall.length > 0 && (
-        <section className="card">
-          <h2 className="label">Whose call</h2>
-          <ul className="plain">{doc.whoseCall.map((line, i) => <li key={i}>{line}</li>)}</ul>
-        </section>
-      )}
-      {doc.checksAfterMerge.length > 0 && (
-        <section className="card">
-          <h2 className="label">Check after merge</h2>
-          <ol className="steps">{doc.checksAfterMerge.map((line, i) => <li key={i}>{line}</li>)}</ol>
-        </section>
-      )}
-      <BriefBlock brief={doc.brief} {...(merge === undefined ? {} : { merge })} />
-      {doc.selfReviewText.trim() !== '' && (
-        <section className="card">
-          <h2 className="label">Text for your pull request</h2>
-          <div className="quote">{doc.selfReviewText}</div>
-          <CopyButton text={() => doc.selfReviewText} label="Copy" {...t} />
-        </section>
-      )}
-      {(doc.map.cohorts.length > 0 || doc.map.standalone.length > 0) && <MapBlock map={doc.map} tiers={tiers} />}
-      {doc.dropped.length > 0 && (
-        <button type="button" className="btn" ref={droppedButton} onClick={() => setSheet(true)}>{`Dropped: ${doc.dropped.length}`}</button>
-      )}
-      {lists.dismissed.length > 0 && (
-        <Collapsible title={`Dismissed: ${lists.dismissed.length}`} open={folds.has('dismissed')} onToggle={() => fold('dismissed')}>
-          <DismissedList items={lists.dismissed} canRestore={!disabled} onRestore={restore} />
-        </Collapsible>
-      )}
-      {ran && (
-        <Collapsible title="Timing" open={folds.has('timing')} onToggle={() => fold('timing')}>
-          <TimingTable timings={doc.timings} />
-        </Collapsible>
-      )}
-      {!stale && <ReviewAgain doc={doc} disabled={disabled} dispatch={dispatch} />}
       {sheet && <DroppedSheet dropped={doc.dropped} opener={droppedButton} onClose={closeSheet} shown={shownIds} onShow={showMerged} />}
     </>
   );

@@ -6,6 +6,7 @@ import { PanelScreen } from '../../src/screens/PanelScreen';
 import { recordOf } from '../helpers/post-fixtures';
 import { prSummary } from './fixtures';
 import { also, EVERYTHING_AGAIN_NOTES, finding, mergeDocument, reviewState, type ReviewOptions } from './review-fixtures';
+import { chooseTab, fold, foldSection, openFold, queryFold, rows, strip, tick } from './review-dom';
 
 afterEach(cleanup);
 
@@ -19,7 +20,18 @@ function review(findings: Finding[], opts: ReviewOptions = {}) {
   return { dispatch };
 }
 const button = (name: string | RegExp) => screen.getByRole('button', { name });
-const cards = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>('.finding-card')];
+const cards = rows;
+const tablist = () => screen.getByRole('tablist');
+/** The notes under More, in order. */
+const notesUnderMore = (): string[] => {
+  chooseTab('More');
+  openFold('Notes from the review');
+  return [...foldSection('Notes from the review').querySelectorAll('li')].map((li) => li.textContent ?? '');
+};
+const chips = (label: string): string[] =>
+  [...(strip().querySelector(`[aria-label="${label}"]`)?.querySelectorAll('li') ?? [])].map((li) => li.textContent ?? '');
+/** Opens the brief on the Change tab. */
+const openBrief = () => { chooseTab('The change'); if (queryFold('What it does') !== null) openFold('What it does'); };
 const follows = (a: HTMLElement, b: HTMLElement) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
 
 describe('starting a re-review', () => {
@@ -69,26 +81,43 @@ describe('showing a re-review', () => {
     );
     const line = screen.getByText(`Review of the push ${'a'.repeat(7)} to ${'c'.repeat(7)}`);
     expect(follows(screen.getByRole('heading', { name: 'Approve after fixes' }), line)).toBe(true);
-    expect(follows(line, screen.getByRole('heading', { name: 'Findings' }))).toBe(true);
+    expect(strip().contains(line)).toBe(true);
+    expect(follows(line, tablist())).toBe(true);
     expect(cards().map((c) => within(c).getByTestId('status').textContent)).toEqual(['Moved', 'New', 'Still open']);
   });
-  it('a first review shows no push line and no chips', () => {
+  it('counts what changed since the last review in the strip, a count of none left out', () => {
+    const fixed = (n: number) => finding(n, { status: 'fixed', bucket: 'also', rank: null });
+    review(
+      [finding(1, { status: 'moved' }), finding(2, { status: 'new' }), finding(3, { status: 'still-open' }), also(4, { status: 'still-open' })],
+      { doc: { previous: PREVIOUS, fixed: [fixed(7), fixed(8)] } },
+    );
+    const label = within(strip()).getByText('Since the last review');
+    expect(chips('Since the last review')).toEqual(['2 fixed', '2 still open', '1 new', '1 moved']);
+    expect(chips('Open findings')).toEqual(['3 to fix', '1 note']);
+    expect(follows(label, strip().querySelector('[aria-label="Since the last review"]')!)).toBe(true);
+    cleanup();
+    review([finding(1, { status: 'new' })], { doc: { previous: PREVIOUS } });
+    expect(chips('Since the last review')).toEqual(['1 new']);
+    cleanup();
+    review([], { doc: { previous: PREVIOUS } });
+    expect(within(strip()).queryByText('Since the last review')).toBeNull();
+  });
+  it('a first review shows no push line, no status and no since-the-last-review chips', () => {
     review([finding(1, { status: null })]);
     expect(screen.queryByText(/^Review of the/)).toBeNull();
     expect(screen.queryByTestId('status')).toBeNull();
+    expect(screen.queryByText('Since the last review')).toBeNull();
   });
   it('an also-found line carries its status too', () => {
     review([also(2, { status: 'still-open' })], { doc: { previous: PREVIOUS } });
-    fireEvent.click(button('Also found'));
+    fireEvent.click(fold('Also found'));
     expect(screen.getByTestId('status').textContent).toBe('Still open');
   });
-  it('the everything-again note is shown when the branch was rewritten', () => {
+  it('the everything-again note is shown under More when the branch was rewritten, and the strip has no range line', () => {
     const note = 'The branch was rewritten, so everything was reviewed again.';
     review([finding(1)], { doc: { previous: PREVIOUS, notes: [note], range: { baseSha: 'b'.repeat(40), headSha: HEAD, kind: 'full' } } });
-    const shown = screen.getByText(note);
-    expect(follows(screen.getByRole('heading', { name: 'Approve after fixes' }), shown)).toBe(true);
-    expect(follows(shown, screen.getByRole('heading', { name: 'Findings' }))).toBe(true);
     expect(screen.queryByText(/^Review of the push/)).toBeNull();
+    expect(notesUnderMore()).toEqual([note]);
   });
 });
 
@@ -104,14 +133,17 @@ describe('what a merge review says it covered (the document\'s mergeReview)', ()
 
   it('a first review of a merge reviewed by hand has the by-hand heading', () => {
     review([finding(1)], { doc: { range: MERGE_RANGE, brief: BRIEF, mergeReview: 'by-hand' } });
+    openBrief();
     expect(screen.getByRole('heading', { name: BY_HAND_HEADING })).toBeTruthy();
-    expect(screen.queryByRole('heading', { name: 'What this does' })).toBeNull();
     cleanup();
     review([finding(1)], { doc: { brief: BRIEF } });
-    expect(screen.getByRole('heading', { name: 'What this does' })).toBeTruthy();
+    openBrief();
+    expect(screen.queryByRole('heading', { name: /^A merge of/ })).toBeNull();
+    expect(within(foldSection('What it does')).getByText('Brings main in.')).toBeTruthy();
   });
   it('a first review of a merge git made with nothing changed by hand says so, and nothing about a review of hand changes', () => {
     review([], { doc: { range: MERGE_RANGE, brief: BRIEF, mergeReview: 'nothing-by-hand' } });
+    openBrief();
     expect(screen.getByRole('heading', { name: CLEAN_HEADING })).toBeTruthy();
     expect(screen.queryByText(/only what was changed by hand was reviewed/)).toBeNull();
   });
@@ -120,10 +152,14 @@ describe('what a merge review says it covered (the document\'s mergeReview)', ()
     ['an older document without the field', {}],
   ])('%s says neither merge sentence: the brief keeps its usual heading', (_name, field) => {
     review([], { doc: { range: MERGE_RANGE, brief: BRIEF, ...field, verdict: { label: 'incomplete', sentence: 'The review did not finish.', counts: { block: 0, fix: 0, ask: 0, note: 0 } } } });
-    expect(screen.getByRole('heading', { name: 'What this does' })).toBeTruthy();
+    expect(anyMergeSentence()).toEqual([]);
+    openBrief();
+    expect(screen.queryByRole('heading', { name: /^A merge of/ })).toBeNull();
     expect(anyMergeSentence()).toEqual([]);
     cleanup();
     review([], { doc: { range: MERGE_RANGE, brief: BRIEF, previous: PREVIOUS, ...field } });
+    expect(anyMergeSentence()).toEqual([]);
+    openBrief();
     expect(anyMergeSentence()).toEqual([]);
   });
   it('a merge pushed since the earlier review and reviewed by hand has its own line', () => {
@@ -142,13 +178,16 @@ describe('what a merge review says it covered (the document\'s mergeReview)', ()
     expect(follows(screen.getByRole('heading', { name: 'Approve after fixes' }), line)).toBe(true);
     expect(screen.queryByText(BY_HAND_LINE)).toBeNull();
     // A re-review's brief keeps its usual heading.
+    openBrief();
     expect(screen.queryByRole('heading', { name: /^A merge of/ })).toBeNull();
   });
-  it.each(EVERYTHING_AGAIN_NOTES)('everything reviewed again: the note is the only line under the verdict (%s)', (note) => {
+  it.each(EVERYTHING_AGAIN_NOTES)('everything reviewed again: no line in the strip, and the note under More (%s)', (note) => {
     for (const kind of ['by-hand', 'nothing-by-hand', 'not-reviewed'] as const) {
       review([finding(1)], { doc: { previous: { ...PREVIOUS, covered: 'everything' }, range: MERGE_RANGE, mergeReview: kind, notes: [note] } });
-      const verdict = screen.getByRole('heading', { name: 'Approve after fixes' }).closest('section')!;
-      expect([...verdict.querySelectorAll('p')].map((p) => p.textContent).filter((t) => t !== 'Two things to fix.' && !t?.startsWith('Reviewed at'))).toEqual([note]);
+      const verdict = strip();
+      expect([...verdict.querySelectorAll('p')].map((p) => p.textContent).filter((t) => t !== 'Two things to fix.' && !t?.startsWith('Reviewed at'))).toEqual([]);
+      expect(anyMergeSentence()).toEqual([]);
+      expect(notesUnderMore()).toEqual([note]);
       expect(anyMergeSentence()).toEqual([]);
       cleanup();
     }
@@ -159,25 +198,28 @@ describe('the line is decided by what the document says it covered, never by a n
   const MERGE_RANGE = { baseSha: 'b'.repeat(40), headSha: HEAD, kind: 'sync-merge' as const };
   const PUSH_RANGE = { baseSha: EARLIER, headSha: HEAD, kind: 'rereview' as const };
   const underVerdict = (): (string | null)[] => {
-    const verdict = screen.getByRole('heading', { name: 'Approve after fixes' }).closest('section')!;
+    const verdict = strip();
     return [...verdict.querySelectorAll('p')].map((p) => p.textContent).filter((t) => t !== 'Two things to fix.' && !t?.startsWith('Reviewed at'));
   };
 
-  it('everything again with a note worded in another way: the note is still the only line', () => {
+  it('everything again with a note worded in another way: no line in the strip, the note under More', () => {
     const note = 'Airlock looked at the whole pull request this time.';
     for (const range of [MERGE_RANGE, PUSH_RANGE]) {
       review([finding(1)], { doc: { previous: { ...PREVIOUS, covered: 'everything' }, range, mergeReview: 'by-hand', notes: [note] } });
-      expect(underVerdict()).toEqual([note]);
+      expect(underVerdict()).toEqual([]);
+      expect(notesUnderMore()).toEqual([note]);
       cleanup();
     }
   });
   it('a pushed merge or a push whose note happens to end in "reviewed again." keeps its own line', () => {
     const note = 'Questions from the last review were repeated and reviewed again.';
     review([finding(1)], { doc: { previous: { ...PREVIOUS, covered: 'merge' }, range: MERGE_RANGE, mergeReview: 'by-hand', notes: [note] } });
-    expect(underVerdict()).toEqual([`Review of the merge pushed since ${'a'.repeat(7)}: only what was changed by hand was reviewed.`, note]);
+    expect(underVerdict()).toEqual([`Review of the merge pushed since ${'a'.repeat(7)}: only what was changed by hand was reviewed.`]);
+    expect(notesUnderMore()).toEqual([note]);
     cleanup();
     review([finding(1)], { doc: { previous: { ...PREVIOUS, covered: 'push' }, range: PUSH_RANGE, notes: [note] } });
-    expect(underVerdict()).toEqual([`Review of the push ${'a'.repeat(7)} to ${'c'.repeat(7)}`, note]);
+    expect(underVerdict()).toEqual([`Review of the push ${'a'.repeat(7)} to ${'c'.repeat(7)}`]);
+    expect(notesUnderMore()).toEqual([note]);
   });
 });
 
@@ -216,21 +258,20 @@ describe('a merge pushed since the earlier review, as the engine writes it', () 
     expect(ReviewDocumentSchema.safeParse(reviewState(findings, { doc, pr: { headSha: MERGE_HEAD } }).latest.document).success).toBe(true);
   });
 
-  it('shows the merge line and the engine\'s note under the verdict, the pull request\'s brief, and a status on every card', () => {
+  it('shows the merge line in the strip, the engine\'s note under More, the pull request\'s brief, and a status on every row', () => {
     review(findings, { doc, pr: { headSha: MERGE_HEAD } });
-    const heading = screen.getByRole('heading', { name: 'Approve after fixes' });
-    const line = screen.getByText('Review of the merge pushed since c3eee29: only what was changed by hand was reviewed.');
-    const note = screen.getByText(NOTE);
-    expect(follows(heading, line)).toBe(true);
-    expect(follows(line, note)).toBe(true);
-    expect(follows(note, screen.getByRole('heading', { name: 'Findings' }))).toBe(true);
-    expect(screen.queryByRole('button', { name: /^Notes/ })).toBeNull();
+    const line = within(strip()).getByText('Review of the merge pushed since c3eee29: only what was changed by hand was reviewed.');
+    expect(follows(line, tablist())).toBe(true);
     expect(screen.queryByText(/^Review of the push/)).toBeNull();
-    // A re-review of a merge shows the pull request's brief under its usual heading, not the first merge review's heading.
-    expect(screen.getByRole('heading', { name: 'What this does' })).toBeTruthy();
-    expect(screen.queryByRole('heading', { name: /^A merge of/ })).toBeNull();
     expect(cards().map((c) => within(c).getByTestId('status').textContent)).toEqual(['Moved', 'Still open', 'New']);
-    expect(screen.getByText('Reviewed at df3c441 · Standard · Generic')).toBeTruthy();
+    expect(within(strip()).getByText('Reviewed at df3c441 · Standard')).toBeTruthy();
+    expect(chips('Since the last review')).toEqual(['1 still open', '1 new', '1 moved']);
+    // A re-review of a merge shows the pull request's brief under its usual heading, not the first merge review's heading.
+    openBrief();
+    expect(within(foldSection('What it does')).getByText('Adds refunds and a pause job.')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: /^A merge of/ })).toBeNull();
+    expect(notesUnderMore()).toEqual([NOTE]);
+    expect(screen.getByText('Reviewed at df3c441 · Standard depth · Packs: Generic')).toBeTruthy();
   });
 });
 
@@ -249,25 +290,16 @@ describe('notes of every kind the engine writes', () => {
     expect(document.querySelector('.card.verdict b, .card.verdict img, section b, section img, li b, li img')).toBeNull();
   };
 
-  it('on a re-review, every note is a line of text under the verdict', () => {
-    review([finding(1)], { doc: { previous: PREVIOUS, notes: NOTES } });
-    const verdict = screen.getByRole('heading', { name: 'Approve after fixes' }).closest('section')!;
-    expect([...verdict.querySelectorAll('p')].map((p) => p.textContent).filter((t) => NOTES.includes(t ?? ''))).toEqual(NOTES);
-    for (const note of NOTES) expect(within(verdict).getByText(note)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /^Notes/ })).toBeNull();
-    noMarkup();
-  });
-
-  it('on a first review, every note is a line of text in the collapsed Notes', () => {
-    review([finding(1, { status: null })], { doc: { notes: NOTES } });
-    const toggle = button(`Notes (${NOTES.length})`);
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  it.each([['a re-review', { previous: PREVIOUS }], ['a first review', {}]])('on %s, every note is a line of text in the collapsed Notes from the review', (_name, previous) => {
+    review([finding(1, { status: null })], { doc: { notes: NOTES, ...previous } });
     expect(screen.queryByText(NOTES[0]!)).toBeNull();
+    chooseTab('More');
+    const toggle = fold('Notes from the review');
+    expect(toggle.textContent).toBe(`Notes from the review ${NOTES.length}`);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
     fireEvent.click(toggle);
-    const section = toggle.closest('section')!;
-    expect([...section.querySelectorAll('li')].map((li) => li.textContent)).toEqual(NOTES);
-    const verdict = screen.getByRole('heading', { name: 'Approve after fixes' }).closest('section')!;
-    expect(within(verdict).queryByText(NOTES[0]!)).toBeNull();
+    expect([...foldSection('Notes from the review').querySelectorAll('li')].map((li) => li.textContent)).toEqual(NOTES);
+    expect(within(strip()).queryByText(NOTES[0]!)).toBeNull();
     noMarkup();
   });
 });
@@ -278,12 +310,14 @@ describe('fixed findings', () => {
 
   it('are listed collapsed with their reason and offer no actions', () => {
     review([finding(1)], { doc: { previous: PREVIOUS, fixed: [fixed(7), fixed(8, { checked: 'The line now reads differently.' })] } });
-    const toggle = button('Fixed since the last review (2)');
+    const toggle = fold('Fixed since the last review');
+    expect(toggle.textContent).toBe('Fixed since the last review 2');
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByText('Problem 7')).toBeNull();
     fireEvent.click(toggle);
     const section = toggle.closest('section')!;
     expect(within(section).getByText('Problem 7')).toBeTruthy();
+    expect(within(section).getAllByText('Fixed')).toHaveLength(2);
     expect(within(section).getByText('src/file7.ts:70')).toBeTruthy();
     expect(within(section).getByText('The quoted code is gone; not checked further.')).toBeTruthy();
     expect(within(section).getByText('The line now reads differently.')).toBeTruthy();
@@ -291,11 +325,13 @@ describe('fixed findings', () => {
     expect(within(section).queryAllByRole('button').map((b) => b.textContent)).toEqual([expect.stringContaining('Fixed since')]);
     expect(cards()).toHaveLength(1);
     // Fixed findings are not in the selection, so nothing can post or copy them.
+    tick('Problem 1');
     expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(within(section).queryAllByRole('checkbox')).toHaveLength(0);
   });
   it('are absent when none was fixed', () => {
     review([finding(1)], { doc: { previous: PREVIOUS, fixed: [] } });
-    expect(screen.queryByRole('button', { name: /^Fixed since/ })).toBeNull();
+    expect(queryFold('Fixed since the last review')).toBeNull();
   });
 });
 
@@ -315,6 +351,7 @@ describe('marks that follow a finding into the next review', () => {
       }],
     });
     expect(cards()).toHaveLength(0);
-    expect(button('Dismissed: 1')).toBeTruthy();
+    chooseTab('More');
+    expect(fold('Dismissed').textContent).toBe('Dismissed 1');
   });
 });

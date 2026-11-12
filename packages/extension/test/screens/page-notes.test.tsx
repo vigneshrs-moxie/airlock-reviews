@@ -38,9 +38,9 @@ describe('the notes line under the verdict', () => {
     });
     const s = show(state, { notesLine: notesLine(shown(3, 0), 0) });
     const line = within(verdictCard()).getByText('3 notes shown in the diff');
-    // With the other small lines under the verdict: after the review-of-the-push line, before the reviewed-at line.
-    expect(line.previousElementSibling?.textContent).toBe('Review of the push bbbbbbb to ccccccc');
-    expect(line.nextElementSibling?.textContent).toMatch(/^Reviewed at/);
+    // With the other small lines in the verdict strip: after the review-of-the-push line and the reviewed-at line.
+    expect(line.previousElementSibling?.textContent).toMatch(/^Reviewed at/);
+    expect(line.previousElementSibling?.previousElementSibling?.textContent).toBe('Review of the push bbbbbbb to ccccccc');
     expect(region().textContent).toBe('3 notes shown in the diff');
 
     s.again({ notesLine: notesLine(shown(2, 1), 0) });
