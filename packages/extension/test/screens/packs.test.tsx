@@ -201,16 +201,16 @@ describe('the Packs screen (fix round 1)', () => {
     show(reviewState([finding(1)]));
     fireEvent.click(document.querySelector('.finding-card button')!);
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
-    fireEvent.click(screen.getByRole('radio', { name: 'Intended' }));
-    fireEvent.change(screen.getByRole('textbox', { name: 'The line that will be saved to your pack' }), { target: { value: 'Totals are rounded on purpose' } });
+    fireEvent.click(screen.getByRole('radio', { name: 'The code is right for a reason Airlock could not know' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'The line Airlock will remember' }), { target: { value: 'Totals are rounded on purpose' } });
     await openPacks();
     const kept = document.querySelector('.kept')!;
     expect(kept.hasAttribute('inert')).toBe(true);
     expect(kept.contains(document.activeElement)).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(screen.getByRole('dialog')).toBeTruthy();
-    expect((screen.getByRole('textbox', { name: 'The line that will be saved to your pack' }) as HTMLTextAreaElement).value).toBe('Totals are rounded on purpose');
-    expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
+    expect((screen.getByRole('textbox', { name: 'The line Airlock will remember' }) as HTMLTextAreaElement).value).toBe('Totals are rounded on purpose');
+    expect(within(screen.getByRole('dialog')).getByRole('button', { name: 'Dismiss' })).toBeTruthy();
   });
 
   it('says it is not known yet when nothing proves whether the panel is paired', async () => {
