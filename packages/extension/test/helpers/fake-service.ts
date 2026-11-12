@@ -11,7 +11,8 @@ export function prSummary(over: Partial<PrSummary> = {}): PrSummary {
   return {
     repo: 'acme/widgets', number: 1, title: 'Add totals', author: 'alice', viewer: 'bob', isOwn: false, stage: 'pr1',
     baseRef: 'main', headRef: 'feature/totals', headSha: HEAD, additions: 10, deletions: 2, changedFiles: 1,
-    packs: [{ id: 'generic', title: 'Generic' }], suggestedDepth: 'quick', ...over,
+    packs: [{ id: 'generic', title: 'Generic' }], suggestedDepth: 'quick',
+    state: 'open', lastReview: null, ...over,
   };
 }
 
@@ -19,7 +20,7 @@ export function latestFor(pr: PrSummary, headSha = pr.headSha): LatestReply {
   const doc = minimalDocument();
   return {
     document: { ...doc, id: 'r_0000000001', pr: { ...doc.pr, repo: pr.repo, number: pr.number, headSha } },
-    dismissals: [],
+    dismissals: [], posts: [],
   };
 }
 

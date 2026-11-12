@@ -394,7 +394,7 @@ describe('GET /reviews/latest', () => {
     await saveReview(doc('r_0123456789'));
     const found = await s.call('GET', `/reviews/latest?repo=${REPO}&number=7`);
     expect(found.status).toBe(200);
-    expect(found.json).toEqual({ document: doc('r_0123456789'), dismissals: [dismissal] });
+    expect(found.json).toEqual({ document: doc('r_0123456789'), dismissals: [dismissal], posts: [] });
     expect(asked).toContain(`${REPO}#7`);
   });
 
@@ -427,6 +427,7 @@ describe('GET /pr', () => {
       repo: REPO, number: 7, title: 'Add totals', author: 'alice', viewer: 'bob', isOwn: false, stage: 'pr3',
       baseRef: 'main', headRef: 'feature/totals', headSha: 'b'.repeat(40), additions: 40, deletions: 10, changedFiles: 3,
       packs: [{ id: 'acme', title: 'Acme pack' }, { id: 'generic', title: 'Generic' }], suggestedDepth: 'quick',
+      state: 'open', lastReview: null,
     });
   });
 

@@ -61,6 +61,8 @@ export interface ReviewRequest {
   kitDir?: string;
   /** The kit's version when `kitDir` is given; `pinned` otherwise. */
   kitSha?: string;
+  /** Review again after an earlier review of this pull request; not used until Task 4. */
+  since?: { reviewId: string };
 }
 
 export interface EngineDeps {

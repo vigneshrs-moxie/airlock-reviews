@@ -380,7 +380,7 @@ describe('startPanel: following a review', () => {
     const doc = latestFor(prSummary(), 'e'.repeat(40)).document;
     run.emit({ type: 'done', document: doc });
     expect(await until(h, 'review')).toEqual({
-      kind: 'review', pr: prSummary(), latest: { document: doc, dismissals: [] }, stale: true,
+      kind: 'review', pr: prSummary(), latest: { document: doc, dismissals: [], posts: [] }, stale: true,
     });
   });
 

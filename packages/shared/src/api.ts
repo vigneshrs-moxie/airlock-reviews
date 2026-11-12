@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ReviewEventSchema } from './events.js';
+import { POST_MAX_ITEMS } from './comment-text.js';
 import { isRepo } from './pr-ref.js';
 import { DepthSchema, ReviewDocumentSchema, StageSchema, type Depth } from './review.js';
 
@@ -19,6 +20,8 @@ export const FindingIdSchema = z.string().regex(/^c_[0-9a-f]{8}$/);
 export const FingerprintSchema = z.string().regex(/^[0-9a-f]{16}$/);
 export const RunIdSchema = z.string().regex(/^run_[0-9a-f]{12}$/);
 export const PackIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/);
+export const PreviewIdSchema = z.string().regex(/^pv_[0-9a-f]{16}$/);
+export const PostIdSchema = z.string().regex(/^post_[0-9a-f]{12}$/);
 
 const repo = RepoSchema;
 const number = PrNumberSchema;
@@ -32,7 +35,10 @@ export const MESSAGE_MAX = 300;
 export const LEARNED_TEXT_MAX = 500;
 export const LEARNED_TEXT_MIN = 10;
 
-export const HelloSchema = z.object({ airlock: z.literal(true), version: z.string(), paired: z.boolean() });
+export const HelloSchema = z.object({
+  airlock: z.literal(true), version: z.string(), paired: z.boolean(),
+  proof: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+});
 export type Hello = z.infer<typeof HelloSchema>;
 
 export const ServiceStatusSchema = z.object({
@@ -46,12 +52,15 @@ export const PrSummarySchema = z.object({
   isOwn: z.boolean(), stage: StageSchema, baseRef: z.string(), headRef: z.string(), headSha: z.string().regex(/^[0-9a-f]{7,64}$/),
   additions: z.number().int(), deletions: z.number().int(), changedFiles: z.number().int(),
   packs: z.array(z.object({ id: PackIdSchema, title: z.string() })), suggestedDepth: DepthSchema,
+  state: z.enum(['open', 'closed', 'merged']).default('open'),
+  lastReview: z.object({ reviewId: ReviewIdSchema, headSha: z.string(), createdAt: z.string(), depth: DepthSchema }).nullable().default(null),
 });
 export type PrSummary = z.infer<typeof PrSummarySchema>;
 
 export const StartReviewBodySchema = z.object({
   repo, number, depth: DepthSchema.optional(),
   packIds: z.array(PackIdSchema).max(10).refine((ids) => new Set(ids).size === ids.length, { message: 'duplicate pack' }).optional(),
+  since: z.literal('last').optional(),
 });
 export type StartReviewBody = z.infer<typeof StartReviewBodySchema>;
 
@@ -100,12 +109,80 @@ export type RestoreBody = z.infer<typeof RestoreBodySchema>;
 export const RestoreReplySchema = z.object({ restored: z.boolean(), note: z.string().nullable() });
 export type RestoreReply = z.infer<typeof RestoreReplySchema>;
 
+export const PlacementSchema = z.enum(['inline', 'summary']);
+export type Placement = z.infer<typeof PlacementSchema>;
+
+export const PostItemSchema = z.object({ fingerprint: FingerprintSchema, body: z.string().optional(), placement: PlacementSchema.optional() });
+export type PostItem = z.infer<typeof PostItemSchema>;
+
+export const PostPreviewBodySchema = z.object({
+  repo, number, reviewId: ReviewIdSchema,
+  items: z.array(PostItemSchema).min(1).max(POST_MAX_ITEMS)
+    .refine((items) => new Set(items.map((i) => i.fingerprint)).size === items.length, { message: 'duplicate finding' }),
+  summary: z.string().optional(),
+});
+export type PostPreviewBody = z.infer<typeof PostPreviewBodySchema>;
+
+export const PostPreviewItemSchema = z.object({
+  fingerprint: FingerprintSchema, title: z.string(), path: z.string(), line: z.number().int().nullable(),
+  startLine: z.number().int().nullable(), placement: PlacementSchema, whySummary: z.string().nullable(),
+  body: z.string(), mentions: z.array(z.string()),
+});
+export type PostPreviewItem = z.infer<typeof PostPreviewItemSchema>;
+
+export const PostPreviewReplySchema = z.object({
+  previewId: PreviewIdSchema, headSha: z.string().regex(/^[0-9a-f]{7,64}$/), viewer: z.string(),
+  items: z.array(PostPreviewItemSchema), summary: z.string(), reviewBody: z.string(), expiresAt: z.string(),
+});
+export type PostPreviewReply = z.infer<typeof PostPreviewReplySchema>;
+
+/** What the person confirms: the preview the service stored, and nothing else. */
+export const PostBodySchema = z.object({ previewId: PreviewIdSchema });
+export type PostBody = z.infer<typeof PostBodySchema>;
+
+export const PostRecordSchema = z.object({
+  id: PostIdSchema, repo, number, reviewId: ReviewIdSchema, headSha: z.string().regex(/^[0-9a-f]{7,64}$/), postedAt: z.string(),
+  outcome: z.enum(['posted', 'unknown']), githubReviewId: z.number().int().nullable(), url: z.string().nullable(),
+  items: z.array(z.object({ fingerprint: FingerprintSchema, aliases: z.array(z.string()), placement: PlacementSchema })),
+}).superRefine((record, ctx) => {
+  if (record.url === null) return;
+  // Not a regular expression: the dot of the host would be escaped in it, and the bundle's address check reads that as another host.
+  const start = `https://github.com/${record.repo}/pull/${record.number}#pullrequestreview-`;
+  if (!record.url.startsWith(start) || !/^[0-9]+$/.test(record.url.slice(start.length))) {
+    ctx.addIssue({ code: 'custom', path: ['url'], message: "not this pull request's review address" });
+  }
+});
+export type PostRecord = z.infer<typeof PostRecordSchema>;
+
+export const ForgetPostBodySchema = z.object({ repo, number, id: PostIdSchema });
+export type ForgetPostBody = z.infer<typeof ForgetPostBodySchema>;
+
+export const LearnedKindSchema = z.enum(['wrong', 'product-knowledge']);
+export type LearnedKind = z.infer<typeof LearnedKindSchema>;
+
+export const LearnedLineSchema = z.object({
+  pack: PackIdSchema, packTitle: z.string(), kind: LearnedKindSchema, date: z.string(), repo: z.string().nullable(),
+  text: z.string(), key: FingerprintSchema, appliesHere: z.boolean(), removable: z.boolean(),
+});
+export type LearnedLine = z.infer<typeof LearnedLineSchema>;
+
+export const LearnedReplySchema = z.object({ lines: z.array(LearnedLineSchema), cap: z.number().int() });
+export type LearnedReply = z.infer<typeof LearnedReplySchema>;
+
+export const RemoveLearnedBodySchema = z.object({ repo, pack: PackIdSchema, kind: LearnedKindSchema, key: FingerprintSchema });
+export type RemoveLearnedBody = z.infer<typeof RemoveLearnedBodySchema>;
+
+export const RemoveLearnedReplySchema = z.object({ removed: z.boolean(), note: z.string().nullable() });
+export type RemoveLearnedReply = z.infer<typeof RemoveLearnedReplySchema>;
+
 export const PairReplySchema = z.object({ paired: z.literal(true), extension: z.enum(['new', 'same']) });
 export type PairReply = z.infer<typeof PairReplySchema>;
 
 // The document is the engine's own output read back from its store, not a front door, so it is not re-validated
 // field by field here; the panel builds every address through filesUrl and blobUrl, which check their inputs.
-export const LatestReplySchema = z.object({ document: ReviewDocumentSchema, dismissals: z.array(DismissalSchema) });
+export const LatestReplySchema = z.object({
+  document: ReviewDocumentSchema, dismissals: z.array(DismissalSchema), posts: z.array(PostRecordSchema).default([]),
+});
 export type LatestReply = z.infer<typeof LatestReplySchema>;
 
 /** The body of every non-2xx response. */

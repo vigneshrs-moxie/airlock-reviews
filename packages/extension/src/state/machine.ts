@@ -312,7 +312,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     }
     if (!current(g)) return;
     const same = latest !== null && latest.document.id === document.id;
-    apply({ type: 'finished', latest: same && latest !== null ? latest : { document, dismissals: [] } });
+    apply({ type: 'finished', latest: same && latest !== null ? latest : { document, dismissals: [], posts: [] } });
     watch(g);
   };
 

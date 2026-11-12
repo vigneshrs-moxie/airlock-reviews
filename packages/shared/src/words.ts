@@ -1,4 +1,7 @@
-import type { Stage, VerdictLabel } from './review.js';
+import type { Severity, Stage, VerdictLabel } from './review.js';
+
+/** A severity as the reader sees it. */
+export const SEVERITY_WORD: Record<Severity, string> = { block: 'Block', fix: 'Fix', ask: 'Ask', note: 'Note' };
 
 const VERDICT_WORDS: Record<VerdictLabel, string> = {
   'not-ready': 'Not ready',

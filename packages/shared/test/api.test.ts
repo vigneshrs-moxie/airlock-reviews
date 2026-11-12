@@ -5,7 +5,8 @@ import {
   DismissBodySchema, DismissalSchema, FindingIdSchema, FingerprintSchema, LEARNED_TEXT_MAX, LEARNED_TEXT_MIN,
   PackIdSchema, PrSummarySchema, RepoSchema, ReviewIdSchema, RestoreBodySchema, RunIdSchema, ServiceEventSchema,
   ServiceStatusSchema, SMALL_PR_LINES, StartReviewBodySchema, StartReviewReplySchema, checkLearnedText, isRepo,
-  minimalDocument, prRefFromUrl, suggestedDepth,
+  minimalDocument, prRefFromUrl, suggestedDepth, HelloSchema, LatestReplySchema, PostPreviewBodySchema, PostRecordSchema,
+  PostBodySchema, PreviewIdSchema, PostIdSchema, StartReviewBodySchema as StartBody,
 } from '@airlock/shared';
 
 describe('suggestedDepth', () => {
@@ -236,3 +237,58 @@ describe('remaining reply fields', () => {
   });
 });
 
+
+describe('posting contract', () => {
+  const record = {
+    id: 'post_0123456789ab', repo: 'acme/widgets', number: 12, reviewId: 'r_0123456789', headSha: 'a'.repeat(40),
+    postedAt: '2026-11-11T10:00:00.000Z', outcome: 'posted', githubReviewId: 7,
+    url: 'https://github.com/acme/widgets/pull/12#pullrequestreview-7',
+    items: [{ fingerprint: '0123456789abcdef', aliases: [], placement: 'inline' }],
+  };
+  it('a post record address for another repository or pull request is refused by the schema', () => {
+    expect(PostRecordSchema.parse(record).url).toBe(record.url);
+    expect(PostRecordSchema.parse({ ...record, url: null, outcome: 'unknown', githubReviewId: null }).url).toBeNull();
+    for (const url of [
+      'https://github.com/acme/other/pull/12#pullrequestreview-7',
+      'https://github.com/acme/widgets/pull/13#pullrequestreview-7',
+      'https://github.com/acme/widgets/pull/12#pullrequestreview-x',
+      'https://evil.example/acme/widgets/pull/12#pullrequestreview-7',
+      'https://github.com/acme/widgets/pull/12#pullrequestreview-7/extra',
+    ]) expect(() => PostRecordSchema.parse({ ...record, url })).toThrow();
+  });
+  it('a preview body with two items of one fingerprint, or 31 items, is refused', () => {
+    const item = (n: number) => ({ fingerprint: n.toString(16).padStart(16, '0') });
+    const base = { repo: 'acme/widgets', number: 12, reviewId: 'r_0123456789' };
+    expect(PostPreviewBodySchema.parse({ ...base, items: [item(1), item(2)] }).items).toHaveLength(2);
+    expect(() => PostPreviewBodySchema.parse({ ...base, items: [item(1), item(1)] })).toThrow();
+    expect(() => PostPreviewBodySchema.parse({ ...base, items: [] })).toThrow();
+    expect(PostPreviewBodySchema.parse({ ...base, items: Array.from({ length: 30 }, (_, i) => item(i)) }).items).toHaveLength(30);
+    expect(() => PostPreviewBodySchema.parse({ ...base, items: Array.from({ length: 31 }, (_, i) => item(i)) })).toThrow();
+    expect(() => PostPreviewBodySchema.parse({ ...base, items: [{ ...item(1), placement: 'top' }] })).toThrow();
+  });
+  it('ids and the post body have their shapes', () => {
+    expect(PreviewIdSchema.safeParse('pv_0123456789abcdef').success).toBe(true);
+    expect(PreviewIdSchema.safeParse('pv_0123456789abcde').success).toBe(false);
+    expect(PostIdSchema.safeParse('post_0123456789ab').success).toBe(true);
+    expect(PostBodySchema.parse({ previewId: 'pv_0123456789abcdef' })).toEqual({ previewId: 'pv_0123456789abcdef' });
+  });
+  it('LatestReply without posts and PrSummary without state parse with their defaults', () => {
+    expect(LatestReplySchema.parse({ document: minimalDocument(), dismissals: [] }).posts).toEqual([]);
+    const pr = {
+      repo: 'acme/widgets', number: 1, title: 't', author: 'a', viewer: 'v', isOwn: false, stage: 'pr1', baseRef: 'main',
+      headRef: 'f', headSha: 'b'.repeat(40), additions: 1, deletions: 0, changedFiles: 1, packs: [], suggestedDepth: 'quick',
+    };
+    const parsed = PrSummarySchema.parse(pr);
+    expect(parsed.state).toBe('open');
+    expect(parsed.lastReview).toBeNull();
+    expect(PrSummarySchema.parse({ ...pr, state: 'merged' }).state).toBe('merged');
+    expect(() => PrSummarySchema.parse({ ...pr, state: 'draft' })).toThrow();
+  });
+  it('start accepts since last only, and hello may carry a 64-hex proof', () => {
+    expect(StartBody.parse({ repo: 'acme/widgets', number: 1, since: 'last' }).since).toBe('last');
+    expect(() => StartBody.parse({ repo: 'acme/widgets', number: 1, since: 'first' })).toThrow();
+    expect(HelloSchema.parse({ airlock: true, version: '1', paired: true }).proof).toBeUndefined();
+    expect(HelloSchema.parse({ airlock: true, version: '1', paired: true, proof: 'a'.repeat(64) }).proof).toBe('a'.repeat(64));
+    expect(() => HelloSchema.parse({ airlock: true, version: '1', paired: true, proof: 'xyz' })).toThrow();
+  });
+});

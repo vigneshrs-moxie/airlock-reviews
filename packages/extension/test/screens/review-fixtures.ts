@@ -43,7 +43,7 @@ export function reviewState(findings: Finding[], opts: ReviewOptions = {}): Revi
     findings, ...opts.doc,
   };
   return {
-    kind: 'review', pr, latest: { document, dismissals: opts.dismissals ?? [] }, stale: opts.stale ?? false,
+    kind: 'review', pr, latest: { document, dismissals: opts.dismissals ?? [], posts: [] }, stale: opts.stale ?? false,
     ...(opts.busy === undefined ? {} : { busy: opts.busy }), ...(opts.notice === undefined ? {} : { notice: opts.notice }),
   };
 }

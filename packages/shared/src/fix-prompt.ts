@@ -1,12 +1,11 @@
-import type { Finding, ReviewDocument, Severity } from './review.js';
+import type { Finding, ReviewDocument } from './review.js';
 import { visibleText } from './visible-text.js';
-
-const SEVERITY_WORD: Record<Severity, string> = { block: 'Block', fix: 'Fix', ask: 'Ask', note: 'Note' };
+import { SEVERITY_WORD } from './words.js';
 const LINE_BREAK = /\r\n|[\n\r\u0085\u2028\u2029]/;
 const INDENT = '   ';
 const LINE_BREAK_ALL = /\r\n|[\r\u0085\u2028\u2029]/g;
 /** Letters that show as nothing: the Hangul fillers, the braille blank and the combining grapheme joiner. */
-const BLANK_LETTERS = /[\u115F\u1160\u3164\uFFA0\u2800\u034F]/g;
+export const BLANK_LETTERS = /[\u115F\u1160\u3164\uFFA0\u2800\u034F]/g;
 
 /**
  * Every string taken from the review document passes through `one`, `many` or `fenced`, which first drop the characters

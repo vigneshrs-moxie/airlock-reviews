@@ -7,3 +7,4 @@ export * from './diff-anchor.js';
 export * from './fix-prompt.js';
 export * from './visible-text.js';
 export * from './words.js';
+export * from './comment-text.js';

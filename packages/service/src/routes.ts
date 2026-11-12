@@ -127,6 +127,8 @@ export function reviewRoutes(
           stage: pr.stage, baseRef: pr.baseRef, headRef: pr.headRef, headSha: pr.headSha,
           additions: pr.additions, deletions: pr.deletions, changedFiles: pr.changedFiles,
           packs: chosen.packs.map((p) => ({ id: p.id, title: p.title })), suggestedDepth: suggestedDepth(pr.additions, pr.deletions),
+          state: pr.merged === true ? 'merged' : pr.state === 'closed' ? 'closed' : 'open',
+          lastReview: null, // Filled in by a later task of step 3.
         });
       },
     },
@@ -155,7 +157,7 @@ export function reviewRoutes(
         const { repo, number } = prOf(req);
         const document = await latestReview(repo, number);
         if (document === null) return refuse(404, NO_REVIEW);
-        return reply<LatestReply>(LatestReplySchema, 200, { document, dismissals: await dismissals(repo, number) });
+        return reply<LatestReply>(LatestReplySchema, 200, { document, dismissals: await dismissals(repo, number), posts: [] });
       },
     },
     {

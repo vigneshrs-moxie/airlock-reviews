@@ -117,6 +117,8 @@ export type Candidate = z.infer<typeof CandidateSchema>;
 export const AnchorSchema = z.object({
   status: z.enum(['in-diff', 'outside-diff', 'not-found']),
   startLine: z.number().int().nullable(), endLine: z.number().int().nullable(),
+  /** Where GitHub can hang a comment on this finding (the diff line, and the first line of a range), when there is such a place. */
+  comment: z.object({ line: z.number().int(), startLine: z.number().int().nullable() }).nullable().optional(),
 });
 export type Anchor = z.infer<typeof AnchorSchema>;
 
@@ -198,5 +200,9 @@ export const ReviewDocumentSchema = z.object({
   notes: z.array(z.string()).optional(),
   /** When the review started (ISO time). `createdAt` is when the document was assembled, at the end of the review. */
   startedAt: z.string().optional(),
+  /** Earlier findings a re-review found fixed. Never part of the verdict or the finding lists. */
+  fixed: z.array(FindingSchema).optional(),
+  /** The review this one continues. */
+  previous: z.object({ reviewId: z.string(), headSha: z.string() }).optional(),
 });
 export type ReviewDocument = z.infer<typeof ReviewDocumentSchema>;

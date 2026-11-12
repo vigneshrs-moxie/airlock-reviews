@@ -340,7 +340,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
         } else if (pull === undefined || pull.document === null) {
           refuse(res, 404, NO_REVIEW);
         } else {
-          reply(res, LatestReplySchema, 200, { document: pull.document, dismissals: pull.dismissals });
+          reply(res, LatestReplySchema, 200, { document: pull.document, dismissals: pull.dismissals, posts: [] });
         }
         return;
       }
