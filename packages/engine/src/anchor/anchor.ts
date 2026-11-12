@@ -1,5 +1,6 @@
 import type { Anchor, Candidate, Dropped, FileDiff, Place } from '@airlock/shared';
 import { lineInDiff } from '../diff/parse.js';
+import { commentLine } from './comment-line.js';
 
 const MIN_FALLBACK_CHARS = 12;
 const NOT_FOUND: Anchor = { status: 'not-found', startLine: null, endLine: null };
@@ -110,7 +111,8 @@ export async function anchorCandidates(
         connected.push({ ...p, line: found.startLine, quote: linesAt(placeText, found.startLine, found.endLine) });
       }
     }
-    anchored.push({ ...c, quote: linesAt(text, anchor.startLine, anchor.endLine), connected, anchor });
+    const comment = commentLine(byPath.get(c.path), anchor.startLine, anchor.endLine);
+    anchored.push({ ...c, quote: linesAt(text, anchor.startLine, anchor.endLine), connected, anchor: { ...anchor, comment } });
   }
   return { anchored, dropped };
 }
