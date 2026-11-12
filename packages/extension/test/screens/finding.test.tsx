@@ -32,7 +32,7 @@ function Harness({ findings, extra }: { findings: Finding[]; extra?: Partial<Fin
   return (
     <FindingDetail
       key={f.id} finding={f} packs={PACKS} previous={findings[at - 1] ?? null} next={findings[at + 1] ?? null}
-      position={{ index: at, total: findings.length }} canDismiss fixPrompt={() => `Prompt for ${f.title}`} onBack={() => undefined}
+      position={{ index: at + 1, total: findings.length }} canDismiss fixPrompt={() => `Prompt for ${f.title}`} onBack={() => undefined}
       onOpen={(g) => setAt(findings.indexOf(g))} onJump={notConnected} changedPaths={new Set([f.path])} onDismiss={() => undefined}
       {...extra}
     />
@@ -96,7 +96,7 @@ describe('the short version', () => {
     const kind = screen.getByText('Block');
     expect(kind.className).toContain('sev-block');
     const title = heading('The guard is skipped');
-    const place = screen.getByText('src/file1.ts:10', { selector: '.ap-where code' });
+    const place = screen.getByText('src/file1.ts:10', { selector: '.ap-where code span' });
     const summary = screen.getByText('A paused account can still order.');
     const todo = heading('What to do');
     const order = [kind, title, place, button('Show in diff'), summary, todo, screen.getByText('Call the guard first.'), fold('What happens')];
@@ -149,6 +149,10 @@ describe('the folds', () => {
     detail([full]);
     const names = [...document.querySelectorAll('.ap-fold')].map((b) => b.textContent);
     expect(names).toEqual(['What happens', 'Why it matters', 'The codesrc/file1.ts:10', 'Also involves1', 'How sure is this']);
+    // The place under the title is shown whole as text; only its display is cut, at the start, when the row is too narrow.
+    const place = document.querySelector('.ap-where code')!;
+    expect(place.textContent).toBe('src/file1.ts:10');
+    expect(place.classList.contains('ap-end')).toBe(true);
     for (const b of document.querySelectorAll('.ap-fold')) expect(b.getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByText('Happens 1.', { selector: '.ap-folded p' })).toBeNull();
     fireEvent.click(fold('Why it matters'));
@@ -157,6 +161,16 @@ describe('the folds', () => {
     fireEvent.click(fold('Why it matters'));
     expect(fold('Why it matters').getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByText('Why 1.')).toBeNull();
+  });
+
+  it('The code shows the whole place first, then the code', () => {
+    const path = `src/${'very-long-folder-name/'.repeat(6)}pause.ts`;
+    detail([finding(1, { path })]);
+    fireEvent.click(fold('The code'));
+    const folded = fold('The code').closest('section')!.querySelector('.ap-folded')!;
+    const whole = within(folded as HTMLElement).getByText(`${path}:10`);
+    expect(whole.classList.contains('ap-end')).toBe(false);
+    expect(follows(whole, within(folded as HTMLElement).getByText('code 1;'))).toBe(true);
   });
 
   it('How sure is this holds Checked, It would be wrong if, From and Also raised by', () => {
@@ -287,6 +301,14 @@ describe('the pinned actions', () => {
     expect(await screen.findByRole('button', { name: 'Copied' })).toBeTruthy();
   });
 
+  it('says the prompt is copied and to paste it to the coding agent', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn().mockResolvedValue(undefined) }, configurable: true });
+    panelOn([finding(1)]);
+    fireEvent.click(button('Copy fix prompt'));
+    await screen.findByRole('button', { name: 'Copied' });
+    expect(document.querySelector('[aria-live]')?.textContent).toBe('Copied. Paste it to your coding agent.');
+  });
+
   it('shows the prompt, selected, above the actions when copying is refused', async () => {
     Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn().mockRejectedValue(new Error('no')) }, configurable: true });
     detail([finding(1)]);
@@ -295,6 +317,11 @@ describe('the pinned actions', () => {
     expect(box.closest('.ap-pinned')).not.toBeNull();
     expect(follows(box, actions())).toBe(true);
     expect(window.getSelection()?.toString()).toContain('Prompt for Problem 1');
+    // Close puts the box away, so it no longer covers the screen, and focus goes back to the button.
+    fireEvent.click(within(box.closest('.ap-refused') as HTMLElement).getByRole('button', { name: 'Close' }));
+    expect(screen.queryByText('Prompt for Problem 1', { selector: 'pre' })).toBeNull();
+    expect(document.querySelector('.ap-refused')).toBeNull();
+    expect(document.activeElement).toBe(button('Copy fix prompt'));
   });
 });
 

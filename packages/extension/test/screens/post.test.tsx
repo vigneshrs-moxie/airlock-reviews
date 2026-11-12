@@ -104,7 +104,8 @@ describe('the post sheet', () => {
   });
 
   it('says for each comment whether it goes on the line or in the review summary', () => {
-    const [a, b, c] = [finding(1), finding(2), finding(3)];
+    const long = 'The pause handler calls the billing guard only after the account state is written, so it can order.';
+    const [a, b, c] = [finding(1, { short: 'Pausing skips the guard' }), finding(2, { title: long }), finding(3)];
     previewed([a, b, c], {}, previewOf([
       itemFor(a), itemFor(b, { placement: 'summary', whySummary: 'The line is not part of the diff GitHub shows.' }),
       itemFor(c, { placement: 'summary', whySummary: 'You chose the summary.', line: null }),
@@ -114,11 +115,14 @@ describe('the post sheet', () => {
     expect(d.getByText('Where they go')).toBeTruthy();
     const places = [...document.querySelectorAll<HTMLElement>('.ap-dest')];
     expect(places.map((p) => p.querySelector('strong')?.textContent)).toEqual(['On the line', 'In the review summary', 'In the review summary']);
-    expect(within(places[0]!).getByText('Problem 1')).toBeTruthy();
+    // Each is headed by its short title: the summary stage's, else the title cut at a word.
+    expect(places.map((p) => p.querySelector('.title')?.textContent)).toEqual(['Pausing skips the guard', 'The pause handler calls the billing guard only after the…', 'Problem 3']);
+    expect([...document.querySelectorAll('.ap-field > .muted:first-child')].map((p) => p.textContent))
+      .toEqual(['Pausing skips the guard', 'The pause handler calls the billing guard only after the…', 'Problem 3']);
     expect(within(places[0]!).getByText(ON_LINE('src/file1.ts, line 10'))).toBeTruthy();
     expect(within(places[1]!).getByText('The line is not part of the diff GitHub shows. The comment names the file and line.')).toBeTruthy();
     expect(within(places[2]!).getByText('You chose the summary. The comment names the file.')).toBeTruthy();
-    expect(d.getByText('Posts as bob on acme/widgets#1, as 3 comments in one review. Airlock never approves, requests changes or merges. Nothing has been sent yet.')).toBeTruthy();
+    expect(d.getByText('Posted together as one review by bob, as comments. Open each to read or edit its exact text. Nothing has been sent yet.')).toBeTruthy();
     expect(button('Post 3 comments')).toBeTruthy();
   });
 
@@ -251,6 +255,15 @@ describe('the post sheet', () => {
     const f = finding(1);
     const m = previewed([f]);
     const exact = `${ACCOUNT} ${NOTHING_SENT}`;
+    expect(dialog().getByText(exact)).toBeTruthy();
+    // An edit that was not previewed: the text shown is not what would be posted, so the line is not said.
+    type('Comment 1', 'Edited.');
+    expect(dialog().queryByText(exact)).toBeNull();
+    expect(dialog().getByText(ACCOUNT)).toBeTruthy();
+    // Nor while the new preview is asked for; it comes back with the fresh preview.
+    fireEvent.click(button('Update preview'));
+    expect(dialog().queryByText(exact)).toBeNull();
+    m.answer({ kind: 'preview', preview: previewOf([itemFor(f, { body: 'Edited.' })]) });
     expect(dialog().getByText(exact)).toBeTruthy();
     fireEvent.click(button('Post comment'));
     expect(dialog().queryByText(exact)).toBeNull();

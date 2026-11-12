@@ -6,11 +6,12 @@ import { useAnnounce } from './Frame';
 export const COPY_REFUSED = 'Copying was refused. Select this text and copy it yourself.';
 
 /**
- * Copying `text()` (read when `copy` is called): `copied` is true for two seconds after it worked. When copying is
- * refused, or there is no clipboard, `shown` holds the text, and the box given `box` has it selected, to copy by hand.
+ * Copying `text()` (read when `copy` is called): `copied` is true for two seconds after it worked, and `said` is
+ * announced. When copying is refused, or there is no clipboard, `shown` holds the text, and the box given `box` has it
+ * selected, to copy by hand; `putAway` takes the box away.
  */
-export function useCopy(text: () => string, timers: Timers = realTimers): {
-  copied: boolean; shown: string | null; copy: () => void; box: RefObject<HTMLPreElement | null>;
+export function useCopy(text: () => string, timers: Timers = realTimers, said = 'Copied'): {
+  copied: boolean; shown: string | null; copy: () => void; putAway: () => void; box: RefObject<HTMLPreElement | null>;
 } {
   const box = useRef<HTMLPreElement>(null);
   const reset = useRef<unknown>(null);
@@ -42,7 +43,7 @@ export function useCopy(text: () => string, timers: Timers = realTimers): {
     if (gone.current) return;
     setShown(null);
     setCopied(true);
-    announce('Copied');
+    announce(said);
     if (reset.current !== null) timers.clearTimeout(reset.current);
     reset.current = timers.setTimeout(() => { reset.current = null; setCopied(false); }, COPIED_MS);
   };
@@ -55,15 +56,16 @@ export function useCopy(text: () => string, timers: Timers = realTimers): {
       refused(value);
     }
   };
-  return { copied, shown, copy, box };
+  return { copied, shown, copy, putAway: () => setShown(null), box };
 }
 
-/** The text to copy by hand, shown when copying was refused. */
-export function RefusedCopy({ shown, box }: { shown: string; box: RefObject<HTMLPreElement | null> }) {
+/** The text to copy by hand, shown when copying was refused; with `onClose`, a Close button puts it away. */
+export function RefusedCopy({ shown, box, onClose }: { shown: string; box: RefObject<HTMLPreElement | null>; onClose?: () => void }) {
   return (
     <div className="block">
       <p className="muted">{COPY_REFUSED}</p>
       <pre className="quote" ref={box} tabIndex={0}>{shown}</pre>
+      {onClose !== undefined && <button type="button" className="btn small" onClick={onClose}>Close</button>}
     </div>
   );
 }

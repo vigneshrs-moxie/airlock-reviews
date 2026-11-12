@@ -34,10 +34,18 @@ describe('shortTitle', () => {
     expect(shown).toBe(`${'y'.repeat(59)}…`);
   });
 
-  it('drops a comma or dash left at the cut', () => {
-    const title = `${'word '.repeat(10)}tail, and then more words that go on past the limit of sixty`;
-    const shown = shortTitle({ title });
-    expect(shown).not.toMatch(/[,\s]…$/);
+  it('drops a comma left at the cut', () => {
+    // 58 characters, then a comma at the 59th and a space at the 60th: the cut falls right after the comma.
+    const title = `${'word '.repeat(11)}abc, and then more words past the limit`;
+    expect([...title][58]).toBe(',');
+    expect(shortTitle({ title })).toBe(`${'word '.repeat(11)}abc…`);
+  });
+
+  it('drops a dash left at the cut', () => {
+    // A spaced dash at the 59th character: the cut keeps neither the dash nor the space before it.
+    const title = `${'word '.repeat(11)}ab - and then more words past the limit`;
+    expect([...title][58]).toBe('-');
+    expect(shortTitle({ title })).toBe(`${'word '.repeat(11)}ab…`);
   });
 });
 

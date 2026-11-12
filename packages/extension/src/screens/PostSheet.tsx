@@ -10,12 +10,20 @@ import { FileText, MessageSquare } from './FindingIcons';
 import { useAnnounce } from './Frame';
 import { ForgetAsk, mentionNotice, NO_POST_OFFLINE, WAIT, whyNotPosting } from './PostedMark';
 import { Sheet } from './Sheet';
+import { shortTitle } from './summary';
 
 export const ONLY_COMMENTS = 'Airlock never approves, requests changes or merges.';
 export const NOTHING_SENT = 'Nothing has been sent yet.';
-/** Who posts, where, and as what, with the promise that nothing else is done. */
-export const accountLine = (viewer: string, pr: { repo: string; number: number }, n: number, nothingSent: boolean): string =>
-  `Posts as ${viewer} on ${pr.repo}#${pr.number}, as ${n === 1 ? 'a comment' : `${n} comments in one review`}. ${ONLY_COMMENTS}${nothingSent ? ` ${NOTHING_SENT}` : ''}`;
+/**
+ * Who posts, where, and as what: for one comment with the promise that nothing else is done, for several (the
+ * prototype's `post_many()`) that they go together as one review. `nothingSent` adds that nothing has been sent yet.
+ */
+export function accountLine(viewer: string, pr: { repo: string; number: number }, n: number, nothingSent: boolean): string {
+  const line = n === 1
+    ? `Posts as ${viewer} on ${pr.repo}#${pr.number}, as a comment. ${ONLY_COMMENTS}`
+    : `Posted together as one review by ${viewer}, as comments. Open each to read or edit its exact text.`;
+  return nothingSent ? `${line} ${NOTHING_SENT}` : line;
+}
 export const GETTING_PREVIEW = 'Getting the preview…';
 export const NO_PREVIEW = 'Airlock got no answer for the preview. Ask again when you are ready.';
 export const OFFLINE_KEPT_POST = 'Airlock could not reach its service. Your comments are kept.';
@@ -152,6 +160,7 @@ const sameSet = (a: readonly string[], b: readonly string[]): boolean => a.lengt
 
 /** Where a comment on a line shows, in words. */
 function lineOf(item: PostPreviewItem): string {
+  // The service always gives an inline comment its line (posts/preview.ts); the contract allows none, so it is handled.
   if (item.line === null) return `${item.path}.`;
   return item.startLine === null ? `${item.path}, line ${item.line}.` : `${item.path}, lines ${item.startLine} to ${item.line}.`;
 }
@@ -162,14 +171,14 @@ export const SHOWS_NEXT_TO_CODE = 'It shows in Files changed, next to the code.'
 export const NAMES_FILE_AND_LINE = 'The comment names the file and line.';
 
 /** Where one comment goes: on its line, or in the review summary with the reason, and the control that moves it. */
-function Destination({ item, movable }: { item: PostPreviewItem; movable: ReactNode }) {
+function Destination({ item, heading, movable }: { item: PostPreviewItem; heading: string; movable: ReactNode }) {
   const inline = item.placement === 'inline';
   const summaryLine = [item.whySummary, item.line === null ? 'The comment names the file.' : NAMES_FILE_AND_LINE].filter((s) => s !== null).join(' ');
   return (
     <div className="ap-dest" data-placement={item.placement}>
       {inline ? <MessageSquare /> : <FileText />}
       <div>
-        <p className="title">{item.title}</p>
+        <p className="title">{heading}</p>
         <p><strong>{inline ? ON_THE_LINE : IN_THE_SUMMARY}</strong></p>
         <p>{inline ? `${lineOf(item)} ${SHOWS_NEXT_TO_CODE}` : summaryLine}</p>
         {movable}
@@ -417,6 +426,12 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
   const describedByBlock = blocked === null ? {} : { 'aria-describedby': blockedId };
   const n = preview.items.length;
   const several = n > 1;
+  // Each comment is headed by its finding's short title (the service's title when the finding is not on screen); the
+  // text that is posted is the field's, never this.
+  const headingOf = (item: PostPreviewItem): string => {
+    const found = latest.document.findings.find((f) => f.fingerprint === item.fingerprint || (f.aliases ?? []).includes(item.fingerprint));
+    return shortTitle(found ?? { title: item.title });
+  };
   const toSummaryControl = (item: PostPreviewItem): ReactNode => {
     const movable = item.placement === 'inline' || draft.previewToSummary.includes(item.fingerprint) || draft.toSummary.includes(item.fingerprint);
     if (!movable) return null;
@@ -434,13 +449,13 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
     <>
       <div className="ap-group">
         <p className="label">{several ? 'Where they go' : 'Where it goes'}</p>
-        {preview.items.map((item) => <Destination key={item.fingerprint} item={item} movable={toSummaryControl(item)} />)}
+        {preview.items.map((item) => <Destination key={item.fingerprint} item={item} heading={headingOf(item)} movable={toSummaryControl(item)} />)}
       </div>
       <div className="ap-group">
         <p className="label">The exact text</p>
         {preview.items.map((item, i) => (
           <div key={item.fingerprint} className="ap-field">
-            {several && <p className="muted">{item.title}</p>}
+            {several && <p className="muted">{headingOf(item)}</p>}
             <TextField
               label={`Comment ${i + 1}`} value={draft.texts[item.fingerprint] ?? ''} max={COMMENT_MAX} locked={locked}
               names={draft.texts[item.fingerprint] === item.body ? item.mentions : undefined}
@@ -462,7 +477,7 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
           {reviewNames.length > 0 && <p className="notice">{mentionNotice(reviewNames)}</p>}
         </div>
       </div>
-      <p className="muted">{accountLine(preview.viewer, pr, n, !draft.sent)}</p>
+      <p className="muted">{accountLine(preview.viewer, pr, n, !needsUpdate && pending === null && !draft.sent)}</p>
       {saidLine}
       {offlineLine}
       {draft.waiting !== null && pending?.kind === 'post' && <p role="status">{draft.waiting}</p>}

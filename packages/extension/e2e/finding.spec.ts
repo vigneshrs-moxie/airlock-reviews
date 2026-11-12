@@ -15,6 +15,7 @@ const TOKEN = 'f'.repeat(64);
 const HEAD = 'b'.repeat(40);
 const URL_ = 'https://github.com/acme/widgets/pull/1/files';
 const LONG_TITLE = 'The pause handler calls the billing guard only after the account state is written, so a paused account can still order.';
+const LONG_PATH = `src/${'a-folder-with-a-long-name/'.repeat(4)}pause-limit.ts`;
 const LONG_TEXT = `${'A paused account can still place an order, because the guard is asked too late. '.repeat(12)}End.`;
 
 function pull(): { pr: PrSummary; latest: LatestReply } {
@@ -35,7 +36,7 @@ function pull(): { pr: PrSummary; latest: LatestReply } {
       connected: [{ path: 'src/guard.ts', line: 4, role: 'caller', quote: 'code - 4' }],
     }),
     one(2, { severity: 'ask', title: 'Is a paused account billed?' }),
-    one(3, { severity: 'note', title: 'Name the pause limit' }),
+    one(3, { severity: 'note', title: 'Name the pause limit', path: LONG_PATH }),
   ];
   const base = minimalDocument();
   const document = ReviewDocumentSchema.parse({
@@ -141,6 +142,42 @@ test('1. the finding screen leads with the short version, and its actions stay p
   await expect.poll(() => panel.evaluate(() => window.scrollY)).toBeGreaterThan(0);
   await pinned();
   await noSideways();
+
+  // Tab from the top through every control: none it reaches before the actions is ever behind them.
+  await panel.evaluate(() => { window.scrollTo(0, 0); (document.activeElement as HTMLElement | null)?.blur(); });
+  let reachedBar = false;
+  for (let i = 0; i < 40 && !reachedBar; i += 1) {
+    await panel.keyboard.press('Tab');
+    const seen = await panel.evaluate(() => {
+      const focused = document.activeElement as HTMLElement | null;
+      const bar = document.querySelector('.ap-pinned');
+      if (focused === null || bar === null || focused === document.body) return { inBar: false, overlap: 0, what: '' };
+      if (bar.contains(focused)) return { inBar: true, overlap: 0, what: focused.textContent ?? '' };
+      const a = focused.getBoundingClientRect();
+      const b = bar.getBoundingClientRect();
+      return { inBar: false, overlap: Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)), what: focused.textContent ?? '' };
+    });
+    reachedBar = seen.inBar;
+    expect(seen.overlap, seen.what).toBe(0);
+  }
+  expect(reachedBar).toBe(true);
+
+  // The hard case: the next control is already on screen but in the strip the actions cover. Tab must bring it clear.
+  const behindBar = await panel.evaluate(() => {
+    const target = [...document.querySelectorAll<HTMLElement>('.ap-fold')].find((b) => b.textContent === 'How sure is this')!;
+    const before = [...document.querySelectorAll<HTMLElement>('.ap-folds button')];
+    before[before.indexOf(target) - 1]!.focus({ preventScroll: true });
+    window.scrollBy(0, target.getBoundingClientRect().bottom - (window.innerHeight - 20));
+    const bar = document.querySelector('.ap-pinned')!.getBoundingClientRect();
+    return target.getBoundingClientRect().bottom > bar.top;
+  });
+  expect(behindBar).toBe(true);
+  await panel.keyboard.press('Tab');
+  const clear = await panel.evaluate(() => {
+    const focused = document.activeElement!.getBoundingClientRect();
+    return { name: document.activeElement!.textContent, clear: focused.bottom <= document.querySelector('.ap-pinned')!.getBoundingClientRect().top };
+  });
+  expect(clear).toEqual({ name: 'How sure is this', clear: true });
 });
 
 test('2. Next keeps the folds open and fills Comment on GitHub for a question; at 420 px nothing moves sideways', async () => {
@@ -154,6 +191,24 @@ test('2. Next keeps the folds open and fills Comment on GitHub for a question; a
   await panel.getByRole('button', { name: 'Next finding' }).click();
   await expect(bar().locator('.btn.primary')).toHaveCount(0);
   await expect(panel.getByRole('button', { name: 'Next finding' })).toBeDisabled();
+  // A place too long for its row is cut at its start: the file name and line number show, the start does not.
+  const place = panel.locator('.ap-where code');
+  await expect(place).toHaveText(`${LONG_PATH}:13`);
+  const ends = await place.evaluate((code) => {
+    const text = code.querySelector('span')!.firstChild as Text;
+    const at = (i: number) => { const r = document.createRange(); r.setStart(text, i); r.setEnd(text, i + 1); return r.getBoundingClientRect(); };
+    const box = code.getBoundingClientRect();
+    const last = at(text.length - 1);
+    const first = at(0);
+    return { lastInside: last.right <= box.right + 1 && last.left >= box.left - 1, firstOutside: first.right <= box.left + 1 };
+  });
+  expect(ends).toEqual({ lastInside: true, firstOutside: true });
+  // Inside The code it is shown whole, wrapped, never cut.
+  const whole = panel.locator('.ap-place-whole');
+  await expect(whole).toHaveText(`${LONG_PATH}:13`);
+  await expect(whole).toBeVisible();
+  expect(await whole.evaluate((p) => p.scrollWidth <= p.clientWidth)).toBe(true);
+  await noSideways();
   await panel.getByRole('button', { name: 'Previous finding' }).click();
   await panel.getByRole('button', { name: 'Previous finding' }).click();
   await expect(panel.getByRole('button', { name: 'Previous finding' })).toBeDisabled();

@@ -1,6 +1,9 @@
 /* The finding screen, its pinned actions, and the comment and dismiss sheets (the redesign's .ap-* rules from
    docs/design/panel-redesign/theme.css, as the panel uses them). */
 
+/* A control reached with Tab scrolls clear of the pinned actions: the page keeps their height free at its bottom. */
+html:has(.finding-screen) { scroll-padding-bottom: calc(var(--ap-pinned-height, 100px) + 8px); }
+
 /* The finding screen fills the panel's height, so its actions sit at the bottom edge even when the finding is short. */
 .panel:has(.finding-screen) { min-height: 100vh; display: flex; flex-direction: column; }
 .panel:has(.finding-screen) > main { flex: 1 0 auto; }
@@ -28,7 +31,11 @@
 .ap-title:focus { outline: none; }
 .ap-title:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .ap-where { display: flex; align-items: center; gap: 8px; align-self: stretch; min-width: 0; }
-.ap-where .path { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ap-where .path { flex: 1; min-width: 0; }
+/* A place too long for its row is cut at its start, so the file name and the line number stay in view. */
+.ap-end { direction: rtl; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ap-end > span { direction: ltr; unicode-bidi: isolate; }
+.ap-place-whole { overflow-wrap: anywhere; }
 .ap-where .btn { display: inline-flex; align-items: center; gap: 5px; flex: none; min-height: 32px; }
 
 /* Summary and what to do. */

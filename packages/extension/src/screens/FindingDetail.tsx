@@ -18,6 +18,14 @@ export const notConnected: Jump = () => Promise.resolve({ sentence: 'Jumping is 
 /** The three actions' quiet lines, under their buttons. */
 export const CAPTION = { copy: 'for your coding agent', post: 'you see it first', dismiss: 'hide it, teach Airlock' } as const;
 
+/** Said when the fix prompt is on the clipboard. */
+export const COPIED_PROMPT = 'Copied. Paste it to your coding agent.';
+
+/** A place that, when too long for its row, is cut at its start, so the file name and the line stay in view. */
+function EndInView({ className, text }: { className: string; text: string }) {
+  return <code className={`${className} ap-end`}><span dir="ltr">{text}</span></code>;
+}
+
 /** The action whose button is filled, by the finding's kind: none for a note. */
 const MAIN: Record<Finding['severity'], 'copy' | 'post' | null> = { block: 'copy', fix: 'copy', ask: 'post', note: null };
 
@@ -32,7 +40,7 @@ function Fold({ fold, title, aside, open, onToggle, children }: {
         <button type="button" className="ap-fold" aria-expanded={open} {...(open ? { 'aria-controls': id } : {})} onClick={() => onToggle(fold)}>
           <ChevronRight />
           <span>{title}</span>
-          {aside !== undefined && <span className="n">{aside}</span>}
+          {aside !== undefined && <span className="n ap-end"><span dir="ltr">{aside}</span></span>}
         </button>
       </h3>
       {open && <div className="ap-folded" id={id}>{children}</div>}
@@ -55,7 +63,7 @@ export interface FindingDetailProps {
   packs: PrSummary['packs'];
   previous: Finding | null;
   next: Finding | null;
-  /** Where the finding is in the list: `index` counts from 0. Shown as "n of m" when given. */
+  /** Where the finding is in the list: `index` counts from 1. Shown as "n of m" when given. */
   position?: { index: number; total: number } | undefined;
   /** Dismiss needs the service; false when the review is shown read-only. */
   canDismiss: boolean;
@@ -94,7 +102,24 @@ export function FindingDetail({
   // `reloadFor`: the place to jump to again after reloading the GitHub tab, when the jump said a reload is needed.
   const [note, setNote] = useState<{ key: string; text: string; reloadFor: JumpPlace | null } | null>(null);
   const [open, toggle] = useFindingFolds();
-  const copy = useCopy(fixPrompt, timers);
+  const copy = useCopy(fixPrompt, timers, COPIED_PROMPT);
+  const copyButton = useRef<HTMLButtonElement>(null);
+  const putAwayCopy = (): void => { copy.putAway(); copyButton.current?.focus(); };
+  // The pinned actions' height, so a control reached with Tab is scrolled clear of them, never behind them.
+  const pinnedBox = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = pinnedBox.current;
+    const root = document.documentElement;
+    if (node === null) return undefined;
+    const measure = (): void => root.style.setProperty('--ap-pinned-height', `${Math.ceil(node.getBoundingClientRect().height)}px`);
+    measure();
+    const watch = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    watch?.observe(node);
+    return () => {
+      watch?.disconnect();
+      root.style.removeProperty('--ap-pinned-height');
+    };
+  }, []);
   const visible = useVisible();
   const focused = useRef(false);
   useEffect(() => {
@@ -151,7 +176,7 @@ export function FindingDetail({
     <div className="finding-screen">
       <div className="ap-top">
         <button type="button" className="ap-back" aria-label="Back to the review" onClick={onBack}><ChevronLeft />Review</button>
-        {position !== undefined && <span className="ap-count">{`${position.index + 1} of ${position.total}`}</span>}
+        {position !== undefined && <span className="ap-count">{`${position.index} of ${position.total}`}</span>}
         <button type="button" className="ap-icon" aria-label="Previous finding" disabled={previous === null} onClick={() => previous && onOpen(previous)}>
           <ChevronUp />
         </button>
@@ -164,7 +189,7 @@ export function FindingDetail({
         <span className={`ap-tag sev-${finding.severity}`}>{severityWord(finding.severity)}</span>
         <h2 className="ap-title" tabIndex={-1} ref={title} data-focus="detail">{shown}</h2>
         <div className="ap-where">
-          <code className="path">{locationText(finding)}</code>
+          <EndInView className="path" text={locationText(finding)} />
           <button type="button" className="btn small" onClick={() => jump('own', ownPlace(finding, changedPaths))}><Crosshair />Show in diff</button>
         </div>
         {noteFor('own')}
@@ -188,6 +213,7 @@ export function FindingDetail({
           <p>{finding.why}</p>
         </Fold>
         <Fold fold="code" title="The code" aside={locationText(finding)} open={open.has('code')} onToggle={toggle}>
+          <p className="path ap-place-whole">{locationText(finding)}</p>
           <pre className="quote"><code>{finding.quote}</code></pre>
         </Fold>
         {finding.connected.length > 0 && (
@@ -217,11 +243,11 @@ export function FindingDetail({
         </Fold>
       </div>
 
-      <div className="ap-pinned">
-        {copy.shown !== null && <div className="ap-refused"><RefusedCopy shown={copy.shown} box={copy.box} /></div>}
+      <div className="ap-pinned" ref={pinnedBox}>
+        {copy.shown !== null && <div className="ap-refused"><RefusedCopy shown={copy.shown} box={copy.box} onClose={putAwayCopy} /></div>}
         <div className="ap-bar">
           <div className="ap-act">
-            <button type="button" className={filled('copy')} aria-describedby={ids.copy} onClick={copy.copy}>
+            <button type="button" className={filled('copy')} ref={copyButton} aria-describedby={ids.copy} onClick={copy.copy}>
               {copy.copied ? 'Copied' : 'Copy fix prompt'}
             </button>
             <span className="cap" id={ids.copy}>{CAPTION.copy}</span>
