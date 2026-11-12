@@ -163,6 +163,30 @@ describe('mergeIntoCarried', () => {
     }
   });
 
+  it('takes the more serious severity when the new finding is more serious, and says so in checked', () => {
+    const cases: [Finding['severity'], Finding['severity'], string][] = [
+      ['fix', 'block', 'Block'], ['ask', 'fix', 'Fix'], ['note', 'block', 'Block'], ['note', 'ask', 'Ask'],
+    ];
+    for (const [was, now, word] of cases) {
+      const target = earlierFinding({ id: 'c_old', severity: was, status: 'still-open', checked: 'Read both callers.' });
+      const r = mergeIntoCarried([item({ severity: now, title: 'Worded differently', happens: 'Other words.' })], [target]);
+      expect(r.items, `${was} to ${now}`).toEqual([]);
+      expect(r.carried[0], `${was} to ${now}`).toMatchObject({
+        severity: now, title: target.title, happens: target.happens, path: target.path, quote: target.quote, anchor: target.anchor,
+        checked: `Read both callers. Raised again as ${word} in this review.`,
+      });
+      expect(target.severity, 'the input is not changed').toBe(was);
+    }
+  });
+
+  it('changes nothing for a repeat that is as serious or less serious', () => {
+    for (const [was, now] of [['block', 'fix'], ['fix', 'fix'], ['fix', 'note'], ['ask', 'note']] as const) {
+      const target = earlierFinding({ id: 'c_old', severity: was, status: 'still-open' });
+      const r = mergeIntoCarried([item({ severity: now })], [target]);
+      expect(r.carried[0], `${was} then ${now}`).toMatchObject({ severity: was, checked: target.checked });
+    }
+  });
+
   it('leaves a finding that is not the same alone, and does not change its inputs', () => {
     const fresh = item({ ...other, quote: 'something else' });
     const before = structuredClone(carried);

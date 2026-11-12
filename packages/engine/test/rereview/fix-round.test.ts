@@ -102,6 +102,10 @@ describe('fix round 1', () => {
     });
     const atRound = doc.findings.filter((f) => f.path === 'src/round.ts');
     expect(atRound.map((f) => [f.id, f.status])).toEqual([[good.id, 'moved']]);
+    // Raised again as a Block where the earlier review had a Fix: the earlier finding takes the more serious word.
+    expect(good.severity).toBe('fix');
+    expect(atRound[0]).toMatchObject({ severity: 'block', title: good.title });
+    expect(atRound[0]!.checked.endsWith(' Raised again as Block in this review.')).toBe(true);
     expect(doc.dropped.filter((d) => d.mergedInto === good.id).map((d) => [d.stage, d.candidate.path])).toEqual([['merge', 'src/round.ts']]);
     // The re-raised one never reached the challenge: only the fixed check asked about it.
     expect(calls.filter((c) => c.role.startsWith('challenge:') && !c.role.startsWith('challenge:fixed:'))).toEqual([]);
@@ -137,10 +141,12 @@ describe('fix round 1', () => {
       }],
       standalone: [],
     };
-    const { doc, calls } = await again(s, earlier.id, head, { paths: [], map, deep: [GOOD] }, 'deep');
+    const { doc, calls } = await again(s, earlier.id, head, { paths: [], map, deep: [{ ...GOOD, severity: 'block' }] }, 'deep');
     expect(calls.some((c) => c.role.startsWith('lens:') && c.instructions.includes(DEEP_SENTENCE))).toBe(true);
     expect(doc.findings.filter((f) => f.path === 'src/money.ts').map((f) => [f.id, f.status])).toEqual([[good.id, 'moved']]);
     expect(doc.dropped.filter((d) => d.mergedInto === good.id).map((d) => d.stage)).toEqual(['merge']);
+    expect(doc.findings.find((f) => f.id === good.id)).toMatchObject({ severity: 'block' });
+    expect(doc.findings.find((f) => f.id === good.id)!.checked.endsWith(' Raised again as Block in this review.')).toBe(true);
     expect(calls.filter((c) => c.role.startsWith('challenge:'))).toEqual([]);
   }, SLOW);
 

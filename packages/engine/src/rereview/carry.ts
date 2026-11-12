@@ -1,4 +1,4 @@
-import type { Dropped, FileDiff, Finding, ReviewDocument, StageError } from '@airlock/shared';
+import { SEVERITY_WORD, type Dropped, type FileDiff, type Finding, type ReviewDocument, type Severity, type StageError } from '@airlock/shared';
 import { anchorCandidates, findQuote } from '../anchor/anchor.js';
 import { commentLine } from '../anchor/comment-line.js';
 import { lineInDiff } from '../diff/parse.js';
@@ -113,12 +113,17 @@ export function unaccounted(prev: ReviewDocument, findings: Finding[], fixed: Fi
   });
 }
 
+const SERIOUSNESS: Severity[] = ['note', 'ask', 'fix', 'block'];
+const moreSerious = (a: Severity, than: Severity): boolean => SERIOUSNESS.indexOf(a) > SERIOUSNESS.indexOf(than);
+
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
 /**
  * A finding raised again is the same finding: each new item whose fingerprint or one of its aliases equals the
  * fingerprint or an alias of a carried finding is dropped at stage `merge` with `mergedInto` that carried finding (the
- * first that matches), which gains the item's fingerprint and aliases as its own aliases. Items and carried findings keep
+ * first that matches), which gains the item's fingerprint and aliases as its own aliases. The carried finding keeps its
+ * own text and place, but takes the item's severity when that is more serious, and its `checked` then gains a sentence
+ * saying so; a repeat that is as serious or less changes nothing else. Items and carried findings keep
  * the order given; the inputs are not changed.
  */
 export function mergeIntoCarried<T extends AnchoredCandidate>(
@@ -136,6 +141,10 @@ export function mergeIntoCarried<T extends AnchoredCandidate>(
     }
     same.aliases = uniqueWithout([...(same.aliases ?? []), ...prints], same.fingerprint);
     if (same.aliases.length === 0) delete same.aliases;
+    if (moreSerious(item.severity, same.severity)) {
+      same.severity = item.severity;
+      same.checked = `${same.checked} Raised again as ${SEVERITY_WORD[item.severity]} in this review.`;
+    }
     dropped.push({
       candidate: plainCandidate(item), stage: 'merge', refutation: null, mergedInto: same.id,
       reason: `raised again: the same finding as "${oneLine(same.title)}" from the last review`,
