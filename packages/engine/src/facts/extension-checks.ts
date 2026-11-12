@@ -1,6 +1,7 @@
 import { posix } from 'node:path';
 import type { Fact, FileDiff } from '@airlock/shared';
 import picomatch from 'picomatch';
+import { builtInIgnoreWords } from './classify.js';
 
 /**
  * Code checks for Chrome extension repositories, named by a pack under `codeChecks:`. Each reads the pull request's files
@@ -267,7 +268,53 @@ function scriptViews(text: string): { code: string[]; bare: string[] } {
   return { code: code.split('\n'), bare: bare.split('\n') };
 }
 
-const htmlView = (text: string): string[] => text.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' ')).split('\n');
+/** Page text with every comment blanked, line breaks kept; a loop, not a pattern, so many unclosed `<!--` cost one pass. */
+function htmlView(text: string): string[] {
+  let out = '';
+  let at = 0;
+  for (;;) {
+    const open = text.indexOf('<!--', at);
+    if (open < 0) break;
+    const close = text.indexOf('-->', open + 4);
+    const end = close < 0 ? text.length : close + 3;
+    out += text.slice(at, open) + text.slice(open, end).replace(/[^\n]/g, ' ');
+    at = end;
+  }
+  return (out + text.slice(at)).split('\n');
+}
+
+/**
+ * No pattern of these checks sees more than MAX_LINE characters of one line: a longer line (a minified file is one) is cut
+ * into pieces of MAX_LINE, each starting PIECE_STEP after the one before, so a call that crosses a cut is still whole in
+ * one piece when it is shorter than the overlap. Every pattern's work is then bounded by the piece, whatever the file.
+ */
+const MAX_LINE = 2000;
+const PIECE_STEP = 1500;
+function pieces(line: string): string[] {
+  if (line.length <= MAX_LINE) return [line];
+  const out: string[] = [];
+  for (let i = 0; ; i += PIECE_STEP) {
+    out.push(line.slice(i, i + MAX_LINE));
+    if (i + MAX_LINE >= line.length) return out;
+  }
+}
+
+/** Lines cut into pieces (see `pieces`) and joined, with the line each piece came from (1-based), for patterns that span lines. */
+function scanText(lines: string[]): { text: string; lineAt: (index: number) => number } {
+  const parts: string[] = [];
+  const lineOf: number[] = [];
+  lines.forEach((line, i) => { for (const p of pieces(line)) { parts.push(p); lineOf.push(i + 1); } });
+  const starts: number[] = [];
+  let offset = 0;
+  for (const p of parts) { starts.push(offset); offset += p.length + 1; }
+  const lineAt = (index: number): number => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid]! <= index) lo = mid; else hi = mid - 1; }
+    return lineOf[lo] ?? 1;
+  };
+  return { text: parts.join('\n'), lineAt };
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The files the extension loads
@@ -303,29 +350,55 @@ function namedPaths(m: Record<string, unknown>): string[] {
   return out;
 }
 
-const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 /**
  * How Chrome matches a manifest entry against the extension's files: from the extension's root after a leading `./` or
  * `/`, letter case ignored here, a `*` matching any run of characters (`/` included) and every other character itself.
+ * No regular expression: runs of `*` are one `*`, and a two-pointer match goes back only to the last `*`, so an entry
+ * full of stars costs at most its length times the path's.
  */
-const entryMatcher = (entry: string): RegExp => new RegExp(`^${entry.split('*').map(escapeRegExp).join('.*')}$`, 'i');
+function entryMatches(entry: string, path: string): boolean {
+  const p = entry.toLowerCase().replace(/\*+/g, '*');
+  const t = path.toLowerCase();
+  let i = 0;
+  let j = 0;
+  let star = -1;
+  let from = 0;
+  while (j < t.length) {
+    if (i < p.length && p[i] === '*') {
+      star = i++;
+      from = j;
+    } else if (i < p.length && p[i] === t[j]) {
+      i++;
+      j++;
+    } else if (star >= 0) {
+      // the last star takes one more character, and the rest of the entry is tried from there
+      i = star + 1;
+      j = ++from;
+    } else return false;
+  }
+  while (i < p.length && p[i] === '*') i++;
+  return i === p.length;
+}
 const stripLead = (entry: string): string => entry.replace(/^(?:\.?\/)+/, '');
 
 interface Loaded {
-  /** The changed files the extension loads, each with why (`loaded by <manifest or page>`). */
+  /** The changed files the extension loads, each with why (`loaded by <the manifest, a page or a script>`). */
   files: Map<string, string>;
   /** Whether the head's manifest.json could be read; when not, nothing can be trusted as a test. */
   manifestRead: boolean;
   facts: Fact[];
 }
 
+/** At most this many files are read while following what loads what; past it a fact says the rest were not followed. */
+export const MAX_FOLLOWED = 200;
+
 const loadedMemo = new WeakMap<CodeCheckInput, Promise<Loaded>>();
 
 /**
- * The changed files the head's top-level manifest.json loads, read whether it changed or not: every path it names (a
- * `*` taking in every changed file it matches) and every local script a page it names pulls in with `<script src>`,
- * relative to that page. An entry holding `..` promotes nothing and is a fact.
+ * The changed files the extension loads, from the head's top-level manifest.json, read whether it changed or not: every
+ * path it names (a `*` taking in every changed file it matches), and then, through the whole chain, what each loaded page
+ * and script loads in turn, read from its head text whether or not it changed (see `loadsIn` and `pageScripts`). An entry
+ * holding `..` promotes nothing and is a fact; past MAX_FOLLOWED files read, a fact says the rest were not followed.
  */
 function loadedFiles(input: CodeCheckInput): Promise<Loaded> {
   let hit = loadedMemo.get(input);
@@ -333,7 +406,94 @@ function loadedFiles(input: CodeCheckInput): Promise<Loaded> {
   return hit;
 }
 
-const SCRIPT_TAG_SRC = /<script\b[^>]*?\bsrc\s*=\s*["']?([^"'\s>]+)/gi;
+const SRC_ATTRIBUTE = /\bsrc\s{0,50}=\s{0,50}["']?\s{0,50}([^"'\s>]{1,1000})/i;
+const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
+/**
+ * The `src` of every `<script>` tag in page text (comments already blanked). A loop, not one pattern: each tag is read up to
+ * its `>`, the next `<` or MAX_LINE characters, whichever is first, so the tags' texts never overlap and a page of many
+ * unclosed `<script` costs one pass.
+ */
+function scriptSources(text: string): string[] {
+  const lower = text.toLowerCase();
+  const out: string[] = [];
+  let gt = -2; // the first `>` at or after the current tag; -1 when there is none left
+  for (let at = lower.indexOf('<script'); at >= 0; at = lower.indexOf('<script', at + 7)) {
+    if (/\w/.test(lower[at + 7] ?? '')) continue;
+    if (gt !== -1 && gt < at) gt = lower.indexOf('>', at);
+    const lt = lower.indexOf('<', at + 1);
+    const end = Math.min(gt < 0 ? text.length : gt, lt < 0 ? text.length : lt, at + MAX_LINE);
+    const src = text.slice(at, end).match(SRC_ATTRIBUTE)?.[1];
+    if (src !== undefined) out.push(src);
+  }
+  return out;
+}
+
+/** The local scripts a page pulls in with `<script src>`, relative to the page. */
+function pageScripts(text: string, page: string): string[] {
+  const out: string[] = [];
+  for (const raw of scriptSources(htmlView(text).join('\n'))) {
+    const src = raw.replace(/[?#].*$/, '');
+    if (src === '' || HAS_SCHEME.test(src) || src.startsWith('//')) continue;
+    const path = resolveIn(posix.dirname(page), src);
+    if (path !== null) out.push(path);
+  }
+  return out;
+}
+
+/** A path a script loads with a literal string, on which line, and the folder the loaded file's own relative addresses resolve against. */
+interface Load { line: number; path: string; base: string }
+
+const FROM_OR_IMPORT = /\b(?:from|import)\s{0,200}(?:\(\s{0,200})?(['"`])([^'"`\n]{1,500})\1/g;
+const IMPORT_SCRIPTS = /\bimportScripts\s{0,200}\(([^)]{0,1500})\)/g;
+const WORKER = /\bnew\s{1,200}(?:Shared)?Worker\s{0,200}\(\s{0,200}(['"`])([^'"`\n]{1,500})\1/g;
+const SCRIPT_CALL = /\b(executeScript|registerContentScripts|updateContentScripts|createDocument)\s{0,200}\(/g;
+/** How far past one of SCRIPT_CALL's names its `files`, `js` or `url` is looked for. */
+const CALL_WINDOW = 1000;
+const LIST_OF = (key: string): RegExp => new RegExp(`\\b${key}\\s{0,50}:\\s{0,50}\\[([^\\]]{0,1000})\\]`);
+const URL_FIELD = /\burl\s{0,50}:\s{0,50}(['"`])([^'"`\n]{1,500})\1/;
+const QUOTED = /(['"`])([^'"`\n]{1,500})\1/g;
+
+/**
+ * Every repository path the script `file` (its lines with comments blanked) loads code from with a literal string:
+ * `import … from`, `import '…'` and `import('…')` (relative ones, from the script's folder); `importScripts` and
+ * `new Worker` (from `base`, the folder of the page or worker the script runs in); `executeScript({ files })`, the `js`
+ * lists of `registerContentScripts` and `updateContentScripts`, and `offscreen.createDocument({ url })` (from the
+ * extension's root). `getURL` is not followed: it names any resource, not code. Every pattern is bounded and sees at most
+ * MAX_LINE characters of a line, so no input makes it slow.
+ */
+function loadsIn(lines: string[], file: string, base: string): Load[] {
+  const { text, lineAt } = scanText(lines);
+  const out: Load[] = [];
+  /** `baseOf` is the base of the loaded file: the same as this script's, its own folder (a worker), or the root. */
+  const add = (at: number, from: string, named: string, baseOf: 'same' | 'own' | 'root'): void => {
+    if (named.includes('${') || HAS_SCHEME.test(named) || named.startsWith('//')) return;
+    const path = resolveIn(from, named.replace(/[?#].*$/, ''));
+    if (path === null) return;
+    out.push({ line: lineAt(at), path, base: baseOf === 'same' ? base : baseOf === 'own' ? posix.dirname(path) : '.' });
+  };
+  const quotedIn = (inner: string, at: number, from: string, baseOf: 'same' | 'root'): void => {
+    for (const q of inner.matchAll(QUOTED)) add(at + q.index, from, q[2]!, baseOf);
+  };
+  for (const m of text.matchAll(FROM_OR_IMPORT)) {
+    const spec = m[2]!;
+    if (spec.startsWith('.') || spec.startsWith('/')) add(m.index + m[0].length - 1, posix.dirname(file), spec, 'same');
+  }
+  for (const m of text.matchAll(IMPORT_SCRIPTS)) quotedIn(m[1]!, m.index + m[0].indexOf('(') + 1, base, 'same');
+  for (const m of text.matchAll(WORKER)) add(m.index + m[0].length - 1, base, m[2]!, 'own');
+  for (const m of text.matchAll(SCRIPT_CALL)) {
+    const call = text.slice(m.index, m.index + CALL_WINDOW);
+    if (m[1] === 'createDocument') {
+      const url = call.match(URL_FIELD);
+      if (url?.index !== undefined) add(m.index + url.index, '.', url[2]!, 'root');
+      continue;
+    }
+    // chrome.scripting takes paths from the extension's root
+    const list = call.match(LIST_OF(m[1] === 'executeScript' ? 'files' : 'js'));
+    if (list?.index !== undefined) quotedIn(list[1]!, m.index + list.index + list[0].indexOf('[') + 1, '.', 'root');
+  }
+  return out;
+}
 
 async function findLoaded(input: CodeCheckInput): Promise<Loaded> {
   const files = new Map<string, string>();
@@ -343,31 +503,50 @@ async function findLoaded(input: CodeCheckInput): Promise<Loaded> {
   const side = await manifestSide(input.readHead, MANIFEST, 'absent');
   if (side.kind !== 'ok') return { files, manifestRead: false, facts };
 
-  const promote = (match: (path: string) => boolean, reason: string): string[] => {
-    const hits = changed.filter((f) => match(f.path)).map((f) => f.path);
-    for (const path of hits) if (!files.has(path)) files.set(path, reason);
-    return hits;
+  // Letter case is ignored, as Chrome on a Mac ignores it.
+  const changedPath = new Map(changed.map((f) => [f.path.toLowerCase(), f.path]));
+  const queue: { path: string; base: string }[] = [];
+  /** `path` is loaded by `by`: promoted when it changed, and followed when it is a script or a page. */
+  const follow = (path: string, by: string, base: string): void => {
+    const hit = changedPath.get(path.toLowerCase());
+    if (hit !== undefined && !files.has(hit)) files.set(hit, `loaded by ${by}`);
+    if (HTML_FILE.test(path) || SCRIPT_FILE.test(path)) queue.push({ path, base });
   };
-  const pages = new Set<string>();
+
+  const background = side.json.background;
+  const worker = isObj(background) ? background.service_worker : undefined;
   for (const named of namedPaths(side.json)) {
     const entry = stripLead(named);
     if (entry.split('/').includes('..')) {
       facts.push({ checkId: 'extension-loaded-files', path: MANIFEST, line: null, message: `The manifest names a path outside the extension: ${cut(named)}.` });
       continue;
     }
-    const re = entryMatcher(entry);
-    const hits = promote((path) => re.test(path), `loaded by ${MANIFEST}`);
-    if (HTML_FILE.test(entry)) for (const page of entry.includes('*') ? hits : [entry]) pages.add(page);
+    // A service worker's addresses resolve from its own folder; the other scripts run in a page at the root or a site's page.
+    const base = named === worker ? posix.dirname(entry) : '.';
+    if (entry.includes('*')) {
+      for (const f of changed) if (entryMatches(entry, f.path)) follow(f.path, MANIFEST, base);
+    } else if (entry !== '') follow(entry, MANIFEST, base);
   }
-  for (const page of pages) {
-    const text = await input.readHead(changed.find((f) => f.path.toLowerCase() === page.toLowerCase())?.path ?? page);
+
+  const seen = new Set<string>();
+  for (let next = 0; next < queue.length; next++) {
+    const { path, base } = queue[next]!;
+    const key = path.toLowerCase();
+    if (seen.has(key)) continue;
+    if (seen.size >= MAX_FOLLOWED) {
+      facts.push({
+        checkId: 'extension-loaded-files', path: MANIFEST, line: null,
+        message: `More than ${MAX_FOLLOWED} files load one another from ${MANIFEST} on, so the rest were not followed: a changed file only they load is not read closely for being loaded.`,
+      });
+      break;
+    }
+    seen.add(key);
+    const text = await input.readHead(changedPath.get(key) ?? path);
     if (text === null) continue;
-    for (const [, raw] of htmlView(text).join('\n').matchAll(SCRIPT_TAG_SRC)) {
-      const src = raw!.replace(/[?#].*$/, '');
-      if (src === '' || /^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith('//')) continue;
-      const path = resolveIn(posix.dirname(page), src);
-      if (path === null) continue;
-      promote((p) => p.toLowerCase() === path.toLowerCase(), `loaded by ${page}`);
+    if (HTML_FILE.test(path)) {
+      for (const script of pageScripts(text, path)) follow(script, path, posix.dirname(path));
+    } else {
+      for (const load of loadsIn(scriptViews(text).code, path, base)) follow(load.path, path, load.base);
     }
   }
   return { files, manifestRead: true, facts };
@@ -376,20 +555,18 @@ async function findLoaded(input: CodeCheckInput): Promise<Loaded> {
 const withTests = (path: string): string | null =>
   underTestFolder(path) ? 'sits under a test or fixture folder' : namedLikeTest(path) ? 'is named like a test' : null;
 
-const IMPORT = /\bimport\s*(?:[\w$*{}\s,]+?\s*from\s*)?\(?\s*['"]([^'"]+)['"]/g;
-const IMPORT_SCRIPTS = /\bimportScripts\s*\(([^)]*)\)/g;
-const EXECUTE_SCRIPT = /\bexecuteScript\s*\(\s*\{(?:[^{}]|\{[^{}]*\})*?\bfiles\s*:\s*\[([^\]]*)\]/g;
-const QUOTED = /['"`]([^'"`]+)['"`]/g;
-
-/** The repository paths an added line of `file` loads code from with a literal path. */
-function loadsOn(code: string, file: string): string[] {
-  const dir = posix.dirname(file);
-  const out: string[] = [];
-  const add = (from: string, named: string): void => { const p = resolveIn(from, named); if (p !== null) out.push(p); };
-  for (const [, spec] of code.matchAll(IMPORT)) if (spec!.startsWith('.') || spec!.startsWith('/')) add(dir, spec!);
-  for (const [, args] of code.matchAll(IMPORT_SCRIPTS)) for (const [, p] of args!.matchAll(QUOTED)) add(dir, p!);
-  // chrome.scripting takes paths from the extension's root
-  for (const [, list] of code.matchAll(EXECUTE_SCRIPT)) for (const [, p] of list!.matchAll(QUOTED)) add('.', p!);
+/** What the added lines of `file` load: read from the whole head text where it holds the line, else from the line alone. */
+function addedLoads(file: string, added: Map<number, string>, head: string | null): Load[] {
+  const headLines = head?.split('\n');
+  const inHead = (n: number, text: string): boolean => headLines?.[n - 1]?.replace(/\r$/, '') === text.replace(/\r$/, '');
+  const base = posix.dirname(file);
+  const out = head === null ? [] : loadsIn(scriptViews(head).code, file, base).filter((l) => {
+    const text = added.get(l.line);
+    return text !== undefined && inHead(l.line, text);
+  });
+  for (const [n, text] of added) {
+    if (!inHead(n, text)) out.push(...loadsIn([scriptViews(text).code[0]!], file, base).map((l) => ({ ...l, line: n })));
+  }
   return out;
 }
 
@@ -402,6 +579,17 @@ const loadedFilesCheck: CodeCheck = async (input) => {
   for (const path of loaded.files.keys()) {
     const where = withTests(path);
     if (where !== null) facts.push({ checkId: 'extension-loaded-files', path, line: null, message: `${path} ${where} but the extension loads it.` });
+  }
+  // The built-in rules leave out minified, built and generated files as if a build made them; here a person committed them.
+  for (const f of live(input.files)) {
+    if (f.binary || !SCRIPT_FILE.test(f.path) || loaded.files.has(f.path)) continue;
+    const words = builtInIgnoreWords(f.path);
+    if (words !== null) {
+      facts.push({
+        checkId: 'extension-loaded-files', path: f.path, line: null,
+        message: `${f.path} is not reviewed (${words}, a built-in rule), but an extension has no build step, so Chrome may load this file.`,
+      });
+    }
   }
   const notTrusted: { path: string; reason: string }[] = [];
   if (!loaded.manifestRead) {
@@ -416,12 +604,10 @@ const loadedFilesCheck: CodeCheck = async (input) => {
   for (const { file, added, head } of await sources(input, SCRIPT_FILE)) {
     // A test loading its own fixtures is not news; a file the extension loads is not a test.
     if (!loaded.files.has(file.path) && withTests(file.path) !== null) continue;
-    for (const [n, code] of viewOfLines(head, added, (t) => scriptViews(t).code)) {
-      for (const target of loadsOn(code, file.path)) {
-        const where = withTests(target);
-        if (where !== null) {
-          facts.push({ checkId: 'extension-loaded-files', path: file.path, line: n, message: `An added line loads ${target}, which ${where}.` });
-        }
+    for (const { line, path: target } of addedLoads(file.path, added, head)) {
+      const where = withTests(target);
+      if (where !== null) {
+        facts.push({ checkId: 'extension-loaded-files', path: file.path, line, message: `An added line loads ${target}, which ${where}.` });
       }
     }
   }
@@ -458,11 +644,10 @@ function viewOfLines<T>(head: string | null, added: Map<number, string>, view: (
   return out;
 }
 
-const EVAL = /(?<![\w$])eval\s*\(/;
-const FUNCTION = /(?<![\w$.])Function\s*\(/;
-const PLAIN_ADDRESS = /\b(?:http|ws):\/\/[^\s'"`<>)\\]+/gi;
+const EVAL = /(?<![\w$])eval\s{0,200}\(/;
+const FUNCTION = /(?<![\w$.])Function\s{0,200}\(/;
+const PLAIN_ADDRESS = /\b(?:http|ws):\/\/[^\s'"`<>)\\]{1,1000}/gi;
 const XML_NAMESPACE = /^http:\/\/www\.w3\.org\//i;
-const SCRIPT_SRC = /<script\b[^>]*?\bsrc\s*=\s*["']?\s*((?:http|ws):\/\/[^\s"'>]+)/gi;
 const secure = (address: string): string => (/^ws:/i.test(address) ? 'wss' : 'https');
 
 const remoteCode: CodeCheck = async (input) => {
@@ -470,34 +655,48 @@ const remoteCode: CodeCheck = async (input) => {
   for (const { file, added, head } of await sources(input, SCRIPT_FILE)) {
     const fact = (line: number, message: string): void => { out.push({ checkId: 'extension-remote-code', path: file.path, line, message }); };
     const views = viewOfLines(head, added, (t) => { const v = scriptViews(t); return v.code.map((code, i) => ({ code, bare: v.bare[i]! })); });
-    for (const [n, { code, bare }] of views) {
-      if (EVAL.test(bare)) fact(n, 'An added line runs text as code with eval.');
-      if (FUNCTION.test(bare)) fact(n, 'An added line builds a function from text with new Function.');
-      for (const [address] of code.matchAll(PLAIN_ADDRESS)) {
-        if (!XML_NAMESPACE.test(address)) fact(n, `An added line has the address ${cut(address)}, which is not ${secure(address)}.`);
-      }
+    for (const [n, view] of views) {
+      // The two views have the same length, so their pieces line up.
+      const bares = pieces(view.bare);
+      pieces(view.code).forEach((code, i) => {
+        const bare = bares[i]!;
+        if (EVAL.test(bare)) fact(n, 'An added line runs text as code with eval.');
+        if (FUNCTION.test(bare)) fact(n, 'An added line builds a function from text with new Function.');
+        for (const [address] of code.matchAll(PLAIN_ADDRESS)) {
+          if (!XML_NAMESPACE.test(address)) fact(n, `An added line has the address ${cut(address)}, which is not ${secure(address)}.`);
+        }
+      });
     }
   }
   for (const { file, added, head } of await sources(input, HTML_FILE)) {
     for (const [n, line] of viewOfLines(head, added, htmlView)) {
-      for (const [, address] of line.matchAll(SCRIPT_SRC)) {
-        out.push({
-          checkId: 'extension-remote-code', path: file.path, line: n,
-          message: `An added line loads a script from ${cut(address!)}, which is not ${secure(address!)}.`,
-        });
+      for (const piece of pieces(line)) {
+        for (const address of scriptSources(piece).filter((src) => /^(?:http|ws):\/\//i.test(src))) {
+          out.push({
+            checkId: 'extension-remote-code', path: file.path, line: n,
+            message: `An added line loads a script from ${cut(address)}, which is not ${secure(address)}.`,
+          });
+        }
       }
     }
   }
-  return { facts: out };
+  // A piece overlaps the one before it, so one address may be seen twice: each fact once.
+  return { facts: [...new Map(out.map((f) => [JSON.stringify([f.line, f.message]), f])).values()] };
 };
 
-const SINK = /\.(innerHTML|outerHTML)\s*(?:\+=|=(?!=))|\.(insertAdjacentHTML)\s*\(/g;
+const SINK = /\.(innerHTML|outerHTML)\s{0,200}(?:\+=|=(?!=))|\.(insertAdjacentHTML)\s{0,200}\(/g;
+
+/**
+ * The hand scanners below look at most MAX_LINE characters past where they start, so a file of many unclosed calls or
+ * strings costs no more than its length times MAX_LINE; what runs past that is not one fixed text.
+ */
+const scanEnd = (text: string, i: number): number => Math.min(text.length, i + MAX_LINE);
 
 /** The end of the string literal opening at `i` (the index of its closing quote), or -1 when it is not one fixed text. */
 function literalEnd(text: string, i: number): number {
   const quote = text[i];
   if (quote !== "'" && quote !== '"' && quote !== '`') return -1;
-  for (let j = i + 1; j < text.length; j++) {
+  for (let j = i + 1, end = scanEnd(text, i); j < end; j++) {
     const c = text[j];
     if (c === '\\') { j++; continue; }
     if (c === quote) return j;
@@ -507,7 +706,10 @@ function literalEnd(text: string, i: number): number {
   return -1;
 }
 
-const skipSpace = (text: string, i: number): number => { while (i < text.length && /\s/.test(text[i]!)) i++; return i; };
+const skipSpace = (text: string, i: number): number => {
+  for (const end = scanEnd(text, i); i < end && /\s/.test(text[i]!);) i++;
+  return i;
+};
 
 /** Whether the value starting at `i` is one fixed text: a string literal with nothing joined to it or called on it. */
 function isFixedText(text: string, i: number): boolean {
@@ -521,7 +723,7 @@ function isFixedText(text: string, i: number): boolean {
 /** The start of the second argument of a call whose arguments start at `i`, or -1 when there is none. */
 function secondArgument(text: string, i: number): number {
   let depth = 0;
-  for (let j = i; j < text.length; j++) {
+  for (let j = i, end = scanEnd(text, i); j < end; j++) {
     const c = text[j]!;
     const end = literalEnd(text, j);
     if (end >= 0) { j = end; continue; }
@@ -549,20 +751,14 @@ const htmlInjection: CodeCheck = async (input) => {
     const headLines = head?.split('\n');
     const whole = head !== null && [...added].every(([n, t]) => headLines?.[n - 1]?.replace(/\r$/, '') === t.replace(/\r$/, ''));
     if (whole) {
-      const code = scriptViews(head).code.join('\n');
-      const starts = [0];
-      for (let i = 0; i < code.length; i++) if (code[i] === '\n') starts.push(i + 1);
-      scan(code, (index) => {
-        let lo = 0;
-        let hi = starts.length - 1;
-        while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid]! <= index) lo = mid; else hi = mid - 1; }
-        return added.has(lo + 1) ? lo + 1 : null;
-      });
+      const { text, lineAt } = scanText(scriptViews(head).code);
+      scan(text, (index) => { const n = lineAt(index); return added.has(n) ? n : null; });
     } else {
-      for (const [n, text] of added) scan(scriptViews(text).code[0]!, () => n);
+      for (const [n, text] of added) scan(scanText([scriptViews(text).code[0]!]).text, () => n);
     }
   }
-  return { facts: out };
+  // A long line's pieces overlap, so one sink may be seen twice: each fact once.
+  return { facts: [...new Map(out.map((f) => [JSON.stringify([f.line, f.message]), f])).values()] };
 };
 
 // ---------------------------------------------------------------------------------------------------------------------

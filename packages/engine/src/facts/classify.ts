@@ -31,6 +31,12 @@ export interface ReadClosely { path: string; packId: string; reason: string }
 export interface FromChecks { readClosely: ReadClosely[]; notTrusted: ReadClosely[] }
 const NOTHING_FROM_CHECKS: FromChecks = { readClosely: [], notTrusted: [] };
 
+/** What a built-in ignore glob leaves `path` out as (`minified file`, `build output`, …), or null when none matches it. */
+export function builtInIgnoreWords(path: string): string | null {
+  const glob = BUILT_IN_IGNORE.find((g) => matches(g, path));
+  return glob === undefined ? null : BUILT_IN_IGNORE_WORDS[glob]!;
+}
+
 /** Whether a pack's ignore globs or the built-in ones leave `path` out of the review. */
 export const isIgnoredPath = (path: string, packs: Pack[]): boolean => firstMatch(path, packs, (p) => p.tiers.ignore, BUILT_IN_IGNORE) !== null;
 

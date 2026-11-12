@@ -2,7 +2,7 @@ import type { Fact, FileDiff } from '@airlock/shared';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { CODE_CHECK_IDS, gatherChecks, runChecks } from '../../src/facts/checks.js';
-import { EXTENSION_CHECKS } from '../../src/facts/extension-checks.js';
+import { EXTENSION_CHECKS, MAX_FOLLOWED } from '../../src/facts/extension-checks.js';
 import { loadPack } from '../../src/packs/load.js';
 import type { Pack } from '../../src/packs/types.js';
 
@@ -470,5 +470,139 @@ describe('matching what the manifest names', () => {
     const fine = await gather(files, { 'manifest.json': manifest({}), 'tests/x.test.js': code });
     expect(fine.notTrusted).toEqual([]);
     expect(only(fine.facts, 'extension-remote-code')).toEqual([]);
+  });
+});
+
+describe('what loaded scripts load, through the whole chain', () => {
+  const gather = (files: FileDiff[], head: Record<string, string>) =>
+    gatherChecks(files, [pack()], async (p) => head[p] ?? null, { sizeOfHead: async () => null });
+  const promoted = (r: { readClosely: { path: string; reason: string }[] }): string[] =>
+    r.readClosely.map((c) => `${c.path} ${c.reason}`).sort();
+
+  it('follows import, importScripts, new Worker, executeScript, registerContentScripts and an offscreen page from the head text, not getURL', async () => {
+    const head = {
+      'manifest.json': manifest({ background: { service_worker: 'bg/sw.js' }, action: { default_popup: 'popup/popup.html' } }),
+      // the service worker, unchanged: its addresses resolve from its own folder, chrome.scripting's from the root
+      'bg/sw.js': [
+        "importScripts('lib/helpers.min.js');",
+        "chrome.scripting.executeScript({ target: { tabId }, files: ['inject/a.js'] });",
+        'chrome.scripting.registerContentScripts([{',
+        "  id: 'x', matches: ['https://a.example.com/*'],",
+        "  js: ['inject/b.js'],",
+        '}]);',
+        "chrome.offscreen.createDocument({ url: 'off/off.html', reasons: ['DOM_PARSER'], justification: 'x' });",
+        "const icon = chrome.runtime.getURL('inject/not-code.js');",
+      ].join('\n'),
+      'bg/lib/helpers.min.js': 'x;',
+      'off/off.html': '<script src="off.js"></script>',
+      'popup/popup.html': '<script type="module" src="popup.js"></script>',
+      'popup/popup.js': "import { a } from './lib/a.js';\nconst later = () => import('./dyn.js');",
+      // a worker started from a page script resolves from the page; what the worker loads resolves from the worker
+      'popup/lib/a.js': "export const a = new Worker('workers/w.js');",
+      'popup/workers/w.js': "importScripts('deep/x.js');",
+    };
+    const changedFiles = [
+      'bg/lib/helpers.min.js', 'inject/a.js', 'inject/b.js', 'off/off.js', 'popup/dyn.js', 'popup/workers/deep/x.js', 'inject/not-code.js',
+    ].map((p) => changed(p, 'y;'));
+    expect(promoted(await gather(changedFiles, head))).toEqual([
+      'bg/lib/helpers.min.js loaded by bg/sw.js',
+      'inject/a.js loaded by bg/sw.js',
+      'inject/b.js loaded by bg/sw.js',
+      'off/off.js loaded by off/off.html',
+      'popup/dyn.js loaded by popup/popup.js',
+      'popup/workers/deep/x.js loaded by popup/workers/w.js',
+    ]);
+  });
+
+  it('follows a chain three deep to a changed file under tests/, whatever its tier', async () => {
+    const head = {
+      'manifest.json': manifest({ background: { service_worker: 'background.js' } }),
+      'background.js': "importScripts('one.js');",
+      'one.js': "importScripts('two.js');",
+      'two.js': "importScripts('tests/three.js');",
+    };
+    const result = await gather([changed('tests/three.js', 'z;'), changed('CHANGELOG.md', 'words')], head);
+    expect(promoted(result)).toEqual(['tests/three.js loaded by two.js']);
+    expect(only(result.facts, 'extension-loaded-files').map((f) => f.message)).toEqual([
+      'tests/three.js sits under a test or fixture folder but the extension loads it.',
+    ]);
+  });
+
+  it('a loop ends: a loads b, b loads a, and each is read once', async () => {
+    const head: Record<string, string> = {
+      'manifest.json': manifest({ background: { service_worker: 'a.js' } }),
+      'a.js': "importScripts('b.js');",
+      'b.js': "importScripts('a.js');",
+    };
+    const reads: string[] = [];
+    const result = await gatherChecks([changed('b.js', 'x;')], [pack()], async (p) => { reads.push(p); return head[p] ?? null; }, { sizeOfHead: async () => null });
+    expect(promoted(result)).toEqual(['b.js loaded by a.js']);
+    expect(reads.filter((p) => p !== 'manifest.json').sort()).toEqual(['a.js', 'b.js']);
+  });
+
+  it(`stops after ${MAX_FOLLOWED} files read, with a fact saying so`, async () => {
+    const head: Record<string, string> = { 'manifest.json': manifest({ background: { service_worker: 's0.js' } }) };
+    for (let i = 0; i < 250; i++) head[`s${i}.js`] = `importScripts('s${i + 1}.js');`;
+    const result = await gather([changed('s150.js', 'x;'), changed('s240.js', 'x;')], head);
+    expect(promoted(result)).toEqual(['s150.js loaded by s149.js']);
+    expect(only(result.facts, 'extension-loaded-files').map((f) => `${f.path} ${f.message}`)).toEqual([
+      `manifest.json More than ${MAX_FOLLOWED} files load one another from manifest.json on, so the rest were not followed: a changed file only they load is not read closely for being loaded.`,
+    ]);
+  });
+
+  it('a changed script a built-in rule ignores and nothing loads is a fact, not promoted; one the extension loads is promoted', async () => {
+    const head = {
+      'manifest.json': manifest({ background: { service_worker: 'background.js' } }),
+      'background.js': "importScripts('vendor/used.min.js');",
+    };
+    const files = ['vendor/lib.min.js', 'dist/bundle.js', 'api.generated.js', 'vendor/used.min.js', 'dist/logo.png', 'package-lock.json']
+      .map((p) => changed(p, 'x;'));
+    const result = await gather(files, head);
+    expect(promoted(result)).toEqual(['vendor/used.min.js loaded by background.js']);
+    expect(only(result.facts, 'extension-loaded-files').map((f) => `${f.path}: ${f.message}`)).toEqual([
+      'api.generated.js: api.generated.js is not reviewed (generated file, a built-in rule), but an extension has no build step, so Chrome may load this file.',
+      'dist/bundle.js: dist/bundle.js is not reviewed (build output, a built-in rule), but an extension has no build step, so Chrome may load this file.',
+      'vendor/lib.min.js: vendor/lib.min.js is not reviewed (minified file, a built-in rule), but an extension has no build step, so Chrome may load this file.',
+    ]);
+    // a pack that does not name extension-loaded-files gives no such fact
+    const none = await gatherChecks(files, [pack(['extension-remote-code'])], async (p) => (head as Record<string, string>)[p] ?? null, { sizeOfHead: async () => null });
+    expect(only(none.facts, 'extension-loaded-files')).toEqual([]);
+  });
+});
+
+describe('hostile input stays fast', () => {
+  const gather = (files: FileDiff[], head: Record<string, string>) =>
+    gatherChecks(files, [pack()], async (p) => head[p] ?? null, { sizeOfHead: async () => null });
+  const timed = async (work: () => Promise<unknown>): Promise<number> => {
+    const start = performance.now();
+    await work();
+    return performance.now() - start;
+  };
+
+  it('a manifest entry of many stars against a long path', async () => {
+    // the review measured 14 stars against 80 letters; this is ten times both
+    const entry = `${'*a'.repeat(140)}*!`;
+    const path = 'a'.repeat(800);
+    const head = { 'manifest.json': manifest({ web_accessible_resources: [{ resources: [entry], matches: ['<all_urls>'] }] }) };
+    expect(await timed(() => gather([changed(path, 'x;')], head))).toBeLessThan(200);
+  });
+
+  it('an import followed by a long run of spaces, or by a long comment, and no quote', async () => {
+    for (const line of [`import${' '.repeat(15_000)}x`, `import/*${'c'.repeat(200_000)}*/x`, `import ${'import '.repeat(30_000)}`]) {
+      const head = { 'manifest.json': manifest({ background: { service_worker: 'background.js' } }), 'background.js': line };
+      expect(await timed(() => gather([changed('background.js', line, 'added')], head))).toBeLessThan(200);
+    }
+  });
+
+  it('a manifest page made of <script repeated with no closing bracket', async () => {
+    const page = '<script'.repeat(30_000);
+    const head = { 'manifest.json': manifest({ action: { default_popup: 'popup.html' } }), 'popup.html': page };
+    expect(await timed(() => gather([changed('popup.html', page, 'added')], head))).toBeLessThan(200);
+  });
+
+  it('matching still works past the cut: a loader at the end of a long minified line is followed', async () => {
+    const line = `${'var a=1;'.repeat(1000)}importScripts('lib/late.js');`;
+    const head = { 'manifest.json': manifest({ background: { service_worker: 'background.js' } }), 'background.js': line };
+    expect((await gather([changed('lib/late.js', 'x;')], head)).readClosely.map((c) => c.path)).toEqual(['lib/late.js']);
   });
 });
