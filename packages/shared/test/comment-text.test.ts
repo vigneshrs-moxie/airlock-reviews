@@ -112,6 +112,7 @@ describe('mentionsIn', () => {
     expect(mentionsIn('@start')).toEqual(['@start']);
     expect(mentionsIn('path/@zed @@wes \u00E9@ann')).toEqual(['@zed', '@wes', '@ann']);
     expect(mentionsIn('see \\`@alice` now')).toEqual(['@alice']);
+    expect(mentionsIn('@a@b@c, then @a.')).toEqual(['@a', '@b', '@c']);
   });
   it('reports a name in a code span, a fence, an HTML comment and a script block', () => {
     expect(mentionsIn('use `@bob` here')).toEqual(['@bob']);
@@ -119,28 +120,57 @@ describe('mentionsIn', () => {
     expect(mentionsIn('<!-- @bob -->')).toEqual(['@bob']);
     expect(mentionsIn('<script>\n@bob\n</script>')).toEqual(['@bob']);
   });
-  it('reports a name after an underscore, which can close emphasis', () => {
+  it('reports a name whatever stands before the @: an underscore, a letter, a digit, an address', () => {
     expect(mentionsIn('_x_@bob')).toEqual(['@bob']);
     expect(mentionsIn('__init__@bob')).toEqual(['@bob']);
-    expect(mentionsIn('mail x_@y')).toEqual(['@y']);
+    expect(mentionsIn('mail x_@bob')).toEqual(['@bob']);
+    expect(mentionsIn('9@bob')).toEqual(['@bob']);
+    expect(mentionsIn('mail a@b.com')).toEqual(['@b.com']);
   });
-  it('reads every written form of @ and of the letters of a name', () => {
+  it('reports a name after a reference that a renderer may leave as text (the third re-review\'s cases)', () => {
+    expect(mentionsIn('\\&#98;@bob')).toEqual(['@bob']);
+    expect(mentionsIn('&#00000098;@bob')).toEqual(['@bob']);
+    expect(mentionsIn('&#x0000062;@bob')).toEqual(['@bob']);
+    expect(mentionsIn('Thanks \\&#97;@alice')).toEqual(['@alice']);
+    expect(mentionsIn('&#98;@bob')).toEqual(['@bob']);
+  });
+  it('reads every written form of @ and of the characters of a name', () => {
     expect(mentionsIn('&#64;a &#x40;b &#X040;c &#0064;d &commat;e &COMMAT;f &#64g')).toEqual(['@a', '@b', '@c', '@d', '@e', '@f', '@g']);
     expect(mentionsIn('@&#98;ob')).toEqual(['@bob']);
     expect(mentionsIn('&#64;&#98;&#111;&#98;')).toEqual(['@bob']);
     expect(mentionsIn('&#x40;bob')).toEqual(['@bob']);
     expect(mentionsIn('&commat;bob')).toEqual(['@bob']);
     expect(mentionsIn('&#x00040;&#X62;ob &#0000064;&#x0062&#111b')).toEqual(['@bob']);
+    expect(mentionsIn('@&fjlig;ord &commat;&fjlig;ell')).toEqual(['@fjord', '@fjell']);
+    expect(mentionsIn('@org&sol;team @a&period;b @c&lowbar;d @e&UnderBar;f @g&sol;')).toEqual(['@org/team', '@a.b', '@c_d', '@e_f', '@g']);
     expect(mentionsIn('&#645;h &#x405;i &#1114112;j &#xD800;k')).toEqual([]);
   });
-  it('reports nothing for an address and for text with no @', () => {
-    expect(mentionsIn('mail a@b.com')).toEqual([]);
+  it('decodes a reference only where a name character would stand', () => {
+    expect(mentionsIn('@&sol;x @&period;y @&#x2F;z')).toEqual([]);
+    expect(mentionsIn('@b&#32;ob @c&amp;d')).toEqual(['@b', '@c']);
+    expect(mentionsIn('@a&#64;b')).toEqual(['@a', '@b']);
+  });
+  it('reports nothing for text with no @ directly before a letter or digit', () => {
     expect(mentionsIn('nothing to see here')).toEqual([]);
-    expect(mentionsIn('a space: @ alice')).toEqual([]);
+    expect(mentionsIn('a space: @ alice, @-x, @_y, @')).toEqual([]);
   });
   it('is not a judge of commentBody: names in its prose are broken, but a name inside a code part is over-reported', () => {
     expect(mentionsIn(commentBody(finding({ happens: 'Ask @alice', suggestedChange: '' })))).toEqual([]);
     expect(mentionsIn(commentBody(finding({ suggestedChange: 'x\n@alice' })))).toEqual(['@alice']);
+  });
+  it('runs in time linear in the text: 60,000 characters of the worst cases each take well under 500 ms', () => {
+    const n = REVIEW_BODY_MAX;
+    const many = Array.from({ length: n / 8 }, (_, i) => `@n${i.toString(36).padStart(5, '0')}`).join(' ');
+    const cases = [
+      `@a${'.'.repeat(n - 3)}b`, `@a${'.'.repeat(n - 2)}`, `@a${'/-_.'.repeat(n / 4)}`, `&#${'0'.repeat(n - 2)}`,
+      `@${'&#0'.repeat(n / 3)}`, '@&#'.repeat(n / 3), '&#64;'.repeat(n / 5), `@${'&#98;'.repeat(n / 5)}`, many,
+    ];
+    for (const text of cases) {
+      const started = performance.now();
+      mentionsIn(text);
+      expect(performance.now() - started, text.slice(0, 20)).toBeLessThan(500);
+    }
+    expect(mentionsIn(many)).toHaveLength(n / 8);
   });
 });
 
@@ -150,23 +180,32 @@ describe('postMentions', () => {
     const reviewBody = summaryBody([{ path: 'a.ts', line: 1, body: quiet }], defaultSummary(2));
     expect(postMentions(
       [{ body: quiet, isDefault: true, inSummary: false }, { body: quiet, isDefault: true, inSummary: true }],
-      { text: defaultSummary(2), isDefault: true }, reviewBody,
+      { isDefault: true }, reviewBody,
     )).toEqual({ items: [[], []], reviewBody: [] });
   });
   it('lists every name in the review body once the person typed the summary, a default body\'s code part too', () => {
-    const summary = 'Use this:\n```';
-    const reviewBody = summaryBody([{ path: 'a.ts', line: 1, body: quiet }], summary);
-    expect(postMentions([{ body: quiet, isDefault: true, inSummary: true }], { text: summary, isDefault: false }, reviewBody))
-      .toEqual({ items: [[]], reviewBody: ['@bob'] });
+    for (const summary of ['Use this:\n```', '~~~', '<script>', 'Use this:\n~~~', '<style>']) {
+      const reviewBody = summaryBody([{ path: 'a.ts', line: 1, body: quiet }], summary);
+      expect(postMentions([{ body: quiet, isDefault: true, inSummary: true }], { isDefault: false }, reviewBody), summary)
+        .toEqual({ items: [[]], reviewBody: ['@bob'] });
+    }
+  });
+  it('lists the names in the person\'s summary when every comment is inline and default', () => {
+    const summary = 'Thanks @dave, see `@erin`.';
+    const reviewBody = summaryBody([], summary);
+    expect(postMentions([{ body: quiet, isDefault: true, inSummary: false }], { isDefault: false }, reviewBody))
+      .toEqual({ items: [[]], reviewBody: mentionsIn(summary) });
+    expect(mentionsIn(summary)).toEqual(['@dave', '@erin']);
   });
   it('lists an edited comment\'s own names, and the review body\'s too when that comment is in the summary', () => {
     const edited = 'I agree, ask @carol.';
     const reviewBody = summaryBody([], defaultSummary(1));
-    expect(postMentions([{ body: edited, isDefault: false, inSummary: false }], { text: defaultSummary(1), isDefault: true }, reviewBody))
+    expect(postMentions([{ body: edited, isDefault: false, inSummary: false }], { isDefault: true }, reviewBody))
       .toEqual({ items: [['@carol']], reviewBody: [] });
-    const withIt = summaryBody([{ path: 'a.ts', line: 1, body: edited }], defaultSummary(1));
-    expect(postMentions([{ body: edited, isDefault: false, inSummary: true }], { text: defaultSummary(1), isDefault: true }, withIt))
-      .toEqual({ items: [['@carol']], reviewBody: ['@carol'] });
+    const withIt = summaryBody([{ path: 'a.ts', line: 1, body: edited }, { path: 'b.ts', line: null, body: quiet }], defaultSummary(2));
+    expect(postMentions(
+      [{ body: edited, isDefault: false, inSummary: true }, { body: quiet, isDefault: true, inSummary: true }], { isDefault: true }, withIt,
+    )).toEqual({ items: [['@carol'], []], reviewBody: ['@carol', '@bob'] });
   });
 });
 
