@@ -72,11 +72,11 @@ const NOT_IN_FILE = 'not found in the file';
  * code that is not in the file. A connected place is quoted the same way when found; when its quote or file is not
  * found it keeps its path, role and quote, gets no line, and its role says it was not found.
  */
-export async function anchorCandidates(
-  cands: Candidate[],
+export async function anchorCandidates<C extends Candidate>(
+  cands: C[],
   files: FileDiff[],
   readHead: (p: string) => Promise<string | null>,
-): Promise<{ anchored: (Candidate & { anchor: Anchor })[]; dropped: Dropped[] }> {
+): Promise<{ anchored: (C & { anchor: Anchor })[]; dropped: Dropped[] }> {
   const byPath = new Map(files.map((f) => [f.path, f]));
   const cache = new Map<string, Promise<string | null>>();
   const read = (path: string): Promise<string | null> => {
@@ -88,7 +88,7 @@ export async function anchorCandidates(
     return hit;
   };
 
-  const anchored: (Candidate & { anchor: Anchor })[] = [];
+  const anchored: (C & { anchor: Anchor })[] = [];
   const dropped: Dropped[] = [];
   const drop = (c: Candidate, reason: string): void => { dropped.push({ candidate: c, stage: 'anchor', reason, refutation: null }); };
   for (const c of cands) {

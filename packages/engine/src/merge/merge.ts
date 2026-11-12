@@ -1,4 +1,4 @@
-import type { Anchor, Candidate, Dropped, Place, Source, StageError, StageErrorKind } from '@airlock/shared';
+import type { Anchor, Candidate, Dropped, Finding, Place, Source, StageError, StageErrorKind } from '@airlock/shared';
 import { z } from 'zod';
 import { asMaterial, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner, AgentUsage } from '../agent/runner.js';
@@ -14,9 +14,10 @@ const NEAR_LINES = 2;
 
 /**
  * An anchored candidate. After a merge the keeper also lists the lenses and rules whose duplicates it absorbed, and their
- * fingerprints, so a later dismissal or re-review can recognise it under any of them.
+ * fingerprints, so a later dismissal or re-review can recognise it under any of them. On a re-review it carries its
+ * status: `new`, or `still-open` or `moved` for an earlier finding carried over.
  */
-export type AnchoredCandidate = Candidate & { anchor: Anchor; alsoRaisedBy?: Source[]; aliases?: string[] };
+export type AnchoredCandidate = Candidate & { anchor: Anchor; alsoRaisedBy?: Source[]; aliases?: string[]; status?: Finding['status'] };
 
 export interface Cluster { id: string; members: AnchoredCandidate[] }
 
@@ -210,8 +211,10 @@ function uniqueBy<T>(values: T[], key: (v: T) => string, except: Set<string> = n
 }
 
 /** The candidate without what the pipeline added to it, as a Dropped entry holds it. */
-export function plainCandidate(c: Candidate & Partial<{ anchor: Anchor; checked: string; alsoRaisedBy: Source[]; aliases: string[] }>): Candidate {
-  const { anchor: _a, checked: _c, alsoRaisedBy: _s, aliases: _p, ...candidate } = c;
+export function plainCandidate(
+  c: Candidate & Partial<{ anchor: Anchor; checked: string; alsoRaisedBy: Source[]; aliases: string[]; status: Finding['status'] }>,
+): Candidate {
+  const { anchor: _a, checked: _c, alsoRaisedBy: _s, aliases: _p, status: _t, ...candidate } = c;
   return candidate;
 }
 
