@@ -12,6 +12,8 @@ export const LEARNED_UNREACHABLE = 'Airlock could not reach its service to read 
 export const NO_REMOVE_OFFLINE = 'Removing a line needs the Airlock service, which is not answering.';
 export const NO_REMOVE_UNPAIRED = 'Removing a line needs this panel to be paired with the Airlock service.';
 export const REMOVED = 'Removed.';
+/** A removal whose answer was lost: the line may be gone or not, so the list is read again. */
+export const REMOVE_UNKNOWN = 'Airlock got no answer from its service, so it cannot tell whether the line was removed. The list below is read again.';
 /** The team's own pack: its lines are not the person's to edit, whether or not it holds any. */
 export const KIT_PACK = 'raj-standard';
 /** A pack's count against the cap is shown only for a kind holding more lines than this. */
@@ -36,8 +38,10 @@ export interface Refusal { pack: string; kind: LearnedKind; key: string; message
 
 /**
  * The learned lines of the packs chosen for `repo`, read when the screen opens and again after a removal, and the
- * removal itself. Only the latest read counts. A different repository drops the old lines at once. The result of a
- * removal (`result`) and a refusal live here, not in the lists, so they outlast a re-read that fails.
+ * removal itself. Only the latest read counts. What is shown belongs to one repository: a different repository drops the
+ * old lines, note and refusal in the same render, and a removal answered after the repository changed is dropped and
+ * not followed by a read. The result of a removal (`result`) and a refusal live here, not in the lists, so they outlast a
+ * re-read that fails. A removal whose answer was lost says so and reads the lines again.
  */
 export function useLearned(
   repo: string | null,
@@ -47,35 +51,36 @@ export function useLearned(
   view: LearnedView;
   reload: () => Promise<void>;
   removing: boolean;
-  /** The service's note on the last removal that went through (or `Removed.`), and the pack it was in. */
+  /** The service's note on the last removal that went through (or `Removed.`), or that its outcome is not known, and the pack it was in. */
   result: { note: string; pack: string; at: number } | null;
   refusal: (Refusal & { at: number }) | null;
   remove: (line: LearnedLine) => void;
 } {
-  const [view, setView] = useState<LearnedView>({ kind: 'loading' });
+  const [shown, setShown] = useState<{ repo: string | null; view: LearnedView }>({ repo, view: { kind: 'loading' } });
   const [removing, setRemoving] = useState(false);
-  const [result, setResult] = useState<{ note: string; pack: string; at: number } | null>(null);
-  const [refusal, setRefusal] = useState<(Refusal & { at: number }) | null>(null);
+  const [result, setResult] = useState<{ repo: string; note: string; pack: string; at: number } | null>(null);
+  const [refusal, setRefusal] = useState<(Refusal & { repo: string; at: number }) | null>(null);
   const latest = useRef(0);
   const inFlight = useRef(false);
   const alive = useRef(false);
   const counter = useRef(0);
+  /** The repository on screen now, for an answer that arrives after it changed. */
+  const repoNow = useRef(repo);
+  useEffect(() => { repoNow.current = repo; }, [repo]);
   // Set false in the body: under StrictMode the cleanup runs once and the effect runs again.
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const read = useCallback(async (keep: boolean): Promise<void> => {
     if (repo === null) return;
     const mine = ++latest.current;
-    setView((was) => (keep && was.kind === 'ok' ? was : { kind: 'loading' }));
+    setShown((was) => (keep && was.repo === repo && was.view.kind === 'ok' ? was : { repo, view: { kind: 'loading' } }));
     try {
       const reply = await fetchLearned(repo);
-      if (latest.current === mine) setView({ kind: 'ok', reply });
+      if (latest.current === mine) setShown({ repo, view: { kind: 'ok', reply } });
     } catch (error) {
-      if (latest.current === mine) setView({ kind: 'failed', message: failureWords(error) });
+      if (latest.current === mine) setShown({ repo, view: { kind: 'failed', message: failureWords(error) } });
     }
   }, [repo, fetchLearned]);
   useEffect(() => {
-    setResult(null);
-    setRefusal(null);
     void read(false);
     return () => { latest.current++; };
   }, [read]);
@@ -87,23 +92,40 @@ export function useLearned(
     setResult(null);
     setRefusal(null);
     const stamp = ++counter.current;
+    const settle = (): void => {
+      inFlight.current = false;
+      if (alive.current) setRemoving(false);
+    };
+    // The answer of a removal asked on another repository changes nothing here, and no read follows it.
+    const moved = (): boolean => !alive.current || repoNow.current !== repo;
     removeLearned({ repo, pack: line.pack, kind: line.kind, key: line.key }).then(
       async (done) => {
-        const note = done.note ?? REMOVED;
-        if (alive.current) setResult({ note, pack: line.pack, at: stamp });
+        if (moved()) { settle(); return; }
+        setResult({ repo, note: done.note ?? REMOVED, pack: line.pack, at: stamp });
         await read(true);
-        inFlight.current = false;
-        if (alive.current) setRemoving(false);
+        settle();
       },
-      (error: unknown) => {
-        inFlight.current = false;
-        if (!alive.current) return;
-        setRemoving(false);
-        setRefusal({ pack: line.pack, kind: line.kind, key: line.key, message: failureWords(error), at: stamp });
+      async (error: unknown) => {
+        if (moved()) { settle(); return; }
+        if (error instanceof ServiceError && error.kind === 'offline') {
+          // The removal may have gone through: say the outcome is not known, and show what is there now.
+          setResult({ repo, note: REMOVE_UNKNOWN, pack: line.pack, at: stamp });
+          await read(true);
+          settle();
+          return;
+        }
+        settle();
+        setRefusal({ repo, pack: line.pack, kind: line.kind, key: line.key, message: failureWords(error), at: stamp });
       },
     );
   };
-  return { view, reload, removing, result, refusal, remove };
+  const view: LearnedView = shown.repo === repo ? shown.view : { kind: 'loading' };
+  return {
+    view, reload, removing,
+    result: result !== null && result.repo === repo ? result : null,
+    refusal: refusal !== null && refusal.repo === repo ? refusal : null,
+    remove,
+  };
 }
 
 /** Under the pack list's heading: that the lines are loading, or why they could not be read, with a way to read again. */

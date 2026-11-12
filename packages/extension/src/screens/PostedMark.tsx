@@ -59,6 +59,58 @@ export function PostedMark({ record, link = true, id }: { record: PostRecord; li
 }
 
 /**
+ * `It was not posted`, which asks once more before it forgets a record whose outcome is not known: the question in
+ * place, with `It was not posted` and `Keep`. Focus follows the question: to Keep when it is asked, back to It was not
+ * posted when it is put away. `blocked`: why it cannot be pressed now. The same in the post sheet as on a finding.
+ */
+export function ForgetAsk({ blocked, onForget, small = false }: {
+  blocked: string | null;
+  /** Called on the second press, once the person said the review was not posted. */
+  onForget: () => void;
+  small?: boolean;
+}) {
+  const [asking, setAsking] = useState(false);
+  const whyId = useId();
+  const askButton = useRef<HTMLButtonElement>(null);
+  const keepButton = useRef<HTMLButtonElement>(null);
+  const moved = useRef(false);
+  useEffect(() => {
+    if (!moved.current) return;
+    moved.current = false;
+    (asking ? keepButton : askButton).current?.focus();
+  }, [asking]);
+  const ask = (open: boolean): void => {
+    moved.current = true;
+    setAsking(open);
+  };
+  const described = blocked === null ? {} : { 'aria-describedby': whyId };
+  const className = small ? 'btn small' : 'btn';
+  const forget = (): void => {
+    if (blocked !== null) return;
+    setAsking(false);
+    onForget();
+  };
+  return (
+    <>
+      {asking ? (
+        <>
+          <p>{FORGET_ASK}</p>
+          <div className="actions">
+            <button type="button" className={className} disabled={blocked !== null} {...described} onClick={forget}>It was not posted</button>
+            <button type="button" className={className} ref={keepButton} onClick={() => ask(false)}>Keep</button>
+          </div>
+        </>
+      ) : (
+        <button type="button" className={className} ref={askButton} disabled={blocked !== null} {...described} onClick={() => ask(true)}>
+          It was not posted
+        </button>
+      )}
+      {blocked !== null && <Reason id={whyId} text={blocked} />}
+    </>
+  );
+}
+
+/**
  * A record whose outcome is not known, where its finding is shown: the words, the pull request to look at, and `It was
  * not posted`, which asks once more before it forgets the record. `blocked`: why it cannot be forgotten now. A refusal
  * of this mark's own request is said here.
@@ -73,47 +125,13 @@ export function UnknownMark({ record, address, blocked, onForget, reply, id }: {
   /** The id of the words, for the Post button they explain. */
   id?: string;
 }) {
-  const [asking, setAsking] = useState(false);
   const [ticket, setTicket] = useState<number | null>(null);
-  const whyId = useId();
-  const askButton = useRef<HTMLButtonElement>(null);
-  const keepButton = useRef<HTMLButtonElement>(null);
-  // Focus follows the question: to Keep when it is asked, back to It was not posted when it is put away.
-  const moved = useRef(false);
-  useEffect(() => {
-    if (!moved.current) return;
-    moved.current = false;
-    (asking ? keepButton : askButton).current?.focus();
-  }, [asking]);
-  const ask = (open: boolean): void => {
-    moved.current = true;
-    setAsking(open);
-  };
   const refusal = reply !== undefined && reply.ticket === ticket && reply.kind === 'refused' ? reply.message : null;
-  const described = blocked === null ? {} : { 'aria-describedby': whyId };
-  const forget = (): void => {
-    if (blocked !== null) return;
-    setAsking(false);
-    setTicket(onForget(record));
-  };
   return (
     <div className="mark block">
       <span {...(id === undefined ? {} : { id })}>{UNKNOWN_MARK}</span>
       <p><a href={address} target="_blank" rel="noopener noreferrer">Open the pull request</a></p>
-      {asking ? (
-        <>
-          <p>{FORGET_ASK}</p>
-          <div className="actions">
-            <button type="button" className="btn small" disabled={blocked !== null} {...described} onClick={forget}>It was not posted</button>
-            <button type="button" className="btn small" ref={keepButton} onClick={() => ask(false)}>Keep</button>
-          </div>
-        </>
-      ) : (
-        <button type="button" className="btn small" ref={askButton} disabled={blocked !== null} {...described} onClick={() => ask(true)}>
-          It was not posted
-        </button>
-      )}
-      {blocked !== null && <Reason id={whyId} text={blocked} />}
+      <ForgetAsk blocked={blocked} small onForget={() => setTicket(onForget(record))} />
       {refusal !== null && <p role="alert" className="notice">{refusal}</p>}
     </div>
   );

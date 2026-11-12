@@ -270,6 +270,50 @@ describe('learned lines under Packs', () => {
     expect(screen.getByText('Airlock could not reach its service to read what it has learned.')).toBeTruthy();
   });
 
+  it('a removal whose answer is lost says it cannot tell, and reads the lines again', async () => {
+    const { removeLearned, fetchLearned } = await show(reply([line(1), line(2)]));
+    removeLearned.mockRejectedValue(new ServiceError('offline', 'The Airlock service is not answering.'));
+    // The line had gone: the list read again no longer holds it.
+    fetchLearned.mockResolvedValue(reply([line(2)]));
+    const generic = pack('Generic');
+    await click(generic.getAllByRole('button', { name: 'Remove' })[0]!);
+    await click(generic.getAllByRole('button', { name: 'Remove' })[0]!);
+    const said = 'Airlock got no answer from its service, so it cannot tell whether the line was removed. The list below is read again.';
+    expect(screen.getByText(said, { selector: '.packs-screen .notice' })).toBeTruthy();
+    expect(screen.queryByText('Airlock could not reach its service to read what it has learned.')).toBeNull();
+    expect(fetchLearned).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('Learned line 1.')).toBeNull();
+    expect(screen.getByText('Learned line 2.')).toBeTruthy();
+    expect(document.querySelector('[aria-live]')?.textContent).toBe(said);
+  });
+
+  it('a removal answered after the repository changed fills in nothing of the old repository and reads nothing again', async () => {
+    let answer: (r: RemoveLearnedReply) => void = () => undefined;
+    const view = await show(reply([line(1)]));
+    view.removeLearned.mockReturnValue(new Promise<RemoveLearnedReply>((r) => { answer = r; }));
+    const generic = pack('Generic');
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    await click(generic.getByRole('button', { name: 'Remove' }));
+    // The tab moves to another repository, whose lines load.
+    view.fetchLearned.mockResolvedValue(reply([line(5, { repo: 'acme/other', text: 'Of the other repository.' })]));
+    await act(async () => {
+      view.rerender(
+        <PanelScreen state={{ kind: 'ready', pr: prSummary({ repo: 'acme/other' }) }} dispatch={() => undefined} fetchStatus={() => Promise.reject(new Error('x'))}
+          fetchLearned={view.fetchLearned} removeLearned={view.removeLearned} />,
+      );
+    });
+    expect(screen.getByText('Of the other repository.')).toBeTruthy();
+    const reads = view.fetchLearned.mock.calls.length;
+    // The first repository's answer arrives: no read of it follows, and nothing is said here.
+    view.fetchLearned.mockResolvedValue(reply([line(1)]));
+    await act(async () => { answer({ removed: true, note: null }); });
+    expect(view.fetchLearned.mock.calls.length).toBe(reads);
+    expect(view.fetchLearned).toHaveBeenLastCalledWith('acme/other');
+    expect(screen.getByText('Of the other repository.')).toBeTruthy();
+    expect(screen.queryByText('Learned line 1.')).toBeNull();
+    expect(screen.queryByText('Removed.')).toBeNull();
+  });
+
   it('a different pull request drops the old lines at once and loads the new ones', async () => {
     const view = await show(reply([line(1)]));
     let release: (r: LearnedReply) => void = () => undefined;

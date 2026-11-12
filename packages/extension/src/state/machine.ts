@@ -4,6 +4,9 @@ import { realTimers, type Timers } from '../client/timers';
 import {
   isFor, POST_NOT_LEARNED, POST_UNKNOWN, reduce, withStage, type Action, type PanelState, type PostReply, type StageLine, type UserAction,
 } from './reduce';
+
+/** A post the proof stopped before the Pair screen: nothing was sent. Said in the post sheet once the review is back. */
+export const POST_NOT_SENT_UNPROVEN = 'Nothing was sent: Airlock could not confirm it was talking to its own service.';
 import { recordHolds } from './selection';
 import type { SettingsStore } from './settings';
 import type { TabWatcher } from './tab';
@@ -99,11 +102,18 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
   let offlineRetry: { handle: unknown } | null = null;
   /** The latest check of the service: a check that is not the latest stops, so there is one at a time. */
   let watching = 0;
+  /** An answer for the post sheet that the Pair screen came before: given with the pull request's review when it is back. */
+  let carried: { ref: PrRef; reply: PostReply } | null = null;
+  /** The post records and dismissals last on screen, and whose they are, for a finished review whose own read fails. */
+  let records: { repo: string; number: number; posts: PostRecord[]; dismissals: LatestReply['dismissals'] } | null = null;
   const sleeping = new Set<unknown>();
 
   const emit = (next: PanelState): void => {
     if (stopped || next === state) return;
     state = next;
+    if (next.kind === 'review') {
+      records = { repo: next.pr.repo, number: next.pr.number, posts: next.latest.posts, dismissals: next.latest.dismissals };
+    }
     deps.onState(next);
   };
   const apply = (action: Action): void => emit(reduce(state, action));
@@ -243,7 +253,9 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
       if (!current(g)) return;
       // The run that was showing is gone: unless this stored review is its result, say that it stopped.
       const lost = cutOff !== null && !finishedSince(latest, cutOff.startedAt);
-      apply(lost ? { type: 'loaded', pr, latest, notice: RUN_STOPPED } : { type: 'loaded', pr, latest });
+      const owed = latest !== null && carried !== null && sameRef(carried.ref, target) ? carried.reply : undefined;
+      if (owed !== undefined) carried = null;
+      apply({ type: 'loaded', pr, latest, ...(lost ? { notice: RUN_STOPPED } : {}), ...(owed === undefined ? {} : { post: owed }) });
       watch(g);
     } catch (error) {
       fail(g, error, pr);
@@ -318,7 +330,10 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     }
   };
 
-  /** Reads the stored review so its dismissals come with it; the event's own document when that fails. */
+  /**
+   * Reads the stored review so its dismissals and post records come with it. When that fails, the event's own document,
+   * with the records last on screen for this pull request (never an empty list in their place).
+   */
   const finish = async (g: number, pr: PrSummary, document: ReviewDocument): Promise<void> => {
     let latest: LatestReply | null = null;
     try {
@@ -328,7 +343,8 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     }
     if (!current(g)) return;
     const same = latest !== null && latest.document.id === document.id;
-    apply({ type: 'finished', latest: same && latest !== null ? latest : { document, dismissals: [], posts: [] } });
+    const kept = records !== null && isFor(records, pr) ? records : { posts: [], dismissals: [] };
+    apply({ type: 'finished', latest: same && latest !== null ? latest : { document, dismissals: kept.dismissals, posts: kept.posts } });
     watch(g);
   };
 
@@ -396,10 +412,18 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
   const answer = (g: number, reply: PostReply): void => {
     if (current(g)) apply({ type: 'post-reply', reply });
   };
-  /** A refusal in the service's words is the post sheet's to show; anything else goes on to `act`. */
-  const refusedOr = (g: number, ticket: number, error: unknown): void => {
+  /** A refusal in the service's words, as the post sheet's answer; anything else is thrown on to `act`. */
+  const refusal = (ticket: number, error: unknown): PostReply => {
     if (!(error instanceof ServiceError && error.kind === 'problem')) throw error;
-    answer(g, { ticket, kind: 'refused', message: error.message });
+    return { ticket, kind: 'refused', message: error.message };
+  };
+  /**
+   * The post records as the service now has them, shown before the answer that follows, so the action stays in flight
+   * (and the buttons say to wait) until they are on screen.
+   */
+  const reread = async (g: number, pr: PrSummary): Promise<void> => {
+    const posts = await readPosts(pr);
+    if (posts !== null && current(g)) apply({ type: 'posts', posts });
   };
 
   /**
@@ -415,10 +439,24 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
   ): Promise<void> => {
     const { ticket } = action;
     const sent = await client.post({ previewId: action.previewId });
+    if (sent.outcome === 'unsent') {
+      // The proof came first and failed, so nothing was sent: said as such, and the post can be tried again. What answers
+      // could not prove it holds the token: the Pair screen, as everywhere, and the sheet hears it when the review is back.
+      if (sent.why !== 'unproven' && sent.why !== 'unpaired') { answer(g, { ticket, kind: 'unsent', message: sent.message }); return; }
+      carried = { ref: { repo: pr.repo, number: pr.number }, reply: { ticket, kind: 'unsent', message: POST_NOT_SENT_UNPROVEN } };
+      throw new ServiceError(sent.why, sent.message);
+    }
     // A record for another pull request is not this post's answer: its address is not shown here.
     if (sent.outcome === 'posted' && isFor(sent.record, pr)) { answer(g, { ticket, kind: 'posted', record: sent.record }); return; }
-    if (sent.outcome === 'refused') { answer(g, { ticket, kind: 'refused', message: sent.message }); return; }
+    if (sent.outcome === 'refused') {
+      // A refusal may leave a record the service could not clear: the records are read again, so it can be forgotten.
+      await reread(g, pr);
+      answer(g, { ticket, kind: 'refused', message: sent.message });
+      return;
+    }
     const said = sent.outcome === 'unclear' ? sent.message ?? POST_UNKNOWN : POST_UNKNOWN;
+    // A server error that said something other than its 504: its sentence is kept for the end of the wait.
+    const problem = sent.outcome === 'unclear' && sent.status !== undefined && sent.status !== 504 ? sent.message : undefined;
     const mine = (r: PostRecord): boolean => isFor(r, pr) && !known.has(r.id) && findings.some((f) => recordHolds(r, f));
     for (let read = 0; ; read += 1) {
       if (read > 0) {
@@ -434,7 +472,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
         return;
       }
       if (read >= POST_RECHECKS) {
-        answer(g, { ticket, kind: 'unclear', message: POST_NOT_LEARNED });
+        answer(g, { ticket, kind: 'unclear', message: problem === undefined ? POST_NOT_LEARNED : `${problem} ${POST_NOT_LEARNED}` });
         return;
       }
       if (read === 0) answer(g, { ticket, kind: 'waiting' });
@@ -502,12 +540,17 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
       // already sent is not aborted when the tab moves; only its answer is dropped.
       case 'preview-post':
         if (state.kind === 'review' && action.body.repo === state.pr.repo && action.body.number === state.pr.number) {
-          act(state.pr, async (g) => {
+          const shown = state.pr;
+          act(shown, async (g) => {
+            let reply: PostReply;
             try {
-              answer(g, { ticket: action.ticket, kind: 'preview', preview: await client.previewPost(action.body) });
+              reply = { ticket: action.ticket, kind: 'preview', preview: await client.previewPost(action.body) };
             } catch (error) {
-              refusedOr(g, action.ticket, error);
+              reply = refusal(action.ticket, error);
+              // A refused preview may name a record not on screen (posted from another panel, or not cleared): read them.
+              await reread(g, shown);
             }
+            answer(g, reply);
           });
         }
         return;
@@ -526,15 +569,20 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
           const shown = state.pr;
           const { repo, number } = shown;
           act(shown, async (g) => {
+            let reply: PostReply;
             try {
-              await client.forgetPost({ repo, number, id: action.id });
-              answer(g, { ticket: action.ticket, kind: 'forgotten', id: action.id });
+              const done = await client.forgetPost({ repo, number, id: action.id });
+              // GitHub has the review: nothing was forgotten, and the record is now posted.
+              reply = done.found !== undefined
+                ? { ticket: action.ticket, kind: 'found', message: done.found.message, record: done.found.record }
+                : { ticket: action.ticket, kind: 'forgotten', id: action.id };
             } catch (error) {
-              refusedOr(g, action.ticket, error);
+              reply = refusal(action.ticket, error);
             }
-            // Then, forgotten or refused, the records as the service now has them.
-            const posts = await readPosts(shown);
-            if (posts !== null && current(g)) apply({ type: 'posts', posts });
+            // Then, forgotten, found or refused, the records as the service now has them, before the answer: the forget is in
+            // flight until they are on screen, so a press meanwhile waits rather than being dropped.
+            await reread(g, shown);
+            answer(g, reply);
           });
         }
         return;
