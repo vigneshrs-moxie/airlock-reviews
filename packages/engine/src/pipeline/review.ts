@@ -393,6 +393,7 @@ async function reviewInWorkspace(
     // its path says, and one it says not to trust is skimmed at least.
     const checked = await rec.attempt(() => gatherChecks(files, packs, readHead, {
       readBase: (path) => safeRead(ws.baseDir, path), sizeOfHead: (path) => safeSize(ws.headDir, path),
+      presentAtHead: (path) => presentAt(ws.headDir, path),
     }), { facts: [] as Fact[], readClosely: [] as ReadClosely[], notTrusted: [] as ReadClosely[] });
     const tiers = await rec.attempt(() => classifyFiles(files, packs, checked), [] as FileFact[]);
     // A push of only ignored files leaves nothing of the pull request unreviewed that the earlier review did not see.

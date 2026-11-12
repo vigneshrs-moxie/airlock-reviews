@@ -2,7 +2,8 @@ import type { Fact, FileDiff } from '@airlock/shared';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { CODE_CHECK_IDS, gatherChecks, runChecks } from '../../src/facts/checks.js';
-import { EXTENSION_CHECKS, MAX_FOLLOWED } from '../../src/facts/extension-checks.js';
+import { classifyFiles } from '../../src/facts/classify.js';
+import { EXTENSION_CHECKS, FOLLOW_BUDGET } from '../../src/facts/extension-checks.js';
 import { loadPack } from '../../src/packs/load.js';
 import type { Pack } from '../../src/packs/types.js';
 
@@ -33,14 +34,30 @@ function changed(path: string, head: string, status: FileDiff['status'] = 'modif
   };
 }
 
+/** A changed file's text at the head, from its diff, as the head worktree would hold it (null when it is not changed or deleted). */
+function textOf(files: FileDiff[], path: string): string | null {
+  const f = files.find((x) => x.path === path && x.status !== 'deleted');
+  return f ? f.hunks.flatMap((h) => h.lines.filter((l) => l.newNo !== null).map((l) => l.text)).join('\n') : null;
+}
+
 interface Tree { head?: Record<string, string>; base?: Record<string, string>; sizes?: Record<string, number> }
 async function run(files: FileDiff[], tree: Tree = {}, codeChecks: string[] = ALL): Promise<Fact[]> {
-  return runChecks(files, [pack(codeChecks)], async (p) => tree.head?.[p] ?? null, {
+  return runChecks(files, [pack(codeChecks)], async (p) => tree.head?.[p] ?? textOf(files, p), {
     readBase: async (p) => tree.base?.[p] ?? null,
     sizeOfHead: async (p) => tree.sizes?.[p] ?? (tree.head?.[p] !== undefined ? Buffer.byteLength(tree.head[p]!) : null),
   });
 }
 const only = (facts: Fact[], checkId: string): Fact[] => facts.filter((f) => f.checkId === checkId);
+/**
+ * The processor time `work` takes in this test process, in milliseconds. Each test file runs in its own process, so this
+ * is the checks' own work, not the wall clock, which other test files running at the same time on a busy machine stretch.
+ */
+async function cpuTimed<T>(work: () => Promise<T>): Promise<{ ms: number; value: T }> {
+  const start = process.cpuUsage();
+  const value = await work();
+  const used = process.cpuUsage(start);
+  return { ms: (used.user + used.system) / 1000, value };
+}
 const manifest = (o: Record<string, unknown>): string => JSON.stringify({ manifest_version: 3, name: 'Tool', ...o }, null, 2);
 
 describe('the extension code checks', () => {
@@ -290,8 +307,8 @@ describe('the Orbit checks with the code-check hook', () => {
 });
 
 describe('files the extension loads', () => {
-  const read = (tree: Tree) => async (p: string): Promise<string | null> => tree.head?.[p] ?? null;
-  const gather = (files: FileDiff[], tree: Tree, codeChecks: string[] = ALL) => gatherChecks(files, [pack(codeChecks)], read(tree), {
+  const read = (tree: Tree, files: FileDiff[]) => async (p: string): Promise<string | null> => tree.head?.[p] ?? textOf(files, p);
+  const gather = (files: FileDiff[], tree: Tree, codeChecks: string[] = ALL) => gatherChecks(files, [pack(codeChecks)], read(tree, files), {
     readBase: async (p) => tree.base?.[p] ?? null, sizeOfHead: async () => null,
   });
 
@@ -417,7 +434,7 @@ describe('manifest edge cases', () => {
 
 describe('matching what the manifest names', () => {
   const gather = (files: FileDiff[], head: Record<string, string>) =>
-    gatherChecks(files, [pack()], async (p) => head[p] ?? null, { sizeOfHead: async () => null });
+    gatherChecks(files, [pack()], async (p) => head[p] ?? textOf(files, p), { sizeOfHead: async () => null });
 
   it('a star crosses folders, letter case is ignored, a leading ./ or / is dropped, and an entry with .. promotes nothing and is said', async () => {
     const head = manifest({
@@ -475,7 +492,7 @@ describe('matching what the manifest names', () => {
 
 describe('what loaded scripts load, through the whole chain', () => {
   const gather = (files: FileDiff[], head: Record<string, string>) =>
-    gatherChecks(files, [pack()], async (p) => head[p] ?? null, { sizeOfHead: async () => null });
+    gatherChecks(files, [pack()], async (p) => head[p] ?? textOf(files, p), { sizeOfHead: async () => null });
   const promoted = (r: { readClosely: { path: string; reason: string }[] }): string[] =>
     r.readClosely.map((c) => `${c.path} ${c.reason}`).sort();
 
@@ -540,44 +557,60 @@ describe('what loaded scripts load, through the whole chain', () => {
     expect(reads.filter((p) => p !== 'manifest.json').sort()).toEqual(['a.js', 'b.js']);
   });
 
-  it(`stops after ${MAX_FOLLOWED} files read, with a fact saying so`, async () => {
+  it(`stops after ${FOLLOW_BUDGET.files} files read, with a fact saying so, and then trusts no code file`, async () => {
     const head: Record<string, string> = { 'manifest.json': manifest({ background: { service_worker: 's0.js' } }) };
     for (let i = 0; i < 250; i++) head[`s${i}.js`] = `importScripts('s${i + 1}.js');`;
-    const result = await gather([changed('s150.js', 'x;'), changed('s240.js', 'x;')], head);
+    const files = [changed('s150.js', head['s150.js']!), changed('s240.js', head['s240.js']!), changed('tests/a.test.js', 'x;')];
+    const result = await gather(files, head);
     expect(promoted(result)).toEqual(['s150.js loaded by s149.js']);
     expect(only(result.facts, 'extension-loaded-files').map((f) => `${f.path} ${f.message}`)).toEqual([
-      `manifest.json More than ${MAX_FOLLOWED} files load one another from manifest.json on, so the rest were not followed: a changed file only they load is not read closely for being loaded.`,
+      `manifest.json Not everything the extension loads could be followed (more than ${FOLLOW_BUDGET.files} files load one another), so a changed file only the rest load is not read closely for that, and no file is trusted as a test.`,
+    ]);
+    expect(result.notTrusted.map((r) => `${r.path}: ${r.reason}`)).toEqual([
+      's150.js: not everything the extension loads could be followed, so no file is trusted as a test',
+      's240.js: not everything the extension loads could be followed, so no file is trusted as a test',
+      'tests/a.test.js: not everything the extension loads could be followed, so no file is trusted as a test',
     ]);
   });
 
-  it('a changed script a built-in rule ignores and nothing loads is a fact, not promoted; one the extension loads is promoted', async () => {
+  it('a changed script or page a built-in rule ignores and nothing loads is skimmed with a fact; one the extension loads is promoted', async () => {
     const head = {
       'manifest.json': manifest({ background: { service_worker: 'background.js' } }),
       'background.js': "importScripts('vendor/used.min.js');",
     };
-    const files = ['vendor/lib.min.js', 'dist/bundle.js', 'api.generated.js', 'vendor/used.min.js', 'dist/logo.png', 'package-lock.json']
+    const files = ['vendor/lib.min.js', 'dist/bundle.js', 'dist/page.html', 'api.generated.js', 'vendor/used.min.js', 'dist/logo.png', 'package-lock.json', 'dist/types.ts']
       .map((p) => changed(p, 'x;'));
     const result = await gather(files, head);
     expect(promoted(result)).toEqual(['vendor/used.min.js loaded by background.js']);
-    expect(only(result.facts, 'extension-loaded-files').map((f) => `${f.path}: ${f.message}`)).toEqual([
-      'api.generated.js: api.generated.js is not reviewed (generated file, a built-in rule), but an extension has no build step, so Chrome may load this file.',
-      'dist/bundle.js: dist/bundle.js is not reviewed (build output, a built-in rule), but an extension has no build step, so Chrome may load this file.',
-      'vendor/lib.min.js: vendor/lib.min.js is not reviewed (minified file, a built-in rule), but an extension has no build step, so Chrome may load this file.',
+    expect((result.notIgnored ?? []).map((r) => `${r.path} ${r.packId}: ${r.reason}`)).toEqual([
+      'vendor/lib.min.js extensions: minified file by its name, but an extension has no build step, so Chrome may load this file',
+      'dist/bundle.js extensions: build output by its name, but an extension has no build step, so Chrome may load this file',
+      'dist/page.html extensions: build output by its name, but an extension has no build step, so Chrome may load this file',
+      'api.generated.js extensions: generated file by its name, but an extension has no build step, so Chrome may load this file',
     ]);
-    // a pack that does not name extension-loaded-files gives no such fact
+    expect(only(result.facts, 'extension-loaded-files').map((f) => `${f.path}: ${f.message}`)).toEqual([
+      'api.generated.js: A built-in rule would leave api.generated.js out as a generated file, but an extension has no build step, so Chrome may load this file: it is skimmed.',
+      'dist/bundle.js: A built-in rule would leave dist/bundle.js out as build output, but an extension has no build step, so Chrome may load this file: it is skimmed.',
+      'dist/page.html: A built-in rule would leave dist/page.html out as build output, but an extension has no build step, so Chrome may load this file: it is skimmed.',
+      'vendor/lib.min.js: A built-in rule would leave vendor/lib.min.js out as a minified file, but an extension has no build step, so Chrome may load this file: it is skimmed.',
+    ]);
+    // the tier hook raises them to skim, never higher, and a binary stays ignored
+    const tiers = classifyFiles(files, [pack()], result);
+    expect(tiers.map((t) => `${t.path} ${t.tier}`)).toEqual([
+      'vendor/lib.min.js skim', 'dist/bundle.js skim', 'dist/page.html skim', 'api.generated.js skim', 'vendor/used.min.js read',
+      'dist/logo.png ignored', 'package-lock.json ignored', 'dist/types.ts ignored',
+    ]);
+    // a pack that does not name extension-loaded-files gives no such fact and raises nothing
     const none = await gatherChecks(files, [pack(['extension-remote-code'])], async (p) => (head as Record<string, string>)[p] ?? null, { sizeOfHead: async () => null });
     expect(only(none.facts, 'extension-loaded-files')).toEqual([]);
+    expect(none.notIgnored).toEqual([]);
   });
 });
 
 describe('hostile input stays fast', () => {
   const gather = (files: FileDiff[], head: Record<string, string>) =>
-    gatherChecks(files, [pack()], async (p) => head[p] ?? null, { sizeOfHead: async () => null });
-  const timed = async (work: () => Promise<unknown>): Promise<number> => {
-    const start = performance.now();
-    await work();
-    return performance.now() - start;
-  };
+    gatherChecks(files, [pack()], async (p) => head[p] ?? textOf(files, p), { sizeOfHead: async () => null });
+  const timed = async (work: () => Promise<unknown>): Promise<number> => (await cpuTimed(work)).ms;
 
   it('a manifest entry of many stars against a long path', async () => {
     // the review measured 14 stars against 80 letters; this is ten times both
@@ -604,5 +637,147 @@ describe('hostile input stays fast', () => {
     const line = `${'var a=1;'.repeat(1000)}importScripts('lib/late.js');`;
     const head = { 'manifest.json': manifest({ background: { service_worker: 'background.js' } }), 'background.js': line };
     expect((await gather([changed('lib/late.js', 'x;')], head)).readClosely.map((c) => c.path)).toEqual(['lib/late.js']);
+  });
+});
+
+describe('the follower on hostile input: a budget, and then nothing trusted', () => {
+  const withBackground = (code: string, extra: Record<string, string> = {}): Record<string, string> => ({
+    'manifest.json': manifest({ background: { service_worker: 'background.js' } }), 'background.js': code, ...extra,
+  });
+  const gather = (files: FileDiff[], head: Record<string, string>) =>
+    gatherChecks(files, [pack()], async (p) => head[p] ?? textOf(files, p), { sizeOfHead: async () => null });
+  const timed = cpuTimed;
+  const NOT_ALL = 'not everything the extension loads could be followed, so no file is trusted as a test';
+
+  it("the re-check's three inputs each finish under 200 ms", async () => {
+    // a 2 MB script of unclosed executeScript lists, and one of unclosed importScripts calls, followed from the manifest
+    for (const code of ['executeScript(files:['.repeat(95_000), 'importScripts('.repeat(140_000)]) {
+      const { ms } = await timed(() => gather([changed('tests/a.test.js', 'x;')], withBackground("importScripts('big.js');", { 'big.js': code })));
+      expect(ms, code.slice(0, 14)).toBeLessThan(200);
+    }
+    // 100 long "*" entries against 300 changed files with long paths: the entry length bound
+    const entries = Array.from({ length: 100 }, () => `*${'a/'.repeat(250)}b`);
+    const files = Array.from({ length: 300 }, (_, i) => changed(`${'a/'.repeat(500)}${i}.js`, 'x;'));
+    const head = { 'manifest.json': manifest({ web_accessible_resources: [{ resources: entries, matches: ['<all_urls>'] }] }) };
+    const { ms, value } = await timed(() => gather(files, head));
+    expect(ms).toBeLessThan(200);
+    expect(only(value.facts, 'extension-loaded-files').map((f) => f.message)).toEqual([
+      'Not everything the extension loads could be followed (the manifest names a path longer than 256 characters), so a changed file only the rest load is not read closely for that, and no file is trusted as a test.',
+    ]);
+  });
+
+  it('entries under the length bound against many long paths stop at the matching budget', async () => {
+    const entries = Array.from({ length: 100 }, () => `*${'a/'.repeat(120)}b`);
+    const files = Array.from({ length: 300 }, (_, i) => changed(`${'a/'.repeat(500)}${i}.js`, 'x;'));
+    const head = { 'manifest.json': manifest({ web_accessible_resources: [{ resources: entries, matches: ['<all_urls>'] }] }) };
+    const { ms, value } = await timed(() => gather(files, head));
+    expect(ms).toBeLessThan(200);
+    expect(only(value.facts, 'extension-loaded-files').map((f) => f.message)).toEqual([
+      'Not everything the extension loads could be followed (matching the manifest\'s "*" entries against the changed files would take too long), so a changed file only the rest load is not read closely for that, and no file is trusted as a test.',
+    ]);
+  });
+
+  const whole = async (content: string): Promise<{ ms: number; value: Awaited<ReturnType<typeof gather>> }> => {
+    const names = Array.from({ length: 200 }, (_, i) => `lib/f${i}.js`);
+    const head: Record<string, string> = withBackground(`importScripts(${names.map((n) => `'${n}'`).join(', ')});`);
+    for (const n of names) head[n] = content;
+    const files = [changed('lib/f199.js', 'x;'), changed('tests/a.test.js', 'x;'), changed('README.md', 'words')];
+    return timed(() => gather(files, head));
+  };
+  const notFollowed = (why: string): string =>
+    `Not everything the extension loads could be followed (${why}), so a changed file only the rest load is not read closely for that, and no file is trusted as a test.`;
+
+  it('a pull request whose extension loads 200 such files finishes the whole check under two seconds, with the fact and nothing trusted', async () => {
+    // the re-check's input: a list that never ends stops the follower at the first such file
+    const unclosed = await whole('executeScript(files:['.repeat(95_000));
+    expect(unclosed.ms).toBeLessThan(2000);
+    expect(only(unclosed.value.facts, 'extension-loaded-files').map((f) => f.message))
+      .toContain(notFollowed('a call that loads files has a list that does not end within 20,000 characters'));
+    expect(unclosed.value.notTrusted.map((r) => `${r.path}: ${r.reason}`)).toEqual([`lib/f199.js: ${NOT_ALL}`, `tests/a.test.js: ${NOT_ALL}`]);
+    expect(unclosed.value.readClosely.map((r) => r.path)).toEqual(['lib/f199.js']); // found before the stop, still read closely
+    // 1 MB files dense with loader words and no call left open: the text budget stops it
+    const dense = await whole(`${"import x from './a.js'; ".repeat(20_000)}${'import '.repeat(80_000)}`);
+    expect(dense.ms).toBeLessThan(2000);
+    expect(only(dense.value.facts, 'extension-loaded-files').map((f) => f.message))
+      .toContain(notFollowed(`the files it loads hold more than ${FOLLOW_BUDGET.bytes.toLocaleString('en-US')} characters`));
+    expect(dense.value.notTrusted.map((r) => r.path)).toEqual(['lib/f199.js', 'tests/a.test.js']);
+    // and many small calls, each closed: the calls budget stops it
+    const calls = await whole("importScripts('a.js');".repeat(30_000));
+    expect(calls.ms).toBeLessThan(2000);
+    expect(only(calls.value.facts, 'extension-loaded-files').map((f) => f.message))
+      .toContain(notFollowed(`they hold more than ${FOLLOW_BUDGET.calls.toLocaleString('en-US')} calls that load files`));
+  });
+
+  it('a loaded script that is there and cannot be read is a fact and leaves nothing trusted; one that is not there is a fact only', async () => {
+    const head = withBackground("importScripts('lib/huge.js', 'lib/gone.js');");
+    const files = [changed('tests/a.test.js', 'x;'), changed('tests/b.test.js', 'y;')];
+    const run = (present: string[]) => gatherChecks(files, [pack()], async (p) => head[p] ?? textOf(files, p), {
+      sizeOfHead: async () => null, presentAtHead: async (p) => present.includes(p),
+    });
+    const there = await run(['lib/huge.js']);
+    expect(only(there.facts, 'extension-loaded-files').map((f) => `${f.path}: ${f.message}`)).toEqual([
+      'background.js: background.js loads lib/gone.js, which is not in the extension at the head.',
+      'lib/huge.js: lib/huge.js, loaded by background.js, could not be read (too large, a link, or spelled differently on disk), so what it loads was not followed and no file is trusted as a test.',
+    ]);
+    expect(there.notTrusted.map((r) => r.path)).toEqual(['tests/a.test.js', 'tests/b.test.js']);
+    const gone = await run([]);
+    expect(only(gone.facts, 'extension-loaded-files').map((f) => f.message)).toEqual([
+      'background.js loads lib/huge.js, which is not in the extension at the head.',
+      'background.js loads lib/gone.js, which is not in the extension at the head.',
+    ]);
+    expect(gone.notTrusted).toEqual([]);
+  });
+});
+
+describe('paths and pages the follower resolves as a browser does', () => {
+  const gather = (files: FileDiff[], head: Record<string, string>) =>
+    gatherChecks(files, [pack()], async (p) => head[p] ?? textOf(files, p), { sizeOfHead: async () => null });
+  const promoted = (r: { readClosely: { path: string; reason: string }[] }): string[] => r.readClosely.map((c) => `${c.path} ${c.reason}`).sort();
+
+  it('.. stops at the root, percent escapes are decoded (a bad one read as written), and the pages of tabs, windows, setPopup, setOptions and an iframe are followed', async () => {
+    const head = {
+      'manifest.json': manifest({ background: { service_worker: 'background.js' } }),
+      'background.js': [
+        "importScripts('../tests/shared.js', 'lib/my%20helper.js', 'lib/100%.js');",
+        "chrome.tabs.create({ url: 'dash/dash.html' });",
+        "chrome.tabs.create({ url: chrome.runtime.getURL('report.html') });",
+        "chrome.windows.create({ url: ['win.html'], type: 'popup' });",
+        "chrome.action.setPopup({ popup: 'p2.html' });",
+        "chrome.sidePanel.setOptions({ tabId, path: 'side.html', enabled: true });",
+      ].join('\n'),
+      'dash/dash.html': '<iframe src="frame.html"></iframe><script src="dash.js"></script>',
+      'dash/frame.html': '<script src="../framed.js"></script>',
+      'report.html': '<script src="report.js"></script>',
+      'win.html': '<script src="win.js"></script>',
+      'p2.html': '<script src="p2.js"></script>',
+      'side.html': '<script src="side.js"></script>',
+    };
+    const files = ['tests/shared.js', 'lib/my helper.js', 'lib/100%.js', 'dash/dash.js', 'framed.js', 'report.js', 'win.js', 'p2.js', 'side.js']
+      .map((p) => changed(p, 'x;'));
+    expect(promoted(await gather(files, head))).toEqual([
+      'dash/dash.js loaded by dash/dash.html',
+      'framed.js loaded by dash/frame.html',
+      'lib/100%.js loaded by background.js',
+      'lib/my helper.js loaded by background.js',
+      'p2.js loaded by p2.html',
+      'report.js loaded by report.html',
+      'side.js loaded by side.html',
+      'tests/shared.js loaded by background.js',
+      'win.js loaded by win.html',
+    ]);
+  });
+
+  it('a loader in the overlap of two pieces of a cut line gives its fact once', async () => {
+    const line = `${'var a=1;'.repeat(210)}importScripts('tests/x.js');${'var b=2;'.repeat(100)}`;
+    expect(line.indexOf('importScripts')).toBeGreaterThan(1500);
+    expect(line.indexOf('importScripts') + 30).toBeLessThan(2000);
+    // the check itself, not only the runner that drops repeated facts
+    const files = [changed('src/background.js', line, 'added')];
+    const head: Record<string, string> = { 'manifest.json': manifest({}), 'src/background.js': line };
+    const { facts } = await EXTENSION_CHECKS['extension-loaded-files']!({
+      files, readHead: async (p) => head[p] ?? null, readBase: async () => null, sizeOfHead: async () => null,
+      presentAtHead: async () => false, isIgnored: () => false,
+    });
+    expect(facts.map((f) => `${f.line} ${f.message}`)).toEqual(['1 An added line loads src/tests/x.js, which sits under a test or fixture folder.']);
   });
 });

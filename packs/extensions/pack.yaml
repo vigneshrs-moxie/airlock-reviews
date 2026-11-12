@@ -18,8 +18,8 @@ stageRules:
 # a weaker one; its notes on the extension's place in the portfolio and on updating register.md are the kit owner's to
 # act on, and each brief says they are not a lens's job. Left out: lens-rules.md, which instructs the kit's own agents
 # (their tools, files and reply) that Airlock's lenses do not use, and SKILL.md and asks.md, which are about running the
-# kit's review and writing its comments. Each brief says that a file of one of those names in the working folder belongs
-# to the pull request.
+# kit's review and writing its comments. The attached files also name profile.md and extensions.md, which are not
+# attached either. Each brief says that a file of one of those names in the working folder belongs to the pull request.
 kit:
   repo: Moxie-Pest-Control-Phoenix/moxie-ext-review-kit
   files:
@@ -39,7 +39,9 @@ kit:
 # of these, every changed file the extension loads is read whatever its path, test, fixture and ignored folders
 # included: what the manifest names, the local scripts its pages pull in, and what those scripts load in turn (the
 # extension-loaded-files check names them).
-# Skimmed (the default): the popup, options and side panel pages, their scripts and the styles.
+# Skimmed (the default): the popup, options and side panel pages, their scripts and the styles; and a changed script or
+# page that a built-in rule would leave out as minified, built or generated, since here a person commits it and Chrome may
+# load it (the extension-loaded-files check names them).
 # Trusted: the top-level tests/ folder with the fixtures under it (and the engine's built-in test names), the other words
 # for people (README, CHANGELOG, privacy notes), and the image files under icons/. If manifest.json cannot be read at the
 # head, no code file is trusted (the extension-loaded-files check names them), since what the extension loads is not known.

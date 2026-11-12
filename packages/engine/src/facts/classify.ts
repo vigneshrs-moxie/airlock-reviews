@@ -25,10 +25,11 @@ function firstMatch(path: string, packs: Pack[], pick: (p: Pack) => string[], bu
 /** A file a pack's code check asks to be read closely (an extension's manifest loads it), with the pack and why. */
 export interface ReadClosely { path: string; packId: string; reason: string }
 /**
- * What the code checks said about tiers: files to read closely whatever their path says, and files that must not be trusted
- * as tests (skimmed at least), each with the pack and why.
+ * What the code checks said about tiers, which can only raise one: files to read closely whatever their path says, files
+ * that must not be trusted as tests (skimmed at least), and files an ignore rule would leave out that are skimmed instead
+ * (an extension's hand-committed minified script), each with the pack and why.
  */
-export interface FromChecks { readClosely: ReadClosely[]; notTrusted: ReadClosely[] }
+export interface FromChecks { readClosely: ReadClosely[]; notTrusted: ReadClosely[]; notIgnored?: ReadClosely[] }
 const NOTHING_FROM_CHECKS: FromChecks = { readClosely: [], notTrusted: [] };
 
 /** What a built-in ignore glob leaves `path` out as (`minified file`, `build output`, …), or null when none matches it. */
@@ -44,7 +45,7 @@ export const isIgnoredPath = (path: string, packs: Pack[]): boolean => firstMatc
  * A symbolic link is classified by its path like any other file, so a pull request cannot take a source file out of the
  * lenses by turning it into a link; the lenses see its diff and the fact saying where it points. A file in `readClosely` is read
  * whatever its path says (a test, a fixture or an ignored folder), because the extension loads it; a binary file stays ignored.
- * A file in `notTrusted` that would be trusted is skimmed instead.
+ * A file in `notTrusted` that would be trusted is skimmed instead, and one in `notIgnored` that would be ignored is skimmed.
  */
 function classify(file: FileDiff, packs: Pack[], checks: FromChecks = NOTHING_FROM_CHECKS): FileFact {
   const fact = (tier: Tier, reason: string): FileFact => ({ path: file.path, tier, reason });
@@ -53,6 +54,8 @@ function classify(file: FileDiff, packs: Pack[], checks: FromChecks = NOTHING_FR
   if (loaded) return fact('read', `${loaded.packId}: ${loaded.reason}`);
   const ignored = firstMatch(file.path, packs, (p) => p.tiers.ignore, BUILT_IN_IGNORE);
   if (ignored) {
+    const kept = checks.notIgnored?.find((c) => c.path === file.path);
+    if (kept) return fact('skim', `${kept.packId}: ${kept.reason}`);
     const words = ignored.startsWith('built-in: ') ? BUILT_IN_IGNORE_WORDS[ignored.slice('built-in: '.length)] : undefined;
     return fact('ignored', words === undefined ? ignored : `${words} (${ignored})`);
   }

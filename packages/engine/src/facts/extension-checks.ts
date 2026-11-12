@@ -15,14 +15,20 @@ export interface CodeCheckInput {
   readHead: (path: string) => Promise<string | null>;
   readBase: (path: string) => Promise<string | null>;
   sizeOfHead: (path: string) => Promise<number | null>;
+  /** Whether anything (a file, a folder, a link) is at a path at the head, readable or not. */
+  presentAtHead: (path: string) => Promise<boolean>;
   /** Whether the packs' ignore globs or the built-in ones leave a path out of the review. */
   isIgnored: (path: string) => boolean;
 }
-/** A check's facts, and what it says about tiers: changed files to read closely, and changed files not to trust as tests. */
+/**
+ * A check's facts, and what it says about tiers, which can only raise one: changed files to read closely, changed files not
+ * to trust as tests, and changed files a built-in ignore rule would leave out that are to be skimmed instead.
+ */
 export interface CodeCheckResult {
   facts: Fact[];
   readClosely?: { path: string; reason: string }[];
   notTrusted?: { path: string; reason: string }[];
+  notIgnored?: { path: string; reason: string }[];
 }
 export type CodeCheck = (input: CodeCheckInput) => Promise<CodeCheckResult>;
 
@@ -235,37 +241,60 @@ const versionChangelog: CodeCheck = async (input) => {
  * of its line.
  */
 function scriptViews(text: string): { code: string[]; bare: string[] } {
-  let code = '';
-  let bare = '';
-  let state: 'code' | 'line' | 'block' | "'" | '"' | '`' = 'code';
-  const keep = (c: string, b = c): void => { code += c; bare += b; };
-  for (let i = 0; i < text.length; i++) {
+  // Runs of ordinary text are copied whole, found with sticky searches, so a long file costs one pass and few strings.
+  const code: string[] = [];
+  const bare: string[] = [];
+  const both = (s: string): void => { code.push(s); bare.push(s); };
+  const blank = (s: string): string => s.replace(/[^\n]/g, ' ');
+  const CODE_STOP = /[/'"`\n]/g;
+  const STRING_STOP: Record<string, RegExp> = { "'": /['\\\n]/g, '"': /["\\\n]/g, '`': /[`\\]/g };
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    CODE_STOP.lastIndex = i;
+    const stop = CODE_STOP.exec(text)?.index ?? n;
+    both(text.slice(i, stop));
+    i = stop;
+    if (i >= n) break;
     const c = text[i]!;
-    const n = text[i + 1];
-    if (c === '\n') {
-      if (state === 'line' || state === "'" || state === '"') state = 'code';
-      keep('\n');
+    if (c === '\n') { both('\n'); i++; continue; }
+    if (c === '/') {
+      const next = text[i + 1];
+      if (next === '/') {
+        const end = text.indexOf('\n', i) < 0 ? n : text.indexOf('\n', i);
+        both(' '.repeat(end - i));
+        i = end;
+      } else if (next === '*') {
+        const close = text.indexOf('*/', i + 2);
+        const end = close < 0 ? n : close + 2;
+        both(blank(text.slice(i, end)));
+        i = end;
+      } else { both('/'); i++; }
       continue;
     }
-    if (state === 'code') {
-      if (c === '/' && (n === '/' || n === '*')) { state = n === '/' ? 'line' : 'block'; keep('  '); i++; continue; }
-      if (c === "'" || c === '"' || c === '`') state = c;
-      keep(c);
-    } else if (state === 'line') {
-      keep(' ');
-    } else if (state === 'block') {
-      if (c === '*' && n === '/') { state = 'code'; keep('  '); i++; } else keep(' ');
-    } else if (c === '\\' && n !== undefined && n !== '\n') {
-      keep(c + n, '  ');
-      i++;
-    } else if (c === state) {
-      state = 'code';
-      keep(c);
-    } else {
-      keep(c, ' ');
+    // A string: its inside is kept in `code` and blanked in `bare`; a ' or " string ends at a line break.
+    both(c);
+    i++;
+    const search = STRING_STOP[c]!;
+    for (;;) {
+      search.lastIndex = i;
+      const at = search.exec(text)?.index ?? n;
+      const inside = text.slice(i, at);
+      code.push(inside);
+      bare.push(blank(inside));
+      i = at;
+      if (i >= n) break;
+      const d = text[i]!;
+      if (d === '\\') {
+        const escaped = text[i + 1];
+        if (escaped !== undefined && escaped !== '\n') { code.push(d + escaped); bare.push('  '); i += 2; } else { code.push(d); bare.push(' '); i++; }
+        continue;
+      }
+      if (d !== '\n') { both(d); i++; }
+      break;
     }
   }
-  return { code: code.split('\n'), bare: bare.split('\n') };
+  return { code: code.join('').split('\n'), bare: bare.join('').split('\n') };
 }
 
 /** Page text with every comment blanked, line breaks kept; a loop, not a pattern, so many unclosed `<!--` cost one pass. */
@@ -299,11 +328,14 @@ function pieces(line: string): string[] {
   }
 }
 
-/** Lines cut into pieces (see `pieces`) and joined, with the line each piece came from (1-based), for patterns that span lines. */
-function scanText(lines: string[]): { text: string; lineAt: (index: number) => number } {
+/**
+ * Lines joined, with the line (1-based) of each index, for patterns that span lines: cut into pieces (see `pieces`) unless
+ * `whole`, for passes whose every repeat is bounded and whose stretches are read once, which need the text as written.
+ */
+function scanText(lines: string[], whole = false): { text: string; lineAt: (index: number) => number } {
   const parts: string[] = [];
   const lineOf: number[] = [];
-  lines.forEach((line, i) => { for (const p of pieces(line)) { parts.push(p); lineOf.push(i + 1); } });
+  lines.forEach((line, i) => { for (const p of whole ? [line] : pieces(line)) { parts.push(p); lineOf.push(i + 1); } });
   const starts: number[] = [];
   let offset = 0;
   for (const p of parts) { starts.push(offset); offset += p.length + 1; }
@@ -319,12 +351,21 @@ function scanText(lines: string[]): { text: string; lineAt: (index: number) => n
 // ---------------------------------------------------------------------------------------------------------------------
 // The files the extension loads
 
-/** A path named relative to `dir`, from the repository root (a leading `/` is the extension's root); null when it leaves it. */
+/**
+ * A path named relative to `dir`, as a browser resolves it inside the extension: percent escapes decoded first (a bad
+ * escape leaves the text as it is), a leading `/` from the extension's root, `.` dropped, and `..` climbing no higher
+ * than the root (`../tests/x.js` from the root is `tests/x.js`); null when nothing is left.
+ */
 function resolveIn(dir: string, named: string): string | null {
-  const from = named.startsWith('/') ? '.' : dir;
-  const joined = posix.normalize(posix.join(from === '.' ? '' : from, named.replace(/^\/+/, '')));
-  if (joined === '.' || joined === '' || joined.startsWith('../') || joined === '..') return null;
-  return joined.replace(/^\.\//, '');
+  let text = named;
+  try { text = decodeURIComponent(named); } catch { /* a bad escape is read as it is written */ }
+  const parts = text.startsWith('/') || dir === '.' || dir === '' ? [] : dir.split('/');
+  for (const segment of text.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') parts.pop();
+    else parts.push(segment);
+  }
+  return parts.length === 0 ? null : parts.join('/');
 }
 
 /** Every path a manifest names as something Chrome loads: scripts, pages, styles and web-accessible resources. */
@@ -353,8 +394,8 @@ function namedPaths(m: Record<string, unknown>): string[] {
 /**
  * How Chrome matches a manifest entry against the extension's files: from the extension's root after a leading `./` or
  * `/`, letter case ignored here, a `*` matching any run of characters (`/` included) and every other character itself.
- * No regular expression: runs of `*` are one `*`, and a two-pointer match goes back only to the last `*`, so an entry
- * full of stars costs at most its length times the path's.
+ * No regular expression: runs of `*` are one `*`, and a two-pointer match goes back only to the last `*`, so one match
+ * costs at most the entry's length times the path's (the follower's budget bounds the sum).
  */
 function entryMatches(entry: string, path: string): boolean {
   const p = entry.toLowerCase().replace(/\*+/g, '*');
@@ -381,24 +422,60 @@ function entryMatches(entry: string, path: string): boolean {
 }
 const stripLead = (entry: string): string => entry.replace(/^(?:\.?\/)+/, '');
 
+/**
+ * What following the extension may spend on one review, so no pull request can make it slow: the files read, their text,
+ * the loader calls looked at, a manifest entry's length, and the work of matching `*` entries against changed paths (an
+ * entry's length times a path's, summed). When one runs out, following stops and no file is trusted as a test.
+ */
+export const FOLLOW_BUDGET = {
+  files: 200,
+  bytes: 8_000_000,
+  calls: 50_000,
+  entryLength: 256,
+  matchWork: 5_000_000,
+} as const;
+
+/** What has been spent of FOLLOW_BUDGET, and what ran out first (null while nothing has). */
+class Budget {
+  bytes = 0;
+  calls = 0;
+  matchWork = 0;
+  spent: string | null = null;
+  /** Spends `n` of `what`; false (and remembered) when that goes past the budget. */
+  spend(what: 'bytes' | 'calls' | 'matchWork', n: number): boolean {
+    this[what] += n;
+    if (this[what] > FOLLOW_BUDGET[what] && this.spent === null) this.spent = BUDGET_WORDS[what];
+    return this.spent === null;
+  }
+  runOut(why: string): void { if (this.spent === null) this.spent = why; }
+}
+const BUDGET_WORDS = {
+  bytes: `the files it loads hold more than ${FOLLOW_BUDGET.bytes.toLocaleString('en-US')} characters`,
+  calls: `they hold more than ${FOLLOW_BUDGET.calls.toLocaleString('en-US')} calls that load files`,
+  matchWork: 'matching the manifest\'s "*" entries against the changed files would take too long',
+} as const;
+
 interface Loaded {
   /** The changed files the extension loads, each with why (`loaded by <the manifest, a page or a script>`). */
   files: Map<string, string>;
   /** Whether the head's manifest.json could be read; when not, nothing can be trusted as a test. */
   manifestRead: boolean;
+  /**
+   * Whether everything the extension loads was followed: false when a loaded script could not be read or a budget ran out,
+   * and then, as for an unread manifest, nothing can be trusted as a test.
+   */
+  followedAll: boolean;
   facts: Fact[];
 }
-
-/** At most this many files are read while following what loads what; past it a fact says the rest were not followed. */
-export const MAX_FOLLOWED = 200;
 
 const loadedMemo = new WeakMap<CodeCheckInput, Promise<Loaded>>();
 
 /**
  * The changed files the extension loads, from the head's top-level manifest.json, read whether it changed or not: every
  * path it names (a `*` taking in every changed file it matches), and then, through the whole chain, what each loaded page
- * and script loads in turn, read from its head text whether or not it changed (see `loadsIn` and `pageScripts`). An entry
- * holding `..` promotes nothing and is a fact; past MAX_FOLLOWED files read, a fact says the rest were not followed.
+ * and script loads in turn, read from its head text whether or not it changed (see `loadsIn` and `pageSources`). An entry
+ * holding `..` promotes nothing and is a fact; a loaded file that is not there is a fact; one that is there and cannot be
+ * read, or a run-out FOLLOW_BUDGET, is a fact and leaves nothing trusted.
  */
 function loadedFiles(input: CodeCheckInput): Promise<Loaded> {
   let hit = loadedMemo.get(input);
@@ -410,29 +487,33 @@ const SRC_ATTRIBUTE = /\bsrc\s{0,50}=\s{0,50}["']?\s{0,50}([^"'\s>]{1,1000})/i;
 const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 
 /**
- * The `src` of every `<script>` tag in page text (comments already blanked). A loop, not one pattern: each tag is read up to
- * its `>`, the next `<` or MAX_LINE characters, whichever is first, so the tags' texts never overlap and a page of many
- * unclosed `<script` costs one pass.
+ * The `src` of every `<script>` tag in page text (comments already blanked), and of every `<iframe>` with `iframes`. A loop,
+ * not one pattern: each tag is read up to its `>`, the next `<` or MAX_LINE characters, whichever is first, so the tags'
+ * texts never overlap and a page of many unclosed tags costs one pass.
  */
-function scriptSources(text: string): string[] {
+function tagSources(text: string): { src: string; page: boolean }[] {
   const lower = text.toLowerCase();
-  const out: string[] = [];
+  const out: { src: string; page: boolean }[] = [];
   let gt = -2; // the first `>` at or after the current tag; -1 when there is none left
-  for (let at = lower.indexOf('<script'); at >= 0; at = lower.indexOf('<script', at + 7)) {
-    if (/\w/.test(lower[at + 7] ?? '')) continue;
+  for (let at = lower.indexOf('<'); at >= 0; at = lower.indexOf('<', at + 1)) {
+    const tag = lower.startsWith('script', at + 1) ? 'script' : lower.startsWith('iframe', at + 1) ? 'iframe' : null;
+    if (tag === null || /\w/.test(lower[at + 7] ?? '')) continue;
     if (gt !== -1 && gt < at) gt = lower.indexOf('>', at);
     const lt = lower.indexOf('<', at + 1);
     const end = Math.min(gt < 0 ? text.length : gt, lt < 0 ? text.length : lt, at + MAX_LINE);
     const src = text.slice(at, end).match(SRC_ATTRIBUTE)?.[1];
-    if (src !== undefined) out.push(src);
+    if (src !== undefined) out.push({ src, page: tag === 'iframe' });
   }
   return out;
 }
 
-/** The local scripts a page pulls in with `<script src>`, relative to the page. */
-function pageScripts(text: string, page: string): string[] {
+/** The remote addresses of a page's scripts (`http:` or `ws:`), for the remote-code check. */
+const scriptSources = (text: string): string[] => tagSources(text).filter((t) => !t.page).map((t) => t.src);
+
+/** The local scripts a page pulls in with `<script src>` and the local pages it frames, relative to the page. */
+function pageSources(text: string, page: string): string[] {
   const out: string[] = [];
-  for (const raw of scriptSources(htmlView(text).join('\n'))) {
+  for (const { src: raw } of tagSources(htmlView(text).join('\n'))) {
     const src = raw.replace(/[?#].*$/, '');
     if (src === '' || HAS_SCHEME.test(src) || src.startsWith('//')) continue;
     const path = resolveIn(posix.dirname(page), src);
@@ -444,73 +525,142 @@ function pageScripts(text: string, page: string): string[] {
 /** A path a script loads with a literal string, on which line, and the folder the loaded file's own relative addresses resolve against. */
 interface Load { line: number; path: string; base: string }
 
+// Each pattern starts with a fixed word and has only bounded repeats, so one pass over a text is linear in it. What sits
+// between a call's brackets is found by index, never by a pattern that runs on to find the closing bracket.
 const FROM_OR_IMPORT = /\b(?:from|import)\s{0,200}(?:\(\s{0,200})?(['"`])([^'"`\n]{1,500})\1/g;
-const IMPORT_SCRIPTS = /\bimportScripts\s{0,200}\(([^)]{0,1500})\)/g;
 const WORKER = /\bnew\s{1,200}(?:Shared)?Worker\s{0,200}\(\s{0,200}(['"`])([^'"`\n]{1,500})\1/g;
-const SCRIPT_CALL = /\b(executeScript|registerContentScripts|updateContentScripts|createDocument)\s{0,200}\(/g;
-/** How far past one of SCRIPT_CALL's names its `files`, `js` or `url` is looked for. */
-const CALL_WINDOW = 1000;
-const LIST_OF = (key: string): RegExp => new RegExp(`\\b${key}\\s{0,50}:\\s{0,50}\\[([^\\]]{0,1000})\\]`);
-const URL_FIELD = /\burl\s{0,50}:\s{0,50}(['"`])([^'"`\n]{1,500})\1/;
+const CALL = /\b(importScripts|executeScript|registerContentScripts|updateContentScripts|createDocument|setPopup|setOptions|(?:tabs|windows)\s{0,50}\.\s{0,50}create)\s{0,200}\(/g;
+const FIELD = /\b(files|js|url|popup|path)\s{0,50}:\s{0,50}/g;
+const GET_URL = /^(?:chrome\s{0,50}\.\s{0,50})?runtime\s{0,50}\.\s{0,50}getURL\s{0,50}\(\s{0,50}/;
 const QUOTED = /(['"`])([^'"`\n]{1,500})\1/g;
+/** How far past a call's name its field is looked for, and how long an argument or a list may be. */
+const CALL_WINDOW = 1000;
+const LIST_LENGTH = 20_000;
+
+/** Which field of each call names what it loads, and where those paths resolve from: the root, or the calling script's base. */
+const CALL_FIELD: Record<string, { key: string; from: 'root' | 'base' }> = {
+  executeScript: { key: 'files', from: 'root' },
+  registerContentScripts: { key: 'js', from: 'root' },
+  updateContentScripts: { key: 'js', from: 'root' },
+  createDocument: { key: 'url', from: 'root' },
+  setPopup: { key: 'popup', from: 'root' },
+  setOptions: { key: 'path', from: 'root' },
+  create: { key: 'url', from: 'base' },
+};
+
+/** The sorted positions of `c` in `text`, and the first of them at or after `from` (binary search), or -1. */
+function positionsOf(text: string, c: string): (from: number) => number {
+  const at: number[] = [];
+  for (let i = text.indexOf(c); i >= 0; i = text.indexOf(c, i + 1)) at.push(i);
+  return (from) => {
+    let lo = 0;
+    let hi = at.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (at[mid]! < from) lo = mid + 1; else hi = mid; }
+    return at[lo] ?? -1;
+  };
+}
 
 /**
- * Every repository path the script `file` (its lines with comments blanked) loads code from with a literal string:
+ * Every repository path the script `file` (its lines with comments blanked) loads with a literal string:
  * `import … from`, `import '…'` and `import('…')` (relative ones, from the script's folder); `importScripts` and
  * `new Worker` (from `base`, the folder of the page or worker the script runs in); `executeScript({ files })`, the `js`
- * lists of `registerContentScripts` and `updateContentScripts`, and `offscreen.createDocument({ url })` (from the
- * extension's root). `getURL` is not followed: it names any resource, not code. Every pattern is bounded and sees at most
- * MAX_LINE characters of a line, so no input makes it slow.
+ * lists of `registerContentScripts` and `updateContentScripts`, and the pages of `offscreen.createDocument({ url })`,
+ * `action.setPopup({ popup })` and `sidePanel.setOptions({ path })` (from the extension's root); the pages of
+ * `tabs.create` and `windows.create` (`url`, from `base`). A field's value may be a string, a list of strings, or
+ * `runtime.getURL('…')`; `getURL` elsewhere is not followed, since it names any resource. Each found once per line.
+ * Every pass is linear in the text; the calls looked at are spent from `budget`, and a list that does not end within
+ * LIST_LENGTH spends it all, since what it loads cannot be known.
  */
-function loadsIn(lines: string[], file: string, base: string): Load[] {
-  const { text, lineAt } = scanText(lines);
-  const out: Load[] = [];
+function loadsIn(lines: string[], file: string, base: string, budget: Budget = new Budget()): Load[] {
+  // Read whole, not in pieces: a list cut in two would pair the wrong quotes. Every pattern here starts with a fixed word
+  // and repeats only a bounded number of times, and each list is read once, so the work stays linear in the text.
+  const { text, lineAt } = scanText(lines, true);
+  const found = new Map<string, Load>();
   /** `baseOf` is the base of the loaded file: the same as this script's, its own folder (a worker), or the root. */
   const add = (at: number, from: string, named: string, baseOf: 'same' | 'own' | 'root'): void => {
     if (named.includes('${') || HAS_SCHEME.test(named) || named.startsWith('//')) return;
     const path = resolveIn(from, named.replace(/[?#].*$/, ''));
     if (path === null) return;
-    out.push({ line: lineAt(at), path, base: baseOf === 'same' ? base : baseOf === 'own' ? posix.dirname(path) : '.' });
+    const line = lineAt(at);
+    found.set(`${line}\0${path}`, { line, path, base: baseOf === 'same' ? base : baseOf === 'own' ? posix.dirname(path) : '.' });
   };
-  const quotedIn = (inner: string, at: number, from: string, baseOf: 'same' | 'root'): void => {
-    for (const q of inner.matchAll(QUOTED)) add(at + q.index, from, q[2]!, baseOf);
+  const quotedIn = (start: number, end: number, from: string, baseOf: 'same' | 'root'): void => {
+    for (const q of text.slice(start, end).matchAll(QUOTED)) add(start + q.index, from, q[2]!, baseOf);
   };
+
   for (const m of text.matchAll(FROM_OR_IMPORT)) {
     const spec = m[2]!;
     if (spec.startsWith('.') || spec.startsWith('/')) add(m.index + m[0].length - 1, posix.dirname(file), spec, 'same');
   }
-  for (const m of text.matchAll(IMPORT_SCRIPTS)) quotedIn(m[1]!, m.index + m[0].indexOf('(') + 1, base, 'same');
   for (const m of text.matchAll(WORKER)) add(m.index + m[0].length - 1, base, m[2]!, 'own');
-  for (const m of text.matchAll(SCRIPT_CALL)) {
-    const call = text.slice(m.index, m.index + CALL_WINDOW);
-    if (m[1] === 'createDocument') {
-      const url = call.match(URL_FIELD);
-      if (url?.index !== undefined) add(m.index + url.index, '.', url[2]!, 'root');
-      continue;
-    }
-    // chrome.scripting takes paths from the extension's root
-    const list = call.match(LIST_OF(m[1] === 'executeScript' ? 'files' : 'js'));
-    if (list?.index !== undefined) quotedIn(list[1]!, m.index + list.index + list[0].indexOf('[') + 1, '.', 'root');
+
+  const nextClose = { ')': positionsOf(text, ')'), ']': positionsOf(text, ']') };
+  const fields = new Map<string, number[]>();
+  for (const m of text.matchAll(FIELD)) {
+    const list = fields.get(m[1]!) ?? [];
+    list.push(m.index + m[0].length);
+    fields.set(m[1]!, list);
   }
-  return out;
+  const firstField = (key: string, from: number): number => {
+    const at = fields.get(key) ?? [];
+    let lo = 0;
+    let hi = at.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (at[mid]! < from) lo = mid + 1; else hi = mid; }
+    return at[lo] ?? -1;
+  };
+  // Calls that share a closing bracket (or a field) are read once: the stretches read never overlap, so the work is linear.
+  const done = new Set<number>();
+  /** The paths in a list starting at `open` (`[` or `(`), up to its closing bracket within LIST_LENGTH. */
+  const list = (open: number, close: ')' | ']', from: string, baseOf: 'same' | 'root'): void => {
+    const end = nextClose[close](open);
+    if (end < 0 || end - open > LIST_LENGTH) {
+      budget.runOut(`a call that loads files has a list that does not end within ${LIST_LENGTH.toLocaleString('en-US')} characters`);
+      return;
+    }
+    if (done.has(end)) return;
+    done.add(end);
+    quotedIn(open + 1, end, from, baseOf);
+  };
+  for (const m of text.matchAll(CALL)) {
+    if (!budget.spend('calls', 1)) break;
+    const open = m.index + m[0].length - 1;
+    const name = /^(?:tabs|windows)/.test(m[1]!) ? 'create' : m[1]!;
+    if (name === 'importScripts') { list(open, ')', base, 'same'); continue; }
+    const { key, from: fromWhere } = CALL_FIELD[name] ?? CALL_FIELD.create!;
+    const from = fromWhere === 'root' ? '.' : base;
+    const at = firstField(key, open);
+    if (at < 0 || at - open > CALL_WINDOW || done.has(-at - 1)) continue;
+    done.add(-at - 1);
+    if (text[at] === '[') { list(at, ']', from, 'root'); continue; }
+    const wrapped = GET_URL.exec(text.slice(at, at + 200));
+    const v = at + (wrapped?.[0].length ?? 0);
+    const quote = text[v];
+    if (quote !== "'" && quote !== '"' && quote !== '`') continue;
+    const end = text.slice(v + 1, v + 501).search(/['"`\n]/);
+    if (end > 0 && text[v + 1 + end] === quote) add(v, from, text.slice(v + 1, v + 1 + end), 'root');
+  }
+  return [...found.values()];
 }
 
 async function findLoaded(input: CodeCheckInput): Promise<Loaded> {
   const files = new Map<string, string>();
   const facts: Fact[] = [];
   const changed = live(input.files);
-  if (changed.length === 0) return { files, manifestRead: true, facts };
+  if (changed.length === 0) return { files, manifestRead: true, followedAll: true, facts };
   const side = await manifestSide(input.readHead, MANIFEST, 'absent');
-  if (side.kind !== 'ok') return { files, manifestRead: false, facts };
+  if (side.kind !== 'ok') return { files, manifestRead: false, followedAll: true, facts };
 
+  const fact = (path: string, message: string): void => { facts.push({ checkId: 'extension-loaded-files', path, line: null, message }); };
+  const budget = new Budget();
+  let followedAll = true;
   // Letter case is ignored, as Chrome on a Mac ignores it.
   const changedPath = new Map(changed.map((f) => [f.path.toLowerCase(), f.path]));
-  const queue: { path: string; base: string }[] = [];
+  const queue: { path: string; base: string; by: string }[] = [];
   /** `path` is loaded by `by`: promoted when it changed, and followed when it is a script or a page. */
   const follow = (path: string, by: string, base: string): void => {
     const hit = changedPath.get(path.toLowerCase());
     if (hit !== undefined && !files.has(hit)) files.set(hit, `loaded by ${by}`);
-    if (HTML_FILE.test(path) || SCRIPT_FILE.test(path)) queue.push({ path, base });
+    if (HTML_FILE.test(path) || SCRIPT_FILE.test(path)) queue.push({ path, base, by });
   };
 
   const background = side.json.background;
@@ -518,38 +668,52 @@ async function findLoaded(input: CodeCheckInput): Promise<Loaded> {
   for (const named of namedPaths(side.json)) {
     const entry = stripLead(named);
     if (entry.split('/').includes('..')) {
-      facts.push({ checkId: 'extension-loaded-files', path: MANIFEST, line: null, message: `The manifest names a path outside the extension: ${cut(named)}.` });
+      fact(MANIFEST, `The manifest names a path outside the extension: ${cut(named)}.`);
       continue;
     }
+    if (entry.length > FOLLOW_BUDGET.entryLength) { budget.runOut(`the manifest names a path longer than ${FOLLOW_BUDGET.entryLength} characters`); break; }
     // A service worker's addresses resolve from its own folder; the other scripts run in a page at the root or a site's page.
     const base = named === worker ? posix.dirname(entry) : '.';
     if (entry.includes('*')) {
-      for (const f of changed) if (entryMatches(entry, f.path)) follow(f.path, MANIFEST, base);
+      for (const f of changed) {
+        if (!budget.spend('matchWork', entry.length * f.path.length)) break;
+        if (entryMatches(entry, f.path)) follow(f.path, MANIFEST, base);
+      }
+      if (budget.spent !== null) break;
     } else if (entry !== '') follow(entry, MANIFEST, base);
   }
 
   const seen = new Set<string>();
-  for (let next = 0; next < queue.length; next++) {
-    const { path, base } = queue[next]!;
+  for (let next = 0; next < queue.length && budget.spent === null; next++) {
+    const { path, base, by } = queue[next]!;
     const key = path.toLowerCase();
     if (seen.has(key)) continue;
-    if (seen.size >= MAX_FOLLOWED) {
-      facts.push({
-        checkId: 'extension-loaded-files', path: MANIFEST, line: null,
-        message: `More than ${MAX_FOLLOWED} files load one another from ${MANIFEST} on, so the rest were not followed: a changed file only they load is not read closely for being loaded.`,
-      });
-      break;
-    }
+    if (seen.size >= FOLLOW_BUDGET.files) { budget.runOut(`more than ${FOLLOW_BUDGET.files} files load one another`); break; }
     seen.add(key);
-    const text = await input.readHead(changedPath.get(key) ?? path);
-    if (text === null) continue;
+    const at = changedPath.get(key) ?? path;
+    const text = await input.readHead(at);
+    if (text === null) {
+      // A changed file is there by definition; another is there when something sits at its path.
+      if (changedPath.has(key) || (await input.presentAtHead(at))) {
+        followedAll = false;
+        fact(at, `${at}, loaded by ${by}, could not be read (too large, a link, or spelled differently on disk), so what it loads was not followed and no file is trusted as a test.`);
+      } else {
+        fact(by, `${by} loads ${path}, which is not in the extension at the head.`);
+      }
+      continue;
+    }
+    if (!budget.spend('bytes', text.length)) break;
     if (HTML_FILE.test(path)) {
-      for (const script of pageScripts(text, path)) follow(script, path, posix.dirname(path));
+      for (const source of pageSources(text, path)) follow(source, path, posix.dirname(path));
     } else {
-      for (const load of loadsIn(scriptViews(text).code, path, base)) follow(load.path, path, load.base);
+      for (const load of loadsIn(scriptViews(text).code, path, base, budget)) follow(load.path, path, load.base);
     }
   }
-  return { files, manifestRead: true, facts };
+  if (budget.spent !== null) {
+    followedAll = false;
+    fact(MANIFEST, `Not everything the extension loads could be followed (${budget.spent}), so a changed file only the rest load is not read closely for that, and no file is trusted as a test.`);
+  }
+  return { files, manifestRead: true, followedAll, facts };
 }
 
 const withTests = (path: string): string | null =>
@@ -571,7 +735,11 @@ function addedLoads(file: string, added: Map<number, string>, head: string | nul
 }
 
 const CODE_FILE = /\.(?:m?js|cjs|jsx|tsx?|gs|html?|css|json)$/i;
+/** Script and page files Chrome can load as they are committed. */
+const LOADABLE_FILE = /\.(?:m?js|cjs|html?)$/i;
 const NO_MANIFEST = 'manifest.json could not be read, so no file is trusted as a test';
+const NOT_FOLLOWED = 'not everything the extension loads could be followed, so no file is trusted as a test';
+const NO_BUILD = 'an extension has no build step, so Chrome may load this file';
 
 const loadedFilesCheck: CodeCheck = async (input) => {
   const loaded = await loadedFiles(input);
@@ -580,26 +748,32 @@ const loadedFilesCheck: CodeCheck = async (input) => {
     const where = withTests(path);
     if (where !== null) facts.push({ checkId: 'extension-loaded-files', path, line: null, message: `${path} ${where} but the extension loads it.` });
   }
-  // The built-in rules leave out minified, built and generated files as if a build made them; here a person committed them.
+  // The built-in rules leave out minified, built and generated files as if a build made them; here a person committed
+  // them, and Chrome may load one in a way the follower cannot see (a list in a variable, a page opened by an address it
+  // builds): such a file is skimmed, so it sits in a cohort and its fact reaches that cohort's lenses.
+  const notIgnored: { path: string; reason: string }[] = [];
   for (const f of live(input.files)) {
-    if (f.binary || !SCRIPT_FILE.test(f.path) || loaded.files.has(f.path)) continue;
+    if (f.binary || !LOADABLE_FILE.test(f.path) || loaded.files.has(f.path)) continue;
     const words = builtInIgnoreWords(f.path);
-    if (words !== null) {
-      facts.push({
-        checkId: 'extension-loaded-files', path: f.path, line: null,
-        message: `${f.path} is not reviewed (${words}, a built-in rule), but an extension has no build step, so Chrome may load this file.`,
-      });
-    }
+    if (words === null) continue;
+    notIgnored.push({ path: f.path, reason: `${words} by its name, but ${NO_BUILD}` });
+    facts.push({
+      checkId: 'extension-loaded-files', path: f.path, line: null,
+      message: `A built-in rule would leave ${f.path} out as ${words === 'build output' ? words : `a ${words}`}, but ${NO_BUILD}: it is skimmed.`,
+    });
   }
   const notTrusted: { path: string; reason: string }[] = [];
-  if (!loaded.manifestRead) {
-    // Unread, the manifest could load any file: none is trusted as a test, and the fact says why.
-    const side = await manifestSide(input.readHead, MANIFEST, 'absent');
-    facts.push({
-      checkId: NOT_JSON, path: MANIFEST, line: null,
-      message: side.kind === 'bad' ? headNotJson(MANIFEST) : `${MANIFEST} could not be read at the head, so no file could be trusted as a test.`,
-    });
-    for (const f of live(input.files)) if (CODE_FILE.test(f.path)) notTrusted.push({ path: f.path, reason: NO_MANIFEST });
+  if (!loaded.manifestRead || !loaded.followedAll) {
+    // Unread, the manifest could load any file, and so could a script that was not followed: none is trusted as a test.
+    if (!loaded.manifestRead) {
+      const side = await manifestSide(input.readHead, MANIFEST, 'absent');
+      facts.push({
+        checkId: NOT_JSON, path: MANIFEST, line: null,
+        message: side.kind === 'bad' ? headNotJson(MANIFEST) : `${MANIFEST} could not be read at the head, so no file could be trusted as a test.`,
+      });
+    }
+    const reason = loaded.manifestRead ? NOT_FOLLOWED : NO_MANIFEST;
+    for (const f of live(input.files)) if (CODE_FILE.test(f.path)) notTrusted.push({ path: f.path, reason });
   }
   for (const { file, added, head } of await sources(input, SCRIPT_FILE)) {
     // A test loading its own fixtures is not news; a file the extension loads is not a test.
@@ -611,7 +785,7 @@ const loadedFilesCheck: CodeCheck = async (input) => {
       }
     }
   }
-  return { facts, readClosely: [...loaded.files].map(([path, reason]) => ({ path, reason })), notTrusted };
+  return { facts, readClosely: [...loaded.files].map(([path, reason]) => ({ path, reason })), notTrusted, notIgnored };
 };
 
 /**

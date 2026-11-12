@@ -18,6 +18,8 @@ export interface OtherSides {
   readBase?: (path: string) => Promise<string | null>;
   /** The size in bytes of a head file; unknown when not given. */
   sizeOfHead?: (path: string) => Promise<number | null>;
+  /** Whether anything is at a path at the head, readable or not; nothing is, when not given. */
+  presentAtHead?: (path: string) => Promise<boolean>;
 }
 
 const nothing = async (): Promise<null> => null;
@@ -80,12 +82,14 @@ export async function gatherChecks(
   const live = files.filter((f) => f.mode !== SYMLINK_MODE);
   const input: CodeCheckInput = {
     files: live, readHead: read, readBase: once(sides.readBase ?? nothing), sizeOfHead: once(sides.sizeOfHead ?? nothing),
+    presentAtHead: once(sides.presentAtHead ?? (async () => false)),
     isIgnored: (path) => isIgnoredPath(path, packs),
   };
   const ran = new Set<string>();
   const seen = new Set<string>();
   const readClosely: ReadClosely[] = [];
   const notTrusted: ReadClosely[] = [];
+  const notIgnored: ReadClosely[] = [];
   for (const pack of packs) {
     for (const id of pack.codeChecks ?? []) {
       if (ran.has(id)) continue;
@@ -103,9 +107,12 @@ export async function gatherChecks(
       for (const r of result.notTrusted ?? []) {
         if (!notTrusted.some((c) => c.path === r.path)) notTrusted.push({ path: r.path, packId: pack.id, reason: r.reason });
       }
+      for (const r of result.notIgnored ?? []) {
+        if (!notIgnored.some((c) => c.path === r.path)) notIgnored.push({ path: r.path, packId: pack.id, reason: r.reason });
+      }
     }
   }
-  return { facts: out, readClosely, notTrusted };
+  return { facts: out, readClosely, notTrusted, notIgnored };
 }
 
 async function runOne(pack: Pack, check: CheckDef, files: FileDiff[], read: ReadHead): Promise<Fact[]> {
