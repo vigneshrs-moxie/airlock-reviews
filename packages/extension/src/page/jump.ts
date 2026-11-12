@@ -137,8 +137,14 @@ export function listen(runtime: RuntimeLike, page: Page): void {
   });
 }
 
+/** The destination WXT's address-change event names, or undefined when it carries none. */
+export function destinationOf(event: Event): string | undefined {
+  const to = (event as { newUrl?: { href?: unknown } | null }).newUrl?.href;
+  return typeof to === 'string' ? to : undefined;
+}
+
 /** WXT's address-change event: passes its destination on, and ignores an event that carries none. */
 export function locationChanged(page: Page, event: Event): void {
-  const to = (event as { newUrl?: { href?: unknown } | null }).newUrl?.href;
-  if (typeof to === 'string') page.softNavigated('locationchange', to);
+  const to = destinationOf(event);
+  if (to !== undefined) page.softNavigated('locationchange', to);
 }

@@ -125,19 +125,12 @@ export interface PreparedPacks {
 }
 
 /**
-<<<<<<< HEAD
  * Makes the selected packs ready for the review: attaches to each pack whose manifest names a kit that kit's files, applies
  * the hold-out to every pack, finds the helpers a kit's orbit.md names that the base no longer has, and reads the
- * repository's rule files from the base. A stale kit adds a question naming it. A kit that cannot be had, with no copy in
- * the cache, rejects with a sentence naming it (one per kit), so the review stops before any model call. After this, only
- * the returned packs are used: nothing is read from the packs folder again.
-=======
- * Makes the selected packs ready for the review: attaches the team's kit to its pack, applies the hold-out to every pack,
- * finds the helpers the kit names that the base no longer has, and reads the repository's rule files from the base (on a
- * re-review of a push, from the pull request's base commit: see `rulesAt`).
- * A kit that cannot be had drops its pack with a stage error; a stale kit adds a question. After this, only the returned
- * packs are used: nothing is read from the packs folder again.
->>>>>>> build/step-3-posting-rereview
+ * repository's rule files from the base (on a re-review of a push, from the pull request's base commit: see `rulesAt`).
+ * A stale kit adds a question naming it. A kit that cannot be had, with no copy in the cache, rejects with a sentence
+ * naming it (one per kit), so the review stops before any model call. After this, only the returned packs are used:
+ * nothing is read from the packs folder again.
  */
 export async function preparePacks(selected: Pack[], opts: PackOptions): Promise<PreparedPacks> {
   const errors: StageError[] = [];

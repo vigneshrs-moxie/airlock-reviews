@@ -19,6 +19,8 @@ function memorySettings(token: string | null): SettingsStore & { token: string |
     async setToken(t) { this.token = t; },
     async getDefaultDepth() { return null; },
     async setDefaultDepth() {},
+    async getShowNotes() { return true; },
+    async setShowNotes() {},
   };
 }
 

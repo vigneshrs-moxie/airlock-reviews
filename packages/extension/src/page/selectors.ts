@@ -25,6 +25,15 @@ export const REACT = {
   lineNumber: { name: 'react-line-number', css: 'td[class*="diff-line-number"]' },
 } as const satisfies Record<string, NamedSelector>;
 
+/**
+ * The element holding every file of each view, which the notes watch for GitHub's re-renders (the page's body when it
+ * matches nothing). The classic one is in the fixture taken from a live page; the newer one is unconfirmed.
+ */
+export const FILES: Record<View, NamedSelector> = {
+  classic: { name: 'classic-files', css: '#files.js-diff-container' },
+  react: { name: 'react-files', css: '[data-testid="progressive-diffs-list"]' },
+};
+
 /** What the lookups use for each view; for an unrecognised page, what was tried to recognise it. */
 const TRIED: Record<View | 'none', readonly NamedSelector[]> = {
   classic: [CLASSIC.file, CLASSIC.newLineNumber],

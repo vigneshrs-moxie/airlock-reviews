@@ -2,17 +2,20 @@
 import '../../src/zod-jitless';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App, realServices, startRealPanel } from '../../src/panel/App';
+import { App, browserNotes, realServices, startRealPanel } from '../../src/panel/App';
 import { browserSettings } from '../../src/state/settings';
 import { browserTab } from '../../src/state/tab';
 import '../../src/screens/panel.css';
 
-// One store and one tab watcher, so the panel and its jumps read the same tab.
+// One store, one tab watcher and one set of notes, so the panel, its jumps and its notes read the same tab.
 const settings = browserSettings();
 const tab = browserTab();
+const notes = browserNotes(settings, tab);
 const root = document.getElementById('root');
 if (root) {
   createRoot(root).render(
-    <StrictMode><App start={(onState) => startRealPanel(onState, { settings, tab })} services={realServices(settings, tab)} /></StrictMode>,
+    <StrictMode>
+      <App start={(onState) => startRealPanel(onState, { settings, tab, notes })} services={realServices(settings, tab, notes)} />
+    </StrictMode>,
   );
 }
