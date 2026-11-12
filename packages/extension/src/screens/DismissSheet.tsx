@@ -5,17 +5,21 @@ import { dismissalOf, listFindings } from '../state/selection';
 import { CopyButton } from './CopyButton';
 import { useAnnounce } from './Frame';
 import { Sheet } from './Sheet';
+import { shortTitle } from './summary';
 
 export const TITLE_IN_DRAFT_MAX = 120;
 
-const REASONS: { reason: DismissReason; name: string; line: string }[] = [
-  { reason: 'wrong', name: 'Wrong', line: 'The finding is mistaken. Saved to your pack so the same mistake is not made again.' },
-  { reason: 'intended', name: 'Intended', line: 'The code is right for a reason the reviewer could not know. Saved to your pack as a product fact.' },
-  { reason: 'not-now', name: 'Not now', line: 'Hide it on this pull request only. Nothing is saved to your pack.' },
+/** The reasons, as the person chooses them: what each one is, and what Airlock does with it. */
+export const REASONS: { reason: DismissReason; name: string; line: string }[] = [
+  { reason: 'wrong', name: 'The finding is mistaken', line: 'Airlock saves a line so the same mistake is not made again.' },
+  { reason: 'intended', name: 'The code is right for a reason Airlock could not know', line: 'Saved as a fact about your product.' },
+  { reason: 'not-now', name: 'Hide it on this pull request only', line: 'Nothing is saved.' },
 ];
 
+export const DISMISS_LEAD = 'It leaves this review. Nothing is sent to GitHub. You can bring it back under More.';
+export const LINE_LABEL = 'The line Airlock will remember';
 export const INTENDED_PLACEHOLDER = 'The product fact the reviewer did not know';
-export const INSTRUCTION_NOTE = 'This line is given to the reviewer as an instruction in every later review of this repository. Write it so it is true on its own.';
+export const INSTRUCTION_NOTE = 'Airlock reads this line in every later review of this repository. You can remove it in Settings.';
 
 /** Letters that show as blank space: the Hangul fillers and the braille blank. */
 const BLANK_LETTERS = /[\u115F\u1160\u3164\uFFA0\u2800]/g;
@@ -43,7 +47,7 @@ export interface SheetDraft {
   text: string;
   /** The person has typed in the field, so a change of reason keeps the text. */
   typed: boolean;
-  /** This sheet pressed Save and has not been refused or undone since: a dismissal that then appears is its own. */
+  /** This sheet pressed Dismiss and has not been refused or undone since: a dismissal that then appears is its own. */
   submitted: boolean;
 }
 
@@ -112,7 +116,7 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
   const showing = !current ? 'stale' : foreign ? 'dismissed' : result === null ? 'form' : 'result';
   useEffect(() => { if (offline) announce(OFFLINE_KEPT); }, [announce, offline]);
 
-  // Pressing Save is only this sheet's own until it is refused, undone or lost with the service: a save whose answer
+  // Pressing Dismiss is only this sheet's own until it is refused, undone or lost with the service: a save whose answer
   // never came cannot claim a dismissal that appears later.
   const wasResult = useRef(showing === 'result');
   useEffect(() => {
@@ -167,14 +171,16 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
 
   const header = (
     <>
-      <h2 className="title" id={titleId} tabIndex={-1} ref={heading}>Dismiss this finding</h2>
-      <p className="title">{finding.title}</p>
+      <h2 className="ap-sheet-title" id={titleId} tabIndex={-1} ref={heading}>Dismiss this finding</h2>
+      <p className="muted">{shortTitle(finding)}</p>
     </>
   );
   const shell = (children: React.ReactNode) => (
-    <Sheet labelledBy={titleId} initialFocus={heading} returnFocus={false} active={active} onClose={close}>
-      {header}
-      {children}
+    <Sheet labelledBy={titleId} initialFocus={heading} returnFocus={false} active={active} bottom onClose={close}>
+      <div className="ap-sheet">
+        {header}
+        {children}
+      </div>
     </Sheet>
   );
 
@@ -185,7 +191,7 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
         {text !== '' && <pre className="quote">{text}</pre>}
         <div className="actions">
           <CopyButton text={() => text} label="Copy line" />
-          {showing === 'stale' && <button type="button" className="btn primary" disabled>Save</button>}
+          {showing === 'stale' && <button type="button" className="btn primary" disabled>Dismiss</button>}
           <button type="button" className="btn" onClick={onClose}>Close</button>
         </div>
       </>,
@@ -208,25 +214,27 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
 
   return shell(
     <>
-      <div role="radiogroup" aria-labelledby={groupId}>
-        <p className="label" id={groupId}>Why are you dismissing it?</p>
-        {REASONS.map((r) => (
-          <div key={r.reason} className="choice">
-            <input
-              type="radio" id={`${groupId}-${r.reason}`} name={groupId} checked={reason === r.reason}
-              aria-describedby={`${groupId}-${r.reason}-line`} onChange={() => choose(r.reason)}
-            />
-            <div>
-              <label htmlFor={`${groupId}-${r.reason}`}><strong>{r.name}</strong></label>
-              <span className="muted block" id={`${groupId}-${r.reason}-line`}>{r.line}</span>
+      <p>{DISMISS_LEAD}</p>
+      <div className="ap-group" role="radiogroup" aria-labelledby={groupId}>
+        <p className="label" id={groupId}>Why?</p>
+        <div className="ap-opts">
+          {REASONS.map((r) => (
+            <div key={r.reason} className="ap-opt">
+              <input
+                type="radio" id={`${groupId}-${r.reason}`} name={groupId} checked={reason === r.reason}
+                aria-describedby={`${groupId}-${r.reason}-line`} onChange={() => choose(r.reason)}
+              />
+              <div>
+                <label htmlFor={`${groupId}-${r.reason}`}><strong>{r.name}</strong></label>
+                <span className="muted block" id={`${groupId}-${r.reason}-line`}>{r.line}</span>
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
       {saves && (
-        <div className="part">
-          <p>{INSTRUCTION_NOTE}</p>
-          <label htmlFor={fieldId} className="label">The line that will be saved to your pack</label>
+        <div className="ap-field">
+          <label htmlFor={fieldId} className="label">{LINE_LABEL}</label>
           <textarea
             id={fieldId} className="input" rows={3} value={text} spellCheck={false}
             {...(reason === 'intended' ? { placeholder: INTENDED_PLACEHOLDER } : {})}
@@ -236,14 +244,15 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
           />
           <p className="muted">{`${[...text].length} of ${LEARNED_TEXT_MAX}`}</p>
           {problem !== null && <p id={errorId} className="detail">{problem}</p>}
+          <p className="muted">{INSTRUCTION_NOTE}</p>
         </div>
       )}
       {save.reply !== null && <p role="alert" className="notice">{save.reply}</p>}
       {undo.reply !== null && <p role="status" className="muted">{undo.reply}</p>}
       {offline && <p className="notice">{OFFLINE_KEPT}</p>}
-      <div className="actions">
-        <button type="button" className="btn primary" disabled={reason === null || problem !== null || busy || offline} onClick={submit}>Save</button>
+      <div className="ap-row-buttons">
         <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+        <button type="button" className="btn primary" disabled={reason === null || problem !== null || busy || offline} onClick={submit}>Dismiss</button>
       </div>
     </>,
   );

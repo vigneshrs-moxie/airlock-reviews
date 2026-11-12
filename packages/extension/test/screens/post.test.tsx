@@ -11,7 +11,9 @@ import { also, finding, reviewState, type ReviewOptions } from './review-fixture
 
 afterEach(cleanup);
 
-const FIXED = 'Airlock posts these as one review with the Comment action. It never approves or requests changes.';
+const ACCOUNT = 'Posts as bob on acme/widgets#1, as a comment. Airlock never approves, requests changes or merges.';
+const NOTHING_SENT = 'Nothing has been sent yet.';
+const ON_LINE = (place: string): string => `${place}. It shows in Files changed, next to the code.`;
 
 type Reply = PostReply extends infer R ? (R extends { ticket: number } ? Omit<R, 'ticket'> : never) : never;
 
@@ -45,6 +47,7 @@ const field = (name: string) => screen.getByRole('textbox', { name }) as HTMLTex
 const type = (name: string, value: string) => fireEvent.change(field(name), { target: { value } });
 const openDetail = (title: string) => fireEvent.click(screen.getByText(title, { selector: '.finding-card .title' }));
 const tick = (title: string) => fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(`${title}$`) }));
+const follows = (a: HTMLElement, b: HTMLElement) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
 
 const names = (list: string): string => `Names ${list}: GitHub notifies them unless the name is inside code.`;
 const WAIT = 'Wait for the current action to finish.';
@@ -52,22 +55,22 @@ const NOT_LEARNED = 'Airlock could not learn what happened to this post. Look at
 
 const itemFor = (f: Finding, over: Parameters<typeof previewItem>[1] = {}) => previewItem(f, over);
 
-/** Opens the first finding, presses Post comment, and answers with its preview. */
+/** Opens the first finding, presses Comment on GitHub, and answers with its preview. */
 function previewed(findings: Finding[] = [finding(1)], opts: ReviewOptions = {}, preview?: PostPreviewReply): Mounted & { preview: PostPreviewReply } {
   const m = mount(findings, opts);
   openDetail((findings[0] as Finding).title);
-  fireEvent.click(button('Post comment'));
+  fireEvent.click(button('Comment on GitHub'));
   const shownPreview = preview ?? previewOf([itemFor(findings[0] as Finding)]);
   m.answer({ kind: 'preview', preview: shownPreview });
   return { ...m, preview: shownPreview };
 }
 
 describe('the post sheet', () => {
-  it('Post comment opens the sheet with the service preview for that finding', () => {
+  it('Comment on GitHub opens the sheet with the service preview for that finding', () => {
     const f = finding(1);
     const m = mount([f, finding(2)]);
     openDetail('Problem 1');
-    fireEvent.click(button('Post comment'));
+    fireEvent.click(button('Comment on GitHub'));
     expect(m.last()).toEqual({
       type: 'preview-post', ticket: expect.any(Number),
       body: { repo: 'acme/widgets', number: 1, reviewId: 'r_0000000001', items: [{ fingerprint: f.fingerprint }] },
@@ -76,16 +79,51 @@ describe('the post sheet', () => {
     const preview = previewOf([itemFor(f, { body: 'The exact comment.' })]);
     m.answer({ kind: 'preview', preview });
     const d = dialog();
-    expect(d.getByRole('heading', { name: 'Post to GitHub' })).toBeTruthy();
-    expect(d.getByText('Posts as bob on acme/widgets#1.')).toBeTruthy();
-    expect(d.getByText('On src/file1.ts, line 10')).toBeTruthy();
+    expect(d.getByRole('heading', { name: 'Comment on GitHub' })).toBeTruthy();
+    expect(d.getByText('Where it goes')).toBeTruthy();
+    expect(d.getByText('On the line')).toBeTruthy();
+    expect(d.getByText(ON_LINE('src/file1.ts, line 10'))).toBeTruthy();
+    expect(d.getByText('The exact text')).toBeTruthy();
     expect(field('Comment 1').value).toBe('The exact comment.');
     expect(d.getByText(`${'The exact comment.'.length} of 4000`)).toBeTruthy();
     expect(field('Summary').value).toBe('Review notes from Airlock: 1 comment.');
-    expect(d.getByText(FIXED)).toBeTruthy();
+    expect(d.getByText(`${ACCOUNT} ${NOTHING_SENT}`)).toBeTruthy();
     expect(d.getByRole('checkbox', { name: 'Put in the summary instead' })).toBeTruthy();
-    expect(button('Post 1 comment to GitHub').disabled).toBe(false);
+    expect(button('Post comment').disabled).toBe(false);
+    expect(button('Post comment').classList.contains('primary')).toBe(true);
     expect(d.queryByRole('button', { name: 'Update preview' })).toBeNull();
+  });
+
+  it('leads with where the comment goes, then the exact text, the account line and the buttons', () => {
+    previewed();
+    const d = dialog();
+    const order = [d.getByRole('heading', { name: 'Comment on GitHub' }), d.getByText('Where it goes'), d.getByText('On the line'),
+      d.getByText('The exact text'), field('Comment 1'), d.getByText(`${ACCOUNT} ${NOTHING_SENT}`), button('Post comment'), button('Cancel')];
+    for (const [i, node] of order.slice(1).entries()) expect(follows(order[i]!, node), node.textContent ?? '').toBe(true);
+    expect(document.querySelector('.sheet')!.classList.contains('bottom')).toBe(true);
+  });
+
+  it('says for each comment whether it goes on the line or in the review summary', () => {
+    const long = 'The pause handler calls the billing guard only after the account state is written, so it can order.';
+    const [a, b, c] = [finding(1, { short: 'Pausing skips the guard' }), finding(2, { title: long }), finding(3)];
+    previewed([a, b, c], {}, previewOf([
+      itemFor(a), itemFor(b, { placement: 'summary', whySummary: 'The line is not part of the diff GitHub shows.' }),
+      itemFor(c, { placement: 'summary', whySummary: 'You chose the summary.', line: null }),
+    ]));
+    const d = dialog();
+    expect(d.getByRole('heading', { name: 'Comment on GitHub: 3 comments' })).toBeTruthy();
+    expect(d.getByText('Where they go')).toBeTruthy();
+    const places = [...document.querySelectorAll<HTMLElement>('.ap-dest')];
+    expect(places.map((p) => p.querySelector('strong')?.textContent)).toEqual(['On the line', 'In the review summary', 'In the review summary']);
+    // Each is headed by its short title: the summary stage's, else the title cut at a word.
+    expect(places.map((p) => p.querySelector('.title')?.textContent)).toEqual(['Pausing skips the guard', 'The pause handler calls the billing guard only after the…', 'Problem 3']);
+    expect([...document.querySelectorAll('.ap-field > .muted:first-child')].map((p) => p.textContent))
+      .toEqual(['Pausing skips the guard', 'The pause handler calls the billing guard only after the…', 'Problem 3']);
+    expect(within(places[0]!).getByText(ON_LINE('src/file1.ts, line 10'))).toBeTruthy();
+    expect(within(places[1]!).getByText('The line is not part of the diff GitHub shows. The comment names the file and line.')).toBeTruthy();
+    expect(within(places[2]!).getByText('You chose the summary. The comment names the file.')).toBeTruthy();
+    expect(d.getByText('Posted together as one review by bob, as comments. Open each to read or edit its exact text. Nothing has been sent yet.')).toBeTruthy();
+    expect(button('Post 3 comments')).toBeTruthy();
   });
 
   it('says why a comment goes in the summary, and a range of lines', () => {
@@ -94,8 +132,8 @@ describe('the post sheet', () => {
       itemFor(a, { placement: 'summary', whySummary: 'The line is not part of the diff GitHub shows.' }),
       itemFor(b, { line: 22, startLine: 20 }),
     ]));
-    expect(dialog().getByText('In the summary: The line is not part of the diff GitHub shows.')).toBeTruthy();
-    expect(dialog().getByText('On src/file2.ts, lines 20 to 22')).toBeTruthy();
+    expect(dialog().getByText('The line is not part of the diff GitHub shows. The comment names the file and line.')).toBeTruthy();
+    expect(dialog().getByText(ON_LINE('src/file2.ts, lines 20 to 22'))).toBeTruthy();
     // A comment the service put in the summary because its line is not in the diff cannot be moved inline.
     expect(dialog().getAllByRole('checkbox', { name: 'Put in the summary instead' })).toHaveLength(1);
   });
@@ -126,11 +164,11 @@ describe('the post sheet', () => {
     const f = finding(1);
     const m = previewed([f]);
     type('Comment 1', 'A better comment.');
-    expect(screen.queryByRole('button', { name: /^Post 1 comment/ })).toBeNull();
+    expect(dialog().queryByRole('button', { name: 'Post comment' })).toBeNull();
     expect(button('Update preview').disabled).toBe(false);
     // Typed back to what the service showed: the preview is the text again.
     type('Comment 1', m.preview.items[0]!.body);
-    expect(button('Post 1 comment to GitHub')).toBeTruthy();
+    expect(button('Post comment')).toBeTruthy();
     type('Comment 1', 'A better comment.');
     fireEvent.click(button('Update preview'));
     expect(m.last()).toEqual({
@@ -138,9 +176,9 @@ describe('the post sheet', () => {
       body: { repo: 'acme/widgets', number: 1, reviewId: 'r_0000000001', items: [{ fingerprint: f.fingerprint, body: 'A better comment.' }] },
     });
     // While the new preview is coming, nothing can be posted.
-    expect(screen.queryByRole('button', { name: /^Post 1 comment/ })).toBeNull();
+    expect(dialog().queryByRole('button', { name: 'Post comment' })).toBeNull();
     m.answer({ kind: 'preview', preview: previewOf([itemFor(f, { body: 'A better comment.' })], { previewId: 'pv_1111111111111111' }) });
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     expect(m.last()).toEqual({ type: 'post', ticket: expect.any(Number), previewId: 'pv_1111111111111111', fingerprints: [f.fingerprint] });
   });
 
@@ -169,7 +207,7 @@ describe('the post sheet', () => {
     fireEvent.click(dialog().getByRole('checkbox', { name: 'Put in the summary instead' }));
     expect(button('Update preview')).toBeTruthy();
     fireEvent.click(dialog().getByRole('checkbox', { name: 'Put in the summary instead' }));
-    expect(button('Post 1 comment to GitHub')).toBeTruthy();
+    expect(button('Post comment')).toBeTruthy();
   });
 
   it('a mention shows the notice with the names: the service\'s for a fresh preview, the typed ones for an edit', () => {
@@ -204,7 +242,7 @@ describe('the post sheet', () => {
   it('after a 404 on the post, says it is checking whether the post already went through, then that the preview expired', () => {
     const f = finding(1);
     const m = previewed([f]);
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     m.answer({ kind: 'waiting', checking: true }, { busy: true });
     expect(dialog().getByRole('status').textContent).toBe('Checking whether this post already went through…');
     expect(dialog().queryByText('Waiting to hear whether GitHub accepted the comments…')).toBeNull();
@@ -216,9 +254,18 @@ describe('the post sheet', () => {
   it('says nothing has been sent only while that is true', () => {
     const f = finding(1);
     const m = previewed([f]);
-    const exact = 'This is the exact text. Nothing has been sent yet.';
+    const exact = `${ACCOUNT} ${NOTHING_SENT}`;
     expect(dialog().getByText(exact)).toBeTruthy();
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    // An edit that was not previewed: the text shown is not what would be posted, so the line is not said.
+    type('Comment 1', 'Edited.');
+    expect(dialog().queryByText(exact)).toBeNull();
+    expect(dialog().getByText(ACCOUNT)).toBeTruthy();
+    // Nor while the new preview is asked for; it comes back with the fresh preview.
+    fireEvent.click(button('Update preview'));
+    expect(dialog().queryByText(exact)).toBeNull();
+    m.answer({ kind: 'preview', preview: previewOf([itemFor(f, { body: 'Edited.' })]) });
+    expect(dialog().getByText(exact)).toBeTruthy();
+    fireEvent.click(button('Post comment'));
     expect(dialog().queryByText(exact)).toBeNull();
     m.answer({ kind: 'waiting' }, { busy: true });
     expect(dialog().queryByText(exact)).toBeNull();
@@ -257,7 +304,7 @@ describe('the post sheet', () => {
     fireEvent.click(button('Update preview'));
     m.answer({ kind: 'preview', preview: previewOf([itemFor(f, { body: 'Better.' })]) });
     expect(document.querySelector('[aria-live]')?.textContent).toBe('Preview updated.');
-    expect(document.activeElement).toBe(button('Post 1 comment to GitHub'));
+    expect(document.activeElement).toBe(button('Post comment'));
   });
 
   it('Enter in a field adds a line and sends nothing', () => {
@@ -277,7 +324,7 @@ describe('the post sheet', () => {
     const f = finding(1);
     const m = previewed([f]);
     m.show(reviewState([f], over));
-    const main = button('Post 1 comment to GitHub');
+    const main = button('Post comment');
     expect(main.disabled).toBe(true);
     expect(main.getAttribute('aria-describedby')).toBe(dialog().getByText(reason).id);
     type('Comment 1', 'Edited.');
@@ -305,7 +352,7 @@ describe('the post sheet', () => {
     type('Summary', 'Edited summary.');
     fireEvent.click(button('Update preview'));
     m.answer({ kind: 'preview', preview: previewOf([itemFor(a, { body: 'Edited first.' }), itemFor(b)], { summary: 'Edited summary.', previewId: 'pv_2222222222222222' }) });
-    fireEvent.click(button('Post 2 comments to GitHub'));
+    fireEvent.click(button('Post 2 comments'));
     const said = 'GitHub refused the comments: Line 10 is not part of the diff. Nothing was posted.';
     m.answer({ kind: 'refused', message: said });
     expect(dialog().getByRole('alert').textContent).toBe(said);
@@ -314,7 +361,7 @@ describe('the post sheet', () => {
     expect(field('Summary').value).toBe('Edited summary.');
     // A new preview of the kept texts comes before another post.
     expect(button('Update preview').disabled).toBe(false);
-    expect(screen.queryByRole('button', { name: /^Post 2 comments/ })).toBeNull();
+    expect(dialog().queryByRole('button', { name: 'Post 2 comments' })).toBeNull();
     // The next edit clears the sentence.
     type('Comment 1', 'Edited again.');
     expect(dialog().queryByRole('alert')).toBeNull();
@@ -323,7 +370,7 @@ describe('the post sheet', () => {
   it('a refused first preview says why, with Close', () => {
     const m = mount([finding(1)]);
     openDetail('Problem 1');
-    fireEvent.click(button('Post comment'));
+    fireEvent.click(button('Comment on GitHub'));
     m.answer({ kind: 'refused', message: 'This finding is already posted on this pull request: Problem 1.' });
     expect(dialog().getByRole('alert').textContent).toBe('This finding is already posted on this pull request: Problem 1.');
     fireEvent.click(button('Close'));
@@ -333,7 +380,7 @@ describe('the post sheet', () => {
   it('posted: says how many, links to the review, and marks the finding', () => {
     const f = finding(1);
     const m = previewed([f]);
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     const record = recordOf([f.fingerprint]);
     m.answer({ kind: 'posted', record }, { posts: [record] });
     expect(dialog().getByText('Posted 1 comment.')).toBeTruthy();
@@ -346,7 +393,7 @@ describe('the post sheet', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.getByText('Posted', { selector: '.mark *' })).toBeTruthy();
     expect((screen.getByRole('link', { name: 'Open on GitHub' }) as HTMLAnchorElement).getAttribute('href')).toBe(record.url);
-    expect(button('Post comment').disabled).toBe(true);
+    expect(button('Comment on GitHub').disabled).toBe(true);
   });
 
   /** A post whose outcome is not known, in the sheet, after its texts were edited and previewed. */
@@ -355,7 +402,7 @@ describe('the post sheet', () => {
     type('Comment 1', 'Kept text.');
     fireEvent.click(button('Update preview'));
     m.answer({ kind: 'preview', preview: previewOf([itemFor(f, { body: 'Kept text.' })]) });
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     const record = recordOf([f.fingerprint], { outcome: 'unknown' });
     m.answer({ kind: 'unknown', message: UNKNOWN_SENTENCE, record }, { posts: [record] });
     return { m, record };
@@ -441,15 +488,15 @@ describe('the post sheet', () => {
     type('Comment 1', 'Kept text.');
     fireEvent.click(button('Update preview'));
     m.answer({ kind: 'preview', preview: previewOf([itemFor(f, { body: 'Kept text.' })]) });
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     m.answer({ kind: 'unsent', message: 'Airlock could not reach its service, so nothing was sent.' });
     const d = dialog();
     expect(d.getByRole('alert').textContent).toBe('Airlock could not reach its service, so nothing was sent.');
     expect(d.queryByRole('link', { name: 'Open the pull request' })).toBeNull();
     expect(field('Comment 1').value).toBe('Kept text.');
     // Not a post whose outcome is unknown: the same preview can be posted again, and nothing has been sent.
-    expect(d.getByText('This is the exact text. Nothing has been sent yet.')).toBeTruthy();
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    expect(d.getByText(`${ACCOUNT} ${NOTHING_SENT}`)).toBeTruthy();
+    fireEvent.click(button('Post comment'));
     expect(m.dispatch.mock.calls.filter(([a]) => a.type === 'post')).toHaveLength(2);
   });
 
@@ -458,8 +505,12 @@ describe('the post sheet', () => {
     mount([f], { posts: [recordOf([f.fingerprint], { outcome: 'unknown' })] });
     expect(screen.getByText('Not known whether this was posted', { selector: '.finding-card *' })).toBeTruthy();
     openDetail('Problem 1');
-    expect(screen.getByText('Not known whether this was posted')).toBeTruthy();
-    expect(button('Post comment').disabled).toBe(true);
+    // Under Comment on GitHub, the mark in place of its line; the full mark, with its controls, in the screen.
+    const comment = button('Comment on GitHub');
+    expect(comment.disabled).toBe(true);
+    expect(document.getElementById(comment.getAttribute('aria-describedby')!)?.textContent).toBe('Not known whether this was posted');
+    expect(within(document.querySelector<HTMLElement>('.ap-onhub')!).getByText('Not known whether this was posted')).toBeTruthy();
+    expect(within(document.querySelector<HTMLElement>('.ap-onhub')!).getByRole('button', { name: 'It was not posted' })).toBeTruthy();
   });
 
   it('a finding is posted under any of its aliases, either way round', () => {
@@ -479,8 +530,8 @@ describe('the post sheet', () => {
     expect(button('Post selected (1)').disabled).toBe(true);
     expect(screen.getByText(reason)).toBeTruthy();
     openDetail('Problem 1');
-    expect(button('Post comment').disabled).toBe(true);
-    expect(button('Post comment').getAttribute('aria-describedby')).toBe(screen.getByText(reason).id);
+    expect(button('Comment on GitHub').disabled).toBe(true);
+    expect(button('Comment on GitHub').getAttribute('aria-describedby')).toBe(screen.getByText(reason).id);
   });
 
   it('posting is disabled with its reason offline', () => {
@@ -495,7 +546,7 @@ describe('the post sheet', () => {
   it('a second press during a post sends nothing and the sheet cannot be closed', () => {
     const f = finding(1);
     const m = previewed([f]);
-    const post = button('Post 1 comment to GitHub');
+    const post = button('Post comment');
     fireEvent.click(post);
     fireEvent.click(post);
     expect(m.dispatch.mock.calls.filter(([a]) => a.type === 'post')).toHaveLength(1);
@@ -552,7 +603,7 @@ describe('the post sheet keeps its texts', () => {
   it('a post with no answer before the service went away shows what the records say when it is back', () => {
     const f = finding(1);
     const m = previewed([f]);
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     m.show(offlineOf(reviewState([f])));
     expect(screen.getByRole('dialog')).toBeTruthy();
     const record = recordOf([f.fingerprint]);
@@ -563,7 +614,7 @@ describe('the post sheet keeps its texts', () => {
   it('a post with no answer finds its record when the service is back by the same rule as the marks (an alias)', () => {
     const f = finding(1, { aliases: ['00000000000000aa'] });
     const m = previewed([f]);
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     m.show(offlineOf(reviewState([f])));
     m.show(reviewState([f], { posts: [recordOf(['00000000000000aa'])] }));
     expect(dialog().getByText('Posted 1 comment.')).toBeTruthy();
@@ -572,7 +623,7 @@ describe('the post sheet keeps its texts', () => {
   it('a post with no answer and no record when the service is back says so and keeps the texts', () => {
     const f = finding(1);
     const m = previewed([f]);
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     m.show(offlineOf(reviewState([f])));
     m.show(reviewState([f]));
     expect(dialog().getByRole('alert').textContent).toBe(NOT_LEARNED);
@@ -581,18 +632,18 @@ describe('the post sheet keeps its texts', () => {
     expect(button('Update preview')).toBeTruthy();
   });
 
-  it('closes on Escape and gives focus back to Post comment', () => {
+  it('closes on Escape and gives focus back to Comment on GitHub', () => {
     previewed();
     fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(screen.queryByRole('dialog')).toBeNull();
-    expect(document.activeElement).toBe(button('Post comment'));
+    expect(document.activeElement).toBe(button('Comment on GitHub'));
   });
 
   it('Cancel drops the draft: the next sheet asks for a new preview', () => {
     const m = previewed();
     type('Comment 1', 'Dropped.');
     fireEvent.click(button('Cancel'));
-    fireEvent.click(button('Post comment'));
+    fireEvent.click(button('Comment on GitHub'));
     expect(m.last().type).toBe('preview-post');
     expect(dialog().getByText('Getting the preview…')).toBeTruthy();
   });
@@ -600,7 +651,7 @@ describe('the post sheet keeps its texts', () => {
   it('a post in flight when the tab moves is not judged by the other pull request\'s records, and is when the tab is back', () => {
     const f = finding(1);
     const m = previewed([f]);
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     m.show(reviewState([f], { busy: true }));
     // The tab moves to pull request 2: its review, and a record of its own that holds a finding with the same fingerprint.
     const elsewhere = recordOf([f.fingerprint], { number: 2, url: 'https://github.com/acme/widgets/pull/2#pullrequestreview-77' });
@@ -621,7 +672,7 @@ describe('the post sheet keeps its texts', () => {
   it('a post in flight, back on its pull request with no record of it there, says it could not learn what happened', () => {
     const f = finding(1);
     const m = previewed([f]);
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     m.show(reviewState([f], { busy: true }));
     m.show(reviewState([f], { pr: { number: 2 }, doc: { id: 'r_0000000002' } }));
     m.show(reviewState([f]));
@@ -633,7 +684,7 @@ describe('the post sheet keeps its texts', () => {
     const m = previewed([f]);
     m.show(reviewState([f], { doc: { id: 'r_0000000002' } }));
     expect(dialog().getByText('This review is no longer the one on screen, so these comments cannot be posted from it. Closing this loses the texts here.')).toBeTruthy();
-    expect(dialog().queryByRole('button', { name: /^Post 1 comment/ })).toBeNull();
+    expect(dialog().queryByRole('button', { name: 'Post comment' })).toBeNull();
     fireEvent.click(button('Close'));
     expect(screen.queryByRole('dialog')).toBeNull();
   });
@@ -645,7 +696,7 @@ describe('a post in flight', () => {
   it('cannot be closed while the service is away, and shows its outcome when it is back', () => {
     const f = finding(1);
     const m = previewed([f]);
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     m.show(offlineOf(reviewState([f])));
     expect(button('Cancel').disabled).toBe(true);
     fireEvent.keyDown(document.body, { key: 'Escape' });
@@ -663,7 +714,7 @@ describe('a post in flight', () => {
     type('Comment 1', 'Kept.');
     fireEvent.click(button('Update preview'));
     m.answer({ kind: 'preview', preview: previewOf([itemFor(f, { body: 'Kept.' })]) });
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     m.answer({ kind: 'waiting' }, { busy: true });
     expect(dialog().getByText('Waiting to hear whether GitHub accepted the comments…')).toBeTruthy();
     expect(button('Cancel').disabled).toBe(true);
@@ -675,23 +726,23 @@ describe('a post in flight', () => {
     expect(button('Cancel').disabled).toBe(false);
     fireEvent.click(button('Cancel'));
     // The findings stay unmarked; a record read later marks them.
-    expect(button('Post comment').disabled).toBe(false);
+    expect(button('Comment on GitHub').disabled).toBe(false);
     m.show(reviewState([f], { posts: [recordOf([f.fingerprint])] }));
     expect(screen.getByText('Posted', { selector: '.mark *' })).toBeTruthy();
-    expect(button('Post comment').disabled).toBe(true);
+    expect(button('Comment on GitHub').disabled).toBe(true);
   });
 
   it('is the same post when the sheet is hidden and shown again: nothing can be sent and it cannot be closed', () => {
     const f = finding(1);
     const m = previewed([f]);
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    fireEvent.click(button('Post comment'));
     m.show(reviewState([f], { busy: true }));
     m.show({ kind: 'unpaired' });
     expect(screen.queryByRole('dialog')).toBeNull();
     m.show(reviewState([f], { busy: true }));
     expect(button('Cancel').disabled).toBe(true);
-    expect(button('Post 1 comment to GitHub').disabled).toBe(true);
-    fireEvent.click(button('Post 1 comment to GitHub'));
+    expect(button('Post comment').disabled).toBe(true);
+    fireEvent.click(button('Post comment'));
     expect(m.dispatch.mock.calls.filter(([a]) => a.type === 'post')).toHaveLength(1);
   });
 });
@@ -722,7 +773,7 @@ describe('an unknown record can be cleared from the finding', () => {
     const f = finding(1);
     const m = mount([f], { posts: [unknownFor(f)] });
     openDetail('Problem 1');
-    expectClearable(within(document.querySelector<HTMLElement>('main')!), m, unknownFor(f).id);
+    expectClearable(within(document.querySelector<HTMLElement>('.ap-onhub')!), m, unknownFor(f).id);
   });
 
   it('from its Also found entry', () => {
@@ -732,7 +783,7 @@ describe('an unknown record can be cleared from the finding', () => {
     expectClearable(within(screen.getByText('Problem 4', { selector: 'li .title' }).closest('li')!), m, unknownFor(f).id);
   });
 
-  it('moves focus to Keep, back to It was not posted, and after the record is forgotten to Post comment, saying so', () => {
+  it('moves focus to Keep, back to It was not posted, and after the record is forgotten to Comment on GitHub, saying so', () => {
     const f = finding(1);
     const m = mount([f], { posts: [unknownFor(f)] });
     openDetail('Problem 1');
@@ -744,7 +795,7 @@ describe('an unknown record can be cleared from the finding', () => {
     fireEvent.click(scope.getByRole('button', { name: 'It was not posted' }));
     fireEvent.click(scope.getByRole('button', { name: 'It was not posted' }));
     m.answer({ kind: 'forgotten', id: unknownFor(f).id }, { posts: [] });
-    expect(document.activeElement).toBe(button('Post comment'));
+    expect(document.activeElement).toBe(button('Comment on GitHub'));
     expect(document.querySelector('[aria-live]')?.textContent).toBe('Record forgotten.');
   });
 
@@ -805,7 +856,7 @@ describe('the Post buttons', () => {
     expect(bar.disabled).toBe(true);
     expect(document.getElementById(bar.getAttribute('aria-describedby')!)?.textContent).toBe(WAIT);
     openDetail('Problem 1');
-    const one = button('Post comment');
+    const one = button('Comment on GitHub');
     expect(document.getElementById(one.getAttribute('aria-describedby')!)?.textContent).toBe(WAIT);
   });
 

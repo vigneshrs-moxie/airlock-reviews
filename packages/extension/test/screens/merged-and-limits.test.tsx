@@ -2,11 +2,15 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import type { Dropped, Finding } from '@airlock/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { forgetFindingFolds } from '../../src/screens/finding-folds';
 import { PanelScreen } from '../../src/screens/PanelScreen';
 import type { PanelState } from '../../src/state/reduce';
 import { also, dismissal, finding, reviewState, type ReviewOptions } from './review-fixtures';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  forgetFindingFolds();
+});
 
 function show(findings: Finding[], opts: ReviewOptions = {}) {
   const dispatch = vi.fn();
@@ -99,15 +103,19 @@ describe('a finding also raised by other lenses and rules', () => {
   it('lists each one in its detail as the pack title and the lens or rule', () => {
     show([merged]);
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    const part = heading('Also raised by').closest('section')!;
+    fireEvent.click(button('How sure is this'));
+    const part = heading('Also raised by').closest('.ap-line')!;
     expect([...part.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['Orbit · R-7', 'Generic · security', 'mystery']);
   });
   it('has no such part when nothing else raised it, or the list is empty', () => {
     show([finding(1), finding(2, { alsoRaisedBy: [] })]);
     expect(screen.queryByText(/Also raised by/)).toBeNull();
     fireEvent.click(within(cards()[0]!).getByRole('button'));
+    fireEvent.click(button('How sure is this'));
+    expect(heading('From')).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Also raised by' })).toBeNull();
-    fireEvent.click(button('Next'));
+    fireEvent.click(button('Next finding'));
+    expect(heading('From')).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Also raised by' })).toBeNull();
   });
 });
@@ -124,12 +132,12 @@ describe('a dismissal made under one of a finding\'s aliases', () => {
     fireEvent.click(button('Restore Problem 1'));
     expect(dispatch).toHaveBeenCalledWith({ type: 'restore', fingerprint: ALIAS });
   });
-  it('is the dismiss sheet\'s own result after Save, and Undo restores it by the dismissal\'s fingerprint', () => {
+  it('is the dismiss sheet\'s own result after Dismiss, and Undo restores it by the dismissal\'s fingerprint', () => {
     const { rerender, dispatch } = show([merged, finding(2)]);
     fireEvent.click(within(cards()[0]!).getByRole('button'));
     fireEvent.click(button('Dismiss'));
-    fireEvent.click(screen.getByRole('radio', { name: 'Not now' }));
-    fireEvent.click(button('Save'));
+    fireEvent.click(screen.getByRole('radio', { name: 'Hide it on this pull request only' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Dismiss' }));
     rerender(reviewState([merged, finding(2)], { dismissals: [underAlias] }));
     expect(within(screen.getByRole('dialog')).getByText('Hidden on this pull request.')).toBeTruthy();
     fireEvent.click(button('Undo'));

@@ -228,14 +228,14 @@ describe('Open in Airlock while a sheet is open', () => {
     const m = mount();
     fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
-    fireEvent.click(screen.getByRole('radio', { name: 'Wrong' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'The finding is mistaken' }));
     const line = 'Flagged "Problem 1" in src/file1.ts. Wrong because: the caller checks it first.';
-    fireEvent.change(textbox('The line that will be saved to your pack'), { target: { value: line } });
-    textbox('The line that will be saved to your pack').focus();
+    fireEvent.change(textbox('The line Airlock will remember'), { target: { value: line } });
+    textbox('The line Airlock will remember').focus();
     m.ask(finding(2).id, 1);
     expect(dialog()).not.toBeNull();
-    expect(textbox('The line that will be saved to your pack').value).toBe(line);
-    expect(document.activeElement).toBe(textbox('The line that will be saved to your pack'));
+    expect(textbox('The line Airlock will remember').value).toBe(line);
+    expect(document.activeElement).toBe(textbox('The line Airlock will remember'));
     expect(detailHeading()?.textContent).toBe('Problem 1');
     fireEvent.click(within(dialog()!).getByRole('button', { name: 'Cancel' }));
     expect(dialog()).toBeNull();
@@ -245,7 +245,7 @@ describe('Open in Airlock while a sheet is open', () => {
   it('waits for a post sheet to close: the sheet and its edited comment stay, then the finding opens', () => {
     const m = mount();
     fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Post comment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Comment on GitHub' }));
     const action = m.dispatch.mock.calls.at(-1)![0] as Extract<UserAction, { type: 'preview-post' }>;
     const preview = previewOf([previewItem(finding(1))]);
     m.setState({ ...reviewState([finding(1), finding(2)]), post: { ticket: action.ticket, kind: 'preview', preview } as PostReply });
@@ -285,9 +285,9 @@ describe('the GitHub tab loads again while a sheet is open', () => {
     />);
     fireEvent.click(await screen.findByRole('button', { name: /Problem 1/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
-    fireEvent.click(screen.getByRole('radio', { name: 'Wrong' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'The finding is mistaken' }));
     const line = 'Flagged "Problem 1" in src/file1.ts. Wrong because: the caller checks it first.';
-    const field = () => screen.getByRole('textbox', { name: 'The line that will be saved to your pack' }) as HTMLTextAreaElement;
+    const field = () => screen.getByRole('textbox', { name: 'The line Airlock will remember' }) as HTMLTextAreaElement;
     fireEvent.change(field(), { target: { value: line } });
     const reads = svc.calls.filter((c) => c === 'GET /pr').length;
 

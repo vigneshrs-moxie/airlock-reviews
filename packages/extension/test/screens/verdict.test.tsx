@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { fixPrompt, type Finding } from '@airlock/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { forgetFindingFolds } from '../../src/screens/finding-folds';
 import { PanelScreen, type PanelScreenProps } from '../../src/screens/PanelScreen';
 import type { PanelState } from '../../src/state/reduce';
 import type { JumpResult } from '../../src/state/jump';
@@ -11,6 +12,7 @@ import { also, dismissal, finding, reviewState, type ReviewOptions } from './rev
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  forgetFindingFolds();
 });
 
 function show(state: PanelState, extra: Partial<PanelScreenProps> = {}) {
@@ -29,6 +31,8 @@ const heading = (name: string | RegExp) => screen.getByRole('heading', { name })
 const cards = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>('.finding-card')];
 const tick = (title: string) => fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(`${title}$`) }));
 const follows = (a: HTMLElement, b: HTMLElement) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+/** Opens a fold of the finding screen by the start of its name (a fold's name ends with its count or place). */
+const openFold = (name: string) => fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${name}`) }));
 
 function clipboard(writeText: (text: string) => Promise<void>) {
   Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
@@ -246,9 +250,12 @@ describe('the detail of a finding', () => {
     expect(heading('Problem 1')).toBeTruthy();
     expect(document.activeElement).toBe(heading('Problem 1'));
     expect(screen.queryByRole('heading', { name: 'Findings' })).toBeNull();
-    for (const name of ['What happens', 'Why', 'Suggested change', 'Also involves', 'Checked', 'Would be wrong if', 'From']) expect(heading(name), name).toBeTruthy();
-    expect(screen.getByText('Happens 1.')).toBeTruthy();
+    expect(heading('What to do')).toBeTruthy();
     expect(screen.getByText('Change 1.')).toBeTruthy();
+    for (const name of ['What happens', 'Why it matters', 'The code', 'Also involves', 'How sure is this']) openFold(name);
+    expect(screen.getAllByText('Happens 1.').length).toBeGreaterThan(0);
+    expect(screen.getByText('Why 1.')).toBeTruthy();
+    for (const name of ['Checked', 'It would be wrong if', 'From']) expect(heading(name), name).toBeTruthy();
     expect(screen.getByText('Checked 1.')).toBeTruthy();
     expect(screen.getByText('Callers already round.')).toBeTruthy();
     expect(screen.getByText('code 1;').closest('pre')).not.toBeNull();
@@ -260,12 +267,16 @@ describe('the detail of a finding', () => {
   it('leaves out an empty part', () => {
     review([finding(1, { wouldBeWrongIf: '', checked: '', suggestedChange: '' })]);
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    for (const name of ['Would be wrong if', 'Checked', 'Suggested change', 'Also involves']) expect(screen.queryByRole('heading', { name }), name).toBeNull();
+    openFold('How sure is this');
+    for (const name of ['It would be wrong if', 'Checked', 'What to do']) expect(screen.queryByRole('heading', { name }), name).toBeNull();
+    expect(queryButton(/^Also involves/)).toBeNull();
+    expect(heading('From')).toBeTruthy();
   });
   it('shows each connected place as a button that calls onJump and shows what it resolved to', async () => {
     const onJump = vi.fn().mockResolvedValue({ sentence: 'Jumped to src/other.ts line 7.', needsReload: false });
     show(reviewState([full]), { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
+    openFold('Also involves');
     const place = button(/src\/other\.ts:7/);
     expect(place.textContent).toContain('caller');
     expect(button(/src\/lib\.ts/).textContent).not.toContain(':');
@@ -275,16 +286,16 @@ describe('the detail of a finding', () => {
     expect(await screen.findByText('Jumped to src/other.ts line 7.')).toBeTruthy();
     expect(place.parentElement?.textContent).toContain('Jumped to src/other.ts line 7.');
   });
-  it('Jump to line calls onJump with the finding path and start line; the default says it is not connected', async () => {
+  it('Show in diff calls onJump with the finding path and start line; the default says it is not connected', async () => {
     const onJump = vi.fn().mockResolvedValue({ sentence: 'Done.', needsReload: false });
     show(reviewState([full]), { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    fireEvent.click(button('Jump to line'));
+    fireEvent.click(button('Show in diff'));
     expect(onJump).toHaveBeenCalledWith(REVIEWED, { path: 'src/file1.ts', line: 10, kind: 'changed' }, NO_RELOAD);
     cleanup();
     review([full]);
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    fireEvent.click(button('Jump to line'));
+    fireEvent.click(button('Show in diff'));
     expect(await screen.findByText('Jumping is not connected yet.')).toBeTruthy();
   });
   it('says what kind of place each jump is: changed, outside the changed lines, or not in the pull request', () => {
@@ -293,8 +304,9 @@ describe('the detail of a finding', () => {
     const outside = { ...full, anchor: { status: 'outside-diff' as const, startLine: 40, endLine: 40 } };
     show(reviewState([outside], { doc: { files } }), { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    fireEvent.click(button('Jump to line'));
+    fireEvent.click(button('Show in diff'));
     expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/file1.ts', line: 40, kind: 'outside' }, NO_RELOAD);
+    openFold('Also involves');
     fireEvent.click(button(/src\/lib\.ts/));
     expect(onJump).toHaveBeenLastCalledWith(REVIEWED, { path: 'src/lib.ts', line: null, kind: 'changed' }, NO_RELOAD);
     fireEvent.click(button(/src\/other\.ts:7/));
@@ -305,7 +317,8 @@ describe('the detail of a finding', () => {
     const onJump = vi.fn(() => new Promise<JumpResult>((resolve) => answers.push(resolve)));
     show(reviewState([full]), { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    fireEvent.click(button('Jump to line'));
+    fireEvent.click(button('Show in diff'));
+    openFold('Also involves');
     fireEvent.click(button(/src\/other\.ts:7/));
     await act(async () => { answers[1]!({ sentence: 'Opened src/other.ts in a new tab; it is not part of this pull request.', needsReload: false }); });
     await act(async () => { answers[0]!({ sentence: 'Asked GitHub to show src/file1.ts:10.', needsReload: false }); });
@@ -317,7 +330,7 @@ describe('the detail of a finding', () => {
     const onJump = vi.fn().mockResolvedValueOnce(stuck).mockResolvedValueOnce({ sentence: 'Showing src/file1.ts:10.', needsReload: false });
     show(reviewState([full]), { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    fireEvent.click(button('Jump to line'));
+    fireEvent.click(button('Show in diff'));
     const reload = await screen.findByRole('button', { name: 'Reload the GitHub tab' });
     expect(screen.getByText(stuck.sentence)).toBeTruthy();
     expect(reload.parentElement?.textContent).toContain(stuck.sentence);
@@ -334,6 +347,7 @@ describe('the detail of a finding', () => {
     const onJump = vi.fn().mockResolvedValue(stuck);
     show(reviewState([full], { doc: { files: [{ path: 'src/other.ts', tier: 'read', reason: '' }] } }), { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
+    openFold('Also involves');
     const place = button(/src\/other\.ts:7/);
     fireEvent.click(place);
     const reload = await screen.findByRole('button', { name: 'Reload the GitHub tab' });
@@ -346,7 +360,7 @@ describe('the detail of a finding', () => {
     const kept = reviewState([full]);
     show({ kind: 'offline', review: { pr: kept.pr, latest: kept.latest, stale: false } }, { onJump });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    fireEvent.click(button('Jump to line'));
+    fireEvent.click(button('Show in diff'));
     expect(onJump).toHaveBeenCalledWith(REVIEWED, { path: 'src/file1.ts', line: 10, kind: 'changed' }, NO_RELOAD);
     expect(await screen.findByText('Showing src/file1.ts:10.')).toBeTruthy();
   });
@@ -361,16 +375,16 @@ describe('the detail of a finding', () => {
     const f = [finding(1), finding(2), finding(3), also(4), also(5)];
     review(f, { dismissals: [dismissal(f[1]!), dismissal(f[3]!)] });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    expect((button('Previous') as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(button('Next'));
+    expect((button('Previous finding') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(button('Next finding'));
     expect(heading('Problem 3')).toBeTruthy();
     expect(document.activeElement).toBe(heading('Problem 3'));
-    fireEvent.click(button('Next'));
+    fireEvent.click(button('Next finding'));
     expect(heading('Problem 5')).toBeTruthy();
-    expect((button('Next') as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(button('Previous'));
+    expect((button('Next finding') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(button('Previous finding'));
     expect(heading('Problem 3')).toBeTruthy();
-    fireEvent.click(button('Previous'));
+    fireEvent.click(button('Previous finding'));
     expect(heading('Problem 1')).toBeTruthy();
   });
   it('opens an also-found finding and returns focus to its line', () => {
@@ -571,6 +585,8 @@ describe('text from a review is only ever text', () => {
     noMarkup();
     fireEvent.click(button('Close'));
     fireEvent.click(within(cards()[0]!).getByRole('button'));
+    openFold('The code');
+    openFold('Also involves');
     expect(screen.getByText(evil, { selector: 'pre, code' })).toBeTruthy();
     expect(screen.getAllByRole('button').some((b) => b.textContent?.includes('p.ts:1') && b.textContent.includes(evil))).toBe(true);
     noMarkup();
@@ -601,7 +617,7 @@ describe('dismissing the open finding', () => {
   it('returns from Next into the collapsed Also found by opening it and focusing the line', () => {
     review([finding(1), also(2)]);
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    fireEvent.click(button('Next'));
+    fireEvent.click(button('Next finding'));
     fireEvent.click(button('Back to the review'));
     expect(button('Also found').getAttribute('aria-expanded')).toBe('true');
     expect(document.activeElement).toBe(button(/Problem 2/));
@@ -617,15 +633,17 @@ describe('dismissing the open finding', () => {
   it('disables both Previous and Next for a single finding', () => {
     review([finding(1)]);
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    expect((button('Previous') as HTMLButtonElement).disabled).toBe(true);
-    expect((button('Next') as HTMLButtonElement).disabled).toBe(true);
+    expect((button('Previous finding') as HTMLButtonElement).disabled).toBe(true);
+    expect((button('Next finding') as HTMLButtonElement).disabled).toBe(true);
   });
-  it('renders a very long title whole', () => {
+  it('renders a very long title whole, as the first line of What happens under the cut one', () => {
     const title = `${'Very long title '.repeat(40)}end`;
     review([finding(1, { title })]);
     expect(within(cards()[0]!).getByText(title)).toBeTruthy();
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    expect(heading(title)).toBeTruthy();
+    expect(heading(`${'Very long title '.repeat(3)}Very long…`)).toBeTruthy();
+    openFold('What happens');
+    expect(screen.getByText(title)).toBeTruthy();
   });
 });
 
@@ -771,13 +789,13 @@ describe('a jump that fails', () => {
   it('says so when onJump rejects', async () => {
     show(reviewState([full]), { onJump: () => Promise.reject(new Error('no')) });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    fireEvent.click(button('Jump to line'));
+    fireEvent.click(button('Show in diff'));
     expect(await screen.findByText(sentence)).toBeTruthy();
   });
   it('says so when onJump throws', async () => {
     show(reviewState([full]), { onJump: () => { throw new Error('no'); } });
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    fireEvent.click(button('Jump to line'));
+    fireEvent.click(button('Show in diff'));
     expect(await screen.findByText(sentence)).toBeTruthy();
   });
 });
@@ -791,6 +809,11 @@ describe('every field of document text is only text', () => {
     expect(box!.querySelectorAll(NO_ELEMENTS), field).toHaveLength(0);
   };
   const section = (name: string): Element | null => heading(name).closest('section');
+  /** What a fold of the finding screen holds, once open: the fold's own button and its arrow left out. */
+  const folded = (name: string): Element | null => {
+    openFold(name);
+    return screen.getByRole('button', { name: new RegExp(`^${name}`) }).closest('section')!.querySelector('.ap-folded');
+  };
 
   it('in the lists, the notice, the stage errors and the dismissed section', () => {
     const gone = also(3, { title: 'Gone' });
@@ -817,10 +840,11 @@ describe('every field of document text is only text', () => {
   it('in the detail', () => {
     review([finding(1, { happens: h('happens'), why: h('why'), checked: h('checked'), wouldBeWrongIf: h('wrong'), suggestedChange: h('change') })]);
     fireEvent.click(within(cards()[0]!).getByRole('button'));
-    literal(heading('What happens').closest('section'), 'happens');
-    literal(heading('Why').closest('section'), 'why');
-    literal(heading('Checked').closest('section'), 'checked');
-    literal(heading('Would be wrong if').closest('section'), 'wrong');
-    literal(heading('Suggested change').closest('section'), 'change');
+    literal(folded('What happens'), 'happens');
+    literal(folded('Why it matters'), 'why');
+    const proof = folded('How sure is this');
+    literal(proof, 'checked');
+    literal(proof, 'wrong');
+    literal(section('What to do'), 'change');
   });
 });

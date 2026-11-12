@@ -330,10 +330,15 @@ test('5. the first finding: its fields, and Copy fix prompt puts exactly its pro
   const first = top[0]!;
   await cards().first().getByRole('button').click();
   await expect(panel.getByRole('heading', { name: first.title })).toBeVisible();
-  await expect(panel.locator('.sev')).toHaveText('Block');
-  await expect(panel.getByText('src/pause.ts:11', { exact: true })).toBeVisible();
-  for (const text of [first.happens, first.why, first.suggestedChange, first.checked, first.wouldBeWrongIf, 'Orbit · R-12']) {
-    await expect(panel.getByText(text, { exact: true })).toBeVisible();
+  await expect(panel.locator('.ap-tag')).toHaveText('Block');
+  await expect(panel.locator('.ap-where').getByText('src/pause.ts:11', { exact: true })).toBeVisible();
+  await expect(panel.locator('.ap-do').getByText(first.suggestedChange, { exact: true })).toBeVisible();
+  // The detail is folded: each fold opens with its button.
+  for (const name of ['What happens', 'Why it matters', 'The code', 'Also involves', 'How sure is this']) {
+    await panel.getByRole('button', { name: new RegExp(`^${name}`) }).click();
+  }
+  for (const text of [first.happens, first.why, first.checked, first.wouldBeWrongIf, 'Orbit · R-12']) {
+    await expect(panel.locator('.ap-folds').getByText(text, { exact: true })).toBeVisible();
   }
   await expect(panel.locator('pre.quote code')).toHaveText(first.quote);
   await expect(panel.getByRole('button', { name: /src\/guard\.ts:4/ })).toBeVisible();
@@ -348,8 +353,8 @@ test('6. dismissed as Not now it leaves the list and Dismissed: 1 appears; Resto
   const first = top[0]!;
   await panel.getByRole('button', { name: 'Dismiss' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('radio', { name: 'Not now' }).check();
-  await sheet.getByRole('button', { name: 'Save' }).click();
+  await sheet.getByRole('radio', { name: 'Hide it on this pull request only' }).check();
+  await sheet.getByRole('button', { name: 'Dismiss', exact: true }).click();
   await expect(sheet.getByText('Hidden on this pull request.')).toBeVisible();
   await sheet.getByRole('button', { name: 'Done' }).click();
   await expect(sheet).toHaveCount(0);
@@ -382,9 +387,9 @@ test('7. dismissed as Wrong: Save waits for a valid line, the service gets exact
   await expect(panel.getByRole('heading', { name: second.title })).toBeVisible();
   await panel.getByRole('button', { name: 'Dismiss' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('radio', { name: 'Wrong' }).check();
-  const field = sheet.getByRole('textbox', { name: 'The line that will be saved to your pack' });
-  const save = sheet.getByRole('button', { name: 'Save' });
+  await sheet.getByRole('radio', { name: 'The finding is mistaken' }).check();
+  const field = sheet.getByRole('textbox', { name: 'The line Airlock will remember' });
+  const save = sheet.getByRole('button', { name: 'Dismiss', exact: true });
   // The draft ends with a space, so it cannot be saved as it is.
   await expect(field).toHaveValue(`Flagged "${second.title}" in ${second.path}. Wrong because: `);
   await expect(save).toBeDisabled();
@@ -526,7 +531,7 @@ test('10. notes: Notes in the diff turned off removes them all and on brings the
   }
 });
 
-const POST_ONE_REVIEW = 'Airlock posts these as one review with the Comment action. It never approves or requests changes.';
+const ONLY_COMMENTS = 'Airlock never approves, requests changes or merges.';
 const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
 const EDITED = 'Please call the guard before pausing; a paused account can still place an order.';
 const SUMMARY = 'Notes from my review of the pause change, for @carol.';
@@ -538,19 +543,19 @@ test('11. Post comment: the preview, an edit, Update preview, then the post; the
   const first = top[0]!;
   await cards().first().getByRole('button').click();
   await expect(panel.getByRole('heading', { name: first.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await expect(sheet.getByText(`Posts as alice on ${REPO}#${NUMBER}.`)).toBeVisible();
-  await expect(sheet.getByText('On src/pause.ts, line 11')).toBeVisible();
+  await expect(sheet.getByText(`Posts as alice on ${REPO}#${NUMBER}, as a comment. ${ONLY_COMMENTS} Nothing has been sent yet.`)).toBeVisible();
+  await expect(sheet.getByText('On the line', { exact: true })).toBeVisible();
+  await expect(sheet.getByText('src/pause.ts, line 11. It shows in Files changed, next to the code.')).toBeVisible();
   const comment = sheet.getByRole('textbox', { name: 'Comment 1' });
   await expect(comment).toHaveValue(commentBody(first));
   await expect(sheet.getByRole('textbox', { name: 'Summary' })).toHaveValue('Review notes from Airlock: 1 comment.');
-  await expect(sheet.getByText(POST_ONE_REVIEW)).toBeVisible();
 
   await comment.fill(EDITED);
-  await expect(sheet.getByRole('button', { name: /^Post 1 comment/ })).toHaveCount(0);
+  await expect(sheet.getByRole('button', { name: 'Post comment', exact: true })).toHaveCount(0);
   await sheet.getByRole('button', { name: 'Update preview' }).click();
-  const post = sheet.getByRole('button', { name: 'Post 1 comment to GitHub' });
+  const post = sheet.getByRole('button', { name: 'Post comment', exact: true });
   await expect(post).toBeEnabled();
   expect(previewBodies()).toEqual([
     { repo: REPO, number: NUMBER, reviewId: document.id, items: [{ fingerprint: first.fingerprint }] },
@@ -580,7 +585,7 @@ test('11. Post comment: the preview, an edit, Update preview, then the post; the
   await sheet.getByRole('button', { name: 'Done' }).click();
   await expect(sheet).toHaveCount(0);
   await expect(panel.locator('.mark').getByText('Posted', { exact: true })).toBeVisible();
-  await expect(panel.getByRole('button', { name: 'Post comment' })).toBeDisabled();
+  await expect(panel.getByRole('button', { name: 'Comment on GitHub' })).toBeDisabled();
   await panel.getByRole('button', { name: 'Back to the review' }).click();
   await expect(cards().first()).toContainText('Posted');
 });
@@ -594,7 +599,7 @@ test('12. Post selected skips the posted finding; GitHub refuses, and every text
   const sheet = panel.getByRole('dialog');
   const comment = sheet.getByRole('textbox', { name: 'Comment 1' });
   await expect(comment).toHaveValue(commentBody(third));
-  await expect(sheet.getByText('In the summary: The line is not part of the diff GitHub shows.')).toBeVisible();
+  await expect(sheet.getByText('The line is not part of the diff GitHub shows. The comment names the file and line.')).toBeVisible();
   expect(previewBodies().at(-1)).toEqual({ repo: REPO, number: NUMBER, reviewId: document.id, items: [{ fingerprint: third.fingerprint }] });
   // Airlock's own texts only: the service names no one in the drafted comment or the review text.
   expect(svc().previews.at(-1)?.items[0]?.mentions).toEqual([]);
@@ -604,7 +609,7 @@ test('12. Post selected skips the posted finding; GitHub refuses, and every text
   // Unsent: the summary field says the name it holds.
   await expect(sheet.getByText(NAMES_CAROL)).toHaveCount(1);
   await sheet.getByRole('button', { name: 'Update preview' }).click();
-  const post = sheet.getByRole('button', { name: 'Post 1 comment to GitHub' });
+  const post = sheet.getByRole('button', { name: 'Post comment', exact: true });
   await expect(post).toBeEnabled();
   // Sent and previewed: the service's list for the review's own text says it now.
   expect(svc().previews.at(-1)?.reviewBodyMentions).toEqual(['@carol']);
@@ -628,7 +633,7 @@ test('13. a post whose outcome is not known: the sentence and Open the pull requ
   await sheet.getByRole('button', { name: 'Update preview' }).click();
   await expect(sheet.getByText("The review's own text, as it will be posted:")).toBeVisible();
   await expect(sheet.locator('[data-review-body]')).toHaveText(svc().previews.at(-1)?.reviewBody ?? 'missing');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   await expect(sheet.getByRole('alert')).toHaveText(UNKNOWN);
   await expect(sheet.getByRole('link', { name: 'Open the pull request' })).toHaveAttribute('href', `https://github.com/${REPO}/pull/${NUMBER}`);
   const [, unknown] = svc().posts(REPO, NUMBER);
@@ -672,9 +677,9 @@ test('14. GitHub has the review after all: It was not posted finds it, nothing i
   svc().answerNextPost({ unknown: true });
   await cards().nth(1).getByRole('button').click();
   await expect(panel.getByRole('heading', { name: third.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   await expect(sheet.getByRole('alert')).toHaveText(UNKNOWN);
   await sheet.getByRole('button', { name: 'Close' }).click();
   await expect(sheet).toHaveCount(0);
@@ -700,9 +705,9 @@ test('15. a post whose proof gets no answer was never sent: it says so, and the 
   await panel.getByRole('button', { name: 'Also found' }).click();
   await panel.locator('button.line').filter({ hasText: fourth.title }).click();
   await expect(panel.getByRole('heading', { name: fourth.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  const post = sheet.getByRole('button', { name: 'Post 1 comment to GitHub' });
+  const post = sheet.getByRole('button', { name: 'Post comment', exact: true });
   await expect(post).toBeEnabled();
   // The service stops answering /hello, and the proof of a second ago has run out: the post proves first, and gets no answer.
   svc().hellosDown(true);
@@ -729,20 +734,20 @@ test('16. GitHub refuses a post and the service cannot clear its record: the rec
   svc().answerNextPost({ refuseKept: 'Validation Failed' });
   await panel.locator('button.line').filter({ hasText: fifth.title }).click();
   await expect(panel.getByRole('heading', { name: fifth.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   await expect(sheet.getByRole('alert')).toHaveText(
     'GitHub refused the comments: Validation Failed. Nothing was posted, but Airlock could not clear its own record: press "It was not posted" before trying again.',
   );
   await sheet.getByRole('button', { name: 'Cancel' }).click();
   await expect(sheet).toHaveCount(0);
   // The record the service kept is on screen without a reload, and can be cleared where the finding is.
-  await expect(panel.getByText('Not known whether this was posted')).toBeVisible();
+  await expect(panel.locator('.ap-onhub').getByText('Not known whether this was posted')).toBeVisible();
   await panel.getByRole('button', { name: 'It was not posted' }).click();
   await panel.getByRole('button', { name: 'It was not posted' }).click();
   await expect(panel.getByText('Not known whether this was posted')).toHaveCount(0);
-  await expect(panel.getByRole('button', { name: 'Post comment' })).toBeEnabled();
+  await expect(panel.getByRole('button', { name: 'Comment on GitHub' })).toBeEnabled();
   expect(svc().posts(REPO, NUMBER).map((r) => r.outcome)).toEqual(['posted', 'posted', 'posted']);
   expect(svc().sent).toHaveLength(6);
   await panel.getByRole('button', { name: 'Back to the review' }).click();
@@ -824,9 +829,9 @@ test('19. a post whose connection is cut before any answer: the panel waits, rea
   svc().answerNextPost({ cut: true, recordAfterMs: 2_000 });
   await cards().nth(1).getByRole('button').click();
   await expect(panel.getByRole('heading', { name: NEW_FINDING.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   // Chromium may send the cut post again by itself; that copy finds the preview taken (404), and the panel then checks
   // whether the post already went through instead of waiting to hear. Either way it reads the records.
   await expect(sheet.getByRole('status').filter({
@@ -971,9 +976,9 @@ test('22. a post the browser sent twice: the copy the panel hears is told the pr
   const before = svc().sent.length;
   await cards().first().getByRole('button').click();
   await expect(panel.getByRole('heading', { name: top[0]!.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   await expect(sheet.getByText('Checking whether this post already went through…')).toBeVisible();
   await expect(sheet.getByRole('button', { name: 'Cancel' })).toBeDisabled();
   await expect(sheet.getByText('Posted 1 comment.')).toBeVisible(RETRY_WAIT);
@@ -993,9 +998,9 @@ test('23. a preview that really expired: the panel checks for 20 seconds, finds 
   const before = svc().sent.length;
   await cards().nth(1).getByRole('button').click();
   await expect(panel.getByRole('heading', { name: top[1]!.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   await expect(sheet.getByText('Checking whether this post already went through…')).toBeVisible();
   // A first read, then four more five seconds apart: the answer comes after about twenty seconds, not ninety.
   const started = Date.now();

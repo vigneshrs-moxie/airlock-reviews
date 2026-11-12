@@ -52,7 +52,7 @@ describe('App', () => {
     render(<App start={f.start} services={services} />);
     f.send(reviewState([finding(1)]));
     fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Jump to line' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Show in diff' }));
     expect(await screen.findByText('Showing src/file1.ts:10.')).toBeTruthy();
     expect(jump).toHaveBeenCalledWith(
       expect.objectContaining({ repo: 'acme/widgets', number: 1 }), { path: 'src/file1.ts', line: 10, kind: 'changed' },
@@ -75,7 +75,8 @@ describe('App', () => {
     render(<App start={f.start} services={services} />);
     f.send(reviewState([finding(1, { connected: [{ path: 'src/other.ts', line: 7, role: 'caller', quote: '' }] })]));
     fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Jump to line' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Show in diff' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Also involves/ }));
     fireEvent.click(screen.getByRole('button', { name: /src\/other\.ts:7/ }));
     act(() => { pending[1]!({ view: 'classic', missing: [] }); });
     act(() => { pending[0]!({ view: null, missing: ['classic-file'] }); });
