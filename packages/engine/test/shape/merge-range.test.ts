@@ -422,7 +422,7 @@ describe('runReview of a pull request that only merges its base in', () => {
     expect(parents.stdout.trim()).toBe(`${doc.range.baseSha} ${s.headSha}`);
     expect((await realExec('git', ['cat-file', '-e', doc.range.baseSha], { cwd: s.remote.dir })).code).not.toBe(0);
     expect(doc.files.map((f) => f.path)).toEqual(['src/money.ts']);
-    expect(doc.previous).toEqual({ reviewId: first.doc.id, headSha: s.headSha });
+    expect(doc.previous).toEqual({ reviewId: first.doc.id, headSha: s.headSha, covered: 'merge' });
     expect(doc.notes).toContain('The push since the last review only merges the base branch main in, so only what was changed by hand in that merge was reviewed.');
     expect(Object.fromEntries(doc.findings.map((f) => [f.title, f.status]))).toEqual({
       [GOOD.title as string]: 'still-open', [RULED.title as string]: 'still-open',
@@ -533,8 +533,33 @@ describe('runReview of a pull request that only merges its base in', () => {
     ]);
     expect(doc.stageErrors).toEqual([]);
     expect(doc.mergeReview).toBe('nothing-by-hand');
+    expect(doc.previous).toEqual({ reviewId: first.doc.id, headSha: s.headSha, covered: 'merge' });
+    // Nothing was changed by hand, so no note says that what was changed by hand was reviewed.
+    expect(doc.notes ?? []).not.toContainEqual(expect.stringMatching(/by hand/));
     expect(renderReview(doc).split('\n')[2])
       .toBe(`Review of the merge pushed since ${s.headSha.slice(0, 7)}: git merged it without conflicts and nothing was changed by hand.`);
+  }, SLOW);
+
+  it('a re-review whose push is a merge of the base Airlock could not review says it only merges the base, never that it was reviewed', async () => {
+    const first = await review();
+    const { s } = first;
+    // main deletes the file the pull request changed; the merge keeps the pull request's file as git left it, with no markers.
+    await s.remote.git('checkout', 'main');
+    await commitFiles(s.remote, { 'src/money.ts': null, 'README.md': 'main moved on\n' }, 'main deletes money.ts');
+    await s.remote.git('checkout', 'feature');
+    await s.remote.git('merge', '--no-commit', 'main').catch(() => undefined);
+    await s.remote.git('add', '--all');
+    await s.remote.git('commit', '--no-edit', '-m', 'Merge main into feature');
+    const head = await s.remote.git('rev-parse', 'HEAD');
+    const script = scenarioScript({ 'challenge:fixed:': () => { throw new Error('no fixed check was expected'); } });
+    const { doc } = await review({ s, req: { since: { reviewId: first.doc.id } }, exec: fakeGh({ baseSha: s.baseSha, headSha: head }), script });
+    expect(doc.mergeReview).toBe('not-reviewed');
+    expect(doc.previous).toEqual({ reviewId: first.doc.id, headSha: s.headSha, covered: 'merge' });
+    expect(doc.stageErrors.map((e) => e.stage)).toContain('shape');
+    expect(doc.notes).toContain('The push since the last review only merges the base branch main in.');
+    expect(doc.notes ?? []).not.toContainEqual(expect.stringMatching(/by hand/));
+    // No line of its own under the header: the stage error says what happened.
+    expect(renderReview(doc).split('\n')[2]).toBe('');
   }, SLOW);
 
   it('a pull request that is only a merge, reviewed again in full, tells every request the pull request\'s scope, not the push\'s', async () => {
@@ -555,9 +580,11 @@ describe('runReview of a pull request that only merges its base in', () => {
     expect(doc.range.kind).toBe('sync-merge');
     expect(doc.mergeReview).toBe('by-hand');
     expect(doc.notes).toContainEqual(expect.stringMatching(/the whole pull request was reviewed again\.$/));
+    expect(doc.previous).toEqual({ reviewId: first.doc.id, headSha: merged, covered: 'everything' });
     expect(calls.length).toBeGreaterThan(0);
     for (const c of calls) expect(c.instructions.endsWith(mergeNote('pull request'))).toBe(true);
-    expect(renderReview(doc).split('\n')[2]).toBe(`Reviewed again in full since ${merged.slice(0, 7)}`);
+    // No merge line and no line of its own: the note says why everything was reviewed again.
+    expect(renderReview(doc).split('\n')[2]).toBe('');
   }, SLOW);
 
   it('a rule file with conflict markers on the base side is not used as rules, and the limits say so', async () => {

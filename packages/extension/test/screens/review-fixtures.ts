@@ -49,16 +49,11 @@ export function reviewState(findings: Finding[], opts: ReviewOptions = {}): Revi
   };
 }
 
-/**
- * The engine's notes for a re-review that reviewed the whole pull request again (`everythingNote` in
- * packages/engine/src/pipeline/review.ts, with the two reasons the engine's part of the fix wave adds: a retargeted pull
- * request and an earlier review of a given range).
- */
+/** The engine's notes for a re-review that reviewed the whole pull request again (`everythingNote` in packages/engine/src/rereview/notes.ts). */
 export const EVERYTHING_AGAIN_NOTES = [
   'The branch was rewritten since the last review (its earlier head aaaaaaa is no longer part of it), so the whole pull request was reviewed again.',
   'A commit pushed since the last review merges the base branch main in, so the whole pull request was reviewed again.',
   'The last review did not finish, so everything was reviewed again.',
-  'The base commit of this pull request could not be found, so Airlock could not tell whether the push merges main in, and everything was reviewed again.',
   'The pull request now targets main; the last review was against develop, so everything was reviewed again.',
   'The last review covered a range given by hand, so everything was reviewed again.',
 ];

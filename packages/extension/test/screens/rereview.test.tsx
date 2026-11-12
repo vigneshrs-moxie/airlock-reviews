@@ -126,12 +126,17 @@ describe('what a merge review says it covered (the document\'s mergeReview)', ()
     expect(anyMergeSentence()).toEqual([]);
   });
   it('a merge pushed since the earlier review and reviewed by hand has its own line', () => {
+    review([finding(1)], { doc: { previous: { ...PREVIOUS, covered: 'merge' }, range: MERGE_RANGE, mergeReview: 'by-hand' } });
+    expect(screen.getByText(BY_HAND_LINE)).toBeTruthy();
+    expect(screen.queryByText(CLEAN_LINE)).toBeNull();
+    cleanup();
+    // A document stored before the field: its merge range says it was a merge.
     review([finding(1)], { doc: { previous: PREVIOUS, range: MERGE_RANGE, mergeReview: 'by-hand' } });
     expect(screen.getByText(BY_HAND_LINE)).toBeTruthy();
     expect(screen.queryByText(CLEAN_LINE)).toBeNull();
   });
   it('a merge pushed since the earlier review with nothing changed by hand says git merged it', () => {
-    review([finding(1)], { doc: { previous: PREVIOUS, range: MERGE_RANGE, mergeReview: 'nothing-by-hand' } });
+    review([finding(1)], { doc: { previous: { ...PREVIOUS, covered: 'merge' }, range: MERGE_RANGE, mergeReview: 'nothing-by-hand' } });
     const line = screen.getByText(CLEAN_LINE);
     expect(follows(screen.getByRole('heading', { name: 'Approve after fixes' }), line)).toBe(true);
     expect(screen.queryByText(BY_HAND_LINE)).toBeNull();
@@ -140,12 +145,38 @@ describe('what a merge review says it covered (the document\'s mergeReview)', ()
   });
   it.each(EVERYTHING_AGAIN_NOTES)('everything reviewed again: the note is the only line under the verdict (%s)', (note) => {
     for (const kind of ['by-hand', 'nothing-by-hand', 'not-reviewed'] as const) {
-      review([finding(1)], { doc: { previous: PREVIOUS, range: MERGE_RANGE, mergeReview: kind, notes: [note] } });
+      review([finding(1)], { doc: { previous: { ...PREVIOUS, covered: 'everything' }, range: MERGE_RANGE, mergeReview: kind, notes: [note] } });
       const verdict = screen.getByRole('heading', { name: 'Approve after fixes' }).closest('section')!;
       expect([...verdict.querySelectorAll('p')].map((p) => p.textContent).filter((t) => t !== 'Two things to fix.' && !t?.startsWith('Reviewed at'))).toEqual([note]);
       expect(anyMergeSentence()).toEqual([]);
       cleanup();
     }
+  });
+});
+
+describe('the line is decided by what the document says it covered, never by a note\'s wording', () => {
+  const MERGE_RANGE = { baseSha: 'b'.repeat(40), headSha: HEAD, kind: 'sync-merge' as const };
+  const PUSH_RANGE = { baseSha: EARLIER, headSha: HEAD, kind: 'rereview' as const };
+  const underVerdict = (): (string | null)[] => {
+    const verdict = screen.getByRole('heading', { name: 'Approve after fixes' }).closest('section')!;
+    return [...verdict.querySelectorAll('p')].map((p) => p.textContent).filter((t) => t !== 'Two things to fix.' && !t?.startsWith('Reviewed at'));
+  };
+
+  it('everything again with a note worded in another way: the note is still the only line', () => {
+    const note = 'Airlock looked at the whole pull request this time.';
+    for (const range of [MERGE_RANGE, PUSH_RANGE]) {
+      review([finding(1)], { doc: { previous: { ...PREVIOUS, covered: 'everything' }, range, mergeReview: 'by-hand', notes: [note] } });
+      expect(underVerdict()).toEqual([note]);
+      cleanup();
+    }
+  });
+  it('a pushed merge or a push whose note happens to end in "reviewed again." keeps its own line', () => {
+    const note = 'Questions from the last review were repeated and reviewed again.';
+    review([finding(1)], { doc: { previous: { ...PREVIOUS, covered: 'merge' }, range: MERGE_RANGE, mergeReview: 'by-hand', notes: [note] } });
+    expect(underVerdict()).toEqual([`Review of the merge pushed since ${'a'.repeat(7)}: only what was changed by hand was reviewed.`, note]);
+    cleanup();
+    review([finding(1)], { doc: { previous: { ...PREVIOUS, covered: 'push' }, range: PUSH_RANGE, notes: [note] } });
+    expect(underVerdict()).toEqual([`Review of the push ${'a'.repeat(7)} to ${'c'.repeat(7)}`, note]);
   });
 });
 
@@ -167,7 +198,7 @@ describe('a merge pushed since the earlier review, as the engine writes it', () 
   const doc = {
     id: 'r_1af82a364b',
     range: { baseSha: '83e7843503f4fb77d66c70ca1382d89df6f2e31d', headSha: MERGE_HEAD, kind: 'sync-merge' as const },
-    previous: { reviewId: 'r_bec2ea7ab6', headSha: EARLIER_HEAD },
+    previous: { reviewId: 'r_bec2ea7ab6', headSha: EARLIER_HEAD, covered: 'merge' as const },
     mergeReview: 'by-hand' as const,
     notes: [NOTE],
     brief: { whatItDoes: ['Adds refunds and a pause job.'], claims: [] },

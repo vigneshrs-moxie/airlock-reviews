@@ -4,7 +4,7 @@ import { performance } from 'node:perf_hooks';
 import { ReviewDocumentSchema } from '@airlock/shared';
 import type {
   Brief, Candidate, ChangeMap, Depth, Dropped, Fact, FileDiff, FileFact, Finding, Link, ModelConfig, Neighbour, PrInfo,
-  Question, ReviewDocument, ReviewEvent, ReviewRange, StageError,
+  Question, RereviewCovered, ReviewDocument, ReviewEvent, ReviewRange, StageError,
 } from '@airlock/shared';
 import { UNKNOWN_USAGE } from '../agent/runner.js';
 import type { AgentRequest, AgentResult, AgentRunner } from '../agent/runner.js';
@@ -284,6 +284,8 @@ interface Reviewed {
   fixed: Finding[];
   /** Whenever the range is a merge: whether what was changed by hand in it was reviewed (see ReviewDocument). */
   mergeReview?: ReviewDocument['mergeReview'];
+  /** On a re-review, what it covered (see ReviewDocument's `previous.covered`). */
+  covered?: RereviewCovered;
 }
 
 /** A carried finding as an item for selection: its status kept, its list place and fingerprint made again there. */
@@ -632,10 +634,16 @@ async function reviewInWorkspace(
   const earlierFirst = (earlierOnes: string[], own: string[]): string[] => [...earlierOnes, ...own.filter((t) => !earlierOnes.includes(t))];
   const anyRepeated = earlierQuestions.length + earlierWhoseCall.length + earlierChecks.length > 0;
 
+  const mergeReview = merge === undefined ? undefined : merge.kind === 'unsupported' ? 'not-reviewed' as const : merge.kind;
+  // Only a push (or a pushed merge) is reviewed alone; every other plan reviews the whole pull request again.
+  const pushPlan = ws.plan?.kind === 'push' || ws.plan?.kind === 'base-merge';
+  const covered: RereviewCovered | undefined = previous === null ? undefined
+    : !pushPlan ? 'everything' : mergeReview !== undefined ? 'merge' : 'push';
+  const baseMerge = ws.plan?.kind === 'base-merge' && mergeReview !== undefined ? baseMergeNote(pr, mergeReview) : null;
   const rereviewNotes = previous === null ? []
     : ws.plan?.kind === 'everything' ? [everythingNote(ws.plan.reason, previous, pr)]
       : [
-        ...(ws.plan?.kind === 'base-merge' ? [baseMergeNote(pr)] : []),
+        ...(baseMerge === null ? [] : [baseMerge]),
         ...(push?.whole === null ? [NO_WHOLE_DIFF_NOTE] : []),
         ...(files.length === 0 && merge?.kind !== 'nothing-by-hand' ? [EMPTY_PUSH_NOTE] : []),
         ...(pushed && notReviewed(files, tiers) !== null ? [IGNORED_PUSH_NOTE] : []),
@@ -650,7 +658,8 @@ async function reviewInWorkspace(
       ...mergeNotes, ...selection.notes,
     ],
     fixed: carried.fixed,
-    ...(merge === undefined ? {} : { mergeReview: merge.kind === 'unsupported' ? 'not-reviewed' as const : merge.kind }),
+    ...(mergeReview === undefined ? {} : { mergeReview }),
+    ...(covered === undefined ? {} : { covered }),
   };
 }
 
@@ -749,7 +758,10 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
     findings: selection.findings, questions: reviewed.questions, dropped: reviewed.dropped, candidates: reviewed.candidates,
     whoseCall: reviewed.whoseCall, checksAfterMerge: reviewed.checksAfterMerge, selfReviewText: selection.selfReviewText,
     stageErrors: [...log.errors], timings: log.timings(), limits: reviewed.limits, notes: reviewed.notes,
-    ...(previous === null ? {} : { previous: { reviewId: previous.id, headSha: previous.pr.headSha }, fixed: reviewed.fixed }),
+    ...(previous === null ? {} : {
+      previous: { reviewId: previous.id, headSha: previous.pr.headSha, ...(reviewed.covered === undefined ? {} : { covered: reviewed.covered }) },
+      fixed: reviewed.fixed,
+    }),
     ...(reviewed.mergeReview === undefined ? {} : { mergeReview: reviewed.mergeReview }),
   });
   // A draft that fails the schema is the engine's own fault, so it rejects rather than becoming a stage error.

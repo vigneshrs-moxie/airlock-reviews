@@ -139,7 +139,7 @@ const PUSH_NOTE = 'src/copy.ts changed in the push but was only skimmed.';
 const rereviewDocument = (): ReviewDocument => ReviewDocumentSchema.parse({
   ...document, id: 'r_0123456790', pr: { ...document.pr, headSha: PUSHED_HEAD },
   range: { ...document.range, headSha: PUSHED_HEAD, kind: 'rereview' },
-  previous: { reviewId: document.id, headSha: HEAD },
+  previous: { reviewId: document.id, headSha: HEAD, covered: 'push' },
   findings: [MOVED_FINDING, NEW_FINDING], fixed: [FIXED_FINDING],
   verdict: { label: 'request-changes', sentence: 'One thing still blocks this.', counts: { block: 1, fix: 1, ask: 0, note: 0 } },
   questions: [], notes: [PUSH_NOTE], limits: undefined,
@@ -759,17 +759,22 @@ test('19. Packs shows the learned lines under their packs; Remove asks, removes 
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
 });
 
-/** A merge pull request, reviewed first or as a push since an earlier review, with what the document says was reviewed. */
-const MERGE_PULLS: Array<{ number: number; kind: ReviewDocument['mergeReview']; pushed: boolean }> = [
-  { number: 8, kind: 'by-hand', pushed: false },
-  { number: 9, kind: 'nothing-by-hand', pushed: false },
-  { number: 10, kind: 'not-reviewed', pushed: false },
-  { number: 11, kind: undefined, pushed: false },
-  { number: 12, kind: 'by-hand', pushed: true },
-  { number: 13, kind: 'nothing-by-hand', pushed: true },
+/**
+ * A merge pull request, reviewed first or again since an earlier review (`covered`: as a pushed merge, or everything again,
+ * with the engine's note), with what the document says was reviewed of the merge.
+ */
+const EVERYTHING_NOTE = 'The last review did not finish, so everything was reviewed again.';
+const MERGE_PULLS: Array<{ number: number; kind: ReviewDocument['mergeReview']; covered?: 'merge' | 'everything' }> = [
+  { number: 8, kind: 'by-hand' },
+  { number: 9, kind: 'nothing-by-hand' },
+  { number: 10, kind: 'not-reviewed' },
+  { number: 11, kind: undefined },
+  { number: 12, kind: 'by-hand', covered: 'merge' },
+  { number: 13, kind: 'nothing-by-hand', covered: 'merge' },
+  { number: 14, kind: 'by-hand', covered: 'everything' },
 ];
 
-function mergePull({ number, kind, pushed }: (typeof MERGE_PULLS)[number]): { pr: PrSummary; latest: LatestReply } {
+function mergePull({ number, kind, covered }: (typeof MERGE_PULLS)[number]): { pr: PrSummary; latest: LatestReply } {
   const merge = PrSummarySchema.parse({ ...pr, number, title: `Merge main into the branch (${number})` });
   const base = minimalDocument();
   const doc = ReviewDocumentSchema.parse({
@@ -778,7 +783,8 @@ function mergePull({ number, kind, pushed }: (typeof MERGE_PULLS)[number]): { pr
     range: { baseSha: 'e'.repeat(40), headSha: HEAD, kind: 'sync-merge' },
     brief: { whatItDoes: ['This branch only merges its target branch into itself.'], claims: [] },
     ...(kind === undefined ? {} : { mergeReview: kind }),
-    ...(pushed ? { previous: { reviewId: 'r_0000000001', headSha: 'f'.repeat(40) } } : {}),
+    ...(covered === undefined ? {} : { previous: { reviewId: 'r_0000000001', headSha: 'f'.repeat(40), covered } }),
+    ...(covered === 'everything' ? { notes: [EVERYTHING_NOTE] } : {}),
     ...(kind === 'not-reviewed' ? {
       verdict: { label: 'incomplete', sentence: 'The review did not finish.', counts: { block: 0, fix: 0, ask: 0, note: 0 } },
       stageErrors: [{ stage: 'shape', cohortId: null, message: 'This pull request only merges another branch in. Airlock did not review it: 2 changed files were not looked at.' }],
@@ -787,7 +793,7 @@ function mergePull({ number, kind, pushed }: (typeof MERGE_PULLS)[number]): { pr
   return { pr: merge, latest: { document: doc, dismissals: [], posts: [] } };
 }
 
-test('20. a merge review says it reviewed what was changed by hand only when its document says so', async () => {
+test('20. a merge review says it reviewed what was changed by hand only when its document says so, and nothing of it when everything was reviewed again', async () => {
   if (context === undefined) throw new Error('no browser');
   const classic = await readFile(join(FIXTURES, 'files-classic.html'), 'utf8');
   for (const one of MERGE_PULLS) {
@@ -801,6 +807,8 @@ test('20. a merge review says it reviewed what was changed by hand only when its
     11: { heading: 'What this does', line: null },
     12: { heading: 'What this does', line: `Review of the merge pushed since ${'f'.repeat(7)}: only what was changed by hand was reviewed.` },
     13: { heading: 'What this does', line: 'The push only merged main in; git merged it without conflicts and nothing was changed by hand.' },
+    // A pull request of only a merge reviewed again in full: its note is the only line, and no merge sentence.
+    14: { heading: 'What this does', line: EVERYTHING_NOTE },
   };
   for (const { number } of MERGE_PULLS) {
     await github.goto(`https://github.com/${REPO}/pull/${number}/files`);
@@ -809,7 +817,7 @@ test('20. a merge review says it reviewed what was changed by hand only when its
     await expect(panel.getByRole('heading', { name: want.heading })).toBeVisible();
     const sentences = panel.locator('main').getByText(/changed by hand/);
     if (want.line !== null) await expect(panel.getByText(want.line, { exact: true })).toBeVisible();
-    const count = (want.heading.includes('by hand') ? 1 : 0) + (want.line === null ? 0 : 1);
+    const count = (want.heading.includes('by hand') ? 1 : 0) + (want.line?.includes('by hand') === true ? 1 : 0);
     await expect(sentences).toHaveCount(count);
   }
 });

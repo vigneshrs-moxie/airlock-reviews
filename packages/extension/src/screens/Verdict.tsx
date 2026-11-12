@@ -1,4 +1,4 @@
-import { fixPrompt, POST_MAX_ITEMS, verdictWords, type Dismissal, type Finding, type ReviewDocument, type Tier } from '@airlock/shared';
+import { fixPrompt, POST_MAX_ITEMS, rereviewCovered, verdictWords, type Dismissal, type Finding, type ReviewDocument, type Tier } from '@airlock/shared';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Timers } from '../client/timers';
 import { listFindings, neighbours, postOf, selectedInOrder, toggled } from '../state/selection';
@@ -50,29 +50,19 @@ function ReviewAgain({ doc, disabled, dispatch, label = 'Review again' }: {
 const short = (sha: string): string => sha.slice(0, 7);
 
 /**
- * Whether a re-review reviewed the whole pull request again: the engine then writes a note saying why, and every such
- * note (`everythingNote` in the engine's pipeline/review.ts) ends with "reviewed again.". The range does not tell: a pull
- * request of only merges reviewed again is a `sync-merge` range with `previous`, as a pushed merge is.
- */
-export const reviewedEverythingAgain = (doc: Pick<ReviewDocument, 'previous' | 'notes'>): boolean =>
-  doc.previous !== undefined && (doc.notes ?? []).some((note) => / reviewed again\.$/.test(note));
-
-/**
- * The line under the verdict that says what a re-review covered; nothing for a full review (its note says why), nor when
- * everything was reviewed again (its note is the only line). A pushed merge says it was reviewed by hand only when the
- * document says so (`mergeReview`); one Airlock could not review, or a document from before the field, says neither
- * (the stage error says what happened).
+ * The line under the verdict that says what a re-review covered, as the document says (`rereviewCovered`): the push; a
+ * pushed merge, said to be reviewed by hand only when the document says so (`mergeReview`), and nothing for one Airlock
+ * could not review or a document that does not say (the stage error says what happened). Nothing for a full review (its
+ * note says why), nor when everything was reviewed again (its note is the only line).
  */
 function rangeLine(doc: ReviewDocument): string | null {
-  if (doc.previous === undefined || reviewedEverythingAgain(doc)) return null;
-  if (doc.range.kind === 'sync-merge') {
-    if (doc.mergeReview === 'by-hand') return `Review of the merge pushed since ${short(doc.previous.headSha)}: only what was changed by hand was reviewed.`;
-    if (doc.mergeReview === 'nothing-by-hand') {
-      return `The push only merged ${doc.pr.baseRef} in; git merged it without conflicts and nothing was changed by hand.`;
-    }
-    return null;
+  const covered = rereviewCovered(doc);
+  if (doc.previous === undefined || covered === null || covered === 'everything') return null;
+  if (covered === 'push') return `Review of the push ${short(doc.previous.headSha)} to ${short(doc.pr.headSha)}`;
+  if (doc.mergeReview === 'by-hand') return `Review of the merge pushed since ${short(doc.previous.headSha)}: only what was changed by hand was reviewed.`;
+  if (doc.mergeReview === 'nothing-by-hand') {
+    return `The push only merged ${doc.pr.baseRef} in; git merged it without conflicts and nothing was changed by hand.`;
   }
-  if (doc.range.kind === 'rereview') return `Review of the push ${short(doc.previous.headSha)} to ${short(doc.pr.headSha)}`;
   return null;
 }
 

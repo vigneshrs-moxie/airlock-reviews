@@ -268,7 +268,7 @@ describe('fix round 1', () => {
     const { doc, calls } = await again(s, earlier.id, head, { paths: ['src/money.ts'], correctness: [byHand] });
     expect(doc.stageErrors).toEqual([]);
     expect(doc.range.kind).toBe('sync-merge');
-    expect(doc.previous).toEqual({ reviewId: earlier.id, headSha: s.headSha });
+    expect(doc.previous).toEqual({ reviewId: earlier.id, headSha: s.headSha, covered: 'merge' });
     const challenges = calls.filter((c) => c.role.startsWith('challenge:'));
     expect(challenges.length).toBeGreaterThan(0);
     for (const c of challenges) {

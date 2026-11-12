@@ -94,7 +94,7 @@ describe('re-review after a push', () => {
     const { doc, calls } = await rereview(s, first.id, head, pushScript({ paths: ['src/jobs/pause.ts', 'src/money.ts'], correctness: [NEW_ONE] }));
 
     expect(doc.range).toEqual({ baseSha: s.headSha, headSha: head, kind: 'rereview' });
-    expect(doc.previous).toEqual({ reviewId: first.id, headSha: s.headSha });
+    expect(doc.previous).toEqual({ reviewId: first.id, headSha: s.headSha, covered: 'push' });
     expect(doc.files.map((f) => f.path).sort()).toEqual(['src/jobs/pause.ts', 'src/money.ts']);
     expect(Object.fromEntries(statuses(doc))).toEqual({
       [GOOD.title as string]: 'moved', [RULED.title as string]: 'still-open', [NEW_ONE.title as string]: 'new',
@@ -204,7 +204,7 @@ describe('re-review after a push', () => {
       paths: ['CLAUDE.md', 'src/billing.ts', 'src/jobs/pause.ts', 'src/money.ts', 'test/money.test.ts'],
     }));
     expect(doc.range).toEqual({ baseSha: s.baseSha, headSha: head, kind: 'full' });
-    expect(doc.previous).toEqual({ reviewId: first.id, headSha: s.headSha });
+    expect(doc.previous).toEqual({ reviewId: first.id, headSha: s.headSha, covered: 'everything' });
     expect(doc.notes).toContain(
       `The branch was rewritten since the last review (its earlier head ${s.headSha.slice(0, 7)} is no longer part of it), so the whole pull request was reviewed again.`,
     );
@@ -224,7 +224,7 @@ describe('re-review after a push', () => {
     }));
     expect(doc.range.kind).toBe('full');
     expect(doc.notes).toContain('A commit pushed since the last review merges the base branch main in, so the whole pull request was reviewed again.');
-    expect(doc.previous?.reviewId).toBe(first.id);
+    expect(doc.previous).toEqual({ reviewId: first.id, headSha: s.headSha, covered: 'everything' });
   }, SLOW);
 
   it('reviews everything again when the last review did not finish, and still carries its findings', async () => {
@@ -240,7 +240,7 @@ describe('re-review after a push', () => {
       paths: ['CLAUDE.md', 'src/billing.ts', 'src/jobs/pause.ts', 'src/money.ts', 'test/money.test.ts'],
     }));
     expect(doc.range).toEqual({ baseSha: s.baseSha, headSha: head, kind: 'full' });
-    expect(doc.previous).toEqual({ reviewId: unfinished.id, headSha: s.headSha });
+    expect(doc.previous).toEqual({ reviewId: unfinished.id, headSha: s.headSha, covered: 'everything' });
     expect(doc.notes).toContain('The last review did not finish, so everything was reviewed again.');
     expect(Object.fromEntries(statuses(doc))).toEqual({ [GOOD.title as string]: 'still-open', [RULED.title as string]: 'still-open' });
   }, SLOW);
@@ -255,7 +255,7 @@ describe('re-review after a push', () => {
       paths: ['CLAUDE.md', 'src/billing.ts', 'src/jobs/pause.ts', 'src/money.ts', 'test/money.test.ts'],
     }));
     expect(doc.range).toEqual({ baseSha: s.baseSha, headSha: head, kind: 'full' });
-    expect(doc.previous).toEqual({ reviewId: againstDevelop.id, headSha: s.headSha });
+    expect(doc.previous).toEqual({ reviewId: againstDevelop.id, headSha: s.headSha, covered: 'everything' });
     expect(doc.notes).toContain('The pull request now targets main; the last review was against develop, so everything was reviewed again.');
     // Reviewed again in full, the pull request's questions and checks are its own, not repeated from the last review.
     expect(doc.notes).not.toContain('Questions and checks from the last review are repeated here.');
@@ -272,6 +272,7 @@ describe('re-review after a push', () => {
     }));
     expect(doc.range).toEqual({ baseSha: s.baseSha, headSha: head, kind: 'full' });
     expect(doc.notes).toContain('The last review covered a range given by hand, so everything was reviewed again.');
+    expect(doc.previous?.covered).toBe('everything');
     expect(Object.fromEntries(statuses(doc))).toEqual({ [GOOD.title as string]: 'still-open', [RULED.title as string]: 'still-open' });
   }, SLOW);
 
@@ -330,7 +331,7 @@ describe('re-review after a push', () => {
     await saveReview(upper);
     const head = await push(s, { 'src/jobs/pause.ts': 'export function pauseJob(): void { audit(); }\n' });
     const { doc } = await rereview(s, upper.id, head, pushScript({ paths: ['src/jobs/pause.ts'] }));
-    expect(doc.previous).toEqual({ reviewId: upper.id, headSha: s.headSha });
+    expect(doc.previous).toEqual({ reviewId: upper.id, headSha: s.headSha, covered: 'push' });
     expect(doc.range).toEqual({ baseSha: s.headSha, headSha: head, kind: 'rereview' });
   }, SLOW);
 

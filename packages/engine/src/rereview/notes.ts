@@ -1,7 +1,7 @@
 import type { PrInfo, ReviewDocument } from '@airlock/shared';
 import type { EverythingReason } from './range.js';
 
-/** A re-review's note when the whole pull request was reviewed again, saying why. Each ends as AGAIN_IN_FULL matches. */
+/** A re-review's note when the whole pull request was reviewed again, saying why. */
 export function everythingNote(reason: EverythingReason, previous: ReviewDocument, pr: PrInfo): string {
   switch (reason) {
     case 'rewritten':
@@ -17,18 +17,16 @@ export function everythingNote(reason: EverythingReason, previous: ReviewDocumen
   }
 }
 
-/** How every everythingNote ends. */
-const AGAIN_IN_FULL = /, so (?:everything|the whole pull request) was reviewed again\.$/;
-
 /**
- * True when a document's notes say the whole pull request was reviewed again: a re-review whose range is a merge then
- * covered the pull request's merge, not a merge pushed since the last review.
+ * A re-review's note when the push was one merge of the base branch, as far as `mergeReview` says: that only what was
+ * changed by hand in it was reviewed (`by-hand`); only that it merges the base in, when Airlock could not review it (its
+ * stage error says what happened); none when git merged it by itself, which the brief and the line under the verdict say.
  */
-export const reviewedAgainInFull = (notes: readonly string[]): boolean => notes.some((n) => AGAIN_IN_FULL.test(n));
-
-/** A re-review's note when the push was one merge of the base branch, of which only the changes made by hand were reviewed. */
-export const baseMergeNote = (pr: PrInfo): string =>
-  `The push since the last review only merges the base branch ${pr.baseRef} in, so only what was changed by hand in that merge was reviewed.`;
+export function baseMergeNote(pr: PrInfo, mergeReview: NonNullable<ReviewDocument['mergeReview']>): string | null {
+  const merges = `The push since the last review only merges the base branch ${pr.baseRef} in`;
+  if (mergeReview === 'by-hand') return `${merges}, so only what was changed by hand in that merge was reviewed.`;
+  return mergeReview === 'not-reviewed' ? `${merges}.` : null;
+}
 
 /** A push re-review's note when it repeats the last review's questions, whose-call lines or checks after merge. */
 export const CARRIED_QUESTIONS_NOTE = 'Questions and checks from the last review are repeated here.';
