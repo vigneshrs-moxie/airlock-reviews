@@ -5,7 +5,8 @@
  * keyed with the token's characters, the same as the service's `packages/service/src/proof.ts`.
  */
 
-export const NOT_PROVED = "Something else is answering on Airlock's port. The token was not sent.";
+export const NOT_PROVED = "The service could not show that it holds this panel's token, so the token was not sent. "
+  + "If you replaced the token, paste the new one. If you did not, another program may be answering on Airlock's port.";
 
 const hex = (bytes: Uint8Array): string => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 
@@ -20,7 +21,10 @@ export async function helloProof(token: string, nonce: string): Promise<string> 
   return hex(new Uint8Array(await crypto.subtle.sign('HMAC', key, text.encode(`airlock-hello:${nonce}`))));
 }
 
-/** Whether `proof` (from a hello asked with `nonce`) shows the service holds `token`. A missing proof never does. */
+/**
+ * Whether `proof` (from a hello asked with `nonce`) shows the service holds `token`. A missing proof never does, and
+ * neither does one that is not the 64 lower-case hexadecimal characters the HMAC gives.
+ */
 export async function proves(proof: string | undefined, token: string, nonce: string): Promise<boolean> {
   return proof !== undefined && proof === (await helloProof(token, nonce));
 }

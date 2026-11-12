@@ -60,8 +60,10 @@ function harness(opts: {
   const svc = new FakeService();
   opts.prepare?.(svc);
   const settings = memorySettings(opts.token === undefined ? TOKEN : opts.token);
-  // The client's own timeouts run on separate timers, so these hold only the panel's retries and waits.
-  const client = new ServiceClient(BASE, () => settings.getToken(), svc.fetch, new FakeTimers());
+  // The client's own timeouts run on separate timers, so these hold only the panel's retries and waits. Its monotonic
+  // clock, which says how long a proof is good for, moves only when a test moves `mono`.
+  const mono = { now: 0 };
+  const client = new ServiceClient(BASE, () => settings.getToken(), svc.fetch, new FakeTimers(), () => mono.now);
   const tab = fakeTab('url' in opts ? opts.url : prUrl('acme/widgets', 1), opts.failTabReads);
   const timers = new FakeTimers();
   const states: PanelState[] = [];
@@ -75,7 +77,7 @@ function harness(opts: {
   });
   panels.push(panel);
   const last = (): PanelState | undefined => states.at(-1);
-  return { svc, settings, tab, timers, states, panel, last, clock };
+  return { svc, settings, tab, timers, states, panel, last, clock, mono };
 }
 
 type Harness = ReturnType<typeof harness>;
@@ -391,6 +393,20 @@ describe('startPanel: the proof before the token (Task 8)', () => {
     expect(withToken(h)).toHaveLength(sent);
   });
 
+  it('on the Problem screen, an action more than a second after the last proof proves again, and another listener gets nothing', async () => {
+    const h = harness({ prepare: (svc) => svc.on('GET /reviews/latest', () => json({ error: 'Airlock had a problem: the disk is full.' }, 500)) });
+    const problem = await until(h, 'problem');
+    expect(problem.pr).not.toBeNull();
+    const sent = withToken(h).length;
+    // No check runs on the Problem screen. The service stops and another program takes the port; hours could pass.
+    h.svc.proofKey = OTHER_TOKEN;
+    h.mono.now += 3_600_000;
+    h.panel.dispatch({ type: 'start', depth: 'quick' });
+    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+    expect(h.svc.calls).not.toContain('POST /reviews');
+    expect(withToken(h)).toHaveLength(sent);
+  });
+
   it('after the token is replaced, the next check shows Pair, and the new token pairs the panel', async () => {
     const h = harness();
     await until(h, 'ready');
@@ -580,7 +596,8 @@ describe('startPanel: following a review', () => {
     expect(h.timers.delays()).toEqual([]);
     expect(run.attaches).toBe(1);
     expect(run.listeners.size).toBe(0);
-    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(1);
+    // The first load's, and the proof before the one attach.
+    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(2);
   });
 
   it('network breaks where hello answers each time run to the re-attach limit and end at the lost-connection problem', async () => {
@@ -598,8 +615,8 @@ describe('startPanel: following a review', () => {
     }
     expect(await until(h, 'problem')).toEqual({ kind: 'problem', pr: prSummary(), message: LOST_MESSAGE });
     expect(h.svc.calls.filter((c) => c === 'GET /reviews/:runId/events')).toHaveLength(6);
-    // One hello after each of the six breaks, besides the first load's.
-    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(7);
+    // The first load's, one proof before each of the six attaches, and one hello after each of the six breaks.
+    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(13);
     expect(h.timers.delays()).toEqual([]);
   });
 

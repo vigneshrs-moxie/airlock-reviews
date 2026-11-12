@@ -65,7 +65,7 @@ function recorded(inner: typeof fetch): { fetch: typeof fetch; seen: Array<{ url
 }
 
 async function startService(
-  now: () => Date = () => new Date(),
+  now: () => Date = () => new Date(), monotonic: () => number = () => performance.now(),
 ): Promise<{ service: Service; base: string; token: string; home: string; launched: Launched[] }> {
   const home = await mkdtemp(join(tmpdir(), 'airlock-panel-client-'));
   const saved = process.env['AIRLOCK_HOME'];
@@ -91,7 +91,7 @@ async function startService(
     now: () => new Date(),
   };
   const service = createServer({
-    config: { port: 0, home, packsDir: join(home, 'packs'), version: '1.2.3' }, engine, review, now, log: () => undefined,
+    config: { port: 0, home, packsDir: join(home, 'packs'), version: '1.2.3' }, engine, review, now, monotonic, log: () => undefined,
   });
   const { port } = await service.listen();
   cleanups.push(async () => {
@@ -186,7 +186,7 @@ describe('the panel\'s client and the real service', () => {
 
   it('after the token is replaced, the old one is neither proved nor accepted, and the new one pairs again', async () => {
     let at = Date.parse('2026-11-11T09:00:00.000Z');
-    const s = await startService(() => new Date(at));
+    const s = await startService(() => new Date(at), () => at);
     let stored: string | null = s.token;
     const client = new ServiceClient(s.base, async () => stored, chromeFetch(ORIGIN));
     expect(await client.pair(s.token)).toEqual({ paired: true, extension: 'new' });
@@ -194,6 +194,9 @@ describe('the panel\'s client and the real service', () => {
 
     const fresh = await replaceToken(s.home);
     at += 1_000;
+    // Whoever holds only the old token is refused a second after the replacement, with nothing else asked first.
+    const old = await fetch(`${s.base}/reviews/running?repo=${REPO}&number=7`, { headers: { Authorization: `Bearer ${s.token}` } });
+    expect(old.status).toBe(401);
     // The periodic check: the service now proves the new token, so the old one is not sent again.
     expect(await refusal(client.hello())).toEqual({ kind: 'unproven', message: NOT_PROVED });
     expect(await refusal(client.pr(REPO, 7))).toEqual({ kind: 'unproven', message: NOT_PROVED });

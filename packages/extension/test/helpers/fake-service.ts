@@ -173,6 +173,10 @@ export class FakeService {
 
   private answer(route: string, req: Request): Response {
     if (route === 'GET /hello') {
+      // As the real service: a nonce, when given, is 32 lower-case hex characters, given once.
+      const nonces = req.url.searchParams.getAll('nonce');
+      if (nonces.length > 1) return json({ error: 'A query value was given twice.' }, 400);
+      if (nonces.length === 1 && !/^[0-9a-f]{32}$/.test(nonces[0] as string)) return json({ error: 'nonce: not a nonce' }, 400);
       const nonce = req.url.searchParams.get('nonce');
       const key = this.proofKey === undefined ? this.token : this.proofKey;
       const proof = nonce === null || key === null ? {} : { proof: createHmac('sha256', key).update(`airlock-hello:${nonce}`).digest('hex') };

@@ -263,6 +263,8 @@ describe('ServiceClient', () => {
       const run = svc.startRun('acme/widgets', 1, 'run_00000000000a');
       const seen: ServiceEvent[] = [];
       const result = client.events('run_00000000000a', (e) => seen.push(e), new AbortController().signal);
+      // The attach proves first; the stream is open once its request has gone.
+      while (!svc.calls.includes('GET /reviews/:runId/events')) await tick();
       await tick();
       expect(timers.delays()).toEqual([45_000]);
       const armed = [...timers.pending.keys()];

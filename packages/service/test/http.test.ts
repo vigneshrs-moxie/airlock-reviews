@@ -15,6 +15,8 @@ import { createServer } from '../src/server.js';
 const ORIGIN = `chrome-extension://${'a'.repeat(32)}`;
 const OTHER = `chrome-extension://${'b'.repeat(32)}`;
 const TOKEN = 'f'.repeat(64);
+/** A keeper whose token file never changes. */
+const fixedToken = () => keepToken({ token: TOKEN, signature: null }, { look: async () => null, read: async () => ({ refused: 'unused' }) }, () => performance.now());
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -52,7 +54,7 @@ interface Rig { port: number; log: string[]; paired: { value: string | null } }
 async function routerRig(extra: { pairedOrigin?: string | null } = {}): Promise<Rig> {
   const log: string[] = [];
   const paired = { value: extra.pairedOrigin ?? null };
-  const auth: Auth = { tokens: keepToken(TOKEN, async () => null, Date.now), port: 0, pairedOrigin: async () => paired.value };
+  const auth: Auth = { tokens: fixedToken(), port: 0, pairedOrigin: async () => paired.value };
   const ok: Handler = async (req) => ({ status: 200, json: { path: req.path, params: req.params, body: req.body ?? null, origin: req.origin, q: req.query.get('q') } });
   const listener = createRouter([
     { method: 'GET', path: '/hello', open: true, handler: async () => ({ status: 200, json: { hi: true } }) },
@@ -369,7 +371,7 @@ describe('streams', () => {
     const log: string[] = [];
     let aborted!: () => void;
     const seen = new Promise<void>((r) => { aborted = r; });
-    const auth: Auth = { tokens: keepToken(TOKEN, async () => null, Date.now), port: 0, pairedOrigin: async () => null };
+    const auth: Auth = { tokens: fixedToken(), port: 0, pairedOrigin: async () => null };
     const server = http.createServer(createRouter([{
       method: 'GET', path: '/wait',
       handler: async () => ({ status: 200 as const, stream: (emit, closed) => new Promise<void>((resolve) => {

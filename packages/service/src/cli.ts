@@ -23,6 +23,8 @@ export interface CliOverrides {
   readOrCreateToken?: (home: string) => Promise<string>;
   /** Makes a new token in place of the old one and returns it. */
   replaceToken?: (home: string) => Promise<string>;
+  /** Waits this many milliseconds (`status` waits one second before it asks for the proof a second time). */
+  wait?: (ms: number) => Promise<void>;
   /** Reads the token file without ever making one; null when there is none. */
   readToken?: (home: string) => Promise<string | null>;
   unpair?: (home: string) => Promise<void>;
@@ -316,7 +318,8 @@ const timeoutSignal = (o: CliOverrides, fallback: number): AbortSignal => AbortS
 
 const portTaken = (config: ServiceConfig): string => `Port ${config.port} is in use by another program.`;
 
-const NOT_PROVED = "Something else is answering on Airlock's port. The token was not sent.";
+/** The service's look at a replaced token file is at most a second old; `status` waits that long before asking again. */
+const PROOF_RETRY_MS = 1_000;
 
 /**
  * What answers `/hello` on the configured port: Airlock's hello; `other` when something answered over HTTP but not as
@@ -346,8 +349,8 @@ async function answersHello(config: ServiceConfig, o: CliOverrides): Promise<boo
 
 async function status(io: CliIo, o: CliOverrides): Promise<number> {
   const config = (o.loadConfig ?? loadConfig)(o.env ?? process.env);
-  const nonce = newNonce();
-  const hello = await probe(config, o, nonce);
+  let nonce = newNonce();
+  let hello = await probe(config, o, nonce);
   if (hello === null) {
     io.err(`Airlock's service is not running. Start it with: ${START_HINT}\n`);
     return 1;
@@ -362,9 +365,16 @@ async function status(io: CliIo, o: CliOverrides): Promise<number> {
     io.err("Airlock's service is running, but no pairing token has been made yet.\n");
     return 1;
   }
-  // Whatever answers must prove it holds this token before it is sent.
+  // Whatever answers must prove it holds this token before it is sent. A token replaced a moment ago may not have been
+  // picked up yet, so a failed proof is asked for once more, a second later, with a new nonce.
   if (hello.proof !== helloProof(key, nonce)) {
-    io.err(`${NOT_PROVED} If Airlock is running from another AIRLOCK_HOME, stop it and start it again: ${START_HINT}\n`);
+    await (o.wait ?? ((ms: number) => new Promise<void>((done) => { setTimeout(done, ms); })))(PROOF_RETRY_MS);
+    nonce = newNonce();
+    hello = await probe(config, o, nonce);
+  }
+  if (hello === null || hello === 'other' || hello.proof !== helloProof(key, nonce)) {
+    io.err(`The service on port ${config.port} could not show that it holds the pairing token on disk, so the token was not sent. `
+      + `If Airlock is running from another AIRLOCK_HOME, stop it and start it again: ${START_HINT}. If not, another program may be answering on Airlock's port.\n`);
     return 1;
   }
   let res: Response;

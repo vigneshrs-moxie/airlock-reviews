@@ -80,6 +80,7 @@ function harness(options: { exists?: boolean; env?: Record<string, string>; boot
   const chmodCalls: Array<{ path: string; mode: number }> = [];
   const createToken = vi.fn(async () => TOKEN);
   const replaceToken = vi.fn(async () => NEW_TOKEN);
+  const wait = vi.fn(async (_ms: number) => undefined);
   const exits: number[] = [];
   const overrides: Required<CliOverrides> = {
     createServer: (deps) => { created.push(deps); return server; },
@@ -87,6 +88,7 @@ function harness(options: { exists?: boolean; env?: Record<string, string>; boot
     loadConfig: () => config,
     readOrCreateToken: createToken,
     replaceToken,
+    wait,
     readToken: async () => TOKEN,
     unpair: vi.fn(async () => undefined),
     fetch: (async () => { throw new TypeError('fetch failed'); }) as typeof fetch,
@@ -113,7 +115,7 @@ function harness(options: { exists?: boolean; env?: Record<string, string>; boot
   };
   const io = { out: (t: string) => out.push(t), err: (t: string) => err.push(t) };
   const plist = join(fakeHome, 'Library', 'LaunchAgents', 'com.airlock.service.plist');
-  return { root, airlockHome, fakeHome, repoRoot, cliPath, binDirs, out, err, calls, handlers, server, created, overrides, io, plist, config, createToken, replaceToken, chmodCalls, exits };
+  return { root, airlockHome, fakeHome, repoRoot, cliPath, binDirs, out, err, calls, handlers, server, created, overrides, io, plist, config, createToken, replaceToken, wait, chmodCalls, exits };
 }
 
 const all = (h: { out: string[]; err: string[] }): string => [...h.out, ...h.err].join('');
@@ -586,11 +588,31 @@ describe('status, honestly and read-only', () => {
         return isHello(url) ? answer(url) : json({ version: '1.0.0', claude: true, gh: true, packsDir: '/p', running: [] });
       }) as typeof fetch;
       expect(await main(['status'], h.io, h.overrides), what).toBe(1);
-      expect(sent, what).toEqual([null]);
+      // Asked twice, a second apart, and the token sent to neither.
+      expect(sent, what).toEqual([null, null]);
+      expect(h.wait, what).toHaveBeenCalledExactlyOnceWith(1_000);
       expect(h.err.join(''), what).toBe(
-        "Something else is answering on Airlock's port. The token was not sent. If Airlock is running from another AIRLOCK_HOME, stop it and start it again: npm run service\n");
+        `The service on port ${PORT} could not show that it holds the pairing token on disk, so the token was not sent. `
+        + "If Airlock is running from another AIRLOCK_HOME, stop it and start it again: npm run service. If not, another program may be answering on Airlock's port.\n");
       expect(all(h), what).not.toContain(TOKEN);
     }
+  });
+
+  it('a token replaced a moment ago is not reported as something else: status asks once more a second later', async () => {
+    const h = harness();
+    const asked: string[] = [];
+    let hellos = 0;
+    h.overrides.fetch = (async (url: string, init?: RequestInit) => {
+      asked.push(`${new URL(url).pathname} ${new Headers(init?.headers).get('authorization') ?? '-'}`);
+      if (!isHello(url)) return json({ version: '1.0.0', claude: true, gh: true, packsDir: '/p', running: [] });
+      hellos += 1;
+      // The first answer still proves the old token; the service looks at the file again by the second.
+      return provedHello(url, hello, hellos === 1 ? 'cd'.repeat(32) : TOKEN);
+    }) as typeof fetch;
+    expect(await main(['status'], h.io, h.overrides)).toBe(0);
+    expect(asked).toEqual(['/hello -', '/hello -', `/status Bearer ${TOKEN}`]);
+    expect(h.wait).toHaveBeenCalledExactlyOnceWith(1_000);
+    expect(h.err).toEqual([]);
   });
 
   it('asks with a new nonce each time', async () => {

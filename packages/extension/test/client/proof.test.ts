@@ -2,13 +2,21 @@ import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { NOT_PROVED, helloProof, newNonce } from '../../src/client/proof';
 import { ServiceClient, ServiceError } from '../../src/client/service';
-import { BASE, FakeService, OTHER_TOKEN, TOKEN, json } from '../helpers/fake-service';
+import { BASE, FakeService, OTHER_TOKEN, TOKEN, held, json, type Request } from '../helpers/fake-service';
 import { FakeTimers } from '../helpers/fake-timers';
 
+/** `clock.now` is the client's monotonic clock, moved only by the test. */
 function setup(stored: { token: string | null } = { token: TOKEN }) {
   const svc = new FakeService();
-  const client = new ServiceClient(BASE, async () => stored.token, svc.fetch, new FakeTimers());
-  return { svc, client, stored };
+  const clock = { now: 0 };
+  const client = new ServiceClient(BASE, async () => stored.token, svc.fetch, new FakeTimers(), () => clock.now);
+  return { svc, client, stored, clock };
+}
+
+/** A hello as the service gives it, with the proof for the request's nonce made with `key`. */
+function helloWith(req: Request, key: string): Response {
+  const nonce = req.url.searchParams.get('nonce') ?? '';
+  return json({ airlock: true, version: '0.1.0', paired: true, proof: createHmac('sha256', key).update(`airlock-hello:${nonce}`).digest('hex') });
 }
 
 async function failure(work: Promise<unknown>): Promise<ServiceError> {
@@ -22,7 +30,8 @@ async function failure(work: Promise<unknown>): Promise<ServiceError> {
 }
 
 const withToken = (svc: FakeService) => svc.requests.filter((r) => r.headers.has('authorization'));
-const NOT_PROVED_WORDS = "Something else is answering on Airlock's port. The token was not sent.";
+const NOT_PROVED_WORDS = "The service could not show that it holds this panel's token, so the token was not sent. "
+  + "If you replaced the token, paste the new one. If you did not, another program may be answering on Airlock's port.";
 
 describe('the proof, in the panel', () => {
   it('is the service\'s HMAC-SHA256 of "airlock-hello:<nonce>" keyed with the token, in lower-case hex', async () => {
@@ -36,7 +45,7 @@ describe('the proof, in the panel', () => {
     expect(new Set(nonces).size).toBe(20);
   });
 
-  it('says the sentence the brief gives', () => {
+  it('says the sentence the fix brief gives', () => {
     expect(NOT_PROVED).toBe(NOT_PROVED_WORDS);
   });
 });
@@ -76,6 +85,97 @@ describe('the client and the proof', () => {
       // A new nonce for every ask.
       const nonces = svc.requests.map((r) => r.url.searchParams.get('nonce'));
       expect(new Set(nonces).size).toBe(nonces.length);
+    }
+  });
+
+  it('a proof that is not 64 hexadecimal characters is a failed proof, not a reply it does not understand', async () => {
+    for (const proof of ['', 'xyz', 'A'.repeat(64), 'a'.repeat(63), 'a'.repeat(65)]) {
+      const { svc, client } = setup();
+      svc.on('GET /hello', () => json({ airlock: true, version: '0.1.0', paired: true, proof }));
+      expect(await failure(client.pr('acme/widgets', 1)), proof).toMatchObject({ kind: 'unproven', message: NOT_PROVED_WORDS });
+      expect(await failure(client.hello()), proof).toMatchObject({ kind: 'unproven', message: NOT_PROVED_WORDS });
+      expect(withToken(svc)).toEqual([]);
+    }
+  });
+
+  it('a burst of requests within a second shares one proof, and any request after that second proves again', async () => {
+    const { svc, client, clock } = setup();
+    await client.pr('acme/widgets', 1);
+    clock.now = 999;
+    await client.latest('acme/widgets', 1);
+    await client.running('acme/widgets', 1);
+    expect(svc.calls).toEqual(['GET /hello', 'GET /pr', 'GET /reviews/latest', 'GET /reviews/running']);
+    clock.now = 1_000;
+    await client.latest('acme/widgets', 1);
+    expect(svc.calls.slice(-2)).toEqual(['GET /hello', 'GET /reviews/latest']);
+  });
+
+  it('after a matched proof the service stops and another listener takes the port: the next action a second later sends no Authorization header', async () => {
+    const { svc, client, clock } = setup();
+    await client.pr('acme/widgets', 1);
+    const sent = withToken(svc).length;
+    // Nothing failed in between: no network error, no 401, no failed check.
+    svc.proofKey = OTHER_TOKEN;
+    clock.now = 1_001;
+    for (const call of [
+      () => client.start({ repo: 'acme/widgets', number: 1 }),
+      () => client.dismiss({ repo: 'acme/widgets', number: 1, reviewId: 'r_0000000001', findingId: 'c_01234567', reason: 'not-now', text: '' }),
+    ]) {
+      expect(await failure(call())).toMatchObject({ kind: 'unproven', message: NOT_PROVED_WORDS });
+    }
+    expect(withToken(svc)).toHaveLength(sent);
+    expect(svc.calls).not.toContain('POST /reviews');
+  });
+
+  it('a late success from an older check does not re-arm the proof after a newer check failed', async () => {
+    const { svc, client } = setup();
+    const late = held();
+    let asked = 0;
+    svc.on('GET /hello', (req) => {
+      asked += 1;
+      // The first check is held back and will prove the token; the second is answered at once with a wrong proof.
+      if (asked === 1) return late.reply().then(() => helloWith(req, TOKEN));
+      return helloWith(req, OTHER_TOKEN);
+    });
+    const older = client.hello();
+    await new Promise((r) => setTimeout(r, 0));
+    expect((await failure(client.hello())).kind).toBe('unproven');
+    late.release(new Response());
+    expect(await older).toMatchObject({ airlock: true });
+    // The older success counts for nothing: the next call asks again, and that answer cannot prove the token.
+    expect((await failure(client.pr('acme/widgets', 1))).kind).toBe('unproven');
+    expect(asked).toBe(3);
+    expect(withToken(svc)).toEqual([]);
+  });
+
+  it('pairing proves the pasted token even when it is the stored one and was proved a moment ago', async () => {
+    const { svc, client } = setup();
+    await client.pr('acme/widgets', 1);
+    svc.proofKey = OTHER_TOKEN;
+    expect(await client.pair(TOKEN)).toEqual({ error: NOT_PROVED_WORDS });
+    expect(svc.calls).not.toContain('POST /pair');
+  });
+
+  it('every attach to a review\'s event stream proves first, after any kind of cut', async () => {
+    const { svc, client } = setup();
+    const run = svc.startRun('acme/widgets', 1, 'run_00000000000a');
+    run.emit({ type: 'stage', stage: 'intake', status: 'start', detail: '' });
+    // Closed cleanly without a last event: 'lost', not a network failure.
+    expect(await client.events('run_00000000000a', () => queueMicrotask(() => run.close()), new AbortController().signal)).toBe('lost');
+    svc.proofKey = OTHER_TOKEN;
+    const before = withToken(svc).length;
+    expect((await failure(client.events('run_00000000000a', () => undefined, new AbortController().signal))).kind).toBe('unproven');
+    expect(withToken(svc)).toHaveLength(before);
+    expect(svc.calls).toEqual(['GET /hello', 'GET /reviews/:runId/events', 'GET /hello']);
+  });
+
+  it('the unit fake checks the nonce as the real service does', async () => {
+    const { svc } = setup();
+    const status = async (query: string) => (await svc.fetch(`${BASE}/hello${query}`)).status;
+    expect(await status('')).toBe(200);
+    expect(await status(`?nonce=${'0'.repeat(32)}`)).toBe(200);
+    for (const query of ['?nonce=', '?nonce=abc', `?nonce=${'A'.repeat(32)}`, `?nonce=${'0'.repeat(32)}&nonce=${'0'.repeat(32)}`]) {
+      expect(await status(query), query).toBe(400);
     }
   });
 

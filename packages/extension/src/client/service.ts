@@ -4,6 +4,7 @@ import {
   type DismissBody, type Dismissal, type Hello, type LatestReply, type PairReply, type PrSummary, type RestoreBody,
   type RestoreReply, type ServiceEvent, type ServiceStatus, type StartReviewBody, type StartReviewReply,
 } from '@airlock/shared';
+import { z } from 'zod';
 import { EventDataError, readEventStream } from './event-stream';
 import { NOT_PROVED, newNonce, proves } from './proof';
 import { realTimers, type Timers } from './timers';
@@ -12,6 +13,15 @@ export const NOT_UNDERSTOOD = 'Airlock got a reply from its service that it does
 const NO_TOKEN = 'This panel is not paired with the Airlock service yet.';
 const REFUSED_TOKEN = 'The Airlock service does not accept this panel’s pairing token.';
 const OFFLINE = 'The Airlock service is not answering.';
+
+/** How long a matched proof lets the token be sent, on a clock that never goes back. */
+export const PROOF_MS = 1_000;
+
+/**
+ * Hello as the panel reads it: any string is taken as `proof`, so a malformed one is judged by the gate as a failed
+ * proof (the Pair screen with the sentence) rather than as a reply the panel does not understand.
+ */
+const HelloReplySchema = HelloSchema.extend({ proof: z.string().optional() });
 
 /** How long a call may take, reply read included, before the service counts as not answering. */
 export const HELLO_TIMEOUT_MS = 5_000;
@@ -48,19 +58,29 @@ type Call = { method: 'GET' | 'POST'; path: string; query?: Record<string, strin
  * The panel's only way to reach the local service. Every reply is checked against the shared contract.
  *
  * The token is sent only to an address that has just proved it holds it: `send`, the one place the Authorization
- * header is added, first asks `/hello` with a fresh nonce and checks the proof, unless the same token was proved since
- * the last network failure, 401 or failed check. A periodic `hello` always asks with a new nonce.
+ * header is added, first asks `/hello` with a fresh nonce and checks the proof, unless a proof for this token matched
+ * less than `PROOF_MS` ago (so a burst of requests shares one proof, and any later action proves again). Pairing and
+ * every attach to a review's event stream always prove first. A periodic `hello` always asks with a new nonce.
+ *
+ * Every check with a token gets a number, and only the newest check that has finished decides whether the token is
+ * proved: a late answer to an older check counts for nothing.
  */
 export class ServiceClient {
   private readonly fetchFn: typeof fetch;
-  /** The token whose proof last matched; null after a network failure, a 401 or any hello that did not prove it. */
-  private proved: string | null = null;
+  /** The token whose proof matched in the newest finished check, and when; null after any failure. */
+  private proved: { token: string; at: number } | null = null;
+  /** Why the newest finished check failed, when it did. */
+  private checkFailure: unknown = null;
+  private checks = 0;
+  private newestFinished = 0;
 
   constructor(
     private readonly base: string,
     private readonly token: () => Promise<string | null>,
     fetchFn?: typeof fetch,
     private readonly timers: Timers = realTimers,
+    /** Milliseconds on a clock that never goes back, for how long a proof lasts. */
+    private readonly now: () => number = () => performance.now(),
   ) {
     // Called through a wrapper: an extension page's fetch throws when called without its window as `this`.
     this.fetchFn = fetchFn ?? ((input, init) => fetch(input, init));
@@ -84,7 +104,8 @@ export class ServiceClient {
     return this.timed(CALL_TIMEOUT_MS, undefined, async (signal) => {
       let res: Response;
       try {
-        res = await this.send({ method: 'POST', path: '/pair' }, token, signal);
+        // A pasted token is proved even when it is the stored one and was proved a moment ago.
+        res = await this.send({ method: 'POST', path: '/pair' }, token, signal, true);
       } catch (error) {
         // What answers could not prove it holds this token, or did not answer as Airlock: nothing was sent.
         if (error instanceof ServiceError && error.kind !== 'offline') return { error: error.message };
@@ -161,7 +182,8 @@ export class ServiceClient {
     try {
       let res: Response;
       try {
-        res = await this.send({ method: 'GET', path: `/reviews/${runId}/events` }, token, AbortSignal.any([signal, silent.signal]));
+        // Every attach, the first and each one after a cut of any kind, proves first.
+        res = await this.send({ method: 'GET', path: `/reviews/${runId}/events` }, token, AbortSignal.any([signal, silent.signal]), true);
       } catch (error) {
         if (error instanceof ServiceError && error.kind !== 'offline') throw error;
         return cut(error);
@@ -245,40 +267,61 @@ export class ServiceClient {
   }
 
   /**
-   * Asks `/hello`. With a token, the nonce is new and the proof must match it: a match records the token as proved;
-   * anything else forgets any proof, and a wrong or missing proof throws `unproven`. No answer is `'offline'`.
+   * Asks `/hello`. With a token, the nonce is new and the proof must match it; the check's result is recorded unless a
+   * newer check has already finished. A wrong, missing or malformed proof throws `unproven`. No answer is `'offline'`.
    */
   private async ask(token: string | null, signal?: AbortSignal): Promise<Hello | 'offline'> {
     const nonce = token === null ? null : newNonce();
+    const check = token === null ? 0 : ++this.checks;
     try {
-      return await this.timed(HELLO_TIMEOUT_MS, signal, async (both) => {
+      const hello = await this.timed(HELLO_TIMEOUT_MS, signal, async (both) => {
         const address = nonce === null ? this.url('/hello') : this.url('/hello', { nonce });
         const res = await this.fetchFn(address, { signal: both }).catch(() => {
           throw new ServiceError('offline', OFFLINE);
         });
         if (!res.ok) throw await failure(res);
-        const hello = await parse(res, HelloSchema);
-        if (token === null || nonce === null) return hello;
-        if (!(await proves(hello.proof, token, nonce))) throw new ServiceError('unproven', NOT_PROVED);
-        this.proved = token;
-        return hello;
+        const reply = await parse(res, HelloReplySchema);
+        if (token !== null && nonce !== null && !(await proves(reply.proof, token, nonce))) {
+          throw new ServiceError('unproven', NOT_PROVED);
+        }
+        return reply;
       });
+      if (token !== null) this.record(check, { token, at: this.now() }, null);
+      return hello;
     } catch (error) {
-      if (token !== null) this.proved = null;
+      if (token !== null) this.record(check, null, error);
       if (error instanceof ServiceError && error.kind === 'offline') return 'offline';
       throw error;
     }
   }
 
-  /** The one gate before the token leaves the panel: a proof for this token, unless one has matched since the last failure. */
-  private async proven(token: string, signal: AbortSignal): Promise<void> {
-    if (this.proved === token) return;
+  /** Records a check's result, unless a newer check has already finished. */
+  private record(check: number, proved: { token: string; at: number } | null, failed: unknown): void {
+    if (check < this.newestFinished) return;
+    this.newestFinished = check;
+    this.proved = proved;
+    this.checkFailure = failed;
+  }
+
+  private provedNow(token: string): boolean {
+    return this.proved !== null && this.proved.token === token && this.now() - this.proved.at < PROOF_MS;
+  }
+
+  /**
+   * The one gate before the token leaves the panel: a proof for this token that matched less than `PROOF_MS` ago, or a
+   * new one (always a new one when `always`). A check that matched but was overtaken by a newer one that failed does
+   * not let the token go: that failure is thrown.
+   */
+  private async proven(token: string, signal: AbortSignal, always: boolean): Promise<void> {
+    if (!always && this.provedNow(token)) return;
     if ((await this.ask(token, signal)) === 'offline') throw new ServiceError('offline', OFFLINE);
+    if (this.provedNow(token)) return;
+    throw this.checkFailure instanceof ServiceError ? this.checkFailure : new ServiceError('unproven', NOT_PROVED);
   }
 
   /** The only place the Authorization header is added, and only after `proven`. */
-  private async send(call: Call, token: string, signal: AbortSignal): Promise<Response> {
-    await this.proven(token, signal);
+  private async send(call: Call, token: string, signal: AbortSignal, alwaysProve = false): Promise<Response> {
+    await this.proven(token, signal, alwaysProve);
     const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
     const init: RequestInit = { method: call.method, headers, signal };
     if (call.body !== undefined) {

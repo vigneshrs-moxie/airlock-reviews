@@ -6,7 +6,7 @@ import {
 } from '@airlock/engine';
 import type { Dismissal, Hello, PairReply } from '@airlock/shared';
 import { z } from 'zod';
-import { pair, pairedOrigin, readOrCreateToken, readToken, type ServiceConfig } from './config.js';
+import { pair, pairedOrigin, readOrCreateToken, tokenFile, type ServiceConfig } from './config.js';
 import { dismissalsFor } from './dismissals.js';
 import { createRouter, type Auth, type Route } from './http.js';
 import { helloProof, keepToken, NONCE_PATTERN, type TokenKeeper } from './proof.js';
@@ -26,6 +26,11 @@ export interface ServiceDeps {
   limits?: { requestTimeoutMs?: number; headersTimeoutMs?: number; runMinutes?: number };
   /** The keep-alive and the dropping of finished runs; real timers by default. */
   timers?: Timers;
+  /**
+   * Milliseconds on a clock that never goes back, for the token file's once-a-second look; `performance.now` by
+   * default.
+   */
+  monotonic?: () => number;
   /** The dismissals recorded for a pull request; the stored ones (under the service's home) by default. */
   dismissals?: (repo: string, number: number) => Promise<Dismissal[]>;
 }
@@ -103,9 +108,14 @@ export function createServer(deps: ServiceDeps): Service {
   return {
     routes,
     async listen() {
-      const token = await readOrCreateToken(deps.config.home);
-      // A token replaced with `token --new` is picked up after a failed comparison, without a restart.
-      keeper = keepToken(token, () => readToken(deps.config.home), () => deps.now().getTime());
+      const made = await readOrCreateToken(deps.config.home);
+      // A token replaced with `token --new` is picked up within a second of the next check, without a restart. The
+      // file is looked at, then read, so the token held always comes from the file the look describes (or is newer).
+      const file = tokenFile(deps.config.home);
+      const signature = await file.look();
+      const found = await file.read();
+      const token = 'token' in found ? found.token : made;
+      keeper = keepToken({ token, signature }, file, deps.monotonic ?? (() => performance.now()), deps.log);
       const auth: Auth = { tokens: keeper, port: deps.config.port, pairedOrigin: () => pairedOrigin(deps.config.home) };
       const created = http.createServer({ connectionsCheckingInterval: 5_000 }, createRouter(routes, auth, deps.log, { hidePaths }));
       created.requestTimeout = deps.limits?.requestTimeoutMs ?? 30_000;

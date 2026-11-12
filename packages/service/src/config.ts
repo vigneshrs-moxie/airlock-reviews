@@ -4,6 +4,7 @@ import { chmod, link, lstat, mkdir, readFile, rename, rm, stat, writeFile } from
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { TokenFile } from './proof.js';
 
 export interface ServiceConfig { port: number; home: string; packsDir: string; version: string }
 
@@ -88,15 +89,37 @@ export async function readOrCreateToken(home: string): Promise<string> {
 }
 
 /**
- * The token in the token file, or null when there is none, the file holds anything else, or the path is a symbolic
- * link. It never makes a token: the running service uses it to pick up a replaced one.
+ * The token file as the running service watches it: `look` is one `lstat` (inode, size, modification time and mode,
+ * so a replaced, rewritten or re-permissioned file looks different); `read` takes the token as at start, never follows
+ * a symbolic link, never makes a token, and sets wider permissions back to 0600.
  */
-export async function readToken(home: string): Promise<string | null> {
+export function tokenFile(home: string): TokenFile {
   const file = join(serviceDir(home), 'token');
-  const isLink = await lstat(file).then((st) => st.isSymbolicLink(), () => false);
-  if (isLink) return null;
-  const text = (await readText(file))?.trim();
-  return text !== undefined && TOKEN_PATTERN.test(text) ? text : null;
+  return {
+    async look() {
+      try {
+        const st = await lstat(file);
+        return `${st.ino}:${st.size}:${st.mtimeMs}:${st.mode}`;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw e;
+      }
+    },
+    async read() {
+      const st = await lstat(file).catch((e: unknown) => {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw e;
+      });
+      if (st === null) return { refused: 'it is missing' };
+      if (st.isSymbolicLink()) return { refused: 'it is a symbolic link' };
+      const text = (await readText(file))?.trim() ?? '';
+      if (text === '') return { refused: 'it is empty' };
+      if (!TOKEN_PATTERN.test(text)) return { refused: 'it does not hold a token' };
+      const tightened = (st.mode & 0o077) !== 0;
+      if (tightened) await chmod(file, 0o600);
+      return { token: text, tightened };
+    },
+  };
 }
 
 /**

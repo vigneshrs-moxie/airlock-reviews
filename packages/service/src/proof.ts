@@ -12,18 +12,28 @@ export const helloProof = (token: string, nonce: string): string =>
 
 export const newNonce = (): string => randomBytes(16).toString('hex');
 
-/** How long after reading the token file the service waits before it reads it again. */
+/** How long after looking at the token file the service waits before it looks again, on a clock that never goes back. */
 export const REREAD_MS = 1_000;
+
+/** The token file as the keeper sees it. */
+export interface TokenFile {
+  /** What identifies the file's current state (its inode, size, modification time and mode), or null when there is none. */
+  look(): Promise<string | null>;
+  /**
+   * The token in the file, and whether its permissions had to be set back to 0600; or why it is not taken (a symbolic
+   * link, empty, or not a token).
+   */
+  read(): Promise<{ token: string; tightened: boolean } | { refused: string }>;
+}
 
 /** The pairing token the running service holds, kept in step with the token file without a restart. */
 export interface TokenKeeper {
   /**
-   * Whether `given` is the token, compared in constant time. On a mismatch the file is read again, at most once a
-   * second however many requests arrive (a request that comes while a read is under way waits for it), and `given` is
-   * compared once more. A match never reads the file.
+   * Whether `given` is the token, compared in constant time, after looking at the file when a second has passed since
+   * the last look (a match or not), so a replaced token stops working within a second.
    */
   matches(given: string): Promise<boolean>;
-  /** The token to make a proof with: the one held, after reading the file again when a read is allowed. */
+  /** The token to make a proof with, after the same look. */
   forProof(): Promise<string>;
 }
 
@@ -31,32 +41,70 @@ const sha256 = (text: string): Buffer => createHash('sha256').update(text).diges
 const same = (a: string, b: string): boolean => timingSafeEqual(sha256(a), sha256(b));
 
 /**
- * `read` gives the token in the file, or null when there is none or it is not a token; the token held is kept then.
- * `now` is in milliseconds. The first read is the one that gave `first`, made at the moment this is called.
+ * `first` is the token read at start and the look of the file it came from. Whenever a token is checked or a proof is
+ * made, the file is looked at (one `stat`) if `REREAD_MS` has passed on `now`, a clock that never goes back; it is read
+ * only when its look changed. A look under way is shared, so a flood of requests costs one look a second at most. A
+ * file that is not taken leaves the token held in place; each change of the file, and each failure to look, is logged
+ * once, never with the token.
  */
-export function keepToken(first: string, read: () => Promise<string | null>, now: () => number): TokenKeeper {
-  let token = first;
-  let lastRead = now();
-  let reading: Promise<void> | null = null;
+export function keepToken(
+  first: { token: string; signature: string | null }, file: TokenFile, now: () => number,
+  log: (line: string) => void = () => undefined,
+): TokenKeeper {
+  let token = first.token;
+  let signature = first.signature;
+  let lastLook = now();
+  let looking: Promise<void> | null = null;
+  let lastFailure: string | null = null;
 
-  const reread = (): Promise<void> => {
-    if (reading !== null) return reading;
-    if (now() - lastRead < REREAD_MS) return Promise.resolve();
-    lastRead = now();
-    reading = read()
-      .then((found) => { if (found !== null) token = found; }, () => undefined)
-      .finally(() => { reading = null; });
-    return reading;
+  const lookOnce = async (): Promise<void> => {
+    const seen = await file.look();
+    if (seen !== signature) {
+      // The look is kept only once the file was read, so a read that failed is tried again a second later.
+      const found = await file.read();
+      signature = seen;
+      take(found);
+    }
+    lastFailure = null;
+  };
+
+  const take = (found: Awaited<ReturnType<TokenFile['read']>>): void => {
+    if ('refused' in found) {
+      log(`The token file changed but was not taken (${found.refused}); the token in use is unchanged.`);
+      return;
+    }
+    if (found.tightened) {
+      log('The token file could be read by other users; its permissions were set back to 0600.');
+      // Setting the mode changed the look; that is not a change of token, so the next look reads it once more and
+      // finds the same token.
+    }
+    if (found.token !== token) {
+      token = found.token;
+      log('The token file changed; the new token is in use.');
+    }
+  };
+
+  const refresh = (): Promise<void> => {
+    if (looking !== null) return looking;
+    if (now() - lastLook < REREAD_MS) return Promise.resolve();
+    lastLook = now();
+    looking = lookOnce()
+      .catch((e: unknown) => {
+        const why = e instanceof Error ? e.message : String(e);
+        if (why !== lastFailure) log(`The token file could not be checked (${why}); the token in use is unchanged.`);
+        lastFailure = why;
+      })
+      .finally(() => { looking = null; });
+    return looking;
   };
 
   return {
     async matches(given) {
-      if (same(given, token)) return true;
-      await reread();
+      await refresh();
       return same(given, token);
     },
     async forProof() {
-      await reread();
+      await refresh();
       return token;
     },
   };

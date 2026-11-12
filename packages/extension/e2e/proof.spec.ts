@@ -11,7 +11,8 @@ const EXTENSION_ID = 'nbcmjckbkploiemllhkmhegjimgeimoa';
 const BUILT = fileURLToPath(new URL('../.output-e2e/chrome-mv3', import.meta.url));
 const TOKEN = '0123456789abcdef'.repeat(4);
 const PR_URL = 'https://github.com/acme/widgets/pull/1';
-const NOT_PROVED = "Something else is answering on Airlock's port. The token was not sent.";
+const NOT_PROVED = "The service could not show that it holds this panel's token, so the token was not sent. "
+  + "If you replaced the token, paste the new one. If you did not, another program may be answering on Airlock's port.";
 
 let service: FakeService;
 let profile: string;
