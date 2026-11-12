@@ -1,9 +1,9 @@
 import {
   ApiErrorSchema, checkCommentText, commentBody, DismissalSchema, DismissBodySchema, ForgetPostBodySchema, HelloSchema, LatestReplySchema,
-  mentionsIn, PairReplySchema, PostBodySchema, PostPreviewBodySchema, PostPreviewReplySchema, PostRecordSchema, PrSummarySchema,
-  RestoreBodySchema, RestoreReplySchema, RunIdSchema, ServiceEventSchema, ServiceStatusSchema, StartReviewBodySchema,
+  LearnedReplySchema, mentionsIn, PairReplySchema, PostBodySchema, PostPreviewBodySchema, PostPreviewReplySchema, PostRecordSchema, PrSummarySchema,
+  RemoveLearnedBodySchema, RemoveLearnedReplySchema, RestoreBodySchema, RestoreReplySchema, RunIdSchema, ServiceEventSchema, ServiceStatusSchema, StartReviewBodySchema,
   StartReviewReplySchema, summaryBody, SUMMARY_MAX,
-  type Dismissal, type Finding, type LatestReply, type Placement, type PostPreviewItem, type PostPreviewReply, type PostRecord,
+  type Dismissal, type Finding, type LatestReply, type LearnedLine, type Placement, type PostPreviewItem, type PostPreviewReply, type PostRecord,
   type PrSummary, type ReviewDocument, type ServiceEvent,
 } from '@airlock/shared';
 import { randomBytes } from 'node:crypto';
@@ -33,9 +33,11 @@ const ROUTES: Array<{ method: string; path: RegExp }> = [
   { method: 'POST', path: /^\/posts\/preview$/ },
   { method: 'POST', path: /^\/posts$/ },
   { method: 'POST', path: /^\/posts\/forget$/ },
+  { method: 'GET', path: /^\/learned$/ },
+  { method: 'POST', path: /^\/learned\/remove$/ },
 ];
 /** The routes that can lead to a GitHub write: the real service refuses them without an Origin, before the token. */
-const NEEDS_ORIGIN = new Set(['/posts/preview', '/posts', '/posts/forget']);
+const NEEDS_ORIGIN = new Set(['/posts/preview', '/posts', '/posts/forget', '/learned/remove']);
 const NOT_HERE = 'Airlock only answers on this Mac.';
 const NOT_THIS_PAGE = 'Airlock does not accept requests from this page.';
 const NEEDS_TOKEN = 'Airlock needs its pairing token.';
@@ -47,6 +49,11 @@ const NOT_FOUND = 'Airlock cannot find that finding in the stored review.';
 const PAIRED_ELSEWHERE =
   'Airlock is already paired with another copy of the extension. In the airlock-reviews folder, run: npm run service -- unpair, then pair again.';
 const KIT_PACK = 'raj-standard';
+// The sentences of the learned routes: a line that is no longer there, and the team's kit.
+const LEARNED_GONE = 'That line was already gone; it may have been edited by hand.';
+const LEARNED_REMOVED = 'Removed. The reviewer stops following it from the next review.';
+const KIT_KEPT = 'This line belongs to the team kit, which is not edited here.';
+const LEARNED_CAP = 300;
 // The post sentences of packages/service/src/posts/{preview,records}.ts.
 const NO_REVIEW_HERE = 'Airlock cannot find that review of this pull request.';
 const NOT_ON_DIFF = 'The line is not part of the diff GitHub shows.';
@@ -121,6 +128,8 @@ export interface FakeServiceOptions {
   unpaired?: boolean;
   /** The pull requests it knows. */
   pulls?: FakePull[];
+  /** The learned lines it holds, newest first, as `GET /learned` gives them. */
+  learned?: LearnedLine[];
 }
 
 /** A run the fake started: every event written so far, in order, and whether its script has finished. */
@@ -144,6 +153,8 @@ export interface FakeService {
   posts(repo: string, number: number): PostRecord[];
   /** The pull request got a new head, and the next review started on it plays `script`. */
   push(repo: string, number: number, headSha: string, script: RunStep[]): void;
+  /** The learned lines held now, newest first; a spec may take one out to stand for an edit by hand. */
+  learned: LearnedLine[];
   /** Every preview the fake answered with, in order. */
   previews: PostPreviewReply[];
   /** Every review sent to the fake's GitHub, one per post that reached it, in order. */
@@ -188,7 +199,8 @@ const today = (now: Date): string =>
  * `POST /pair`, `GET /status`, `GET /pr`, `POST /reviews`, `GET /reviews/running`, `GET /reviews/<runId>/events` (a real
  * event stream, written step by step from the pull request's script), `GET /reviews/latest`, `POST /dismissals`,
  * `POST /dismissals/restore`, and the post routes `POST /posts/preview`, `POST /posts` and `POST /posts/forget` (which
- * require an Origin, and whose GitHub is in memory: it records what it is sent and answers as `answerNextPost` says). Request bodies and query values are checked with the shared schemas, and every reply is
+ * require an Origin, and whose GitHub is in memory: it records what it is sent and answers as `answerNextPost` says), and the learned
+ * routes `GET /learned` and `POST /learned/remove` (which requires an Origin and refuses a kit line). Request bodies and query values are checked with the shared schemas, and every reply is
  * checked against its schema before it is sent; a reply that does not match is answered with a 500 and recorded in
  * `problems`. It remembers every request, and can be stopped and started again on the same port.
  */
@@ -204,6 +216,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     posts: p.latest?.posts ?? [],
     script: p.script ?? null,
   }));
+  const learned: LearnedLine[] = [...(options.learned ?? [])];
   const previews: PostPreviewReply[] = [];
   const stored = new Map<string, StoredPreview>();
   const sent: SentReview[] = [];
@@ -439,6 +452,15 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     reply(res, ForgetReplySchema, 200, { forgotten: true });
   }
 
+  function removeLearned(res: ServerResponse, body: unknown): void {
+    const asked = bodyOf(RemoveLearnedBodySchema, body);
+    const at = learned.findIndex((l) => l.pack === asked.pack && l.kind === asked.kind && l.key === asked.key);
+    if (at === -1) { reply(res, RemoveLearnedReplySchema, 200, { removed: false, note: LEARNED_GONE }); return; }
+    if (learned[at]?.removable !== true || asked.pack === KIT_PACK) throw new Refusal(403, KIT_KEPT);
+    learned.splice(at, 1);
+    reply(res, RemoveLearnedReplySchema, 200, { removed: true, note: LEARNED_REMOVED });
+  }
+
   function start(res: ServerResponse, body: unknown): void {
     const asked = bodyOf(StartReviewBodySchema, body);
     const existing = runs.find((r) => r.repo === asked.repo && r.number === asked.number && !r.finished);
@@ -515,6 +537,12 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       if (method === 'POST' && url.pathname === '/posts/preview') { preview(res, body); return; }
       if (method === 'POST' && url.pathname === '/posts') { post(res, body); return; }
       if (method === 'POST' && url.pathname === '/posts/forget') { forget(res, body); return; }
+      if (method === 'POST' && url.pathname === '/learned/remove') { removeLearned(res, body); return; }
+      if (method === 'GET' && url.pathname === '/learned') {
+        if ((url.searchParams.get('repo') ?? '') === '') throw new Refusal(400, 'repo: not a repository name');
+        reply(res, LearnedReplySchema, 200, { lines: [...learned], cap: LEARNED_CAP });
+        return;
+      }
       if (method === 'GET' && ['/pr', '/reviews/running', '/reviews/latest'].includes(url.pathname)) {
         const { repo, number } = queryOf(url);
         const pull = pullOf(repo, number);
@@ -584,6 +612,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       pull.pr = { ...pull.pr, headSha };
       pull.script = script;
     },
+    learned,
     previews,
     sent,
     answerNextPost: (answer) => { answers.push(answer); },

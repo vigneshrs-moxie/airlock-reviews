@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ServiceStatus } from '@airlock/shared';
+import type { LearnedReply, RemoveLearnedBody, RemoveLearnedReply, ServiceStatus } from '@airlock/shared';
 import { ServiceClient } from '../client/service';
 import { realTimers } from '../client/timers';
 import { SERVICE_URL } from '../config';
@@ -31,6 +31,8 @@ export function startRealPanel(
 export interface PanelServices {
   settings: SettingsStore;
   fetchStatus: () => Promise<ServiceStatus>;
+  fetchLearned?: (repo: string) => Promise<LearnedReply>;
+  removeLearned?: (body: RemoveLearnedBody) => Promise<RemoveLearnedReply>;
   jump?: (pr: JumpPr, place: JumpPlace, options: JumpServiceOptions) => Promise<JumpResult>;
 }
 
@@ -56,6 +58,8 @@ export function realServices(settings: SettingsStore = browserSettings(), tab: T
   return {
     settings,
     fetchStatus: () => client.status(),
+    fetchLearned: (repo) => client.learned(repo),
+    removeLearned: (body) => client.removeLearned(body),
     jump: (pr, place, options) => jumpBeside(tab, pr, place, options),
   };
 }
@@ -85,6 +89,8 @@ export function App({ start = (onState) => startRealPanel(onState), services }: 
       state={state} dispatch={dispatch} defaultDepth={depth} onDefaultDepth={setDepth} depthFailed={failed}
       pageReport={pageReport} {...(onJump ? { onJump } : {})}
       {...(services ? { fetchStatus: services.fetchStatus } : {})}
+      {...(services?.fetchLearned ? { fetchLearned: services.fetchLearned } : {})}
+      {...(services?.removeLearned ? { removeLearned: services.removeLearned } : {})}
     />
   );
 }

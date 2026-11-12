@@ -1,8 +1,8 @@
 import {
-  ApiErrorSchema, DismissalSchema, HelloSchema, LatestReplySchema, PairReplySchema, PostPreviewReplySchema, PostRecordSchema,
-  PrSummarySchema, RestoreReplySchema, RunIdSchema, ServiceEventSchema, ServiceStatusSchema, StartReviewReplySchema,
-  type DismissBody, type Dismissal, type ForgetPostBody, type Hello, type LatestReply, type PairReply, type PostBody,
-  type PostPreviewBody, type PostPreviewReply, type PostRecord, type PrSummary, type RestoreBody, type RestoreReply,
+  ApiErrorSchema, DismissalSchema, HelloSchema, LatestReplySchema, LearnedReplySchema, PairReplySchema, PostPreviewReplySchema, PostRecordSchema,
+  PrSummarySchema, RemoveLearnedReplySchema, RestoreReplySchema, RunIdSchema, ServiceEventSchema, ServiceStatusSchema, StartReviewReplySchema,
+  type DismissBody, type Dismissal, type ForgetPostBody, type Hello, type LatestReply, type LearnedReply, type PairReply, type PostBody,
+  type PostPreviewBody, type PostPreviewReply, type PostRecord, type PrSummary, type RemoveLearnedBody, type RemoveLearnedReply, type RestoreBody, type RestoreReply,
   type ServiceEvent, type ServiceStatus, type StartReviewBody, type StartReviewReply,
 } from '@airlock/shared';
 import { z } from 'zod';
@@ -162,6 +162,16 @@ export class ServiceClient {
 
   forgetPost(body: ForgetPostBody): Promise<{ forgotten: boolean }> {
     return this.call({ method: 'POST', path: '/posts/forget', body }, ForgetReplySchema);
+  }
+
+  /** The learned lines of the packs chosen for a repository, newest first. */
+  learned(repo: string, signal?: AbortSignal): Promise<LearnedReply> {
+    return this.call({ method: 'GET', path: '/learned', query: { repo } }, LearnedReplySchema, false, signal);
+  }
+
+  /** Removes one learned line; `removed: false` with a note when it was no longer there. */
+  removeLearned(body: RemoveLearnedBody): Promise<RemoveLearnedReply> {
+    return this.call({ method: 'POST', path: '/learned/remove', body }, RemoveLearnedReplySchema);
   }
 
   /**

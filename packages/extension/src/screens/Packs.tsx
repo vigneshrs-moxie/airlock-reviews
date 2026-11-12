@@ -1,8 +1,9 @@
-import type { Depth, PackRef, PrSummary, ServiceStatus } from '@airlock/shared';
+import type { Depth, LearnedReply, PackRef, PrSummary, RemoveLearnedBody, RemoveLearnedReply, ServiceStatus } from '@airlock/shared';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { Timers } from '../client/timers';
 import { pageWords, type PageReport } from '../state/jump';
 import { CommandBox } from './CommandBox';
+import { LearnedList, LearnedStatus, useLearned } from './LearnedList';
 
 export const UNREACHABLE = 'Airlock could not reach its service.';
 export const UNPAIR_COMMAND = 'npm run service -- unpair';
@@ -54,13 +55,18 @@ function ServiceSection({ fetchStatus }: { fetchStatus: () => Promise<ServiceSta
 }
 
 /** Which packs apply and how the panel is connected; replaces the panel's content until Back. */
-export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onDefaultDepth, depthFailed = false, page = null, onBack, timers }: {
+export function Packs({ pr, packVersions, paired, fetchStatus, fetchLearned, removeLearned, removeBlocked = null, defaultDepth, onDefaultDepth, depthFailed = false, page = null, onBack, timers }: {
   pr: PrSummary | null;
   /** The packs of the review on screen with their versions; empty when no review is on screen. */
   packVersions: readonly PackRef[];
   /** Whether the panel is paired; null when nothing on screen proves it either way. */
   paired: boolean | null;
   fetchStatus: () => Promise<ServiceStatus>;
+  /** Reads the learned lines of the packs chosen for a repository. */
+  fetchLearned: (repo: string) => Promise<LearnedReply>;
+  removeLearned: (body: RemoveLearnedBody) => Promise<RemoveLearnedReply>;
+  /** Why a learned line cannot be removed now (offline, read-only); null when it can. */
+  removeBlocked?: string | null;
   defaultDepth: Depth | null;
   onDefaultDepth: (depth: Depth | null) => void;
   depthFailed?: boolean;
@@ -72,6 +78,7 @@ export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onD
   const heading = useRef<HTMLHeadingElement>(null);
   const depthName = useId();
   useEffect(() => { heading.current?.focus(); }, []);
+  const learned = useLearned(pr === null ? null : pr.repo, fetchLearned);
 
   return (
     <div className="packs-screen">
@@ -81,6 +88,7 @@ export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onD
       </div>
       <section className="card" aria-labelledby="packs-list">
         <h3 className="label" id="packs-list">Packs for this repository</h3>
+        {pr !== null && <LearnedStatus view={learned.view} reload={() => { void learned.reload(); }} />}
         {pr === null ? <p className="muted">Open a pull request to see its packs.</p> : (
           <ul className="plain">
             {pr.packs.map((p) => {
@@ -89,6 +97,9 @@ export function Packs({ pr, packVersions, paired, fetchStatus, defaultDepth, onD
                 <li key={p.id}>
                   <div>{p.title}</div>
                   {version !== undefined && <div className="muted">{`version ${versionWords(version)}`}</div>}
+                  {learned.view.kind === 'ok' && (
+                    <LearnedList repo={pr.repo} packId={p.id} reply={learned.view.reply} blocked={removeBlocked} remove={removeLearned} reload={learned.reload} />
+                  )}
                 </li>
               );
             })}

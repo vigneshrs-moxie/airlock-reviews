@@ -9,8 +9,9 @@ import { Ready } from './Ready';
 import { Running } from './Running';
 import { Verdict } from './Verdict';
 import type { Jump, PageReport } from '../state/jump';
-import type { Depth, Finding, PackRef, PrSummary, ServiceStatus } from '@airlock/shared';
+import type { Depth, Finding, LearnedReply, PackRef, PrSummary, RemoveLearnedBody, RemoveLearnedReply, ServiceStatus } from '@airlock/shared';
 import { DismissSheet, focusAfterClose, newDraft, type SheetDraft, type SheetView } from './DismissSheet';
+import { NO_REMOVE_OFFLINE, NO_REMOVE_UNPAIRED } from './LearnedList';
 import { Packs } from './Packs';
 import { focusAfterPost, newPostDraft, nextTicket, PostSheet, type PostDraft, type PostSheetView } from './PostSheet';
 import { PanelVisible } from './visible';
@@ -28,6 +29,10 @@ export interface PanelScreenProps {
   pageReport?: PageReport | null;
   /** Asks the service for its status, for the Packs screen. */
   fetchStatus?: () => Promise<ServiceStatus>;
+  /** Reads the learned lines of a repository's packs, for the Packs screen. */
+  fetchLearned?: (repo: string) => Promise<LearnedReply>;
+  /** Removes one learned line, for the Packs screen. */
+  removeLearned?: (body: RemoveLearnedBody) => Promise<RemoveLearnedReply>;
   /** The depth stored in the Packs screen; null when none is stored. */
   defaultDepth?: Depth | null;
   /** Stores the default depth; null clears it. */
@@ -52,7 +57,12 @@ function sheetViewOf(state: PanelState): SheetView | null {
   return null;
 }
 
-const unreachable = (): Promise<ServiceStatus> => Promise.reject(new Error('no service'));
+const unreachable = (): Promise<never> => Promise.reject(new Error('no service'));
+
+/** Why a learned line cannot be removed with the panel in this state; null when it can. */
+function removeBlockedBy(state: PanelState): string | null {
+  return state.kind === 'offline' ? NO_REMOVE_OFFLINE : state.kind === 'unpaired' ? NO_REMOVE_UNPAIRED : null;
+}
 
 /** The pull request and the review's packs the state knows about, kept readable even offline. */
 function knownOf(state: PanelState): { pr: PrSummary | null; packs: readonly PackRef[] } {
@@ -125,7 +135,7 @@ function FinishedAnnouncer({ kind }: { kind: PanelState['kind'] }) {
 }
 
 /** The frame and the screen for one state, with the Packs screen and the dismiss and post sheets over it. */
-export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, pageReport = null, fetchStatus = unreachable, defaultDepth = null, onDefaultDepth, depthFailed = false }: PanelScreenProps) {
+export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, pageReport = null, fetchStatus = unreachable, fetchLearned = unreachable, removeLearned = unreachable, defaultDepth = null, onDefaultDepth, depthFailed = false }: PanelScreenProps) {
   const [packsOpen, setPacksOpen] = useState(false);
   // What is in the sheet outlives the sheet being out of sight; only Cancel and Done drop it.
   const [draft, setDraft] = useState<SheetDraft | null>(null);
@@ -197,6 +207,7 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, page
       {packsOpen && (
         <Packs
           pr={known.pr} packVersions={known.packs} paired={pairedOf(state)} fetchStatus={fetchStatus}
+          fetchLearned={fetchLearned} removeLearned={removeLearned} removeBlocked={removeBlockedBy(state)}
           defaultDepth={defaultDepth} onDefaultDepth={onDefaultDepth ?? (() => undefined)} depthFailed={depthFailed} page={pageReport}
           onBack={() => setPacksOpen(false)} {...(timers ? { timers } : {})}
         />

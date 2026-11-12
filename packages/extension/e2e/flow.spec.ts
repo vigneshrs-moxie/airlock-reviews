@@ -1,7 +1,7 @@
 import {
-  DismissBodySchema, ForgetPostBodySchema, LatestReplySchema, PostBodySchema, PostPreviewBodySchema, PrSummarySchema, RestoreBodySchema,
+  DismissBodySchema, ForgetPostBodySchema, LatestReplySchema, PostBodySchema, PostPreviewBodySchema, PrSummarySchema, RemoveLearnedBodySchema, RestoreBodySchema,
   ReviewDocumentSchema, StartReviewBodySchema, candidate, commentBody, fixPrompt, minimalDocument, verdictWords,
-  type Brief, type ChangeMap, type Finding, type PrSummary, type ReviewDocument, type ServiceEvent,
+  type Brief, type ChangeMap, type Finding, type LearnedLine, type PrSummary, type ReviewDocument, type ServiceEvent,
 } from '@airlock/shared';
 import { chromium, expect, test, type BrowserContext, type Page, type Worker } from '@playwright/test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -146,6 +146,16 @@ const rereviewDocument = (): ReviewDocument => ReviewDocumentSchema.parse({
 });
 const rereviewScript: RunStep[] = [stage('intake', 'start'), PAUSE, stage('intake', 'done', '1 file'), PAUSE, { event: { type: 'done', document: rereviewDocument() } }];
 
+const learnedLine = (n: number, over: Partial<LearnedLine> = {}): LearnedLine => ({
+  pack: 'generic', packTitle: 'Generic', kind: 'wrong', date: `2026-11-0${n}`, repo: REPO, text: `Learned line ${n}.`,
+  key: String(n).padStart(16, '0'), appliesHere: true, removable: true, ...over,
+});
+const LEARNED: LearnedLine[] = [
+  learnedLine(3, { kind: 'product-knowledge', text: 'Orders under a cent are rounded up on purpose.' }),
+  learnedLine(2, { text: 'A paused account skips the guard by design.' }),
+  learnedLine(1, { pack: 'orbit', packTitle: 'Orbit', text: '<b>not bold</b>' }),
+];
+
 let service: FakeService | undefined;
 let profile: string | undefined;
 let context: BrowserContext | undefined;
@@ -154,7 +164,7 @@ let github: Page;
 let panel: Page;
 
 test.beforeAll(async () => {
-  service = await startFakeService({ token: TOKEN, unpaired: true, pulls: [{ pr, script }] });
+  service = await startFakeService({ token: TOKEN, unpaired: true, pulls: [{ pr, script }], learned: LEARNED });
   profile = await mkdtemp(join(tmpdir(), 'airlock-e2e-'));
   context = await chromium.launchPersistentContext(profile, {
     channel: 'chromium',
@@ -554,4 +564,32 @@ test('14. a push: the banner, Review the push starts with since last, and the re
   await expect(fixed.getByRole('checkbox')).toHaveCount(0);
   await expect(fixed.getByRole('button')).toHaveCount(1);
   expect(svc().sent).toHaveLength(3);
+});
+
+test('15. Packs shows the learned lines under their packs; Remove asks, removes and shows the note; a line already gone says so', async () => {
+  await panel.getByRole('button', { name: 'Packs' }).click();
+  const generic = panel.locator('.packs-screen li').filter({ hasText: 'Generic' });
+  const orbit = panel.locator('.packs-screen li').filter({ hasText: 'Orbit' });
+  await expect(generic.locator('.learned-line')).toHaveCount(2);
+  await expect(generic.locator('.learned-line').nth(0)).toContainText('Product fact');
+  await expect(generic.locator('.learned-line').nth(0)).toContainText('Applies to this repository');
+  await expect(orbit.locator('.learned-line')).toHaveText(/<b>not bold<\/b>/);
+  await expect(panel.locator('.packs-screen b')).toHaveCount(0);
+
+  const second = generic.locator('.learned-line').nth(1);
+  await second.getByRole('button', { name: 'Remove' }).click();
+  await expect(second.getByText('Remove this line? The reviewer stops following it from the next review.')).toBeVisible();
+  await second.getByRole('button', { name: 'Remove' }).click();
+  await expect(generic.getByText('Removed. The reviewer stops following it from the next review.')).toBeVisible();
+  await expect(generic.locator('.learned-line')).toHaveCount(1);
+  expect(RemoveLearnedBodySchema.parse(bodiesOf('POST', '/learned/remove').at(-1))).toEqual({ repo: REPO, pack: 'generic', kind: 'wrong', key: '0000000000000002' });
+
+  // A line edited by hand since the list was read is already gone: the service says so, and the empty state follows.
+  svc().learned.splice(svc().learned.findIndex((l) => l.key === '0000000000000003'), 1);
+  const last = generic.locator('.learned-line');
+  await last.getByRole('button', { name: 'Remove' }).click();
+  await last.getByRole('button', { name: 'Remove' }).click();
+  await expect(generic.getByText('That line was already gone; it may have been edited by hand.')).toBeVisible();
+  await expect(generic.getByText('Nothing learned yet.')).toBeVisible();
+  await panel.getByRole('button', { name: 'Back', exact: true }).click();
 });
