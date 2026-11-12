@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_EXEC_TIMEOUT_MS, GH_WRITE_REFUSED, isGhRead, must, realExec } from '../../src/util/exec.js';
+import { DEFAULT_EXEC_TIMEOUT_MS, GH_WRITE_REFUSED, ghCallRefused, isGhCommand, isGhRead, must, realExec } from '../../src/util/exec.js';
 import { airlockHome, repoSlug } from '../../src/util/paths.js';
 
 describe('must', () => {
@@ -65,10 +65,24 @@ describe('realExec and gh', () => {
     ['api', 'repos/a/b/issues/1/comments', '--field', 'body=x'], ['api', 'repos/a/b/issues/1/comments', '--raw-field', 'body=x'],
     ['api', 'repos/a/b/pulls/1/reviews', '--input', '-'], ['api', 'repos/a/b/pulls/1/reviews', '--input=body.json'],
     ['api', 'graphql'], ['api', 'graphql', '-f', 'query=mutation { x }'],
+    // Grouped short flags: gh reads -iXPOST as --include with --method POST, and -ifbody=x as --include with a field.
+    ['api', 'repos/a/b', '-iXPOST'], ['api', 'repos/a/b', '-iX', 'DELETE'], ['api', 'repos/a/b', '-ifbody=x'],
+    ['api', 'repos/a/b', '-if', 'body=x'], ['api', 'repos/a/b', '-iF', 'k=1'], ['api', '-iXPOST', 'repos/a/b'],
+    // Only the exact spellings the code uses, each value as the next argument; nothing unknown.
+    ['api', 'repos/a/b', '--method=POST'], ['api', 'user', '--jq=.x'], ['api', '-Hx', 'repos/a/b'], ['api', 'repos/a/b', '-i'],
+    ['api', 'repos/a/b', '--include'], ['api', 'repos/a/b', '-q', '.x'], ['api', 'repos/a/b', '--jq'], ['api', 'repos/a/b', '-H'],
+    ['api', 'repos/a/b', 'repos/c/d'], ['api', 'repos/a/b', '--paginate=true'], ['api'], ['api', '--jq', '.x'],
+    // The GraphQL endpoint, however it is written.
+    ['api', '/GraphQL'], ['api', 'GRAPHQL'], ['api', '//graphql'], ['api', 'graphql', '--jq', '.data'],
+    ['auth', 'status', '--show-token'], ['auth', 'status', '-t'],
   ];
+  // Every gh call the packages make today, and the shapes the allowed flags permit.
   const reads: string[][] = [
-    ['api', 'repos/a/b/pulls/1'], ['api', 'user', '--jq', '.login'], ['api', '-H', 'Accept: application/vnd.github.raw', 'repos/a/b/contents/x?ref=main'],
-    ['auth', 'status'],
+    ['api', 'repos/a/b/pulls/1'], ['api', 'user', '--jq', '.login'], ['api', 'repos/k/r/commits/main', '--jq', '.sha'],
+    ['api', '-H', 'Accept: application/vnd.github.raw', 'repos/a/b/contents/x?ref=main'], ['auth', 'status'],
+    ['api', 'repos/a/b/pulls', '--paginate', '--header', 'Accept: x', '--jq', '.[].number'],
+    // A value is never read as a flag: this is --jq with the expression -X, and gh reads it that way.
+    ['api', 'repos/a/b', '--jq', '-X'], ['api', '-H', '-fake: x', 'repos/a/b'],
   ];
 
   it('refuses every gh call that is not a read, before anything is started', async () => {
@@ -83,6 +97,22 @@ describe('realExec and gh', () => {
     for (const args of reads) {
       expect(isGhRead(args), args.join(' ')).toBe(true);
       await expect(realExec(NO_GH, args), args.join(' ')).rejects.toThrow(/ENOENT/);
+    }
+  });
+
+  it('judges any command whose base name is gh, in any letter case, with or without .exe', async () => {
+    for (const cmd of ['gh', 'GH', 'Gh', 'gh.exe', 'GH.EXE', '/opt/homebrew/bin/gh', '/usr/local/bin/GH', 'C:\\Program Files\\GitHub CLI\\gh.exe']) {
+      expect(isGhCommand(cmd), cmd).toBe(true);
+    }
+    for (const cmd of ['git', 'ghq', 'node', '/opt/homebrew/bin/ghx', 'sigh']) expect(isGhCommand(cmd), cmd).toBe(false);
+    // Judged without running anything: these names would be the real gh.
+    expect(ghCallRefused('GH', ['api', 'repos/a/b', '-X', 'POST'], {})).toBe(true);
+    expect(ghCallRefused('/opt/homebrew/bin/gh', ['pr', 'merge', '7'], {})).toBe(true);
+    expect(ghCallRefused('/opt/homebrew/bin/gh', ['api', 'repos/a/b/pulls/1'], {})).toBe(false);
+    expect(ghCallRefused('git', ['push', '-f'], {})).toBe(false);
+    // And through realExec, with names that do not exist.
+    for (const name of ['GH', 'gh.EXE']) {
+      await expect(realExec(join(tmpdir(), 'airlock-no-such-folder-9f3c', name), ['pr', 'merge', '7'])).rejects.toThrow(GH_WRITE_REFUSED);
     }
   });
 

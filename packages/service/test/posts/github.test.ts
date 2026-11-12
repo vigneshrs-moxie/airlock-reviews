@@ -12,8 +12,10 @@ const WRITE_SUBCOMMANDS = 'pr|issue|repo|release|workflow|label|gist|secret';
 /**
  * What in a source file could make `gh` write, in order of appearance. A second net under the run-time guard in
  * `realExec`; it reads text, so it errs towards finding too much.
- * - the `gh api` flags `--method`, `--input`, `--field`, `--raw-field` and `-X`, anywhere;
- * - `-f` and `-F`, anywhere except on a line that runs git's `grep` (where `-F` means fixed strings) and names no `gh`;
+ * - the `gh api` flags `--method`, `--input`, `--field`, `--raw-field`, and `-X` alone or in a group of short flags
+ *   (`-iXPOST`), anywhere;
+ * - `-f` and `-F`, alone or in a group (`-ifbody=x`), anywhere except on a line that runs git's grep (`exec('git',
+ *   ['grep', …` or `= ['grep', …`, where `-F` means fixed strings) and names no `gh`;
  * - an argument list that starts with a write subcommand (`['pr', …]`), and a `gh` call whose first argument is not
  *   `api` or `auth`;
  * - `gh pr …` and the other write subcommands, and `gh api graphql`, written out in a string; a `graphql` argument;
@@ -25,11 +27,12 @@ function ghWritesIn(text: string): string[] {
     for (const match of text.matchAll(pattern)) found.push({ at: match.index ?? 0, what: what(match) });
   };
   look(/(?<![\w-])--(?:method|input|field|raw-field)(?![\w-])/g);
-  look(/(?<![\w-])-X/g);
+  look(/(?<![\w-])-[A-Za-z]*X/g);
   let offset = 0;
   for (const line of text.split('\n')) {
-    const gitGrep = /['"`]grep['"`]/.test(line) && !/\bgh\b/.test(line);
-    if (!gitGrep) for (const m of line.matchAll(/(?<![\w-])-[fF](?![-\w])|(?<![\w-])-[fF](?=[A-Za-z_[\]]+=)/g)) found.push({ at: offset + (m.index ?? 0), what: m[0] });
+    const gitGrep = /exec\(\s*['"`]git['"`]\s*,\s*\[\s*['"`]grep['"`]|=\s*\[\s*['"`]grep['"`]\s*,/.test(line) && !/gh/i.test(line);
+    const flags = /(?<![\w-])-[A-Za-z]*[fF](?![-\w])|(?<![\w-])-[A-Za-z]*[fF](?=[A-Za-z_[\]]+=)/g;
+    if (!gitGrep) for (const m of line.matchAll(flags)) found.push({ at: offset + (m.index ?? 0), what: m[0] });
     offset += line.length + 1;
   }
   look(new RegExp(`\\[\\s*(['"\`])(?:${WRITE_SUBCOMMANDS})\\1\\s*[,\\]]`, 'g'), (m) => `subcommand ${m[0]}`);
@@ -210,6 +213,14 @@ describe('the one write', () => {
       "exec('gh', ['pr', 'merge', n, '--squash'])",
       "exec('gh', ['pr', 'edit', n, '--add-label', 'x'])",
       "exec(tool, ['pr', 'review', n, '--REQUEST-CHANGES'])",
+      // Short flags grouped behind one dash.
+      "runGh(exec, ['api', path, '-iXPOST'])",
+      "exec('gh', ['api', path, '-iX', 'DELETE'])",
+      "exec('gh', ['api', path, '-ifbody=x'])",
+      "exec('gh', ['api', path, '-iF', 'k=1'])",
+      // A grep word on the line does not hide a field.
+      "runGh(exec, ['api', path, '-f', 'body=x', 'grep'])",
+      "runGh(exec, ['api', path, '-f', 'body=x']); // 'grep'",
     ];
     for (const sample of samples) expect(ghWritesIn(sample), sample).not.toEqual([]);
     expect(ghWritesIn("exec('git', ['grep', '-l', '-w', '-F', name])")).toEqual([]);
