@@ -261,10 +261,10 @@ describe('createSdkRunner limits and failure kinds', () => {
 
   it('sets the time and turn limits by role', () => {
     const minutes = (role: string) => roleLimits(role).timeoutMs / 60_000;
-    expect(['lens:core/a', 'sweep:k1#1', 'challenge:c_1', 'mapper', 'seams', 'brief', 'select', 'judge', 'other'].map(minutes))
-      .toEqual([10, 10, 10, 15, 15, 5, 5, 5, 10]);
-    expect(['select', 'merge', 'judge', 'challenge:c_1', 'brief', 'mapper', 'lens:core/a', 'seams'].map((r) => roleLimits(r).maxTurns))
-      .toEqual([15, 10, 6, 20, 25, 25, 40, 40]);
+    expect(['lens:core/a', 'sweep:k1#1', 'challenge:c_1', 'mapper', 'seams', 'brief', 'select', 'judge', 'summary', 'other'].map(minutes))
+      .toEqual([10, 10, 10, 15, 15, 5, 5, 5, 3, 10]);
+    expect(['select', 'merge', 'judge', 'summary', 'challenge:c_1', 'brief', 'mapper', 'lens:core/a', 'seams'].map((r) => roleLimits(r).maxTurns))
+      .toEqual([15, 10, 6, 6, 20, 25, 25, 40, 40]);
   });
 
   it('sends the role\'s turn limit unless the request names one', async () => {

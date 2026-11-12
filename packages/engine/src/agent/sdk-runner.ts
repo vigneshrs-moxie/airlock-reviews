@@ -18,7 +18,8 @@ const MINUTE = 60_000;
 
 /**
  * How long a run of each role may take and how many turns it may use, by the role's name or the part before `:`. A
- * selection or a judgement needs no reading, a challenge reads around one finding, the brief and the mapper read widely.
+ * selection, a judgement or the summary needs no reading, a challenge reads around one finding, the brief and the mapper
+ * read widely.
  */
 const ROLE_LIMITS: Record<string, { timeoutMs: number; maxTurns: number }> = {
   lens: { timeoutMs: 10 * MINUTE, maxTurns: 40 },
@@ -30,6 +31,7 @@ const ROLE_LIMITS: Record<string, { timeoutMs: number; maxTurns: number }> = {
   select: { timeoutMs: 5 * MINUTE, maxTurns: 15 },
   merge: { timeoutMs: 5 * MINUTE, maxTurns: 10 },
   judge: { timeoutMs: 5 * MINUTE, maxTurns: 6 },
+  summary: { timeoutMs: 3 * MINUTE, maxTurns: 6 },
 };
 const OTHER_LIMITS = { timeoutMs: 10 * MINUTE, maxTurns: 40 };
 

@@ -65,7 +65,7 @@ describe('instructions put what does not change first', () => {
   });
 
   it('no template says the standards come after it', async () => {
-    for (const name of ['lens', 'lens-combined', 'seams', 'sweep', 'merge', 'challenge', 'select']) {
+    for (const name of ['lens', 'lens-combined', 'seams', 'sweep', 'merge', 'challenge', 'select', 'summary']) {
       const text = await loadTemplate(name);
       expect(text, name).not.toMatch(/After these instructions come the team's standards/);
       expect(text, name).not.toMatch(/After these instructions come[^.]*what earlier reviews taught/);

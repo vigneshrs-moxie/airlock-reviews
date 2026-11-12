@@ -37,6 +37,7 @@ import { runSweep } from '../rules/sweep.js';
 import { decideVerdict, sameTextOnce, select, selfReviewText, type RereviewText, type SelectResult } from '../select/select.js';
 import { mergeNote, mergeNoteBlock, settledSentence, type MergeScope } from '../shape/merge-range.js';
 import { reviewById, saveReview } from '../store/store.js';
+import { summarise, SUMMARY_FAILED_NOTE } from '../summary/summary.js';
 import type { Exec } from '../util/exec.js';
 import { limiter } from '../util/limit.js';
 import { presentAt, safeRead, safeSize } from '../util/safe-read.js';
@@ -648,10 +649,34 @@ async function reviewInWorkspace(
     })));
     return { ...r, verdict: decideVerdict(pr, r.findings, [...log.errors], false, r.questions.length) };
   })) ?? fallbackSelection(pr, depth, packs, items, questions, log);
-  const selection = previous === null ? selected : {
+  const ranked = previous === null ? selected : {
     ...selected,
     selfReviewText: selfReviewText(pr, depth, packs.map((p) => p.title), selected.verdict, rereviewText(previous, selected.findings, carried.fixed)),
   };
+
+  // The short title and summary of every finding shown, and one sentence on the change, for the panel; also after a failed
+  // selection. A failure is a note, never a stage error, so the verdict is the same as without the stage. On a sync merge,
+  // or with nothing to say anything about, no request is made; after the usage limit none is sent, and the note says so.
+  const summaryNotes: string[] = [];
+  let selection = ranked;
+  let finalBrief = brief;
+  const nothingToSay = ranked.findings.length === 0 && (sync || brief.whatItDoes.length === 0);
+  if (nothingToSay) log.skip('summary', sync ? 'sync merge' : 'nothing to summarise');
+  else if (deps.gate.stoppedBy() !== null) {
+    log.skip('summary', 'usage limit');
+    summaryNotes.push(SUMMARY_FAILED_NOTE);
+  } else {
+    const r = await log.run('summary', async (rec) => {
+      const out = await summarise(runner, ctx, ranked.findings);
+      rec.usage(out.usage);
+      return out;
+    });
+    if (r !== undefined) {
+      selection = { ...ranked, findings: r.findings };
+      finalBrief = r.brief;
+      if (r.note !== null) summaryNotes.push(r.note);
+    }
+  }
 
   limits.push(...selection.limits);
   // A push re-review repeats the last review's questions, whose-call lines and checks after merge, before its own: they
@@ -681,12 +706,12 @@ async function reviewInWorkspace(
         ...(anyRepeated ? [CARRIED_QUESTIONS_NOTE] : []),
       ];
   return {
-    range, packs, tiers, facts, map, brief, questions: questionsShown, candidates, selection,
+    range, packs, tiers, facts, map, brief: finalBrief, questions: questionsShown, candidates, selection,
     whoseCall: earlierFirst(earlierWhoseCall, selection.whoseCall), checksAfterMerge: earlierFirst(earlierChecks, selection.checksAfterMerge),
     dropped: [...schemaDropped, ...anchorDropped, ...carryDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
     notes: [
       ...chosen.notes, ...rereviewNotes, ...(sync ? [] : [nothingReadNote(files, tiers, pushed ? 'push' : 'pull request')].filter((n) => n !== null)),
-      ...mergeNotes, ...selection.notes,
+      ...mergeNotes, ...selection.notes, ...summaryNotes,
     ],
     fixed: carried.fixed,
     ...(mergeReview === undefined ? {} : { mergeReview }),

@@ -140,11 +140,11 @@ describe('runReview', () => {
     expect(brief).toEqual({ type: 'brief', brief: { whatItDoes: ['Adds refunds and a pause job.'], claims: [] } });
   }, SLOW);
 
-  it('quick depth makes requests only for the mapper, the brief, one combined lens request per group and select', async () => {
+  it('quick depth makes requests only for the mapper, the brief, one combined lens request per group, select and summary', async () => {
     const combined = (req: AgentRequest<unknown>) => (block(req.material, 'cohort')!.startsWith('Cohort: Money\n')
       ? { candidates: [{ ...GOOD, lens: 'core/correctness' }], questions: [] } : { candidates: [], questions: [] });
     const { doc, calls, events } = await review({ req: { depth: 'quick' }, script: scenarioScript({ 'lens:combined': combined }) });
-    expect(new Set(roles(calls))).toEqual(new Set(['mapper', 'brief', 'lens:combined', 'select']));
+    expect(new Set(roles(calls))).toEqual(new Set(['mapper', 'brief', 'lens:combined', 'select', 'summary']));
     expect(roles(calls).filter((r) => r.startsWith('lens:'))).toHaveLength(3); // three groups, one request each
     for (const id of ['core/correctness', 'core/naming', 'raj-standard/boundary']) {
       expect(calls.find((c) => c.role === 'lens:combined')!.instructions).toContain(`### ${id}:`);
@@ -169,7 +169,7 @@ describe('runReview', () => {
 
   it('every request that carries the standards starts its instructions with the same first part, once per request', async () => {
     const { calls } = await review();
-    const withStandards = calls.filter((c) => !['mapper', 'brief'].includes(c.role) && !c.role.startsWith('sweep:'));
+    const withStandards = calls.filter((c) => !['mapper', 'brief', 'summary'].includes(c.role) && !c.role.startsWith('sweep:'));
     expect(new Set(withStandards.map((c) => c.role.split(':')[0]))).toEqual(new Set(['lens', 'seams', 'challenge', 'select']));
     const firsts = new Set(withStandards.map((c) => splitInstructions(c.instructions).standing));
     expect(firsts.size).toBe(1);
@@ -299,7 +299,7 @@ describe('runReview', () => {
     expect(events).toContainEqual({ type: 'brief', brief: doc.brief });
     expect(events.findIndex((e) => e.type === 'map')).toBeLessThan(events.findIndex((e) => e.type === 'brief'));
     const skipped = events.flatMap((e) => (e.type === 'stage' && e.status === 'done' && e.detail.startsWith('skipped') ? [e.stage] : []));
-    expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge']);
+    expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge', 'summary']);
   }, SLOW);
 
   it('a sync merge with nothing changed by hand has no stage error and its brief says so', async () => {
@@ -389,12 +389,12 @@ describe('runReview', () => {
     expect(added.cohortId).toBe('k1');
     expect(doc.findings.map((f) => f.title)).toContain(DEEP_NEW.title);
     expect(roles(calls)).toContain(`challenge:${added.id}`);
-    expect(starts(events)).toEqual([...STANDARD_STAGES.slice(0, 12), 'lenses-deep', 'select', 'store']);
+    expect(starts(events)).toEqual([...STANDARD_STAGES.slice(0, 12), 'lenses-deep', 'select', 'summary', 'store']);
   }, SLOW);
 
   it('timings add up: one entry per stage, agent runs equal to the requests of that stage', async () => {
     const { doc, calls } = await review({ req: { depth: 'deep' } });
-    expect(doc.timings.map((t) => t.stage)).toEqual([...STANDARD_STAGES.slice(0, 12), 'lenses-deep', 'select', 'store']);
+    expect(doc.timings.map((t) => t.stage)).toEqual([...STANDARD_STAGES.slice(0, 12), 'lenses-deep', 'select', 'summary', 'store']);
     const isDeep = (c: AgentRequest<unknown>): boolean => c.instructions.includes(DEEP_SENTENCE);
     const deepIds = new Set(doc.candidates.filter((c) => c.title === DEEP_NEW.title).map((c) => c.id));
     const isDeepChallenge = (c: AgentRequest<unknown>): boolean => deepIds.has(c.role.replace('challenge:', ''));
@@ -410,6 +410,7 @@ describe('runReview', () => {
       challenge: count((c) => c.role.startsWith('challenge:') && !isDeepChallenge(c)),
       'lenses-deep': count((c) => isDeep(c) || (c.role.startsWith('challenge:') && isDeepChallenge(c))),
       select: count((c) => c.role === 'select'),
+      summary: count((c) => c.role === 'summary'),
     };
     expect(expected['lenses-deep']).toBe(7);
     for (const t of doc.timings) {
