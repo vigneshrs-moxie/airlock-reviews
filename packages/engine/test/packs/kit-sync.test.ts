@@ -2,11 +2,20 @@ import { mkdir, mkdtemp, readdir, readFile, utimes, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { attachKit, KIT_FILES, KIT_REPO, syncKit } from '../../src/packs/kit-sync.js';
-import type { Pack } from '../../src/packs/types.js';
-import type { Exec } from '../../src/util/exec.js';
+import { attachKit, kitRefProblem, syncKit } from '../../src/packs/kit-sync.js';
+import type { KitRef, Pack } from '../../src/packs/types.js';
+import { isGhRead, type Exec } from '../../src/util/exec.js';
 
 const SHA = 'a'.repeat(40);
+const TEAM: KitRef = {
+  repo: 'acme/review-kit',
+  files: ['skills/review/profile.md', 'skills/review/orbit.md', 'skills/review/calibration.md'],
+  datedStandards: ['skills/review/calibration.md'],
+};
+const OTHER: KitRef = { repo: 'acme/ext-kit', files: ['skills/ext/standard.md', 'skills/ext/calibration.md'] };
+const TEAM_SLUG = 'acme__review-kit';
+const NAMES = ['calibration.md', 'orbit.md', 'profile.md'];
+
 let home: string;
 let saved: string | undefined;
 beforeEach(async () => {
@@ -19,122 +28,214 @@ afterEach(() => {
 });
 
 type Call = { cmd: string; args: string[] };
-function fakeGh(opts: { sha?: string; resolveFails?: boolean; failPath?: string } = {}) {
+function fakeGh(opts: { sha?: string | ((repo: string) => string); resolveFails?: boolean; failPath?: string } = {}) {
   const calls: Call[] = [];
   const exec: Exec = async (cmd, args) => {
     calls.push({ cmd, args });
-    if (args[1]?.includes('/commits/')) {
+    const commit = /^repos\/([^/]+\/[^/]+)\/commits\//.exec(args[1] ?? '');
+    if (commit) {
       if (opts.resolveFails) return { stdout: '', stderr: 'could not resolve host', code: 4 };
-      return { stdout: `${opts.sha ?? SHA}\n`, stderr: '', code: 0 };
+      const sha = typeof opts.sha === 'function' ? opts.sha(commit[1]!) : opts.sha ?? SHA;
+      return { stdout: `${sha}\n`, stderr: '', code: 0 };
     }
     const target = args[args.length - 1]!;
-    if (opts.failPath && target.includes(opts.failPath)) return { stdout: '', stderr: 'boom', code: 1 };
+    if (opts.failPath && target.includes(opts.failPath)) return { stdout: '', stderr: 'HTTP 404: Not Found', code: 1 };
     return { stdout: `text of ${target}`, stderr: '', code: 0 };
   };
   return { exec, calls };
 }
 
+/** A cached copy under `<home>/kit/<parts...>`, with the given files, dated `time` (seconds). */
+async function cache(parts: string[], files: string[], time: number): Promise<string> {
+  const dir = join(home, 'kit', ...parts);
+  await mkdir(dir, { recursive: true });
+  for (const f of files) await writeFile(join(dir, f), `cached ${f}`);
+  await utimes(dir, time, time);
+  return dir;
+}
+
 describe('syncKit', () => {
-  it('fetches the three standards once, never SKILL.md, and serves the second call from the cache', async () => {
+  it('fetches the listed files once and serves the second call from the cache', async () => {
     const gh = fakeGh();
-    const first = await syncKit(gh.exec);
-    expect(first).toEqual({ sha: SHA, dir: join(home, 'kit', SHA), stale: false });
-    expect(gh.calls[0]).toEqual({ cmd: 'gh', args: ['api', `repos/${KIT_REPO}/commits/main`, '--jq', '.sha'] });
+    const first = await syncKit(gh.exec, TEAM);
+    expect(first).toEqual({ sha: SHA, dir: join(home, 'kit', TEAM_SLUG, SHA), stale: false });
+    expect(gh.calls[0]).toEqual({ cmd: 'gh', args: ['api', 'repos/acme/review-kit/commits/main', '--jq', '.sha'] });
     expect(gh.calls).toHaveLength(4);
-    expect(KIT_FILES.map((p) => p.split('/').at(-1))).toEqual(['profile.md', 'orbit.md', 'calibration.md']);
-    expect(gh.calls.some((c) => c.args.some((a) => a.includes('SKILL.md')))).toBe(false);
-    for (const path of KIT_FILES) {
+    for (const path of TEAM.files) {
       expect(gh.calls).toContainEqual({
         cmd: 'gh',
-        args: ['api', '-H', 'Accept: application/vnd.github.raw', `repos/${KIT_REPO}/contents/${path}?ref=${SHA}`],
+        args: ['api', '-H', 'Accept: application/vnd.github.raw', `repos/acme/review-kit/contents/${path}?ref=${SHA}`],
       });
     }
-    expect((await readdir(first.dir)).sort()).toEqual(['calibration.md', 'orbit.md', 'profile.md']);
-    expect(await readFile(join(first.dir, 'orbit.md'), 'utf8')).toContain('skills/moxie-review/orbit.md');
+    expect((await readdir(first.dir)).sort()).toEqual(NAMES);
+    expect(await readFile(join(first.dir, 'orbit.md'), 'utf8')).toContain('skills/review/orbit.md');
 
-    const second = await syncKit(gh.exec);
+    const second = await syncKit(gh.exec, TEAM);
     expect(second).toEqual({ sha: SHA, dir: first.dir, stale: false });
     expect(gh.calls).toHaveLength(5); // only the commit lookup was repeated
   });
 
-  it('resolves the given ref', async () => {
+  it("resolves the manifest's ref, and the given ref over it", async () => {
     const gh = fakeGh();
-    await syncKit(gh.exec, { ref: 'v2' });
-    expect(gh.calls[0]!.args[1]).toBe(`repos/${KIT_REPO}/commits/v2`);
+    await syncKit(gh.exec, { ...TEAM, ref: 'release' });
+    expect(gh.calls[0]!.args[1]).toBe('repos/acme/review-kit/commits/release');
+    await syncKit(gh.exec, { ...TEAM, ref: 'release' }, { ref: 'v2' });
+    expect(gh.calls[4]!.args[1]).toBe('repos/acme/review-kit/commits/v2');
   });
 
-  it('falls back to the newest complete cached kit, marked stale, when the commit cannot be resolved', async () => {
-    const mk = async (sha: string, complete: boolean, time: number) => {
-      const dir = join(home, 'kit', sha);
-      await mkdir(dir, { recursive: true });
-      for (const f of complete ? ['profile.md', 'orbit.md', 'calibration.md'] : ['profile.md']) {
-        await writeFile(join(dir, f), f);
-      }
-      await utimes(dir, time, time);
-    };
-    await mk('old', true, 1000);
-    await mk('new', true, 2000);
-    await mk('newest-but-partial', false, 3000);
-    await mk('.new-download-abc123', true, 4000); // in-progress temp folder: ignored
-    const result = await syncKit(fakeGh({ resolveFails: true }).exec);
-    expect(result).toEqual({ sha: 'new', dir: join(home, 'kit', 'new'), stale: true });
+  it('two packs with different kits are cached side by side by repository and commit', async () => {
+    const other = 'b'.repeat(40);
+    const gh = fakeGh({ sha: (repo) => (repo === 'acme/ext-kit' ? other : SHA) });
+    const team = await syncKit(gh.exec, TEAM);
+    const ext = await syncKit(gh.exec, OTHER);
+    expect(team.dir).toBe(join(home, 'kit', TEAM_SLUG, SHA));
+    expect(ext).toEqual({ sha: other, dir: join(home, 'kit', 'acme__ext-kit', other), stale: false });
+    expect((await readdir(join(home, 'kit'))).sort()).toEqual(['acme__ext-kit', TEAM_SLUG]);
+    expect((await readdir(team.dir)).sort()).toEqual(NAMES);
+    expect((await readdir(ext.dir)).sort()).toEqual(['calibration.md', 'standard.md']);
+    expect(await readFile(join(ext.dir, 'calibration.md'), 'utf8')).toContain('skills/ext/calibration.md');
+    expect(await readFile(join(team.dir, 'calibration.md'), 'utf8')).toContain('skills/review/calibration.md');
+
+    // The same commit of two repositories is still two folders.
+    const same = fakeGh();
+    expect((await syncKit(same.exec, OTHER)).dir).toBe(join(home, 'kit', 'acme__ext-kit', SHA));
+    expect((await readdir(join(home, 'kit', 'acme__ext-kit'))).sort()).toEqual([SHA, other].sort());
   });
 
-  it('throws with gh stderr when the commit cannot be resolved and nothing is cached', async () => {
-    await expect(syncKit(fakeGh({ resolveFails: true }).exec)).rejects.toThrow(/kit could not be fetched.*could not resolve host/s);
+  it('when the kit cannot be fetched the newest cached copy is used and marked stale', async () => {
+    await cache([TEAM_SLUG, 'old'], NAMES, 1000);
+    const newer = await cache([TEAM_SLUG, 'new'], NAMES, 2000);
+    await cache([TEAM_SLUG, 'newest-but-partial'], ['profile.md'], 3000);
+    await cache([TEAM_SLUG, '.new-download-abc123'], NAMES, 4000); // in-progress temp folder: ignored
+    await cache(['acme__ext-kit', 'other-kit'], NAMES, 5000); // another kit's copy: never this kit's
+    await cache(['f'.repeat(40)], NAMES, 6000); // the old place, <home>/kit/<sha>/: ignored
+    expect(await syncKit(fakeGh({ resolveFails: true }).exec, TEAM)).toEqual({ sha: 'new', dir: newer, stale: true });
+
+    // A listed file that is gone (renamed in the kit) falls back the same way, and leaves no partial copy.
+    const renamed = fakeGh({ failPath: 'calibration.md' });
+    expect(await syncKit(renamed.exec, TEAM)).toEqual({ sha: 'new', dir: newer, stale: true });
+    expect(await readdir(join(home, 'kit', TEAM_SLUG))).not.toContain(SHA);
+  });
+
+  it('with no cache it throws a sentence naming the kit and what went wrong', async () => {
+    await cache(['f'.repeat(40)], NAMES, 6000); // a copy in the old place is not a cache
+    await expect(syncKit(fakeGh({ resolveFails: true }).exec, TEAM))
+      .rejects.toThrow('The review kit could not be fetched from acme/review-kit and none is cached: could not resolve host');
+    await expect(syncKit(fakeGh({ failPath: 'calibration.md' }).exec, TEAM))
+      .rejects.toThrow(/could not be fetched from acme\/review-kit and none is cached: skills\/review\/calibration\.md: HTTP 404/);
   });
 
   it('treats a malformed commit value as unresolved and deletes nothing', async () => {
     await mkdir(join(home, 'kit'), { recursive: true });
     await writeFile(join(home, 'sentinel.txt'), 'keep');
     for (const bad of ['..', '../x', 'abc', `${SHA}\nextra`]) {
-      await expect(syncKit(fakeGh({ sha: bad }).exec)).rejects.toThrow(/kit could not be fetched/);
+      await expect(syncKit(fakeGh({ sha: bad }).exec, TEAM)).rejects.toThrow(/kit could not be fetched from acme\/review-kit/);
     }
     expect(await readFile(join(home, 'sentinel.txt'), 'utf8')).toBe('keep');
   });
 
   it('lets two syncs of the same commit run at once and both return the same folder', async () => {
     const gh = fakeGh();
-    const [a, b] = await Promise.all([syncKit(gh.exec), syncKit(gh.exec)]);
-    expect(a).toEqual({ sha: SHA, dir: join(home, 'kit', SHA), stale: false });
+    const [a, b] = await Promise.all([syncKit(gh.exec, TEAM), syncKit(gh.exec, TEAM)]);
+    expect(a).toEqual({ sha: SHA, dir: join(home, 'kit', TEAM_SLUG, SHA), stale: false });
     expect(b).toEqual(a);
-    expect((await readdir(join(home, 'kit'))).sort()).toEqual([SHA]);
-    expect((await readdir(a.dir)).sort()).toEqual(['calibration.md', 'orbit.md', 'profile.md']);
+    expect((await readdir(join(home, 'kit', TEAM_SLUG))).sort()).toEqual([SHA]);
+    expect((await readdir(a.dir)).sort()).toEqual(NAMES);
   });
 
   it('does not treat a half-finished download as cached', async () => {
-    const failing = fakeGh({ failPath: 'calibration.md' });
-    await expect(syncKit(failing.exec)).rejects.toThrow(/boom/);
-    const kitDir = join(home, 'kit');
+    await expect(syncKit(fakeGh({ failPath: 'calibration.md' }).exec, TEAM)).rejects.toThrow(/HTTP 404/);
+    const kitDir = join(home, 'kit', TEAM_SLUG);
     expect((await readdir(kitDir)).filter((n) => n === SHA)).toEqual([]);
-    // a leftover folder with fewer than the three files is not a cache either
+    // a leftover folder without every listed file is not a cache either
     await mkdir(join(kitDir, SHA), { recursive: true });
     await writeFile(join(kitDir, SHA, 'profile.md'), 'x');
     const ok = fakeGh();
-    const result = await syncKit(ok.exec);
+    const result = await syncKit(ok.exec, TEAM);
     expect(result.stale).toBe(false);
     expect(ok.calls).toHaveLength(4);
-    expect((await readdir(result.dir)).sort()).toEqual(['calibration.md', 'orbit.md', 'profile.md']);
+    expect((await readdir(result.dir)).sort()).toEqual(NAMES);
     expect((await readdir(kitDir)).sort()).toEqual([SHA]);
+  });
+
+  it('only reads are made: every gh call is a GET of a commit or a file', async () => {
+    const gh = fakeGh({ sha: (repo) => (repo === 'acme/ext-kit' ? 'b'.repeat(40) : SHA) });
+    await syncKit(gh.exec, TEAM);
+    await syncKit(gh.exec, OTHER, { ref: 'v2' });
+    await syncKit(fakeGh({ resolveFails: true }).exec, TEAM); // the fallback makes no other call
+    expect(gh.calls.length).toBeGreaterThan(0);
+    for (const { cmd, args } of gh.calls) {
+      expect(cmd).toBe('gh');
+      expect(isGhRead(args)).toBe(true);
+      const joined = args.join(' ');
+      expect(joined).toMatch(new RegExp(
+        '^api (repos/acme/(review|ext)-kit/commits/[\\w.-]+ --jq \\.sha'
+        + '|-H Accept: application/vnd\\.github\\.raw repos/acme/(review|ext)-kit/contents/[\\w./-]+\\?ref=[0-9a-f]{40})$'));
+      for (const write of ['--method', '-X', '-f', '-F', '--field', '--raw-field', '--input']) expect(args).not.toContain(write);
+    }
+  });
+
+  it('refuses a kit that fails the manifest checks before running anything', async () => {
+    const gh = fakeGh();
+    await expect(syncKit(gh.exec, { ...TEAM, repo: 'acme' })).rejects.toThrow(/"acme" is not <owner>\/<name>/);
+    await expect(syncKit(gh.exec, { ...TEAM, files: ['../secrets.md'] })).rejects.toThrow(/\.\./);
+    await expect(syncKit(gh.exec, TEAM, { ref: '../x' })).rejects.toThrow(/ref/);
+    expect(gh.calls).toEqual([]);
+  });
+});
+
+describe('kitRefProblem', () => {
+  const ok = (kit: Partial<KitRef>) => kitRefProblem({ ...TEAM, ...kit });
+  it('accepts the team kit and a kit without dated standards', () => {
+    expect(ok({})).toBeNull();
+    expect(kitRefProblem(OTHER)).toBeNull();
+    expect(ok({ ref: 'release/2026-11' })).toBeNull();
+  });
+  it.each([
+    ['acme'], ['acme/'], ['/acme/kit'], ['acme/kit/extra'], ['acme/..'], ['acme/kit?x=1'], ['acme/ kit'], [''],
+  ])('refuses the repository %j', (repo) => {
+    expect(ok({ repo })).toMatch(/is not <owner>\/<name>/);
+  });
+  it.each([
+    ['../a.md'], ['skills/../a.md'], ['skills/..'], ['/etc/passwd'], ['skills\\a.md'], ['skills/a\u0000.md'], ['skills/a\n.md'],
+    ['skills//a.md'], ['./a.md'], ['skills/'], [''], ['a.md?ref=main'], ['a.md#x'], ['%2e%2e/a.md'],
+  ])('refuses the file path %j', (path) => {
+    expect(ok({ files: [path] })).toMatch(/file path/);
+  });
+  it('refuses no files, two files with the same name, a dated standard that is not listed, and a bad ref', () => {
+    expect(ok({ files: [] })).toMatch(/at least one file/);
+    expect(ok({ files: ['a/x.md', 'b/x.md'], datedStandards: [] })).toMatch(/"x\.md" twice/);
+    expect(ok({ datedStandards: ['calibration.md'] })).toMatch(/dated standard "calibration\.md" is not one of the kit's files/);
+    for (const ref of ['../main', 'a..b', '-x', 'main?x', 'a b', '/main', 'main/']) expect(ok({ ref })).toMatch(/ref/);
   });
 });
 
 describe('attachKit', () => {
-  it('marks calibration.md as dated, uses the commit as the version, and does not mutate the adapter', async () => {
-    const { dir } = await syncKit(fakeGh().exec);
-    const adapter = {
-      id: 'raj-standard', title: 't', version: 'local', dir: '/x', repos: [], appRoot: null, stageRules: [],
-      tiers: { read: [], trust: [], ignore: [] }, siblings: [], linkRules: [], checks: [],
-      standards: [], lenses: [], rules: [], learned: [],
-    } satisfies Pack;
-    const snapshot = structuredClone(adapter);
-    const pack = await attachKit(adapter, { sha: SHA, dir });
-    expect(pack).not.toBe(adapter);
-    expect(adapter).toEqual(snapshot);
+  const adapter = (kit: KitRef): Pack => ({
+    id: 'raj-standard', title: 't', version: 'local', dir: '/x', repos: [], appRoot: null, stageRules: [],
+    tiers: { read: [], trust: [], ignore: [] }, siblings: [], linkRules: [], checks: [],
+    standards: [], lenses: [], rules: [], learned: [], kit,
+  });
+
+  it("attaches the kit's files in the manifest's order, marks its dated standards, uses the commit as the version, and does not mutate the adapter", async () => {
+    const { dir } = await syncKit(fakeGh().exec, TEAM);
+    const before = adapter(TEAM);
+    const snapshot = structuredClone(before);
+    const pack = await attachKit(before, { sha: SHA, dir });
+    expect(pack).not.toBe(before);
+    expect(before).toEqual(snapshot);
     expect(pack.version).toBe(SHA);
     expect(pack.standards.map((s) => [s.name, s.dated])).toEqual([
       ['profile.md', false], ['orbit.md', false], ['calibration.md', true],
     ]);
     expect(pack.standards[1]!.text).toContain('orbit.md');
+  });
+
+  it('marks nothing dated when the manifest names no dated standard, and names the kit when a file is missing', async () => {
+    const { dir } = await syncKit(fakeGh().exec, OTHER);
+    const pack = await attachKit(adapter(OTHER), { sha: SHA, dir });
+    expect(pack.standards.map((s) => [s.name, s.dated])).toEqual([['standard.md', false], ['calibration.md', false]]);
+    await expect(attachKit(adapter(TEAM), { sha: SHA, dir }))
+      .rejects.toThrow(/The review kit acme\/review-kit could not be read from .*: profile\.md/);
   });
 });

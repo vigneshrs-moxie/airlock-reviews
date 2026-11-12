@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFakeRunner } from '@airlock/engine';
@@ -11,6 +11,12 @@ import type { ReplayDeps } from '../src/index.js';
 import { doc, finding, problem, replayCase } from './fixtures.js';
 
 const KIT = { dir: '/kit/here', sha: 'c'.repeat(40) };
+/** The team pack's manifest in the harness's packs folder: what the loader needs, and a kit. */
+const TEAM_PACK = [
+  'id: raj-standard', 'title: Team standard', 'repos: [acme/app]', 'kit:', '  repo: acme/review-kit',
+  '  files: [skills/review/profile.md, skills/review/orbit.md, skills/review/calibration.md]',
+  '  datedStandards: [skills/review/calibration.md]', 'lenses: []', '',
+].join('\n');
 
 const CASES = [
   replayCase({ id: 'pr1', pr: 1, known: [problem({ id: 'K1' })] }),
@@ -49,7 +55,7 @@ function harness(over: { review?: (req: ReviewRequest) => ReviewDocument; deps?:
     },
     ...over.deps,
   };
-  const overrides: ReplayCliOverrides = { deps, packsDir: '/packs/here', cases: CASES };
+  const overrides: ReplayCliOverrides = { deps, packsDir: packsDir(), cases: CASES };
   if (over.kit !== null) overrides.kit = over.kit ?? KIT;
   return { overrides, requests, homes, runner };
 }
@@ -62,9 +68,13 @@ function io(): { out: string[]; err: string[]; io: { out: (t: string) => void; e
 
 let work: string;
 let savedHome: string | undefined;
+/** A real packs folder for each test, holding the team pack whose kit the replay syncs. */
+const packsDir = (): string => join(work, 'packs');
 beforeEach(async () => {
   work = await mkdtemp(join(tmpdir(), 'airlock-replay-cli-'));
   savedHome = process.env.AIRLOCK_HOME;
+  await mkdir(join(packsDir(), 'raj-standard'), { recursive: true });
+  await writeFile(join(packsDir(), 'raj-standard', 'pack.yaml'), TEAM_PACK);
 });
 afterEach(async () => {
   await rm(work, { recursive: true, force: true });
@@ -132,7 +142,7 @@ describe('airlock-replay', () => {
     expect(h.requests.map((r) => r.number)).toEqual([1, 3]);
     for (const req of h.requests) {
       expect(req).toMatchObject({
-        depth: 'standard', packsDir: '/packs/here', kitDir: KIT.dir, kitSha: KIT.sha,
+        depth: 'standard', packsDir: packsDir(), kitDir: KIT.dir, kitSha: KIT.sha,
         models: { main: 'claude-opus-5-5', challenger: 'claude-opus-5-5', sweep: 'claude-opus-5-5' },
       });
     }
@@ -200,6 +210,33 @@ describe('airlock-replay', () => {
     expect(t.err.join('\n')).toMatch(/kit/);
     expect(t.err.join('\n')).toContain('a replay without the team standard would not measure the real configuration');
     expect(h.requests).toHaveLength(0);
+  });
+
+  it("syncs the kit the raj-standard pack's manifest names", async () => {
+    const asked: string[][] = [];
+    const h = harness({ kit: null, deps: { exec: async (cmd, args) => { asked.push([cmd, ...args]); return { stdout: '', stderr: 'offline', code: 1 }; } } });
+    const t = io();
+    expect(await keepingEnv(() => main(['run', '--cases', 'pr1', '--out', work], t.io, h.overrides))).toBe(1);
+    expect(asked).toEqual([['gh', 'api', 'repos/acme/review-kit/commits/main', '--jq', '.sha']]);
+    expect(t.err.join('\n')).toContain('The review kit could not be fetched from acme/review-kit and none is cached: offline');
+  });
+
+  it('stops before any review, with one sentence, when the raj-standard pack has no kit or cannot be loaded', async () => {
+    const team = join(packsDir(), 'raj-standard');
+    const noGh = { exec: async (): Promise<never> => { throw new Error('gh must not be called'); } };
+    await writeFile(join(team, 'pack.yaml'), 'id: raj-standard\ntitle: Team standard\nlenses: []\n');
+    const none = harness({ kit: null, deps: noGh });
+    const t = io();
+    expect(await keepingEnv(() => main(['run', '--cases', 'pr1', '--out', work], t.io, none.overrides))).toBe(1);
+    expect(t.err.at(-1)).toBe(`The replay needs the raj-standard pack's kit to pin the team kit for every case, and ${team} has none.`);
+    expect(none.requests).toHaveLength(0);
+
+    await rm(join(team, 'pack.yaml'));
+    const missing = harness({ kit: null, deps: noGh });
+    const u = io();
+    expect(await keepingEnv(() => main(['run', '--cases', 'pr1', '--out', work], u.io, missing.overrides))).toBe(1);
+    expect(u.err.at(-1)).toMatch(new RegExp(`^The replay needs the raj-standard pack's kit to pin the team kit for every case, and ${team.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} could not be loaded: .*file not found\\.$`));
+    expect(missing.requests).toHaveLength(0);
   });
 
   it('report rewrites the report from a run folder without any model call', async () => {

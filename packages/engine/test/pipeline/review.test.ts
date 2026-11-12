@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { candidate, ReviewDocumentSchema, type Candidate, type ReviewEvent } from '@airlock/shared';
 import { PROMPT_BOUNDARY, splitInstructions } from '../../src/agent/prompt.js';
-import { type AgentRequest, withRetry } from '../../src/agent/runner.js';
+import { type AgentRequest, type AgentRunner, withRetry } from '../../src/agent/runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
 import { withUniqueIds } from '../../src/pipeline/review.js';
 import { selfReviewText } from '../../src/select/select.js';
@@ -68,11 +68,11 @@ const roles = (calls: AgentRequest<unknown>[]): string[] => calls.map((c) => c.r
 const everything = (calls: AgentRequest<unknown>[]): string => calls.map((c) => `${c.instructions}\n${c.material}`).join('\n');
 const exists = (p: string): Promise<boolean> => stat(p).then(() => true, () => false);
 
-const STALE_KIT_QUESTION = 'The team standard could not be refreshed; the copy from 2026-03-04 was used.';
-/** Puts a copy of the kit dated 2026-03-04 in the cache, so a review without `kitDir` uses it and says it is stale. */
+const STALE_KIT_QUESTION = 'The review kit acme/review-kit could not be refreshed; the copy from 2026-03-04 was used.';
+/** Puts a copy of the fixture team pack's kit dated 2026-03-04 in the cache, so a review without `kitDir` uses it and says it is stale. */
 async function cacheStaleKit(): Promise<string> {
   const sha = 'f'.repeat(40);
-  const cached = join(home(), 'kit', sha);
+  const cached = join(home(), 'kit', 'acme__review-kit', sha);
   await mkdir(cached, { recursive: true });
   for (const name of ['profile.md', 'orbit.md', 'calibration.md', 'SKILL.md']) await copyFile(join(KIT_DIR, name), join(cached, name));
   await utimes(cached, new Date('2026-03-04T12:00:00Z'), new Date('2026-03-04T12:00:00Z'));
@@ -311,15 +311,21 @@ describe('runReview', () => {
     expect(doc.brief.whatItDoes).toEqual(['This pull request only merges main into the branch. Git merged it without conflicts and nothing was changed by hand.']);
   }, SLOW);
 
-  it('a kit that cannot be fetched gives a packs stage error and verdict incomplete', async () => {
-    const { doc, calls } = await review({ req: { kitDir: undefined } });
-    const packErrors = doc.stageErrors.filter((e) => e.stage === 'packs');
-    expect(packErrors).toHaveLength(1);
-    expect(packErrors[0]!.cohortId).toBeNull();
-    expect(packErrors[0]!.message).toMatch(/review kit could not be fetched/);
-    expect(doc.verdict.label).toBe('incomplete');
+  it('with no cache the review fails before any model call and names the kit', async () => {
+    const asked: string[] = [];
+    const events: ReviewEvent[] = [];
+    const counting = (inner: AgentRunner): AgentRunner => ({ run: (r) => { asked.push(r.role); return inner.run(r); } });
+    await expect(review({ req: { kitDir: undefined }, wrap: counting, onEvent: (e) => events.push(e) }))
+      .rejects.toThrow('The review kit could not be fetched from acme/review-kit and none is cached: gh: no network in tests');
+    expect(asked).toEqual([]);
+    expect(starts(events)).toEqual(['intake', 'packs']);
+    expect(await readdir(join(home(), 'reviews')).catch(() => [])).toEqual([]);
+  }, SLOW);
+
+  it('a review of a repository whose packs name no kit is unaffected by a kit that cannot be fetched', async () => {
+    const { doc } = await review({ req: { kitDir: undefined, packIds: ['core'] } });
+    expect(doc.stageErrors).toEqual([]);
     expect(doc.packs.map((p) => p.id)).toEqual(['core']);
-    expect(roles(calls).some((r) => r.startsWith('lens:raj-standard'))).toBe(false);
   }, SLOW);
 
   it('a stale kit adds a question with the date of the cached copy', async () => {

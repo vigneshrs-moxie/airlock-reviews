@@ -12,8 +12,6 @@ import type { Holdout, Pack } from '../packs/types.js';
 import type { Exec } from '../util/exec.js';
 import { messageOf } from './stages.js';
 
-/** The pack that the team's review kit is attached to. */
-export const KIT_PACK_ID = 'raj-standard';
 /** The source of questions the engine itself asks. */
 export const ENGINE_SOURCE: Source = { pack: 'airlock', lens: null, ruleId: null };
 
@@ -83,7 +81,9 @@ export function stageRulesOf(packs: Pack[]): StageRule[] {
 
 export interface PackOptions {
   exec: Exec;
+  /** Stands in for the download of the first selected pack's kit that has one (the replay pins it); others are synced. */
   kitDir?: string;
+  /** The version of the kit in `kitDir`; `pinned` otherwise. */
   kitSha?: string;
   holdout?: Holdout;
   baseDir: string;
@@ -105,35 +105,38 @@ export interface PreparedPacks {
   limits: string[];
 }
 
-/** The kit from `kitDir` when given (no network), otherwise synced from GitHub with the cache as a fallback. */
-async function getKit(exec: Exec, kitDir: string | undefined, kitSha: string | undefined): Promise<SyncedKit> {
-  return kitDir !== undefined ? { sha: kitSha ?? 'pinned', dir: kitDir, stale: false } : syncKit(exec);
-}
-
 /**
- * Makes the selected packs ready for the review: attaches the team's kit to its pack, applies the hold-out to every pack,
- * finds the helpers the kit names that the base no longer has, and reads the repository's rule files from the base.
- * A kit that cannot be had drops its pack with a stage error; a stale kit adds a question. After this, only the returned
- * packs are used: nothing is read from the packs folder again.
+ * Makes the selected packs ready for the review: attaches to each pack whose manifest names a kit that kit's files, applies
+ * the hold-out to every pack, finds the helpers a kit's orbit.md names that the base no longer has, and reads the
+ * repository's rule files from the base. A stale kit adds a question naming it. A kit that cannot be had, with no copy in
+ * the cache, rejects with a sentence naming it (one per kit), so the review stops before any model call. After this, only
+ * the returned packs are used: nothing is read from the packs folder again.
  */
 export async function preparePacks(selected: Pack[], opts: PackOptions): Promise<PreparedPacks> {
   const errors: StageError[] = [];
   const questions: Question[] = [];
 
   const withKit: Pack[] = [];
+  const unavailable: string[] = [];
+  let pinnedUsed = false;
   for (const pack of selected) {
-    if (pack.id !== KIT_PACK_ID) { withKit.push(pack); continue; }
+    if (pack.kit === undefined) { withKit.push(pack); continue; }
+    const pinnedDir = pinnedUsed ? undefined : opts.kitDir;
+    if (pinnedDir !== undefined) pinnedUsed = true;
     try {
-      const kit = await getKit(opts.exec, opts.kitDir, opts.kitSha);
+      const kit: SyncedKit = pinnedDir !== undefined
+        ? { sha: opts.kitSha ?? 'pinned', dir: pinnedDir, stale: false }
+        : await syncKit(opts.exec, pack.kit);
       withKit.push(await attachKit(pack, kit));
       if (kit.stale) {
         const day = (await stat(kit.dir)).mtime.toISOString().slice(0, 10);
-        questions.push(question(`The team standard could not be refreshed; the copy from ${day} was used.`));
+        questions.push(question(`The review kit ${pack.kit.repo} could not be refreshed; the copy from ${day} was used.`));
       }
     } catch (err) {
-      errors.push(packsError(messageOf(err)));
+      unavailable.push(messageOf(err));
     }
   }
+  if (unavailable.length > 0) throw new Error(unavailable.join(' '));
 
   const { holdout } = opts;
   const packs = holdout ? withKit.map((p) => applyHoldout(p, holdout)) : withKit;

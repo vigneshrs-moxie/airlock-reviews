@@ -3,7 +3,7 @@ import { realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { abortOnExitSignals, cleanForTerminal, createSdkRunner, realExec, syncKit, withRetry } from '@airlock/engine';
+import { abortOnExitSignals, cleanForTerminal, createSdkRunner, loadPack, realExec, syncKit, withRetry, type KitRef } from '@airlock/engine';
 import { DepthSchema } from '@airlock/shared';
 import { loadCases, pickCases } from './dataset.js';
 import type { ReplayCase } from './dataset.js';
@@ -21,6 +21,8 @@ const DEFAULT_MODEL = 'claude-opus-5-5';
 const EXIT_STOPPED = 130;
 const DEFAULT_OUT = fileURLToPath(new URL('../../../replay-work', import.meta.url));
 const DEFAULT_PACKS = fileURLToPath(new URL('../../../packs', import.meta.url));
+/** The pack whose kit the replay pins for every case: the team kit the replay cases were reviewed against. */
+const TEAM_KIT_PACK = 'raj-standard';
 
 export function usage(): string {
   return [
@@ -54,6 +56,18 @@ const messageOf = (err: unknown): string => (err instanceof Error ? err.message 
 
 /** Text from outside (errors, case ids, paths) as one line with no terminal control characters. */
 const clean = cleanForTerminal;
+
+/** The kit the team pack's manifest names, or the one sentence that says why the replay cannot have it. */
+async function teamKit(packsDir: string): Promise<{ kit: KitRef } | { why: string }> {
+  const dir = join(packsDir, TEAM_KIT_PACK);
+  const needs = `The replay needs the ${TEAM_KIT_PACK} pack's kit to pin the team kit for every case, and ${dir}`;
+  try {
+    const { kit } = await loadPack(dir);
+    return kit === undefined ? { why: `${needs} has none.` } : { kit };
+  } catch (err) {
+    return { why: `${needs} could not be loaded: ${messageOf(err).replace(/\.$/, '')}.` };
+  }
+}
 
 const defaultDeps = (): ReplayDeps => ({
   exec: realExec, runner: withRetry(createSdkRunner(), 1), now: () => new Date(), signal: abortOnExitSignals(),
@@ -146,10 +160,16 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
   io.err(`Replay reviews and clones are kept in ${clean(home)}, apart from your own reviews.`);
 
   const deps = overrides.deps ?? defaultDeps();
+  const packsDir = overrides.packsDir ?? process.env.AIRLOCK_PACKS_DIR ?? DEFAULT_PACKS;
   let kit = overrides.kit;
   if (kit === undefined) {
+    const team = await teamKit(packsDir);
+    if ('why' in team) {
+      io.err(clean(team.why));
+      return 1;
+    }
     try {
-      const synced = await syncKit(deps.exec);
+      const synced = await syncKit(deps.exec, team.kit);
       if (synced.stale) io.err(`The review kit could not be refreshed; using the cached version ${clean(synced.sha)}.`);
       kit = { dir: synced.dir, sha: synced.sha };
     } catch (err) {
@@ -162,7 +182,7 @@ async function runCommand(args: string[], io: Io, overrides: ReplayCliOverrides)
   let summary;
   try {
     summary = await runReplay({
-      cases, dataset: all, model: opts.model, depth: opts.depth, outDir: opts.out, packsDir: overrides.packsDir ?? process.env.AIRLOCK_PACKS_DIR ?? DEFAULT_PACKS,
+      cases, dataset: all, model: opts.model, depth: opts.depth, outDir: opts.out, packsDir,
       kitDir: kit.dir, kitSha: kit.sha, judgeModel: opts.judgeModel, parallelCases: opts.parallel,
       effort: opts.effort, combine: opts.combine, ...(opts.sweepModel === undefined ? {} : { sweepModel: opts.sweepModel }),
       ...(opts.runId === undefined ? {} : { runId: opts.runId }),

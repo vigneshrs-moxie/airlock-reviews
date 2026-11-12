@@ -61,7 +61,7 @@ export interface ReviewRequest {
   packsDir: string;
   remoteUrl?: string;
   parallel?: number;
-  /** Read the team kit from this folder instead of GitHub (tests and the replay). */
+  /** Read the first selected kit pack's kit from this folder instead of GitHub (tests and the replay); others are synced. */
   kitDir?: string;
   /** The kit's version when `kitDir` is given; `pinned` otherwise. */
   kitSha?: string;
@@ -353,7 +353,7 @@ async function reviewInWorkspace(
     });
     rec.error(...p.errors);
     return p;
-  }, { extraMs: chosen.ms })) ?? NO_PACKS;
+  }, { extraMs: chosen.ms, rethrow: true })) ?? NO_PACKS; // only a kit that cannot be had rejects: no model is asked without it
   const { packs } = prepared;
   engineQuestions.push(...prepared.questions);
   limits.push(...prepared.limits);
@@ -649,8 +649,9 @@ const rereviewText = (previous: ReviewDocument, findings: Finding[], fixed: Find
 
 /**
  * Reviews one pull request: every stage in order, then the document is checked against the schema, saved and returned.
- * A stage that fails becomes a stage error and the verdict `incomplete`; only a pull request that cannot be fetched or a
- * workspace that cannot be prepared rejects. The workspace is always disposed.
+ * A stage that fails becomes a stage error and the verdict `incomplete`; only a pull request that cannot be fetched, a
+ * workspace that cannot be prepared, or a pack's review kit that can be neither fetched nor found in the cache rejects
+ * (the last before any model call). The workspace is always disposed.
  */
 export async function runReview(req: ReviewRequest, deps: EngineDeps, onEvent?: (e: ReviewEvent) => void): Promise<ReviewDocument> {
   checkRequest(req);
