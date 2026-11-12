@@ -1,0 +1,116 @@
+/* Airlock side panel. Tokens and base from packages/extension/src/screens/panel.css; the .ap-* rules below are the
+   redesign's own (new), written here so the prototype and the build share one set of rules. */
+:root {
+  --bg: #ffffff; --card: #f6f7f9; --fg: #1b1f24; --muted: #5a6370; --border: #d0d5dc;
+  --accent: #1f5fd0; --accent-fg: #ffffff; --danger: #b3261e; --focus: #1f5fd0;
+  --warn: #8a5a00; --ok: #1a7f37; --tint: #eaf1fd;
+}
+.dark {
+  --bg: #14171b; --card: #1d2228; --fg: #e6e9ed; --muted: #9aa4b1; --border: #3a424c;
+  --accent: #6ea0ff; --accent-fg: #0c1220; --danger: #ff8a80; --focus: #8ab4ff;
+  --warn: #e3b341; --ok: #57c27a; --tint: #1b2638;
+}
+.canvas { background: var(--bg); color: var(--fg); font: 13px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+.canvas .ap { background: var(--bg); color: var(--fg); font: 13px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; position: relative; }
+.canvas .ap * { box-sizing: border-box; }
+.canvas .ap p { margin: 0; overflow-wrap: anywhere; }
+
+/* existing */
+.canvas .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 5px 12px; font-weight: 600; color: var(--fg); background: var(--card); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; text-align: center; }
+.canvas .btn.small { min-height: 26px; padding: 2px 8px; font-size: 12px; }
+.canvas .btn.primary { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
+.canvas .btn.wide { width: 100%; min-height: 38px; }
+.canvas .btn.off { opacity: 0.55; cursor: not-allowed; }
+.canvas .muted { color: var(--muted); font-size: 12px; }
+.canvas .path { font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.canvas .quote { margin: 0; padding: 8px; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border: 1px solid var(--border); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.canvas .label { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+
+/* new: frame */
+.canvas .ap-chrome { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; font-size: 12px; color: var(--muted); background: var(--card); border-bottom: 1px solid var(--border); flex: none; }
+.canvas .ap-head { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); flex: none; }
+.canvas .ap-logo { width: 20px; height: 20px; flex: none; }
+.canvas .ap-name { font-size: 14px; font-weight: 700; }
+.canvas .ap-state { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+.canvas .ap-state i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; }
+.canvas .ap-icon { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; color: var(--fg); cursor: pointer; flex: none; }
+.canvas .ap-icon:hover { background: var(--card); }
+.canvas .ap-body { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+.canvas .ap-back { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; cursor: pointer; padding: 6px 4px; }
+.canvas .ap-count { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+/* new: verdict strip */
+.canvas .ap-verdict { display: flex; flex-direction: column; gap: 8px; padding: 12px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
+.canvas .ap-vword { font-size: 17px; font-weight: 700; line-height: 1.2; }
+.canvas .ap-headline { font-size: 13px; }
+.canvas .ap-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.canvas .ap-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 9px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; border-radius: 999px; background: var(--bg); }
+.canvas .sev-block { color: var(--danger); }
+.canvas .sev-fix { color: var(--warn); }
+.canvas .sev-ask { color: var(--accent); }
+.canvas .sev-note { color: var(--muted); }
+.canvas .sev-ok { color: var(--ok); }
+
+/* new: tabs, rows, folds */
+.canvas .ap-tabs { display: flex; border-bottom: 1px solid var(--border); margin: 0 -12px; padding: 0 12px; }
+.canvas .ap-tab { flex: 1; padding: 9px 4px 8px; text-align: center; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; }
+.canvas .ap-tab.on { color: var(--fg); border-bottom-color: var(--accent); }
+.canvas .ap-list { display: flex; flex-direction: column; margin: -4px 0 0; }
+.canvas .ap-row { display: flex; align-items: flex-start; gap: 10px; min-height: 56px; padding: 10px 2px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.canvas .ap-sev { flex: 0 0 38px; padding-top: 1px; font-size: 11px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
+.canvas .ap-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.canvas .ap-row-title { font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.canvas .ap-row-sub { color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.canvas .ap-go { flex: none; color: var(--muted); align-self: center; }
+.canvas .ap-tag { display: inline-block; padding: 0 6px; font-size: 11px; font-weight: 700; border: 1px solid currentColor; border-radius: 4px; }
+.canvas .ap-check { flex: none; width: 18px; height: 18px; margin-top: 1px; border: 1.5px solid var(--muted); border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; }
+.canvas .ap-check.on { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.canvas .ap-fold { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 2px; border-bottom: 1px solid var(--border); font-weight: 600; cursor: pointer; }
+.canvas .ap-fold .n { margin-left: auto; font-weight: 400; color: var(--muted); font-size: 12px; }
+.canvas .ap-folded { padding: 8px 2px 12px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); }
+.canvas .ap-points { display: flex; flex-direction: column; gap: 6px; }
+.canvas .ap-points > div { display: flex; gap: 8px; }
+.canvas .ap-points > div::before { content: '•'; color: var(--muted); flex: none; }
+.canvas .ap-steps > div::before { content: counter(step) '.'; counter-increment: step; }
+.canvas .ap-steps { counter-reset: step; }
+.canvas .ap-group { display: flex; flex-direction: column; gap: 6px; }
+.canvas .ap-short { font-size: 14px; }
+
+/* new: pinned bar and action buttons */
+.canvas .ap-bar { display: flex; gap: 8px; padding: 8px 12px 10px; border-top: 1px solid var(--border); background: var(--bg); flex: none; }
+.canvas .ap-act { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; }
+.canvas .ap-act .btn { width: 100%; height: 44px; padding: 4px 6px; line-height: 1.2; }
+.canvas .ap-act .cap { font-size: 11px; color: var(--muted); text-align: center; line-height: 1.25; }
+
+/* new: detail */
+.canvas .ap-title { font-size: 16px; font-weight: 700; line-height: 1.25; }
+.canvas .ap-where { display: flex; align-items: center; gap: 8px; }
+.canvas .ap-where .path { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.canvas .ap-do { padding: 10px 12px; background: var(--tint); border-radius: 8px; display: flex; flex-direction: column; gap: 4px; }
+
+/* new: sheets, tour, settings */
+.canvas .ap-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.45); }
+.canvas .ap-sheet { position: absolute; left: 0; right: 0; bottom: 0; max-height: 90%; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 16px 14px 18px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-bottom: 0; border-radius: 14px 14px 0 0; font: 13px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+.canvas .ap-sheet p { margin: 0; }
+.canvas .ap-sheet-title { font-size: 15px; font-weight: 700; }
+.canvas .ap-dest { display: flex; gap: 8px; align-items: flex-start; padding: 10px; background: var(--tint); border-radius: 8px; }
+.canvas .ap-opt { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+.canvas .ap-opt.on { border-color: var(--accent); background: var(--tint); }
+.canvas .ap-radio { flex: none; width: 16px; height: 16px; margin-top: 2px; border: 1.5px solid var(--muted); border-radius: 50%; }
+.canvas .ap-opt.on .ap-radio { border: 5px solid var(--accent); }
+.canvas .ap-dots { display: flex; gap: 6px; justify-content: center; }
+.canvas .ap-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
+.canvas .ap-dots i.on { background: var(--accent); }
+.canvas .ap-seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.canvas .ap-seg > span { flex: 1; padding: 7px 4px; text-align: center; font-weight: 600; cursor: pointer; border-left: 1px solid var(--border); color: var(--muted); }
+.canvas .ap-seg > span:first-child { border-left: 0; }
+.canvas .ap-seg > span.on { background: var(--accent); color: var(--accent-fg); }
+.canvas .ap-set { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 8px 2px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.canvas .ap-set .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.canvas .ap-switch { flex: none; width: 36px; height: 20px; border-radius: 999px; background: var(--accent); position: relative; }
+.canvas .ap-switch::after { content: ''; position: absolute; top: 2px; right: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--accent-fg); }
+.canvas .ap-preview { padding: 10px; border: 1px dashed var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; }
+.canvas .ap-progress { height: 6px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); overflow: hidden; }
+.canvas .ap-progress i { display: block; height: 100%; width: 44%; background: var(--accent); }
+.canvas .ap-banner { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 10px; background: var(--tint); }
+.canvas svg.lucide { flex: none; }
