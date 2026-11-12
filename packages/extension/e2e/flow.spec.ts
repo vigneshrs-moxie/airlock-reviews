@@ -434,8 +434,8 @@ test('10. Post comment: the preview, an edit, Update preview, then the post; the
 test('11. Post selected skips the posted finding; GitHub refuses, and every text is kept', async () => {
   const third = top[2]!;
   svc().answerNextPost({ refuse: 'Line 13 is not part of the diff' });
-  await panel.getByRole('checkbox', { name: `Select for the fix prompt: ${top[0]!.title}`, exact: true }).check();
-  await panel.getByRole('checkbox', { name: `Select for the fix prompt: ${third.title}`, exact: true }).check();
+  await panel.getByRole('checkbox', { name: `Select: ${top[0]!.title}`, exact: true }).check();
+  await panel.getByRole('checkbox', { name: `Select: ${third.title}`, exact: true }).check();
   await panel.getByRole('button', { name: 'Post selected (1)' }).click();
   const sheet = panel.getByRole('dialog');
   const comment = sheet.getByRole('textbox', { name: 'Comment 1' });
@@ -454,33 +454,37 @@ test('11. Post selected skips the posted finding; GitHub refuses, and every text
   expect(svc().sent).toHaveLength(2);
 });
 
-test('12. a post whose outcome is not known: the sentence, Open the pull request, and It was not posted', async () => {
+test('12. a post whose outcome is not known: the sentence and Open the pull request; It was not posted from the card forgets it', async () => {
   svc().answerNextPost({ unknown: true });
   const sheet = panel.getByRole('dialog');
   await sheet.getByRole('button', { name: 'Update preview' }).click();
+  await expect(sheet.getByText("The review's own text, as it will be posted:")).toBeVisible();
+  await expect(sheet.locator('[data-review-body]')).toHaveText(svc().previews.at(-1)?.reviewBody ?? 'missing');
   await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
   await expect(sheet.getByRole('alert')).toHaveText(UNKNOWN);
   await expect(sheet.getByRole('link', { name: 'Open the pull request' })).toHaveAttribute('href', `https://github.com/${REPO}/pull/${NUMBER}`);
   const [, unknown] = svc().posts(REPO, NUMBER);
   expect(unknown?.outcome).toBe('unknown');
-  await expect(cards().nth(1)).toContainText('Not known whether this was posted');
-
-  await sheet.getByRole('button', { name: 'It was not posted' }).click();
-  await expect(sheet.getByRole('button', { name: 'Update preview' })).toBeEnabled();
-  await expect(sheet.getByRole('textbox', { name: 'Summary' })).toHaveValue(SUMMARY);
-  expect(bodiesOf('POST', '/posts/forget').map((b) => ForgetPostBodySchema.parse(b))).toEqual([{ repo: REPO, number: NUMBER, id: unknown?.id }]);
-  expect(svc().posts(REPO, NUMBER).map((r) => r.outcome)).toEqual(['posted']);
   // One call to GitHub per press, never a second try.
   expect(svc().sent).toHaveLength(3);
   expect(postBodies()).toHaveLength(3);
-
-  await sheet.getByRole('button', { name: 'Cancel' }).click();
+  await sheet.getByRole('button', { name: 'Close' }).click();
   await expect(sheet).toHaveCount(0);
-  await expect(cards().nth(1)).not.toContainText('Not known whether this was posted');
-  await expect(cards().nth(1)).not.toContainText('Posted');
+
+  // The card says it is not known, and the record can still be forgotten from there, after a second question.
+  const card = cards().nth(1);
+  await expect(card).toContainText('Not known whether this was posted');
+  await expect(card.getByRole('link', { name: 'Open the pull request' })).toHaveAttribute('href', `https://github.com/${REPO}/pull/${NUMBER}`);
+  await card.getByRole('button', { name: 'It was not posted' }).click();
+  await expect(card.getByText('Forget this record? Only do this after looking at the pull request.')).toBeVisible();
+  await card.getByRole('button', { name: 'It was not posted' }).click();
+  await expect(card).not.toContainText('Not known whether this was posted');
+  await expect(card).not.toContainText('Posted');
+  expect(bodiesOf('POST', '/posts/forget').map((b) => ForgetPostBodySchema.parse(b))).toEqual([{ repo: REPO, number: NUMBER, id: unknown?.id }]);
+  expect(svc().posts(REPO, NUMBER).map((r) => r.outcome)).toEqual(['posted']);
 });
 
-test('13. the post routes refuse a request without the extension Origin', async () => {
+test('13. the post routes refuse a request without the extension Origin, and a preview body over 512 KB', async () => {
   for (const path of ['/posts/preview', '/posts', '/posts/forget']) {
     const res = await fetch(`http://127.0.0.1:${E2E_PORT}${path}`, {
       method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
@@ -488,4 +492,11 @@ test('13. the post routes refuse a request without the extension Origin', async 
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: 'Airlock does not accept requests from this page.' });
   }
+  // With the Origin, a preview body over 512 KB is refused before it is read as a preview.
+  const big = await fetch(`http://127.0.0.1:${E2E_PORT}/posts/preview`, {
+    method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json', Origin: ORIGIN },
+    body: JSON.stringify({ padding: 'x'.repeat(600 * 1024) }),
+  });
+  expect(big.status).toBe(413);
+  expect(await big.json()).toEqual({ error: 'The request body is too large.' });
 });

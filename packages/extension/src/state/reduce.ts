@@ -9,8 +9,8 @@ export const NOTICE_MAX = MESSAGE_MAX;
 
 /** A post whose reply did not say what happened, and whose record says it is not known. The service's 504 sentence. */
 export const POST_UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
-/** A post whose reply did not say what happened, and that left no record. */
-export const NO_POST_RECORD = 'Airlock got no answer about this post and has no record of it. Look at the pull request before posting again.';
+/** A post whose reply did not say what happened, and whose record did not appear while the panel waited for it. */
+export const POST_NOT_LEARNED = 'Airlock could not learn what happened to this post. Look at the pull request before posting again.';
 
 export interface StageLine {
   stage: string;
@@ -31,7 +31,9 @@ export interface ReviewView {
  * - `preview`: the preview the service stored.
  * - `refused`: nothing was done, in the service's words (a preview, a post or a forget).
  * - `posted` and `unknown`: the record a post made; `unknown` with the sentence to show.
- * - `unclear`: a post whose answer did not say what happened, with no record of it to show.
+ * - `waiting`: a post whose answer did not say what happened; the panel is reading the records until one appears. The
+ *   post is still in flight.
+ * - `unclear`: a post whose record did not appear while the panel waited.
  * - `forgotten`: the unknown record is gone.
  */
 export type PostReply = { ticket: number } & (
@@ -39,6 +41,7 @@ export type PostReply = { ticket: number } & (
   | { kind: 'refused'; message: string }
   | { kind: 'posted'; record: PostRecord }
   | { kind: 'unknown'; message: string; record: PostRecord }
+  | { kind: 'waiting' }
   | { kind: 'unclear'; message: string }
   | { kind: 'forgotten'; id: string }
 );
@@ -106,7 +109,9 @@ export type Action =
   | { type: 'refused'; message: string }
   | { type: 'dismissed'; dismissal: Dismissal }
   | { type: 'restored'; fingerprint: string; note: string | null }
-  | { type: 'post-reply'; reply: PostReply };
+  | { type: 'post-reply'; reply: PostReply }
+  /** The post records just read for the pull request on screen; they replace the ones shown. */
+  | { type: 'posts'; posts: PostRecord[] };
 
 /** At most `NOTICE_MAX` characters, ending in `…` when cut. Counts code points, so a character is never split. */
 export function clip(text: string): string {
@@ -218,9 +223,13 @@ export function reduce(state: PanelState, action: Action): PanelState {
       const next = { ...settled(state), latest: { ...state.latest, dismissals } };
       return action.note === null ? next : { ...next, notice: clip(action.note) };
     }
+    case 'posts':
+      return state.kind === 'review' ? { ...state, latest: { ...state.latest, posts: action.posts } } : state;
     case 'post-reply': {
       if (state.kind !== 'review') return state;
       const reply = action.reply;
+      // The post is still in flight: it stays busy.
+      if (reply.kind === 'waiting') return { ...state, post: reply };
       let posts = state.latest.posts;
       if (reply.kind === 'posted' || reply.kind === 'unknown') {
         const { record } = reply;

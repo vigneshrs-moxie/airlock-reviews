@@ -71,7 +71,8 @@ const readyKey = (pr: PrSummary): string => `${pr.repo}#${pr.number}@${pr.headSh
 
 type BodyProps = Pick<PanelScreenProps, 'state' | 'dispatch' | 'timers' | 'onJump' | 'defaultDepth'> & {
   onDismiss: (finding: Finding) => void;
-  onPost: (findings: Finding[]) => void;
+  /** `opener`: the finding whose Post comment was pressed, or `selected` for the bar. */
+  onPost: (findings: Finding[], opener: string) => void;
 };
 
 /**
@@ -148,12 +149,12 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, page
   postDraftRef.current = postDraft;
   const postClosing = useRef<PostDraft | null>(null);
   const closePost = useCallback((): void => { postClosing.current = postDraftRef.current; setPostDraft(null); }, []);
-  const startPost = (findings: Finding[]): void => {
+  const startPost = (findings: Finding[], opener: string): void => {
     if (state.kind !== 'review' || findings.length === 0) return;
     const { pr, latest } = state;
     const fingerprints = findings.map((f) => f.fingerprint);
     const ticket = nextTicket();
-    setPostDraft(newPostDraft(fingerprints, latest.document.id, findings.length === 1 ? (findings[0] as Finding).id : 'selected', ticket));
+    setPostDraft(newPostDraft(fingerprints, latest.document.id, opener, ticket));
     dispatch({
       type: 'preview-post', ticket,
       body: { repo: pr.repo, number: pr.number, reviewId: latest.document.id, items: fingerprints.map((fingerprint) => ({ fingerprint })) },
@@ -166,7 +167,8 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, page
     (focusAfterPost(closed) ?? document.querySelector<HTMLElement>('main'))?.focus();
   }, [postDraft]);
   const sheetView = sheetViewOf(state);
-  const postView: PostSheetView | null = sheetView === null ? null : state.kind === 'review' ? { ...sheetView, post: state.post } : sheetView;
+  const postView: PostSheetView | null = state.kind === 'review' && sheetView !== null ? { ...sheetView, post: state.post, stale: state.stale }
+    : state.kind === 'offline' && state.review !== undefined && sheetView !== null ? { ...sheetView, stale: state.review.stale } : null;
   const known = knownOf(state);
   useEffect(() => {
     const finding = closing.current;

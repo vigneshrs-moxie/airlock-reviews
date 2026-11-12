@@ -37,7 +37,7 @@ describe('a flip to offline and back keeps the screen (fix round)', () => {
     expect(screen.queryByText("Airlock's service on this Mac is not running.")).toBeNull();
     expect(backButton()).not.toBeNull();
     fireEvent.click(backButton()!);
-    expect(ticked()).toEqual(['Select for the fix prompt: Problem 1', 'Select for the fix prompt: Problem 2']);
+    expect(ticked()).toEqual(['Select: Problem 1', 'Select: Problem 2']);
   });
 
   it('keeps the depth and the pack choices of Ready, with Review unavailable while offline', () => {

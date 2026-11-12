@@ -2,9 +2,10 @@ import {
   checkCommentText, COMMENT_MAX, mentionsIn, SUMMARY_MAX, type PostPreviewBody, type PostPreviewItem, type PostPreviewReply, type PostRecord,
 } from '@airlock/shared';
 import { useEffect, useId, useRef } from 'react';
-import { NO_POST_RECORD, POST_UNKNOWN, type PostReply, type UserAction } from '../state/reduce';
+import { POST_NOT_LEARNED, POST_UNKNOWN, type PostReply, type UserAction } from '../state/reduce';
 import type { SheetView } from './DismissSheet';
 import { useAnnounce } from './Frame';
+import { mentionNotice, whyNotPosting } from './PostedMark';
 import { Sheet } from './Sheet';
 
 export const POST_ONE_REVIEW = 'Airlock posts these as one review with the Comment action. It never approves or requests changes.';
@@ -12,7 +13,11 @@ export const EXACT_TEXT = 'This is the exact text. Nothing has been sent yet.';
 export const GETTING_PREVIEW = 'Getting the preview…';
 export const NO_PREVIEW = 'Airlock got no answer for the preview. Ask again when you are ready.';
 export const OFFLINE_KEPT_POST = 'Airlock could not reach its service. Your comments are kept.';
-export const NOT_THIS_REVIEW_POST = 'This review is no longer the one on screen, so these comments cannot be posted from it.';
+export const NOT_THIS_REVIEW_POST = 'This review is no longer the one on screen, so these comments cannot be posted from it. Closing this loses the texts here.';
+export const WAITING_FOR_RECORD = 'Waiting to hear whether GitHub accepted the comments…';
+export const REVIEW_TEXT = "The review's own text, as it will be posted:";
+export const REVIEW_TEXT_OLD = 'Update preview to see this again.';
+export const PREVIEW_UPDATED = 'Preview updated.';
 export const TO_SUMMARY = 'Put in the summary instead';
 
 let tickets = 0;
@@ -62,6 +67,10 @@ export interface PostDraft {
   said: string | null;
   /** `said` asks the person to look at the pull request. */
   look: boolean;
+  /** The post in flight got no clear answer; the panel is reading the records until its record appears. */
+  waiting: boolean;
+  /** How many previews have come, so a fresh one after the first can be announced. */
+  previews: number;
   /** The record the last post made, and for one whose outcome is not known, the sentence to show. */
   outcome: { record: PostRecord; message: string | null } | null;
 }
@@ -70,16 +79,17 @@ export interface PostDraft {
 export function newPostDraft(fingerprints: string[], reviewId: string, opener: string | 'selected', ticket: number): PostDraft {
   return {
     reviewId, fingerprints, opener, preview: null, texts: {}, summary: '', summaryTyped: false, toSummary: [], previewToSummary: [], spent: false,
-    pending: { kind: 'preview', ticket, started: false, known: [], toSummary: [] }, said: null, look: false, outcome: null,
+    pending: { kind: 'preview', ticket, started: false, known: [], toSummary: [] }, said: null, look: false, waiting: false, previews: 0,
+    outcome: null,
   };
 }
 
 /** The view the sheet sits over: the review, and the answer to the sheet's last request. */
-export type PostSheetView = SheetView & { post?: PostReply | undefined };
+export type PostSheetView = SheetView & { post?: PostReply | undefined; stale?: boolean | undefined };
 
 /** The draft once the answer to its pending request has come. */
-function absorb(draft: PostDraft, pending: PendingPost, reply: PostReply): PostDraft {
-  const settled = { ...draft, pending: null, look: false };
+function absorb(draft: PostDraft, pending: PendingPost, reply: Exclude<PostReply, { kind: 'waiting' }>): PostDraft {
+  const settled = { ...draft, pending: null, look: false, waiting: false };
   switch (reply.kind) {
     case 'preview': {
       const { preview } = reply;
@@ -87,7 +97,7 @@ function absorb(draft: PostDraft, pending: PendingPost, reply: PostReply): PostD
       const toSummary = pending.toSummary.filter((fp) => ids.includes(fp));
       return {
         ...settled, preview, texts: Object.fromEntries(preview.items.map((item) => [item.fingerprint, item.body])), summary: preview.summary,
-        toSummary, previewToSummary: toSummary, spent: false, said: null, outcome: null,
+        toSummary, previewToSummary: toSummary, spent: false, said: null, outcome: null, previews: draft.previews + 1,
       };
     }
     case 'refused': return { ...settled, said: reply.message, spent: draft.spent || pending.kind === 'post' };
@@ -100,12 +110,12 @@ function absorb(draft: PostDraft, pending: PendingPost, reply: PostReply): PostD
 
 /** The draft when its request ended with no answer for it (the service went away, or the pairing did). */
 function unanswered(draft: PostDraft, pending: PendingPost, posts: readonly PostRecord[]): PostDraft {
-  const settled = { ...draft, pending: null, look: false };
+  const settled = { ...draft, pending: null, look: false, waiting: false };
   if (pending.kind !== 'post') return draft.preview === null ? { ...settled, said: NO_PREVIEW } : settled;
   // What the records say: one this post made, holding one of its findings.
   const sent = draft.preview?.items.map((item) => item.fingerprint) ?? draft.fingerprints;
   const record = posts.find((r) => !pending.known.includes(r.id) && r.items.some((item) => sent.includes(item.fingerprint)));
-  if (record === undefined) return { ...settled, said: NO_POST_RECORD, look: true, spent: true };
+  if (record === undefined) return { ...settled, said: POST_NOT_LEARNED, look: true, spent: true };
   return { ...settled, said: null, outcome: { record, message: record.outcome === 'posted' ? null : POST_UNKNOWN } };
 }
 
@@ -118,14 +128,17 @@ function placeOf(item: PostPreviewItem): string {
   return item.startLine === null ? `On ${item.path}, line ${item.line}` : `On ${item.path}, lines ${item.startLine} to ${item.line}`;
 }
 
-/** A text field with its count, the reason it cannot be posted, and who it would notify. */
-function TextField({ label, value, max, locked, onChange }: {
-  label: string; value: string; max: number; locked: boolean; onChange: (value: string) => void;
+/**
+ * A text field with its count, the reason it cannot be posted, and who it names. `names`: the service's list for text
+ * it has shown; without it, the names in the field as typed.
+ */
+function TextField({ label, value, max, locked, names: given, onChange }: {
+  label: string; value: string; max: number; locked: boolean; names?: readonly string[] | undefined; onChange: (value: string) => void;
 }) {
   const id = useId();
   const problemId = useId();
   const problem = checkCommentText(value, max);
-  const names = mentionsIn(value);
+  const names = given ?? mentionsIn(value);
   return (
     <>
       <label htmlFor={id} className="label">{label}</label>
@@ -136,7 +149,7 @@ function TextField({ label, value, max, locked, onChange }: {
       />
       <p className="muted">{`${[...value].length} of ${max}`}</p>
       {problem !== null && <p id={problemId} className="detail">{problem}</p>}
-      {names.length > 0 && <p className="notice">{`Mentions ${names.join(', ')}: they will be notified.`}</p>}
+      {names.length > 0 && <p className="notice">{mentionNotice(names)}</p>}
     </>
   );
 }
@@ -166,8 +179,9 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
   // Takes the answer to this sheet's own request, or sees that the request ended without one.
   useEffect(() => {
     if (pending === null) return;
-    const reply = view.post;
-    if (reply !== undefined && reply.ticket === pending.ticket) onDraft(absorb(draft, pending, reply));
+    const reply = view.post !== undefined && view.post.ticket === pending.ticket ? view.post : undefined;
+    if (reply !== undefined && reply.kind !== 'waiting') onDraft(absorb(draft, pending, reply));
+    else if (reply !== undefined && !draft.waiting) onDraft({ ...draft, waiting: true, pending: { ...pending, started: true } });
     else if (!pending.started && (busy || offline)) onDraft({ ...draft, pending: { ...pending, started: true } });
     else if (pending.started && !busy && !offline) onDraft(unanswered(draft, pending, latest.posts));
   }, [draft, pending, view.post, busy, offline, latest.posts, onDraft]);
@@ -190,10 +204,25 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
     heading.current?.focus();
   }, [showing, active]);
 
-  // A post in flight cannot be left: its outcome is shown when it comes.
-  const inFlight = busy || (pending?.kind === 'post' && !offline);
+  // A post in flight cannot be left, offline included: its outcome is shown when it is known.
+  const inFlight = busy || pending?.kind === 'post';
   const close = (): void => { if (!inFlight) onClose(); };
   const canSend = current && !busy && !offline && pending === null;
+  // Why nothing can be posted from this review now, as it is on screen while the sheet is open.
+  const blocked = whyNotPosting(pr, view.stale === true, offline);
+  const blockedId = useId();
+  const mainButton = useRef<HTMLButtonElement>(null);
+
+  // A fresh preview after the first is said, and focus goes to the button that now posts it.
+  const seenPreviews = useRef(draft.previews);
+  useEffect(() => {
+    if (seenPreviews.current === draft.previews) return;
+    const again = seenPreviews.current > 0;
+    seenPreviews.current = draft.previews;
+    if (!again || !active) return;
+    announce(PREVIEW_UPDATED);
+    mainButton.current?.focus();
+  }, [draft.previews, active, announce]);
 
   const edited = preview !== null && (
     preview.items.some((item) => draft.texts[item.fingerprint] !== item.body)
@@ -220,7 +249,7 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
     request('preview', (ticket) => ({ type: 'preview-post', ticket, body: { repo: pr.repo, number: pr.number, reviewId: draft.reviewId, items } }));
   };
   const update = (): void => {
-    if (!canSend || preview === null || problems) return;
+    if (!canSend || preview === null || problems || blocked !== null) return;
     const body: PostPreviewBody = {
       repo: pr.repo, number: pr.number, reviewId: draft.reviewId,
       items: preview.items.map((item) => ({
@@ -232,7 +261,7 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
     request('preview', (ticket) => ({ type: 'preview-post', ticket, body }));
   };
   const post = (): void => {
-    if (!canSend || preview === null || needsUpdate || problems) return;
+    if (!canSend || preview === null || needsUpdate || problems || blocked !== null) return;
     const fingerprints = preview.items.map((item) => item.fingerprint);
     request('post', (ticket) => ({ type: 'post', ticket, previewId: preview.previewId, fingerprints }));
   };
@@ -318,6 +347,10 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
   }
 
   const locked = pending !== null || busy;
+  // Names for a fresh preview are the service's; a field with unsent edits counts its own.
+  const reviewNames = edited ? [] : mentionsIn(preview.reviewBody);
+  const mainDisabled = !canSend || problems || blocked !== null;
+  const describedByBlock = blocked === null ? {} : { 'aria-describedby': blockedId };
   return shell(
     <>
       <p>{`Posts as ${preview.viewer} on ${pr.repo}#${pr.number}.`}</p>
@@ -330,6 +363,7 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
             <p className="muted">{placeOf(item)}</p>
             <TextField
               label={`Comment ${i + 1}`} value={draft.texts[item.fingerprint] ?? ''} max={COMMENT_MAX} locked={locked}
+              names={draft.texts[item.fingerprint] === item.body ? item.mentions : undefined}
               onChange={(value) => editText(item.fingerprint, value)}
             />
             {movable && (
@@ -345,17 +379,33 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
         );
       })}
       <section className="part">
-        <TextField label="Summary" value={draft.summary} max={SUMMARY_MAX} locked={locked} onChange={editSummary} />
+        <TextField
+          label="Summary" value={draft.summary} max={SUMMARY_MAX} locked={locked}
+          // The summary as the service showed it is counted in the review's own text below.
+          names={draft.summary === preview.summary ? [] : undefined} onChange={editSummary}
+        />
+      </section>
+      <section className="part">
+        <p className="label">{REVIEW_TEXT}</p>
+        <div className={edited ? 'quote muted' : 'quote'} data-review-body data-stale={edited ? 'true' : 'false'}>{preview.reviewBody}</div>
+        {edited && <p className="muted">{REVIEW_TEXT_OLD}</p>}
+        {reviewNames.length > 0 && <p className="notice">{mentionNotice(reviewNames)}</p>}
       </section>
       <p>{POST_ONE_REVIEW}</p>
       {saidLine}
       {offlineLine}
+      {draft.waiting && pending?.kind === 'post' && <p role="status">{WAITING_FOR_RECORD}</p>}
       <div className="actions">
         {needsUpdate
-          ? <button type="button" className="btn primary" disabled={!canSend || problems} onClick={update}>Update preview</button>
-          : <button type="button" className="btn primary" disabled={!canSend || problems} onClick={post}>{`Post ${comments(preview.items.length)} to GitHub`}</button>}
+          ? <button type="button" className="btn primary" ref={mainButton} disabled={mainDisabled} {...describedByBlock} onClick={update}>Update preview</button>
+          : (
+            <button type="button" className="btn primary" ref={mainButton} disabled={mainDisabled} {...describedByBlock} onClick={post}>
+              {`Post ${comments(preview.items.length)} to GitHub`}
+            </button>
+          )}
         <button type="button" className="btn" disabled={inFlight} onClick={onClose}>Cancel</button>
       </div>
+      {blocked !== null && <p className="muted" id={blockedId}>{blocked}</p>}
     </>,
   );
 }

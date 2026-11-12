@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { Timers } from '../client/timers';
 import { connectedPlace, COULD_NOT_JUMP, ownPlace, type Jump, type JumpOptions, type JumpPlace, type JumpResult } from '../state/jump';
 import { CopyButton } from './CopyButton';
-import { PostedMark } from './PostedMark';
+import { PostedMark, Reason, WAIT } from './PostedMark';
 import { useVisible } from './visible';
 import { fromText, locationText, placeText, severityWord, sourceText } from './words';
 
@@ -42,16 +42,20 @@ export interface FindingDetailProps {
   /** False while another action is in flight. */
   canPost?: boolean;
   onPost?: (finding: Finding) => void;
+  /** The mark for a record whose outcome is not known, with its controls; `id` names its words. */
+  unknownMark?: (id: string) => ReactNode;
   timers?: Timers;
 }
 
 /** One finding in full. Keyed by the caller on the finding's id, so each finding starts with its own focus and notes. */
 export function FindingDetail({
   finding, packs, previous, next, canDismiss, fixPrompt, onBack, onOpen, onJump, changedPaths, onDismiss, posted, postBlocked = null,
-  canPost = true, onPost = () => undefined, timers,
+  canPost = true, onPost = () => undefined, unknownMark, timers,
 }: FindingDetailProps) {
   const title = useRef<HTMLHeadingElement>(null);
   const postWhy = useId();
+  // Why Post comment is disabled, when the finding has no record: the review's reason, or another action in flight.
+  const postWhyText = postBlocked ?? (canPost ? null : WAIT);
   // `reloadFor`: the place to jump to again after reloading the GitHub tab, when the jump said a reload is needed.
   const [note, setNote] = useState<{ key: string; text: string; reloadFor: JumpPlace | null } | null>(null);
   const visible = useVisible();
@@ -131,12 +135,14 @@ export function FindingDetail({
         <div className="action"><CopyButton text={fixPrompt} label="Copy fix prompt" {...(timers ? { timers } : {})} /></div>
         <div className="action">
           <button
-            type="button" className="btn" data-post-for={finding.id} disabled={posted !== undefined || postBlocked !== null || !canPost}
-            {...(posted !== undefined || postBlocked !== null ? { 'aria-describedby': postWhy } : {})} onClick={() => onPost(finding)}
+            type="button" className="btn" data-post-for={finding.id} disabled={posted !== undefined || postWhyText !== null}
+            {...(posted !== undefined || postWhyText !== null ? { 'aria-describedby': postWhy } : {})} onClick={() => onPost(finding)}
           >
             Post comment
           </button>
-          {posted !== undefined ? <PostedMark record={posted} id={postWhy} /> : postBlocked !== null && <p className="muted" id={postWhy}>{postBlocked}</p>}
+          {posted !== undefined
+            ? (posted.outcome === 'posted' || unknownMark === undefined ? <PostedMark record={posted} id={postWhy} /> : unknownMark(postWhy))
+            : postWhyText !== null && <Reason id={postWhy} text={postWhyText} />}
         </div>
         <div className="action">
           <button type="button" className="btn" data-dismiss-for={finding.id} disabled={!canDismiss} onClick={() => onDismiss(finding)}>Dismiss</button>

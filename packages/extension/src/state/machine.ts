@@ -2,13 +2,13 @@ import { prRefFromUrl, type Depth, type LatestReply, type PostRecord, type PrSum
 import { ServiceError, type ServiceClient } from '../client/service';
 import { realTimers, type Timers } from '../client/timers';
 import {
-  isFor, NO_POST_RECORD, POST_UNKNOWN, reduce, withStage, type Action, type PanelState, type PostReply, type StageLine, type UserAction,
+  isFor, POST_NOT_LEARNED, POST_UNKNOWN, reduce, withStage, type Action, type PanelState, type PostReply, type StageLine, type UserAction,
 } from './reduce';
 import type { SettingsStore } from './settings';
 import type { TabWatcher } from './tab';
 
 export type { PanelState, PostReply, StageLine, UserAction } from './reduce';
-export { NO_POST_RECORD, POST_UNKNOWN } from './reduce';
+export { POST_NOT_LEARNED, POST_UNKNOWN } from './reduce';
 
 export const LOST_MESSAGE = 'Airlock lost its connection to the review. Press Retry to look again.';
 export const NOT_A_TOKEN = 'That is not a pairing token. Run "npm run service -- token" and paste the 64 characters it prints.';
@@ -16,6 +16,9 @@ export const TAB_UNREADABLE = 'Airlock could not read the address of this tab. P
 export const RUN_STOPPED = 'The review that was running stopped when the Airlock service stopped. Start it again when you are ready.';
 export const SHOWING_PROBLEM = 'Airlock had a problem showing this review.';
 export const OFFLINE_RETRY_MS = 5_000;
+/** After a post whose answer did not say what happened, the records are read again this often, this many times (90 s). */
+export const POST_RECHECK_MS = 5_000;
+export const POST_RECHECKS = 18;
 /** While Ready or a review is on screen, how often the panel checks that the service still answers. */
 export const WATCH_MS = OFFLINE_RETRY_MS;
 /** Unanswered checks in a row before the panel says the service is not running: one missed beat changes nothing. */
@@ -390,10 +393,11 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
   };
 
   /**
-   * Posts a stored preview, once. When the reply does not say what happened, the post records do: the record this post
-   * made (one not on screen before, holding one of its findings) is the outcome; with none, the panel says it does not know.
-   * Records the service will not give are not known either. When it does not answer at all, `act` takes the panel offline
-   * (or to pairing), keeping the review; the sheet reads the records itself when the service is back.
+   * Posts a stored preview, once. When the reply does not say what happened, the post records do: the panel reads them
+   * now and every POST_RECHECK_MS for POST_RECHECKS more reads, while the post stays in flight, until the record this post
+   * made (one not on screen before, holding one of its findings) appears. The records shown are always the ones last
+   * read. A read that fails counts as a read with nothing in it; only a refused pairing stops the wait. With no record at
+   * the end, the panel says it could not learn what happened, and nothing is sent again.
    */
   const post = async (g: number, pr: PrSummary, known: ReadonlySet<string>, action: Extract<UserAction, { type: 'post' }>): Promise<void> => {
     const { ticket } = action;
@@ -402,21 +406,39 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     if (sent.outcome === 'posted' && isFor(sent.record, pr)) { answer(g, { ticket, kind: 'posted', record: sent.record }); return; }
     if (sent.outcome === 'refused') { answer(g, { ticket, kind: 'refused', message: sent.message }); return; }
     const said = sent.outcome === 'unclear' ? sent.message ?? POST_UNKNOWN : POST_UNKNOWN;
+    const mine = (r: PostRecord): boolean =>
+      isFor(r, pr) && !known.has(r.id) && r.items.some((item) => action.fingerprints.includes(item.fingerprint));
+    for (let read = 0; ; read += 1) {
+      if (read > 0) {
+        await sleep(POST_RECHECK_MS);
+        if (!current(g)) return;
+      }
+      const posts = await readPosts(pr);
+      if (!current(g)) return;
+      if (posts !== null) apply({ type: 'posts', posts });
+      const record = posts?.find(mine);
+      if (record !== undefined) {
+        answer(g, record.outcome === 'posted' ? { ticket, kind: 'posted', record } : { ticket, kind: 'unknown', message: said, record });
+        return;
+      }
+      if (read >= POST_RECHECKS) {
+        answer(g, { ticket, kind: 'unclear', message: POST_NOT_LEARNED });
+        return;
+      }
+      if (read === 0) answer(g, { ticket, kind: 'waiting' });
+    }
+  };
+
+  /** The post records of the pull request; null when they could not be read. A refused pairing is thrown. */
+  const readPosts = async (pr: PrSummary): Promise<PostRecord[] | null> => {
     let latest: LatestReply | null;
     try {
       latest = await client.latest(pr.repo, pr.number, live.signal);
     } catch (error) {
-      // Records the service answered about but did not give: still not known, and never called a refusal.
-      if (!(error instanceof ServiceError && error.kind === 'problem')) throw error;
-      answer(g, { ticket, kind: 'unclear', message: said });
-      return;
+      if (error instanceof ServiceError && error.kind === 'unpaired') throw error;
+      return null;
     }
-    const mine = (r: PostRecord): boolean =>
-      isFor(r, pr) && !known.has(r.id) && r.items.some((item) => action.fingerprints.includes(item.fingerprint));
-    const record = latest?.posts.find(mine);
-    if (record === undefined) answer(g, { ticket, kind: 'unclear', message: NO_POST_RECORD });
-    else if (record.outcome === 'posted') answer(g, { ticket, kind: 'posted', record });
-    else answer(g, { ticket, kind: 'unknown', message: said, record });
+    return latest === null ? [] : latest.posts.filter((r) => isFor(r, pr));
   };
 
   const start = async (g: number, pr: PrSummary, depth: Depth, packIds: string[] | undefined): Promise<void> => {
@@ -483,14 +505,19 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
         return;
       case 'forget-post':
         if (state.kind === 'review') {
-          const { repo, number } = state.pr;
-          act(state.pr, async (g) => {
+          const shown = state.pr;
+          const { repo, number } = shown;
+          act(shown, async (g) => {
             try {
               await client.forgetPost({ repo, number, id: action.id });
-              answer(g, { ticket: action.ticket, kind: 'forgotten', id: action.id });
             } catch (error) {
               refusedOr(g, action.ticket, error);
+              return;
             }
+            answer(g, { ticket: action.ticket, kind: 'forgotten', id: action.id });
+            // Then the records as the service now has them.
+            const posts = await readPosts(shown);
+            if (posts !== null && current(g)) apply({ type: 'posts', posts });
           });
         }
         return;

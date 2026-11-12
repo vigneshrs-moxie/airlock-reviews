@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PanelScreen } from '../../src/screens/PanelScreen';
 import type { PanelState, PostReply, UserAction } from '../../src/state/reduce';
 import { UNKNOWN_SENTENCE, previewItem, previewOf, recordOf } from '../helpers/post-fixtures';
-import { finding, reviewState, type ReviewOptions } from './review-fixtures';
+import { also, finding, reviewState, type ReviewOptions } from './review-fixtures';
 
 afterEach(cleanup);
 
@@ -43,6 +43,10 @@ const field = (name: string) => screen.getByRole('textbox', { name }) as HTMLTex
 const type = (name: string, value: string) => fireEvent.change(field(name), { target: { value } });
 const openDetail = (title: string) => fireEvent.click(screen.getByText(title, { selector: '.finding-card .title' }));
 const tick = (title: string) => fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(`${title}$`) }));
+
+const names = (list: string): string => `Names ${list}: GitHub notifies them unless the name is inside code.`;
+const WAIT = 'Wait for the current action to finish.';
+const NOT_LEARNED = 'Airlock could not learn what happened to this post. Look at the pull request before posting again.';
 
 const itemFor = (f: Finding, over: Parameters<typeof previewItem>[1] = {}) => previewItem(f, over);
 
@@ -166,13 +170,73 @@ describe('the post sheet', () => {
     expect(button('Post 1 comment to GitHub')).toBeTruthy();
   });
 
-  it('a mention shows the notice with the names', () => {
-    previewed();
+  it('a mention shows the notice with the names: the service\'s for a fresh preview, the typed ones for an edit', () => {
+    const f = finding(1);
+    // The service's list is shown as it is: the panel does not recount a fresh preview.
+    previewed([f], {}, previewOf([itemFor(f, { body: 'Plain text.', mentions: ['@dave'] })], { reviewBody: 'Thanks @erin.' }));
+    expect(dialog().getByText(names('@dave'))).toBeTruthy();
+    // The review's own text: the names in it as the service returned it.
+    expect(dialog().getByText(names('@erin'))).toBeTruthy();
     // mentionsIn reads no Markdown, so a name in backticks is listed too.
     type('Comment 1', 'Ask @alice and @acme/reviewers, not `@bob`.');
-    expect(dialog().getByText('Mentions @alice, @acme/reviewers, @bob: they will be notified.')).toBeTruthy();
+    expect(dialog().getByText(names('@alice, @acme/reviewers, @bob'))).toBeTruthy();
+    expect(dialog().queryByText(names('@dave'))).toBeNull();
     type('Summary', 'Thanks @carol.');
-    expect(dialog().getByText('Mentions @carol: they will be notified.')).toBeTruthy();
+    expect(dialog().getByText(names('@carol'))).toBeTruthy();
+  });
+
+  it('shows the review\'s own text as the service returned it, greyed after an edit until the next preview', () => {
+    const [a, b] = [finding(1), finding(2)];
+    const reviewBody = 'Review notes from Airlock: 2 comments.\n\nNot on a changed line:\n\n`src/file1.ts:10`\n**Fix: Problem 1**';
+    const m = previewed([a, b], {}, previewOf([
+      itemFor(a, { placement: 'summary', whySummary: 'The line is not part of the diff GitHub shows.' }), itemFor(b),
+    ], { reviewBody }));
+    expect(dialog().getByText("The review's own text, as it will be posted:")).toBeTruthy();
+    const shown = document.querySelector<HTMLElement>('[data-review-body]')!;
+    expect(shown.textContent).toBe(reviewBody);
+    expect(shown.getAttribute('data-stale')).toBe('false');
+    expect(dialog().queryByText('Update preview to see this again.')).toBeNull();
+    type('Summary', 'Mine.');
+    expect(dialog().getByText('Update preview to see this again.')).toBeTruthy();
+    expect(shown.getAttribute('data-stale')).toBe('true');
+    fireEvent.click(button('Update preview'));
+    m.answer({ kind: 'preview', preview: previewOf([itemFor(a), itemFor(b)], { summary: 'Mine.', reviewBody: 'Mine.' }) });
+    expect(document.querySelector('[data-review-body]')!.textContent).toBe('Mine.');
+    expect(dialog().queryByText('Update preview to see this again.')).toBeNull();
+  });
+
+  it('a fresh preview after an update is announced, and focus goes to the main button', () => {
+    const f = finding(1);
+    const m = previewed([f]);
+    type('Comment 1', 'Better.');
+    fireEvent.click(button('Update preview'));
+    m.answer({ kind: 'preview', preview: previewOf([itemFor(f, { body: 'Better.' })]) });
+    expect(document.querySelector('[aria-live]')?.textContent).toBe('Preview updated.');
+    expect(document.activeElement).toBe(button('Post 1 comment to GitHub'));
+  });
+
+  it('Enter in a field adds a line and sends nothing', () => {
+    const m = previewed();
+    const calls = m.dispatch.mock.calls.length;
+    const proceeded = fireEvent.keyDown(field('Comment 1'), { key: 'Enter' });
+    expect(proceeded).toBe(true);
+    expect(m.dispatch.mock.calls.length).toBe(calls);
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it.each([
+    ['the pull request closes', { pr: { state: 'closed' as const } }, 'The pull request is closed, so nothing can be posted to it.'],
+    ['the pull request is merged', { pr: { state: 'merged' as const } }, 'The pull request is merged, so nothing can be posted to it.'],
+    ['new commits arrive', { stale: true }, 'This review is of an older commit. Review the new commits before posting.'],
+  ])('the sheet says why it cannot post when %s while it is open', (_name, over, reason) => {
+    const f = finding(1);
+    const m = previewed([f]);
+    m.show(reviewState([f], over));
+    const main = button('Post 1 comment to GitHub');
+    expect(main.disabled).toBe(true);
+    expect(main.getAttribute('aria-describedby')).toBe(dialog().getByText(reason).id);
+    type('Comment 1', 'Edited.');
+    expect(button('Update preview').disabled).toBe(true);
   });
 
   it('a text that cannot be posted says why, with its count, and nothing can be sent', () => {
@@ -252,7 +316,7 @@ describe('the post sheet', () => {
     const d = dialog();
     expect(d.getByRole('alert').textContent).toBe(UNKNOWN_SENTENCE);
     expect((d.getByRole('link', { name: 'Open the pull request' }) as HTMLAnchorElement).getAttribute('href')).toBe('https://github.com/acme/widgets/pull/1');
-    fireEvent.click(button('It was not posted'));
+    fireEvent.click(d.getByRole('button', { name: 'It was not posted' }));
     expect(m.last()).toEqual({ type: 'forget-post', ticket: expect.any(Number), id: record.id });
     m.answer({ kind: 'forgotten', id: record.id });
     expect(field('Comment 1').value).toBe('Kept text.');
@@ -372,7 +436,8 @@ describe('the post sheet keeps its texts', () => {
     fireEvent.click(button('Post 1 comment to GitHub'));
     m.show(offlineOf(reviewState([f])));
     m.show(reviewState([f]));
-    expect(dialog().getByRole('alert').textContent).toBe('Airlock got no answer about this post and has no record of it. Look at the pull request before posting again.');
+    expect(dialog().getByRole('alert').textContent).toBe(NOT_LEARNED);
+    expect(dialog().getByRole('link', { name: 'Open the pull request' })).toBeTruthy();
     expect(field('Comment 1').value).toBe(m.preview.items[0]!.body);
     expect(button('Update preview')).toBeTruthy();
   });
@@ -397,10 +462,149 @@ describe('the post sheet keeps its texts', () => {
     const f = finding(1);
     const m = previewed([f]);
     m.show(reviewState([f], { doc: { id: 'r_0000000002' } }));
-    expect(dialog().getByText('This review is no longer the one on screen, so these comments cannot be posted from it.')).toBeTruthy();
+    expect(dialog().getByText('This review is no longer the one on screen, so these comments cannot be posted from it. Closing this loses the texts here.')).toBeTruthy();
     expect(dialog().queryByRole('button', { name: /^Post 1 comment/ })).toBeNull();
     fireEvent.click(button('Close'));
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
 
+describe('a post in flight', () => {
+  const offlineOf = (r: ReturnType<typeof reviewState>): PanelState => ({ kind: 'offline', review: { pr: r.pr, latest: r.latest, stale: false } });
+
+  it('cannot be closed while the service is away, and shows its outcome when it is back', () => {
+    const f = finding(1);
+    const m = previewed([f]);
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    m.show(offlineOf(reviewState([f])));
+    expect(button('Cancel').disabled).toBe(true);
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    fireEvent.click(document.querySelector('.sheet')!);
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    const record = recordOf([f.fingerprint]);
+    m.show(reviewState([f], { posts: [record] }));
+    expect(dialog().getByText('Posted 1 comment.')).toBeTruthy();
+    expect(button('Done').disabled).toBe(false);
+  });
+
+  it('while the panel waits for the record: says so and cannot be closed; with none, says it could not learn and keeps the texts', () => {
+    const f = finding(1);
+    const m = previewed([f]);
+    type('Comment 1', 'Kept.');
+    fireEvent.click(button('Update preview'));
+    m.answer({ kind: 'preview', preview: previewOf([itemFor(f, { body: 'Kept.' })]) });
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    m.answer({ kind: 'waiting' }, { busy: true });
+    expect(dialog().getByText('Waiting to hear whether GitHub accepted the comments…')).toBeTruthy();
+    expect(button('Cancel').disabled).toBe(true);
+    m.answer({ kind: 'unclear', message: NOT_LEARNED });
+    expect(dialog().getByRole('alert').textContent).toBe(NOT_LEARNED);
+    expect((dialog().getByRole('link', { name: 'Open the pull request' }) as HTMLAnchorElement).getAttribute('href')).toBe('https://github.com/acme/widgets/pull/1');
+    expect(dialog().queryByText('Waiting to hear whether GitHub accepted the comments…')).toBeNull();
+    expect(field('Comment 1').value).toBe('Kept.');
+    expect(button('Cancel').disabled).toBe(false);
+    fireEvent.click(button('Cancel'));
+    // The findings stay unmarked; a record read later marks them.
+    expect(button('Post comment').disabled).toBe(false);
+    m.show(reviewState([f], { posts: [recordOf([f.fingerprint])] }));
+    expect(screen.getByText('Posted', { selector: '.mark *' })).toBeTruthy();
+    expect(button('Post comment').disabled).toBe(true);
+  });
+
+  it('is the same post when the sheet is hidden and shown again: nothing can be sent and it cannot be closed', () => {
+    const f = finding(1);
+    const m = previewed([f]);
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    m.show(reviewState([f], { busy: true }));
+    m.show({ kind: 'unpaired' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    m.show(reviewState([f], { busy: true }));
+    expect(button('Cancel').disabled).toBe(true);
+    expect(button('Post 1 comment to GitHub').disabled).toBe(true);
+    fireEvent.click(button('Post 1 comment to GitHub'));
+    expect(m.dispatch.mock.calls.filter(([a]) => a.type === 'post')).toHaveLength(1);
+  });
+});
+
+describe('an unknown record can be cleared from the finding', () => {
+  const unknownFor = (f: Finding) => recordOf([f.fingerprint], { outcome: 'unknown' });
+
+  function expectClearable(scope: ReturnType<typeof within>, m: Mounted, id: string) {
+    expect(scope.getByText('Not known whether this was posted')).toBeTruthy();
+    expect((scope.getByRole('link', { name: 'Open the pull request' }) as HTMLAnchorElement).getAttribute('href')).toBe('https://github.com/acme/widgets/pull/1');
+    fireEvent.click(scope.getByRole('button', { name: 'It was not posted' }));
+    expect(scope.getByText('Forget this record? Only do this after looking at the pull request.')).toBeTruthy();
+    fireEvent.click(scope.getByRole('button', { name: 'Keep' }));
+    expect(scope.queryByText('Forget this record? Only do this after looking at the pull request.')).toBeNull();
+    expect(m.dispatch).not.toHaveBeenCalled();
+    fireEvent.click(scope.getByRole('button', { name: 'It was not posted' }));
+    fireEvent.click(scope.getByRole('button', { name: 'It was not posted' }));
+    expect(m.last()).toEqual({ type: 'forget-post', ticket: expect.any(Number), id });
+  }
+
+  it('from its card', () => {
+    const f = finding(1);
+    const m = mount([f, finding(2)], { posts: [unknownFor(f)] });
+    expectClearable(within(document.querySelector<HTMLElement>('.finding-card')!), m, unknownFor(f).id);
+  });
+
+  it('from its detail', () => {
+    const f = finding(1);
+    const m = mount([f], { posts: [unknownFor(f)] });
+    openDetail('Problem 1');
+    expectClearable(within(document.querySelector<HTMLElement>('main')!), m, unknownFor(f).id);
+  });
+
+  it('from its Also found entry', () => {
+    const f = also(4);
+    const m = mount([finding(1), f], { posts: [unknownFor(f)] });
+    fireEvent.click(button('Also found'));
+    expectClearable(within(screen.getByText('Problem 4', { selector: 'li .title' }).closest('li')!), m, unknownFor(f).id);
+  });
+
+  it('a refusal is said where it was asked', () => {
+    const f = finding(1);
+    const m = mount([f], { posts: [unknownFor(f)] });
+    const card = within(document.querySelector<HTMLElement>('.finding-card')!);
+    fireEvent.click(card.getByRole('button', { name: 'It was not posted' }));
+    fireEvent.click(card.getByRole('button', { name: 'It was not posted' }));
+    m.answer({ kind: 'refused', message: 'This review was posted, so Airlock keeps its record.' }, { posts: [unknownFor(f)] });
+    expect(within(document.querySelector<HTMLElement>('.finding-card')!).getByRole('alert').textContent)
+      .toBe('This review was posted, so Airlock keeps its record.');
+  });
+
+  it('is disabled with its reason offline and while another action is in flight', () => {
+    const f = finding(1);
+    const shown = reviewState([f], { posts: [unknownFor(f)] });
+    const m = mount([f], { posts: [unknownFor(f)], busy: true });
+    const forget = () => within(document.querySelector<HTMLElement>('.finding-card')!).getByRole('button', { name: 'It was not posted' }) as HTMLButtonElement;
+    expect(forget().disabled).toBe(true);
+    expect(document.getElementById(forget().getAttribute('aria-describedby')!)?.textContent).toBe(WAIT);
+    m.show({ kind: 'offline', review: { pr: shown.pr, latest: shown.latest, stale: false } });
+    expect(forget().disabled).toBe(true);
+    expect(document.getElementById(forget().getAttribute('aria-describedby')!)?.textContent).toBe('Posting needs the Airlock service, which is not answering.');
+  });
+});
+
+describe('the Post buttons', () => {
+  it('while another action is in flight say to wait, for a screen reader', () => {
+    mount([finding(1)], { busy: true });
+    tick('Problem 1');
+    const bar = button('Post selected (1)');
+    expect(bar.disabled).toBe(true);
+    expect(document.getElementById(bar.getAttribute('aria-describedby')!)?.textContent).toBe(WAIT);
+    openDetail('Problem 1');
+    const one = button('Post comment');
+    expect(document.getElementById(one.getAttribute('aria-describedby')!)?.textContent).toBe(WAIT);
+  });
+
+  it.each([1, 2])('focus goes back to Post selected when the sheet was opened from the bar (%i ticked)', (n) => {
+    const findings = [finding(1), finding(2)];
+    mount(findings);
+    for (const f of findings.slice(0, n)) tick(f.title);
+    fireEvent.click(button(`Post selected (${n})`));
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(button(`Post selected (${n})`));
+  });
+});

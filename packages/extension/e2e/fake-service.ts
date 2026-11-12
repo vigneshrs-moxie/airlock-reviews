@@ -58,6 +58,10 @@ const MERGED = 'The pull request has been merged. Nothing was posted.';
 const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
 const KEPT = 'This review was posted, so Airlock keeps its record.';
 const PREVIEW_MS = 10 * 60_000;
+// The real router's body limits: the preview route takes a full-size preview, every other route 64 KB.
+const PREVIEW_BODY_MAX = 512 * 1024;
+const BODY_MAX = 64 * 1024;
+const TOO_LARGE = 'The request body is too large.';
 const ForgetReplySchema = z.object({ forgotten: z.boolean() });
 
 /** What the fake's GitHub does with the next post: takes it (the default), refuses it with a message, or never answers clearly. */
@@ -328,6 +332,9 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     const chosen: Finding[] = [];
     for (const item of asked.items) {
       const finding = doc.findings.find((f) => keysOf(f).includes(item.fingerprint));
+      const asKeys = finding === undefined ? [item.fingerprint] : keysOf(finding);
+      const fixed = (doc.fixed ?? []).find((f) => keysOf(f).some((k) => asKeys.includes(k)));
+      if (fixed !== undefined) throw new Refusal(404, `This finding is fixed, so it cannot be posted: ${fixed.title}.`);
       if (finding === undefined) throw new Refusal(404, NOT_FOUND);
       if (chosen.includes(finding)) throw new Refusal(400, `This finding is chosen twice: ${finding.title}.`);
       const keys = keysOf(finding);
@@ -402,6 +409,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       postedAt: new Date().toISOString(), items: held.items,
     };
     if ('refuse' in answer) {
+      // Kept for another try, for ten minutes from the refusal, as the service's Previews.keep does.
       stored.set(held.previewId, { ...held, expiresAt: Date.now() + PREVIEW_MS });
       throw new Refusal(502, `GitHub refused the comments: ${answer.refuse}. Nothing was posted.`);
     }
@@ -473,6 +481,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     }
     if (NEEDS_ORIGIN.has(url.pathname) && origin === null) { refuse(res, 403, NOT_THIS_PAGE); return; }
     if (token === undefined || req.headers.authorization !== `Bearer ${token}`) { refuse(res, 401, NEEDS_TOKEN); return; }
+    if (Buffer.byteLength(text, 'utf8') > (url.pathname === '/posts/preview' ? PREVIEW_BODY_MAX : BODY_MAX)) { refuse(res, 413, TOO_LARGE); return; }
 
     try {
       if (pairing) {

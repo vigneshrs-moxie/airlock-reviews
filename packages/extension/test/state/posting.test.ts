@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { LatestReply, PostPreviewBody, PostRecord } from '@airlock/shared';
 import { ServiceClient } from '../../src/client/service';
-import { NO_POST_RECORD, startPanel } from '../../src/state/machine';
+import { POST_NOT_LEARNED, POST_RECHECKS, POST_RECHECK_MS, startPanel } from '../../src/state/machine';
 import { reduce, type PanelState, type PostReply } from '../../src/state/reduce';
 import type { SettingsStore } from '../../src/state/settings';
 import type { TabWatcher } from '../../src/state/tab';
@@ -39,9 +39,10 @@ function harness(prepare?: (svc: FakeService, latest: LatestReply) => void) {
   prepare?.(svc, latest);
   const client = new ServiceClient(BASE, async () => TOKEN, svc.fetch, new FakeTimers());
   const states: PanelState[] = [];
-  const panel = startPanel({ client, tab: tab(prUrl('acme/widgets', 1)), settings: settings(), timers: new FakeTimers(), onState: (s) => states.push(s) });
+  const timers = new FakeTimers();
+  const panel = startPanel({ client, tab: tab(prUrl('acme/widgets', 1)), settings: settings(), timers, onState: (s) => states.push(s) });
   panels.push(panel);
-  return { svc, states, panel, latest, last: () => states.at(-1) };
+  return { svc, states, panel, latest, timers, last: () => states.at(-1) };
 }
 
 type Harness = ReturnType<typeof harness>;
@@ -58,6 +59,17 @@ async function until(h: Harness, more: (s: PanelState) => boolean): Promise<Pane
 
 const reviewWith = (h: Harness, ticket: number) => until(h, (s) => s.kind === 'review' && s.post?.ticket === ticket && s.busy !== true) as Promise<Review>;
 const reviewShown = (h: Harness) => until(h, (s) => s.kind === 'review');
+
+/** Lets the panel's waits run, one round at a time, until the post's final answer under `ticket` is on screen. */
+async function recheckUntil(h: Harness, ticket: number): Promise<Review> {
+  for (let round = 0; round < 60; round++) {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    const s = h.last();
+    if (s?.kind === 'review' && s.post?.ticket === ticket && s.post.kind !== 'waiting' && s.busy !== true) return s;
+    h.timers.fire();
+  }
+  throw new Error(`no final answer; last was ${JSON.stringify(h.last())}`);
+}
 const postsCalled = (h: Harness) => h.svc.calls.filter((c) => c === 'POST /posts').length;
 
 describe('the panel posts through the service', () => {
@@ -157,45 +169,75 @@ describe('the panel posts through the service', () => {
     expect(postsCalled(h)).toBe(1);
   });
 
-  it('no answer and no new record for these findings: says so, and does not take an earlier record for this one', async () => {
+  it('no answer and no record yet: says it is waiting, reads every 5 seconds, and takes a record that appears later', async () => {
     const earlier = recordOf([FP2], { id: 'post_aaaaaaaaaaaa' });
-    const other = recordOf([FP2], { id: 'post_bbbbbbbbbbbb' });
+    const record = recordOf([FP], { id: 'post_cccccccccccc' });
+    let reads = 0;
     const h = harness((svc, latest) => {
       latest.posts = [earlier];
       svc.on('POST /posts', () => {
-        latest.posts = [earlier, other];
-        return json({ error: 'Airlock had a problem.' }, 500);
+        // The service is still inside its call to GitHub: the record comes on the third read.
+        svc.on('GET /reviews/latest', () => {
+          reads += 1;
+          return json({ ...latest, posts: reads >= 3 ? [earlier, record] : [earlier] });
+        });
+        return Promise.reject(new TypeError('Failed to fetch'));
       });
     });
     await reviewShown(h);
     h.panel.dispatch({ type: 'post', ticket: 7, previewId: preview.previewId, fingerprints: [FP] });
-    const s = await reviewWith(h, 7);
-    expect(s.post).toEqual({ ticket: 7, kind: 'unclear', message: NO_POST_RECORD });
+    const waiting = await until(h, (s) => s.kind === 'review' && s.post?.ticket === 7) as Review;
+    expect(waiting.post).toEqual({ ticket: 7, kind: 'waiting' });
+    // Still in flight: nothing else can be sent meanwhile.
+    expect(waiting.busy).toBe(true);
+    expect(h.timers.delays()).toContain(POST_RECHECK_MS);
+    const s = await recheckUntil(h, 7);
+    expect(s.post).toEqual({ ticket: 7, kind: 'posted', record });
+    expect(s.latest.posts).toEqual([earlier, record]);
+    expect(reads).toBe(3);
+    expect(postsCalled(h)).toBe(1);
   });
 
-  it('no answer and records the service will not give: still not known, never a refusal', async () => {
+  it('no record after 90 seconds of reads: says it could not learn what happened; the records on screen are the last read', async () => {
+    const earlier = recordOf([FP2], { id: 'post_aaaaaaaaaaaa' });
+    const other = recordOf([FP2], { id: 'post_bbbbbbbbbbbb' });
+    let reads = 0;
+    const h = harness((svc, latest) => {
+      latest.posts = [earlier];
+      svc.on('POST /posts', () => {
+        svc.on('GET /reviews/latest', () => {
+          reads += 1;
+          return json({ ...latest, posts: [earlier, other] });
+        });
+        return json({ error: 'Airlock had a problem.' }, 500);
+      });
+    });
+    await reviewShown(h);
+    h.panel.dispatch({ type: 'post', ticket: 8, previewId: preview.previewId, fingerprints: [FP] });
+    const s = await recheckUntil(h, 8);
+    expect(s.post).toEqual({ ticket: 8, kind: 'unclear', message: POST_NOT_LEARNED });
+    // A first read, then one every 5 seconds for 90 seconds.
+    expect(reads).toBe(1 + POST_RECHECKS);
+    expect(POST_RECHECKS * POST_RECHECK_MS).toBe(90_000);
+    expect(s.latest.posts).toEqual([earlier, other]);
+    expect(postsCalled(h)).toBe(1);
+  });
+
+  it.each([
+    ['refuses to give them', (svc: FakeService) => svc.on('GET /reviews/latest', () => json({ error: 'Airlock had a problem.' }, 500))],
+    ['does not answer', (svc: FakeService) => { svc.down = true; }],
+  ])('no answer, and the service %s when asked for the records: keeps asking, never a refusal, never offline, nothing sent again', async (_name, cut) => {
     const h = harness((svc) => {
       svc.on('POST /posts', () => {
-        svc.on('GET /reviews/latest', () => json({ error: 'Airlock had a problem.' }, 500));
+        cut(svc);
         return json({ error: UNKNOWN_SENTENCE }, 504);
       });
     });
     await reviewShown(h);
     h.panel.dispatch({ type: 'post', ticket: 13, previewId: preview.previewId, fingerprints: [FP] });
-    const s = await reviewWith(h, 13);
-    expect(s.post).toEqual({ ticket: 13, kind: 'unclear', message: UNKNOWN_SENTENCE });
-  });
-
-  it('no answer and the records cannot be read either: the panel goes offline and nothing is sent again', async () => {
-    const h = harness((svc) => {
-      svc.on('POST /posts', () => {
-        svc.down = true;
-        return Promise.reject(new TypeError('Failed to fetch'));
-      });
-    });
-    await reviewShown(h);
-    h.panel.dispatch({ type: 'post', ticket: 8, previewId: preview.previewId, fingerprints: [FP] });
-    await until(h, (s) => s.kind === 'offline');
+    const s = await recheckUntil(h, 13);
+    expect(s.post).toEqual({ ticket: 13, kind: 'unclear', message: POST_NOT_LEARNED });
+    expect(h.states.some((x) => x.kind === 'offline')).toBe(false);
     expect(postsCalled(h)).toBe(1);
   });
 
@@ -212,17 +254,24 @@ describe('the panel posts through the service', () => {
     expect(postsCalled(h)).toBe(1);
   });
 
-  it('forgetting an unknown record sends the pull request and the id, and removes it from the review', async () => {
+  it('forgetting an unknown record sends the pull request and the id, then reads the records again', async () => {
     const unknown = recordOf([FP], { outcome: 'unknown' });
+    const elsewhere = recordOf([FP2], { id: 'post_dddddddddddd' });
     const h = harness((svc, latest) => {
       latest.posts = [unknown];
-      svc.on('POST /posts/forget', () => json({ forgotten: true }));
+      svc.on('POST /posts/forget', () => {
+        // Another panel posted meanwhile: the records read after the forget are the ones shown.
+        latest.posts = [elsewhere];
+        return json({ forgotten: true });
+      });
     });
     await reviewShown(h);
     h.panel.dispatch({ type: 'forget-post', ticket: 11, id: unknown.id });
-    const s = await reviewWith(h, 11);
+    await until(h, (s) => s.kind === 'review' && s.post?.ticket === 11 && s.busy !== true && s.latest.posts.length === 1);
+    const s = h.last() as Review;
     expect(s.post).toEqual({ ticket: 11, kind: 'forgotten', id: unknown.id });
-    expect(s.latest.posts).toEqual([]);
+    expect(s.latest.posts).toEqual([elsewhere]);
+    expect(h.svc.calls.filter((c) => c === 'GET /reviews/latest').length).toBe(2);
     expect(h.svc.requests.find((r) => r.url.pathname === '/posts/forget')?.body).toEqual({ repo: 'acme/widgets', number: 1, id: unknown.id });
   });
 
@@ -278,6 +327,19 @@ describe('the post reply in the state', () => {
     expect(s.latest.posts).toEqual([]);
     const long = apply(review(), { ticket: 2, kind: 'refused', message: 'x'.repeat(400) }) as Review;
     expect(long.post?.kind === 'refused' && [...long.post.message].length).toBe(300);
+  });
+
+  it('waiting keeps the review busy; the records read replace the ones on screen', () => {
+    const waiting = apply(review(), { ticket: 1, kind: 'waiting' }) as Review;
+    expect(waiting.busy).toBe(true);
+    expect(waiting.post).toEqual({ ticket: 1, kind: 'waiting' });
+    const read = recordOf([FP2], { id: 'post_eeeeeeeeeeee' });
+    const s = reduce(waiting, { type: 'posts', posts: [read] }) as Review;
+    expect(s.latest.posts).toEqual([read]);
+    expect(s.busy).toBe(true);
+    expect(s.post).toEqual({ ticket: 1, kind: 'waiting' });
+    const ready: PanelState = { kind: 'ready', pr };
+    expect(reduce(ready, { type: 'posts', posts: [read] })).toBe(ready);
   });
 
   it('is ignored away from a review, and not kept when the service goes away', () => {

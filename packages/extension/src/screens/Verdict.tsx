@@ -2,7 +2,7 @@ import { fixPrompt, POST_MAX_ITEMS, verdictWords, type Dismissal, type Finding, 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Timers } from '../client/timers';
 import { listFindings, neighbours, postOf, selectedInOrder, toggled } from '../state/selection';
-import type { ReviewView, UserAction } from '../state/reduce';
+import type { PostReply, ReviewView, UserAction } from '../state/reduce';
 import { AlsoFound } from './AlsoFound';
 import { BriefBlock } from './BriefBlock';
 import { Collapsible } from './Collapsible';
@@ -15,21 +15,22 @@ import type { Jump } from '../state/jump';
 import { FindingDetail, notConnected } from './FindingDetail';
 import { useAnnounce } from './Frame';
 import { MapBlock } from './MapBlock';
-import { ALL_POSTED, TOO_MANY, whyNotPosting } from './PostedMark';
+import { ALL_POSTED, NO_POST_OFFLINE, pullAddress, Reason, TOO_MANY, UnknownMark, WAIT, whyNotPosting } from './PostedMark';
+import { nextTicket } from './PostSheet';
 import { StageErrors } from './StageErrors';
 import { TimingTable, tookTime } from './TimingTable';
 import { depthWord } from './words';
 
 export interface VerdictProps {
-  state: ReviewView & { notice?: string; busy?: boolean };
+  state: ReviewView & { notice?: string; busy?: boolean; post?: PostReply };
   dispatch: (action: UserAction) => void;
   /** Shown from before the service stopped: everything that needs the service is disabled. */
   readOnly?: boolean;
   /** Called with the reviewed pull request and the place; works read-only too, as it needs no service. */
   onJump?: Jump;
   onDismiss?: (finding: Finding) => void;
-  /** Opens the post sheet for these findings, none of them posted. */
-  onPost?: (findings: Finding[]) => void;
+  /** Opens the post sheet for these findings, none of them posted; `opener` is a finding's id, or `selected` for the bar. */
+  onPost?: (findings: Finding[], opener: string) => void;
   /** For the Copy buttons' two seconds. */
   timers?: Timers;
 }
@@ -71,7 +72,24 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
   const postBlocked = whyNotPosting(pr, stale, readOnly);
   // Ticked findings already posted (or whose post is not known) are left out of a post.
   const postable = chosen.filter((f) => recordOf(f) === undefined);
-  const barWhy = postBlocked ?? (postable.length === 0 ? ALL_POSTED : postable.length > POST_MAX_ITEMS ? TOO_MANY : null);
+  const barWhy = postBlocked ?? (postable.length === 0 ? ALL_POSTED : postable.length > POST_MAX_ITEMS ? TOO_MANY : state.busy === true ? WAIT : null);
+  // A record whose outcome is not known is cleared where its finding is shown.
+  const forgetBlocked = readOnly ? NO_POST_OFFLINE : state.busy === true ? WAIT : null;
+  const forget = (record: Parameters<typeof UnknownMark>[0]['record']): number => {
+    const ticket = nextTicket();
+    dispatch({ type: 'forget-post', ticket, id: record.id });
+    return ticket;
+  };
+  const unknownMark = (f: Finding, id?: string) => {
+    const record = recordOf(f);
+    if (record === undefined || record.outcome === 'posted') return null;
+    return (
+      <UnknownMark
+        record={record} address={pullAddress(pr)} blocked={forgetBlocked} onForget={forget} reply={state.post}
+        {...(id === undefined ? {} : { id })}
+      />
+    );
+  };
 
   const register = useCallback((id: string, node: HTMLButtonElement | null): void => {
     if (node === null) nodes.current.delete(id);
@@ -145,7 +163,8 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
         key={detail.id} finding={detail} packs={pr.packs} previous={previous} next={next} canDismiss={!disabled}
         fixPrompt={promptFor([detail])} onBack={() => setOpenId(null)} onOpen={(f) => setOpenId(f.id)}
         onJump={(place, options) => onJump(doc.pr, place, options)} changedPaths={changedPaths} onDismiss={onDismiss}
-        posted={recordOf(detail)} postBlocked={postBlocked} canPost={state.busy !== true} onPost={(f) => onPost([f])} {...t}
+        posted={recordOf(detail)} postBlocked={postBlocked} canPost={state.busy !== true} onPost={(f) => onPost([f], f.id)}
+        unknownMark={(id) => unknownMark(detail, id)} {...t}
       />
       </>
     );
@@ -188,12 +207,12 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
               <CopyButton key={chosen.map((f) => f.id).join()} text={promptFor(chosen)} label={`Copy fix prompt for ${count} selected`} {...t} />
               <div className="action">
                 <button
-                  type="button" className="btn small" data-post-selected disabled={barWhy !== null || state.busy === true}
-                  {...(barWhy === null ? {} : { 'aria-describedby': postWhy })} onClick={() => onPost(postable)}
+                  type="button" className="btn small" data-post-selected disabled={barWhy !== null}
+                  {...(barWhy === null ? {} : { 'aria-describedby': postWhy })} onClick={() => onPost(postable, 'selected')}
                 >
                   {`Post selected (${postable.length})`}
                 </button>
-                {barWhy !== null && <p className="muted" id={postWhy}>{barWhy}</p>}
+                {barWhy !== null && <Reason id={postWhy} text={barWhy} />}
               </div>
               <button type="button" className="btn small" onClick={() => setSelected(new Set())}>Clear</button>
             </div>
@@ -201,7 +220,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
           <ol className="plain cards">
             {lists.top.map((f, i) => (
               <FindingCard
-                key={f.id} finding={f} rank={i + 1} packs={pr.packs} selected={selected.has(f.id)} posted={recordOf(f)}
+                key={f.id} finding={f} rank={i + 1} packs={pr.packs} selected={selected.has(f.id)} posted={recordOf(f)} after={unknownMark(f)}
                 onToggle={() => setSelected((was) => toggled(was, f.id))} onOpen={() => setOpenId(f.id)} register={register}
               />
             ))}
@@ -210,7 +229,7 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
       )}
       {lists.also.length > 0 && (
         <Collapsible title="Also found" open={folds.has('also')} onToggle={() => fold('also')}>
-          <AlsoFound findings={lists.also} onOpen={(f) => setOpenId(f.id)} register={register} postOf={recordOf} />
+          <AlsoFound findings={lists.also} onOpen={(f) => setOpenId(f.id)} register={register} postOf={recordOf} after={(f) => unknownMark(f)} />
         </Collapsible>
       )}
       {doc.questions.length > 0 && (

@@ -1,4 +1,6 @@
 import { POST_MAX_ITEMS, type PostRecord, type PrSummary } from '@airlock/shared';
+import { useId, useState } from 'react';
+import type { PostReply } from '../state/reduce';
 
 export const POSTED_WORD = 'Posted';
 export const UNKNOWN_MARK = 'Not known whether this was posted';
@@ -9,6 +11,20 @@ export const NO_POST_CLOSED = 'The pull request is closed, so nothing can be pos
 export const NO_POST_MERGED = 'The pull request is merged, so nothing can be posted to it.';
 export const ALL_POSTED = 'The selected findings are already posted.';
 export const TOO_MANY = `At most ${POST_MAX_ITEMS} comments go in one post.`;
+/** Beside a button disabled only because another action is in flight; for a screen reader. */
+export const WAIT = 'Wait for the current action to finish.';
+export const FORGET_ASK = 'Forget this record? Only do this after looking at the pull request.';
+
+/** The notice under a text that names people. */
+export const mentionNotice = (names: readonly string[]): string => `Names ${names.join(', ')}: GitHub notifies them unless the name is inside code.`;
+
+/** The pull request's address, built by code from its repository and number. */
+export const pullAddress = (pr: Pick<PrSummary, 'repo' | 'number'>): string => `https://github.com/${pr.repo}/pull/${pr.number}`;
+
+/** A reason beside a disabled control: shown, or for a screen reader only when it is the passing wait. */
+export function Reason({ id, text }: { id: string; text: string }) {
+  return <span id={id} className={text === WAIT ? 'sr-only' : 'muted block'}>{text}</span>;
+}
 
 /** Why nothing can be posted from this review now, in a sentence; null when it can. */
 export function whyNotPosting(pr: Pick<PrSummary, 'state'>, stale: boolean, offline: boolean): string | null {
@@ -38,5 +54,51 @@ export function PostedMark({ record, link = true, id }: { record: PostRecord; li
         </>
       )}
     </span>
+  );
+}
+
+/**
+ * A record whose outcome is not known, where its finding is shown: the words, the pull request to look at, and `It was
+ * not posted`, which asks once more before it forgets the record. `blocked`: why it cannot be forgotten now. A refusal
+ * of this mark's own request is said here.
+ */
+export function UnknownMark({ record, address, blocked, onForget, reply, id }: {
+  record: PostRecord;
+  address: string;
+  blocked: string | null;
+  /** Sends the forget and gives its ticket. */
+  onForget: (record: PostRecord) => number;
+  reply?: PostReply | undefined;
+  /** The id of the words, for the Post button they explain. */
+  id?: string;
+}) {
+  const [asking, setAsking] = useState(false);
+  const [ticket, setTicket] = useState<number | null>(null);
+  const whyId = useId();
+  const refusal = reply !== undefined && reply.ticket === ticket && reply.kind === 'refused' ? reply.message : null;
+  const described = blocked === null ? {} : { 'aria-describedby': whyId };
+  const forget = (): void => {
+    if (blocked !== null) return;
+    setAsking(false);
+    setTicket(onForget(record));
+  };
+  return (
+    <div className="mark block">
+      <span {...(id === undefined ? {} : { id })}>{UNKNOWN_MARK}</span>
+      <p><a href={address} target="_blank" rel="noopener noreferrer">Open the pull request</a></p>
+      {asking ? (
+        <>
+          <p>{FORGET_ASK}</p>
+          <div className="actions">
+            <button type="button" className="btn small" disabled={blocked !== null} {...described} onClick={forget}>It was not posted</button>
+            <button type="button" className="btn small" onClick={() => setAsking(false)}>Keep</button>
+          </div>
+        </>
+      ) : (
+        <button type="button" className="btn small" disabled={blocked !== null} {...described} onClick={() => setAsking(true)}>It was not posted</button>
+      )}
+      {blocked !== null && <Reason id={whyId} text={blocked} />}
+      {refusal !== null && <p role="alert" className="notice">{refusal}</p>}
+    </div>
   );
 }
