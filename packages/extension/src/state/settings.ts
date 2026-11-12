@@ -2,6 +2,7 @@ import { DepthSchema, type Depth } from '@airlock/shared';
 
 const TOKEN_KEY = 'airlock.token';
 const DEPTH_KEY = 'airlock.defaultDepth';
+const NOTES_KEY = 'airlock.showNotes';
 
 /** What the panel keeps between sessions. Only the panel page reads the token. */
 export interface SettingsStore {
@@ -10,6 +11,9 @@ export interface SettingsStore {
   getDefaultDepth(): Promise<Depth | null>;
   /** `null` clears the stored value, so each pull request's suggestion is used. */
   setDefaultDepth(depth: Depth | null): Promise<void>;
+  /** Whether the review's notes are shown in the diff on GitHub's page: on unless the person turned them off. */
+  getShowNotes(): Promise<boolean>;
+  setShowNotes(on: boolean): Promise<void>;
 }
 
 /** The part of `chrome.storage.local` the store uses, so tests can pass a fake. */
@@ -36,6 +40,12 @@ export function createSettingsStore(area: StorageAreaLike): SettingsStore {
     async setDefaultDepth(depth) {
       if (depth === null) await area.remove([DEPTH_KEY]);
       else await area.set({ [DEPTH_KEY]: depth });
+    },
+    async getShowNotes() {
+      return (await read(NOTES_KEY)) !== false;
+    },
+    async setShowNotes(on) {
+      await area.set({ [NOTES_KEY]: on });
     },
   };
 }

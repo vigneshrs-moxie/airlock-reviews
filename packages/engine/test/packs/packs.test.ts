@@ -183,6 +183,63 @@ describe('loadPack validation', () => {
     const dir = await withYaml('linkRules:\n  - { id: l, from: f, capture: c, searchIn: [a], detail: d }\n');
     expect((await loadPack(dir)).linkRules[0]!.transform).toBe('none');
   });
+
+  const kit = (body: string) => `kit:\n${body}`;
+  const FILES = '  files: [docs/a.md, docs/b.md]\n';
+
+  it('reads the kit a manifest names, and leaves a pack without one with no kit at all', async () => {
+    const dir = await withYaml(kit(`  repo: acme/review-kit\n  ref: release\n${FILES}  datedStandards: [docs/b.md]\n`));
+    expect((await loadPack(dir)).kit).toEqual({
+      repo: 'acme/review-kit', ref: 'release', files: ['docs/a.md', 'docs/b.md'], datedStandards: ['docs/b.md'],
+    });
+    const plain = await loadPack(await withYaml(kit(`  repo: acme/review-kit\n${FILES}`)));
+    expect(plain.kit).toEqual({ repo: 'acme/review-kit', files: ['docs/a.md', 'docs/b.md'] });
+    expect(Object.hasOwn(await loadPack(await withYaml('')), 'kit')).toBe(false);
+  });
+
+  it('a bare kit: with nothing under it is refused with a sentence naming the pack, not read as no kit', async () => {
+    for (const bare of ['kit:\n', 'kit: \n', 'kit: ~\n', 'kit: null\n']) {
+      const dir = await withYaml(bare);
+      await expect(loadPack(dir), JSON.stringify(bare)).rejects.toThrow(
+        `${join(dir, 'pack.yaml')}: the pack v has "kit:" with nothing under it; name the kit's repo and files, or remove the line.`);
+    }
+  });
+
+  it('a kit repository that is not owner/name, and a file path with .. or a leading slash, are refused', async () => {
+    const refused = async (extra: string, message: RegExp) => {
+      const dir = await withYaml(extra);
+      await expect(loadPack(dir)).rejects.toThrow(new RegExp(`${join(dir, 'pack.yaml').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: invalid "kit"`));
+      await expect(loadPack(dir)).rejects.toThrow(message);
+    };
+    for (const repo of ['acme', 'acme/kit/extra', '../kit', 'acme/..', '"acme/kit?x=1"']) {
+      await refused(kit(`  repo: ${repo}\n${FILES}`), /is not <owner>\/<name>/);
+    }
+    for (const path of ['../a.md', 'docs/../../a.md', '/etc/passwd', '"docs\\\\a.md"', '"docs/a\\u0007.md"']) {
+      await refused(kit(`  repo: acme/kit\n  files: [${path}]\n`), /file path/);
+    }
+    await refused(kit(`  repo: acme/kit\n${FILES}  datedStandards: [docs/c.md]\n`), /dated standard "docs\/c\.md"/);
+    await refused(kit(`  repo: acme/kit\n${FILES}  ref: ../main\n`), /ref/);
+    await refused(kit(`  repo: acme/kit\n  files: []\n`), /at least one file/);
+    await refused(kit(`  repo: acme/kit\n${FILES}  dated: [docs/a.md]\n`), /dated/); // an unknown key, not ignored
+    await refused(kit('  - acme/kit\n'), /kit/);
+    await refused(kit(`  files: [docs/a.md]\n`), /repo/);
+  });
+
+  it('reads the code checks a manifest names, and leaves a pack without any with no code checks at all', async () => {
+    const pack = await loadPack(await withYaml('codeChecks: [extension-permissions, extension-remote-code]\n'));
+    expect(pack.codeChecks).toEqual(['extension-permissions', 'extension-remote-code']);
+    expect(Object.hasOwn(await loadPack(await withYaml('')), 'codeChecks')).toBe(false);
+  });
+
+  it.each([
+    ['an unknown check', 'codeChecks: [extension-permissions, no-such-check]\n', /invalid "codeChecks": no code check is called "no-such-check"/],
+    ['a check named twice', 'codeChecks: [extension-permissions, extension-permissions]\n', /invalid "codeChecks": "extension-permissions" is named twice/],
+    ['not a list', 'codeChecks: extension-permissions\n', /"codeChecks" must be a list of text/],
+  ])('refuses %s in codeChecks, naming pack.yaml', async (_n, extra, message) => {
+    const dir = await withYaml(extra);
+    await expect(loadPack(dir)).rejects.toThrow(/pack\.yaml/);
+    await expect(loadPack(dir)).rejects.toThrow(message);
+  });
 });
 
 describe('selectPacks', () => {

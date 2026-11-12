@@ -7,8 +7,10 @@ import { Pair } from './Pair';
 import { Problem } from './Problem';
 import { Ready } from './Ready';
 import { Running } from './Running';
-import { Verdict } from './Verdict';
+import { Verdict, type OpenFinding } from './Verdict';
 import type { Jump, PageReport } from '../state/jump';
+import type { NotesLine } from '../state/notes';
+import { listFindings } from '../state/selection';
 import type { Depth, Finding, LearnedReply, PackRef, PrSummary, RemoveLearnedBody, RemoveLearnedReply, ServiceStatus } from '@airlock/shared';
 import { DismissSheet, focusAfterClose, newDraft, type SheetDraft, type SheetView } from './DismissSheet';
 import { NO_REMOVE_OFFLINE, NO_REMOVE_UNPAIRED } from './LearnedList';
@@ -39,6 +41,15 @@ export interface PanelScreenProps {
   onDefaultDepth?: (depth: Depth | null) => void;
   /** Storing the default depth failed, so the screen shows what is stored again and says so. */
   depthFailed?: boolean;
+  /** What the notes on GitHub's page did, said under the verdict. */
+  notesLine?: NotesLine | null;
+  onReloadNotes?: () => void;
+  /** The notes setting for the Packs screen: null until it is read. */
+  showNotes?: boolean | null;
+  onShowNotes?: (on: boolean) => void;
+  notesFailed?: boolean;
+  /** The finding `Open in Airlock` asked for: opened when it is an open finding of the review on screen. */
+  openFinding?: OpenFinding | null;
 }
 
 /** Whether this panel is paired, as far as the state proves it; null when it proves nothing. */
@@ -76,10 +87,16 @@ function knownOf(state: PanelState): { pr: PrSummary | null; packs: readonly Pac
   }
 }
 
+/** Whether `id` is an open finding of the review on screen (live, or kept while the service is away). */
+function isOpenFinding(state: PanelState, id: string): boolean {
+  const shown = state.kind === 'review' ? state : state.kind === 'offline' ? state.review : undefined;
+  return shown !== undefined && listFindings(shown.latest.document.findings, shown.latest.dismissals).order.some((f) => f.id === id);
+}
+
 /** Keyed so a different pull request or a new head starts with its own choices. */
 const readyKey = (pr: PrSummary): string => `${pr.repo}#${pr.number}@${pr.headSha}`;
 
-type BodyProps = Pick<PanelScreenProps, 'state' | 'dispatch' | 'timers' | 'onJump' | 'defaultDepth'> & {
+type BodyProps = Pick<PanelScreenProps, 'state' | 'dispatch' | 'timers' | 'onJump' | 'defaultDepth' | 'notesLine' | 'onReloadNotes' | 'openFinding'> & {
   onDismiss: (finding: Finding) => void;
   /** `opener`: the finding whose Post comment was pressed, or `selected` for the bar. */
   onPost: (findings: Finding[], opener: string) => void;
@@ -89,9 +106,9 @@ type BodyProps = Pick<PanelScreenProps, 'state' | 'dispatch' | 'timers' | 'onJum
  * The screen for the state. A review, or Ready, kept while the service is away is drawn by the same keyed element as
  * when it is live, so its own state (the open finding, the ticks, the depth and pack choices) survives the flip.
  */
-function screenFor({ state, dispatch, timers, onJump, onDismiss, onPost, defaultDepth }: BodyProps) {
+function screenFor({ state, dispatch, timers, onJump, onDismiss, onPost, defaultDepth, notesLine = null, onReloadNotes, openFinding = null }: BodyProps) {
   const t = timers ? { timers } : {};
-  const review = { ...(onJump ? { onJump } : {}), onDismiss, onPost };
+  const review = { ...(onJump ? { onJump } : {}), onDismiss, onPost, notesLine, ...(onReloadNotes ? { onReloadNotes } : {}), openFinding };
   switch (state.kind) {
     case 'loading': return <p className="muted">Looking at this pull request…</p>;
     case 'no-pr': return <p className="muted">Open a pull request on GitHub and Airlock will appear here.</p>;
@@ -135,8 +152,17 @@ function FinishedAnnouncer({ kind }: { kind: PanelState['kind'] }) {
 }
 
 /** The frame and the screen for one state, with the Packs screen and the dismiss and post sheets over it. */
-export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, pageReport = null, fetchStatus = unreachable, fetchLearned = unreachable, removeLearned = unreachable, defaultDepth = null, onDefaultDepth, depthFailed = false }: PanelScreenProps) {
+export function PanelScreen({
+  state, dispatch, onOpenPacks, timers, onJump, pageReport = null, fetchStatus = unreachable, fetchLearned = unreachable,
+  removeLearned = unreachable, defaultDepth = null, onDefaultDepth, depthFailed = false, notesLine = null, onReloadNotes,
+  showNotes = null, onShowNotes, notesFailed = false, openFinding = null,
+}: PanelScreenProps) {
   const [packsOpen, setPacksOpen] = useState(false);
+  // `Open in Airlock` for a finding on screen: the Packs screen goes, so the finding is what the person sees.
+  useEffect(() => {
+    if (openFinding !== null && isOpenFinding(state, openFinding.id)) setPacksOpen(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openFinding]);
   // What is in the sheet outlives the sheet being out of sight; only Cancel and Done drop it.
   const [draft, setDraft] = useState<SheetDraft | null>(null);
   const packsButton = useRef<HTMLButtonElement>(null);
@@ -177,6 +203,10 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, page
     (focusAfterPost(closed) ?? document.querySelector<HTMLElement>('main'))?.focus();
   }, [postDraft]);
   const sheetView = sheetViewOf(state);
+  // A finding asked for while a dismiss or post sheet is open waits for the sheet to close: the review under the sheet
+  // does not change, and the person's typing and focus stay where they are.
+  const openUnderSheets = useRef(openFinding);
+  if (draft === null && postDraft === null) openUnderSheets.current = openFinding;
   const postView: PostSheetView | null = state.kind === 'review' && sheetView !== null ? { ...sheetView, post: state.post, stale: state.stale }
     : state.kind === 'offline' && state.review !== undefined && sheetView !== null ? { ...sheetView, stale: state.review.stale } : null;
   const known = knownOf(state);
@@ -195,7 +225,10 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, page
       {/* Packs opens beside the panel, which stays as it was, out of sight and out of reach. */}
       <div className="kept" hidden={packsOpen} inert={packsOpen}>
         <PanelVisible value={!packsOpen}>
-        <Body state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={startDismiss} onPost={startPost} defaultDepth={defaultDepth} />
+        <Body
+          state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={startDismiss} onPost={startPost} defaultDepth={defaultDepth}
+          notesLine={notesLine} onReloadNotes={onReloadNotes} openFinding={openUnderSheets.current}
+        />
         {draft !== null && sheetView !== null && (
           <DismissSheet draft={draft} onDraft={setDraft} view={sheetView} dispatch={dispatch} active={!packsOpen} onClose={closeDismiss} />
         )}
@@ -209,6 +242,7 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, page
           pr={known.pr} packVersions={known.packs} paired={pairedOf(state)} fetchStatus={fetchStatus}
           fetchLearned={fetchLearned} removeLearned={removeLearned} removeBlocked={removeBlockedBy(state)}
           defaultDepth={defaultDepth} onDefaultDepth={onDefaultDepth ?? (() => undefined)} depthFailed={depthFailed} page={pageReport}
+          showNotes={showNotes} {...(onShowNotes ? { onShowNotes } : {})} notesFailed={notesFailed}
           onBack={() => setPacksOpen(false)} {...(timers ? { timers } : {})}
         />
       )}

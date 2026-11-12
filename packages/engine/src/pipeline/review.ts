@@ -14,8 +14,8 @@ import { buildBrief } from '../brief/brief.js';
 import { challenge, type KeptCandidate } from '../challenge/challenge.js';
 import type { ReadFile } from '../challenge/proof.js';
 import { linkFacts, loadDiff, recheckBinary } from '../diff/parse.js';
-import { runChecks } from '../facts/checks.js';
-import { binarySourcePaths, binarySourceSentence, classifyFiles } from '../facts/classify.js';
+import { gatherChecks } from '../facts/checks.js';
+import { binarySourcePaths, binarySourceSentence, classifyFiles, type ReadClosely } from '../facts/classify.js';
 import { inMirror } from '../intake/git-ids.js';
 import { fetchPr } from '../intake/pr.js';
 import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
@@ -39,7 +39,7 @@ import { mergeNote, mergeNoteBlock, settledSentence, type MergeScope } from '../
 import { reviewById, saveReview } from '../store/store.js';
 import type { Exec } from '../util/exec.js';
 import { limiter } from '../util/limit.js';
-import { presentAt, safeRead } from '../util/safe-read.js';
+import { presentAt, safeRead, safeSize } from '../util/safe-read.js';
 import { deepPass } from './deep.js';
 import { choosePacks, ENGINE_SOURCE, preparePacks, stageRulesOf, type PreparedPacks } from './packs.js';
 import { createStageLog, messageOf, type StageLog, type StageName } from './stages.js';
@@ -62,7 +62,10 @@ export interface ReviewRequest {
   packsDir: string;
   remoteUrl?: string;
   parallel?: number;
-  /** Read the team kit from this folder instead of GitHub (tests and the replay). */
+  /**
+   * Read the team review kit (TEAM_KIT_REPO in pipeline/packs.ts) from this folder instead of GitHub (tests and the
+   * replay), for the `raj-standard` pack when its kit is that repository; every other kit is synced.
+   */
   kitDir?: string;
   /** The kit's version when `kitDir` is given; `pinned` otherwise. */
   kitSha?: string;
@@ -362,7 +365,7 @@ async function reviewInWorkspace(
     });
     rec.error(...p.errors);
     return p;
-  }, { extraMs: chosen.ms })) ?? NO_PACKS;
+  }, { extraMs: chosen.ms, rethrow: true })) ?? NO_PACKS; // only a kit that cannot be had rejects: no model is asked without it
   const { packs } = prepared;
   engineQuestions.push(...prepared.questions);
   limits.push(...prepared.limits);
@@ -386,12 +389,18 @@ async function reviewInWorkspace(
   const range: ReviewRange = merge !== undefined ? { ...ws.range, kind: 'sync-merge' } : ws.range;
 
   const gathered = (await log.run('facts', async (rec) => {
-    const tiers = await rec.attempt(() => classifyFiles(files, packs), [] as FileFact[]);
+    // The checks run first: a file a code check asks to be read closely (an extension's manifest loads it) is read whatever
+    // its path says, and one it says not to trust is skimmed at least.
+    const checked = await rec.attempt(() => gatherChecks(files, packs, readHead, {
+      readBase: (path) => safeRead(ws.baseDir, path), sizeOfHead: (path) => safeSize(ws.headDir, path),
+      presentAtHead: (path) => presentAt(ws.headDir, path),
+    }), { facts: [] as Fact[], readClosely: [] as ReadClosely[], notTrusted: [] as ReadClosely[] });
+    const tiers = await rec.attempt(() => classifyFiles(files, packs, checked), [] as FileFact[]);
     // A push of only ignored files leaves nothing of the pull request unreviewed that the earlier review did not see.
     const unreviewed = (pushed ? null : notReviewed(files, tiers)) ?? emptyDiff(files, pr, givenRange);
     if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
-    for (const path of binarySourcePaths(files, packs)) rec.error({ stage: 'facts', cohortId: null, message: binarySourceSentence(path) });
-    const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead), [] as Fact[])];
+    for (const path of binarySourcePaths(files, packs, checked)) rec.error({ stage: 'facts', cohortId: null, message: binarySourceSentence(path) });
+    const facts = [...diffFacts, ...checked.facts];
     const found = await rec.attempt(
       () => findLinks(exec, ws.headDir, files, packs), { links: [] as Link[], skippedNames: 0, limits: [] as string[] },
     );
@@ -691,8 +700,9 @@ const rereviewText = (previous: ReviewDocument, findings: Finding[], fixed: Find
 
 /**
  * Reviews one pull request: every stage in order, then the document is checked against the schema, saved and returned.
- * A stage that fails becomes a stage error and the verdict `incomplete`; only a pull request that cannot be fetched or a
- * workspace that cannot be prepared rejects. The workspace is always disposed.
+ * A stage that fails becomes a stage error and the verdict `incomplete`; only a pull request that cannot be fetched, a
+ * workspace that cannot be prepared, or a pack's review kit that can be neither fetched nor found in the cache rejects
+ * (the last before any model call). The workspace is always disposed.
  */
 export async function runReview(req: ReviewRequest, deps: EngineDeps, onEvent?: (e: ReviewEvent) => void): Promise<ReviewDocument> {
   checkRequest(req);

@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Timers } from '../../src/client/timers';
-import type { JumpReply, JumpRequest } from '../../src/page/protocol';
+import type { JumpReply, JumpRequest, NotesMessage } from '../../src/page/protocol';
 import {
-  ANSWER_MS, LOAD_MS, RETRY_MS, connectedPlace, jumpTo, ownPlace, pageWords, tabLoaded,
+  ANSWER_MS, LOAD_MS, RETRY_MS, connectedPlace, jumpTo, ownPlace, pageWords, sendToPage, tabLoaded,
   type JumpChrome, type JumpPlace, type Loaded, type PageReport, type TabsEvents,
 } from '../../src/state/jump';
+import { NOTICE_MAX } from '../../src/state/reduce';
 import { FakeTimers } from '../helpers/fake-timers';
 import { finding } from '../screens/review-fixtures';
 
@@ -65,7 +66,8 @@ function fakeChrome(answers: Answer[], opts: FakeOptions = {}) {
   const chrome: JumpChrome = {
     async sendMessage(tabId, message) {
       expect(tabId).toBe(TAB);
-      sent.push(message);
+      // The jump tests read the jump's fields; the notes tests only count the sends.
+      sent.push(message as JumpRequest);
       log.push('send');
       const answer = answers.shift();
       if (answer === NEVER) return new Promise(() => undefined);
@@ -172,6 +174,12 @@ describe('jumpTo away from the Files changed page', () => {
 
   it('navigates when the tab is on another pull request’s Files changed page', async () => {
     const f = fakeChrome([{ ok: false, reason: 'not-files-page', view: null, missing: [] }, line], { url: 'https://github.com/acme/widgets/pull/2/files' });
+    expect(await sentenceOf(f.chrome, TAB, PR, place())).toBe('Showing src/pause.ts:11.');
+    expect(f.log).toEqual(['send', ...navigated(`${PAUSE}R11`)]);
+  });
+
+  it('navigates from one commit\'s diff in the newer view to the full Files changed view', async () => {
+    const f = fakeChrome([{ ok: false, reason: 'not-files-page', view: null, missing: [] }, line], { url: `https://github.com/acme/widgets/pull/1/changes/${'a'.repeat(40)}` });
     expect(await sentenceOf(f.chrome, TAB, PR, place())).toBe('Showing src/pause.ts:11.');
     expect(f.log).toEqual(['send', ...navigated(`${PAUSE}R11`)]);
   });
@@ -434,5 +442,67 @@ describe('pageWords', () => {
     expect(pageWords({ view: 'react', missing: [] })).toBe('Recognised as the newer view.');
     expect(pageWords({ view: null, missing: ['classic-file', 'react-file'] })).toBe('Not recognised. Selectors that found nothing: classic-file, react-file.');
     expect(pageWords({ view: 'react', missing: ['react-toolbar'] })).toBe('Recognised as the newer view. Selectors that found nothing: react-toolbar.');
+  });
+});
+
+describe('sendToPage: the notes go through the same tab messaging', () => {
+  const notes: NotesMessage = {
+    type: 'airlock:notes', pr: { repo: 'acme/widgets', number: 1 },
+    notes: [{ id: 'c_00000001', anchorId: PAUSE, line: 11, severity: 'fix', title: 'Pause skips the guard' }],
+  };
+
+  it('gives the counts the page answers, and sends exactly the message', async () => {
+    const f = fakeChrome([{ placed: 1, waiting: 2, view: 'react', missing: ['react-files'] }], { url: FILES });
+    expect(await sendToPage(f.chrome, TAB, notes)).toEqual({ kind: 'shown', placed: 1, waiting: 2, view: 'react', missing: ['react-files'] });
+    expect(f.sent).toEqual([notes]);
+    expect(f.log).toEqual(['send']);
+    // The Packs screen's report is the jump's alone.
+    expect(f.reports).toEqual([]);
+  });
+
+  it('gives the page\'s refusal as its sentence, cut to a notice\'s length', async () => {
+    const f = fakeChrome([{ error: "The page refused Airlock's notes: more than 60 notes." }]);
+    expect(await sendToPage(f.chrome, TAB, notes)).toEqual({ kind: 'refused', sentence: "The page refused Airlock's notes: more than 60 notes." });
+    const long = fakeChrome([{ error: 'x'.repeat(5000) }]);
+    const result = await sendToPage(long.chrome, TAB, { type: 'airlock:notes-clear' });
+    expect(result.kind === 'refused' && [...result.sentence].length).toBe(NOTICE_MAX);
+  });
+
+  it('asks again after each retry wait when no script answers, then needs a reload, never navigating or reloading by itself', async () => {
+    const f = fakeChrome([], { url: FILES });
+    expect(await sendToPage(f.chrome, TAB, notes)).toEqual({ kind: 'unreached' });
+    expect(f.log).toEqual(['send', 'wait 250', 'send', 'wait 500', 'send', 'wait 1000', 'send', 'read address']);
+    // One that appears on the second retry answers.
+    const late = fakeChrome(['no-receiver', 'no-receiver', { placed: 1, waiting: 0, view: 'classic', missing: [] }]);
+    expect(await sendToPage(late.chrome, TAB, notes)).toMatchObject({ kind: 'shown', placed: 1 });
+    // A reply it does not understand counts as no answer.
+    const odd = fakeChrome([{ placed: '1' }, { placed: 1, waiting: 0, view: 'classic', missing: [] }]);
+    expect(await sendToPage(odd.chrome, TAB, notes)).toMatchObject({ kind: 'shown', placed: 1 });
+  });
+
+  it('says nothing when the tab was closed', async () => {
+    const f = fakeChrome([], { urls: [null] });
+    expect(await sendToPage(f.chrome, TAB, notes)).toEqual({ kind: 'gone' });
+  });
+
+  it('reloads first only when the person asked, and sends once the tab has loaded', async () => {
+    const f = fakeChrome([{ placed: 1, waiting: 0, view: 'classic', missing: [] }]);
+    expect(await sendToPage(f.chrome, TAB, notes, { reload: true })).toMatchObject({ kind: 'shown', placed: 1 });
+    expect(f.log).toEqual(['watch load', 'reload', 'send']);
+    const closed = fakeChrome([], { loads: ['closed'] });
+    expect(await sendToPage(closed.chrome, TAB, notes, { reload: true })).toEqual({ kind: 'gone' });
+    expect(closed.log).toEqual(['watch load', 'reload']);
+  });
+
+  it('a replaced send makes no further Chrome call', async () => {
+    const f = fakeChrome([], { hold: true });
+    const controller = new AbortController();
+    const pending = sendToPage(f.chrome, TAB, notes, { signal: controller.signal });
+    await vi.waitFor(() => expect(f.log).toEqual(['send', 'wait 250']));
+    controller.abort();
+    expect(await pending).toEqual({ kind: 'gone' });
+    f.timers.release();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(f.log).toEqual(['send', 'wait 250']);
   });
 });

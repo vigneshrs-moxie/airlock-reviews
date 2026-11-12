@@ -8,8 +8,17 @@ stageRules:
   - { base: staging, stage: pr2 }
   - { base: main, stage: pr3 }
   - { default: true, stage: pr1 }
-# No standards are listed here: the team's kit (profile.md, orbit.md, calibration.md)
-# is downloaded at review time and attached to this pack.
+# No standards are listed here: the team's kit is downloaded at review time (gh reads only),
+# cached by commit, and its files are attached to this pack as standards, in this order.
+# calibration.md holds dated entries: the hold-out and the challenger read it entry by entry.
+kit:
+  repo: Moxie-Pest-Control-Phoenix/moxie-review-kit
+  files:
+    - skills/moxie-review/profile.md
+    - skills/moxie-review/orbit.md
+    - skills/moxie-review/calibration.md
+  datedStandards:
+    - skills/moxie-review/calibration.md
 lenses:
   - { id: boundary-security, title: Boundary and security, file: lenses/boundary-security.md }
   - { id: numbers-data, title: Numbers and data correctness, file: lenses/numbers-data.md }

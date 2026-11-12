@@ -50,3 +50,17 @@ export function splitGuard(): void {
     return row;
   }));
 }
+
+/** What e2e/fixtures/github-live.js does to a fixture page, as GitHub's own re-rendering would. */
+export interface GithubFixture {
+  unload(anchor: string): void;
+  load(anchor: string): void;
+  rerender(anchor: string): void;
+  split(): void;
+}
+
+/** Runs the end-to-end tests' page script on the fixture now in the document (as the page itself would). */
+export function live(): GithubFixture {
+  new Function(fixture('github-live.js'))();
+  return (window as unknown as { githubFixture: GithubFixture }).githubFixture;
+}

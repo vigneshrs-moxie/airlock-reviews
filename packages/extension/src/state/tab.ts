@@ -3,11 +3,14 @@ type Tab = { id?: number; url?: string };
 /** The tab the panel sits beside: its address now, and each time it changes. */
 export interface TabWatcher {
   current(): Promise<{ tabId: number; url: string | undefined }>;
-  /** Calls `fn` with the tab's address on every update to that tab (undefined when Chrome does not show it). */
-  onChange(fn: (url: string | undefined) => void): () => void;
+  /**
+   * Calls `fn` with the tab's address on every update to that tab (undefined when Chrome does not show it), and the
+   * update's load status when it has one (`complete` when the page finished loading).
+   */
+  onChange(fn: (url: string | undefined, status?: string) => void): () => void;
 }
 
-type UpdatedListener = (tabId: number, changeInfo: { url?: string }, tab: Tab) => void;
+type UpdatedListener = (tabId: number, changeInfo: { url?: string; status?: string }, tab: Tab) => void;
 
 /** The part of `chrome.tabs` the watcher uses, so tests can pass a fake. */
 export interface TabsLike {
@@ -44,8 +47,8 @@ export function createTabWatcher(tabs: TabsLike): TabWatcher {
   return {
     current,
     onChange(fn) {
-      const listener: UpdatedListener = (id, _changeInfo, tab) => {
-        if (tabId !== undefined && tabId !== NO_TAB && id === tabId) fn(tab.url);
+      const listener: UpdatedListener = (id, changeInfo, tab) => {
+        if (tabId !== undefined && tabId !== NO_TAB && id === tabId) fn(tab.url, changeInfo.status);
       };
       tabs.onUpdated.addListener(listener);
       void current().catch(() => undefined);

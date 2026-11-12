@@ -3,9 +3,11 @@ import { join, resolve } from 'node:path';
 import { SeveritySchema, StageSchema } from '@airlock/shared';
 import { parse } from 'yaml';
 import { z } from 'zod';
+import { CODE_CHECK_IDS } from '../facts/checks.js';
 import type { StageRule } from '../intake/pr.js';
+import { kitRefProblem } from './kit-sync.js';
 import { learnedFileName, readLearned } from './learned.js';
-import type { CheckDef, LearnedEntry, LensDef, LinkRule, Pack, Rule } from './types.js';
+import type { CheckDef, KitRef, LearnedEntry, LensDef, LinkRule, Pack, Rule } from './types.js';
 
 type Obj = Record<string, unknown>;
 
@@ -52,6 +54,44 @@ const SiblingSchema = z.object({ id: text, glob: text });
 const StageRuleSchema = z.object({ base: text.optional(), default: z.literal(true).optional(), stage: StageSchema })
   .refine((r) => r.base !== undefined || r.default === true, { message: 'needs "base" or "default: true"' });
 const TiersSchema = z.object({ read: list.default([]), trust: list.default([]), ignore: list.default([]) });
+const KitSchema = z.strictObject({ repo: z.string(), ref: z.string().optional(), files: list, datedStandards: list.optional() });
+
+/**
+ * The kit the manifest names under `kit:`, checked as `kitRefProblem` checks it; undefined when there is no `kit:` line. A
+ * `kit:` with no value is refused: it would read as no kit, and the pack's briefs would point at files never attached.
+ */
+function kitOf(doc: Obj, file: string, id: string): KitRef | undefined {
+  if (doc.kit === undefined) return undefined;
+  if (doc.kit === null) {
+    throw new Error(`${file}: the pack ${id} has "kit:" with nothing under it; name the kit's repo and files, or remove the line.`);
+  }
+  const parsed = KitSchema.safeParse(doc.kit);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0]!;
+    const at = ['kit', ...issue.path, ...('keys' in issue ? [issue.keys.join(', ')] : [])].join('.');
+    throw new Error(`${file}: invalid "kit" at ${at}: ${issue.message}`);
+  }
+  const { repo, ref, files, datedStandards } = parsed.data;
+  const kit: KitRef = { repo, ...(ref === undefined ? {} : { ref }), files, ...(datedStandards === undefined ? {} : { datedStandards }) };
+  const problem = kitRefProblem(kit);
+  if (problem !== null) throw new Error(`${file}: invalid "kit": ${problem}`);
+  return kit;
+}
+
+/** The engine code checks the manifest names under `codeChecks:`, each known and named once; undefined when there are none. */
+function codeChecksOf(doc: Obj, file: string): string[] | undefined {
+  if (doc.codeChecks === undefined || doc.codeChecks === null) return undefined;
+  const ids = strList(doc, 'codeChecks', file);
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (!CODE_CHECK_IDS.includes(id)) {
+      throw new Error(`${file}: invalid "codeChecks": no code check is called ${JSON.stringify(id)}; the known ones are ${CODE_CHECK_IDS.join(', ')}`);
+    }
+    if (seen.has(id)) throw new Error(`${file}: invalid "codeChecks": ${JSON.stringify(id)} is named twice`);
+    seen.add(id);
+  }
+  return ids;
+}
 
 function section<T extends z.ZodType>(doc: Obj, key: string, schema: T, file: string, fallback: unknown): z.output<T> {
   const parsed = schema.safeParse(doc[key] ?? fallback);
@@ -176,6 +216,8 @@ export async function loadPack(dir: string): Promise<Pack> {
   const appRoot = doc.appRoot ?? null;
   if (appRoot !== null && typeof appRoot !== 'string') throw new Error(`${yamlPath}: "appRoot" must be text`);
   const version = doc.version;
+  const kit = kitOf(doc, yamlPath, id);
+  const codeChecks = codeChecksOf(doc, yamlPath);
 
   return {
     id, title: str(doc, 'title', yamlPath),
@@ -186,6 +228,7 @@ export async function loadPack(dir: string): Promise<Pack> {
     siblings: section(doc, 'siblings', z.array(SiblingSchema), yamlPath, []),
     linkRules: section(doc, 'linkRules', z.array(LinkRuleSchema), yamlPath, []) as LinkRule[],
     checks: section(doc, 'checks', z.array(CheckSchema), yamlPath, []) as CheckDef[],
-    standards, lenses, rules, learned, learnedProblems,
+    standards, lenses, rules, learned, learnedProblems, ...(kit === undefined ? {} : { kit }),
+    ...(codeChecks === undefined ? {} : { codeChecks }),
   };
 }

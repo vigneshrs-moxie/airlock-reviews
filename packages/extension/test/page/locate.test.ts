@@ -2,7 +2,7 @@
 import { diffAnchorId } from '@airlock/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import { detectView, findFile, findLine, targetsOf } from '../../src/page/locate';
-import { CLASSIC, REACT, missingFor } from '../../src/page/selectors';
+import { CLASSIC, FILES, REACT, missingFor } from '../../src/page/selectors';
 import { CLASSIC_HTML, GUARD, PAUSE, REACT_HTML, load, splitGuard } from './page-fixtures';
 
 afterEach(() => { document.documentElement.innerHTML = '<head></head><body></body>'; });
@@ -19,8 +19,8 @@ describe('the fixtures', () => {
 
 describe('every selector has a name', () => {
   it('for both views, and the names are distinct', () => {
-    const all = [...Object.values(CLASSIC), ...Object.values(REACT)];
-    expect(all.length).toBe(6);
+    const all = [...Object.values(CLASSIC), ...Object.values(REACT), ...Object.values(FILES)];
+    expect(all.length).toBe(8);
     for (const s of all) {
       expect(s.name).not.toBe('');
       expect(() => document.querySelector(s.css)).not.toThrow();
@@ -55,6 +55,13 @@ describe('missingFor', () => {
     expect(missingFor(document, 'classic')).toEqual([]);
     load(REACT_HTML);
     expect(missingFor(document, 'react')).toEqual([]);
+  });
+
+  it('finds the files container of each view in its fixture', () => {
+    load(CLASSIC_HTML);
+    expect(document.querySelectorAll(FILES.classic.css)).toHaveLength(1);
+    load(REACT_HTML);
+    expect(document.querySelectorAll(FILES.react.css)).toHaveLength(1);
   });
 
   it('lists only selectors a lookup uses', () => {

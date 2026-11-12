@@ -110,6 +110,8 @@ export type Action =
    */
   | { type: 'loaded'; pr: PrSummary; latest: LatestReply | null; notice?: string; post?: PostReply }
   | { type: 'attached'; pr: PrSummary }
+  /** The pull request read again while its review is on screen: the review's `stale` is worked out again from it. */
+  | { type: 'head'; pr: PrSummary }
   /** The stage list to show, built by the runtime from the stream's stage events. */
   | { type: 'stages'; stages: StageLine[] }
   | { type: 'event'; event: Exclude<ServiceEvent, { type: 'stage' }> }
@@ -201,6 +203,13 @@ export function reduce(state: PanelState, action: Action): PanelState {
     }
     case 'attached':
       return { kind: 'running', pr: action.pr, stages: [], brief: null, map: null };
+    case 'head': {
+      if (state.kind !== 'review' || !isFor(action.pr, state.pr)) return state;
+      const { stale } = reviewOf(action.pr, state.latest);
+      if (stale === state.stale && JSON.stringify(action.pr) === JSON.stringify(state.pr)) return state;
+      // Everything else stays: a notice, an action in flight, the post sheet's answer.
+      return { ...state, pr: action.pr, stale };
+    }
     case 'stages':
       return state.kind === 'running' ? { ...state, stages: action.stages } : state;
     case 'event': {

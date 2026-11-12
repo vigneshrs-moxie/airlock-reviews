@@ -27,7 +27,10 @@ export class DismissError extends Error {
   }
 }
 
-/** The team kit's pack. Must stay equal to the engine's KIT_PACK_ID (pipeline/packs.ts), which is not exported. */
+/**
+ * The team kit's pack. Must stay equal to the engine's TEAM_KIT_PACK (pipeline/packs.ts), which the engine's index does not
+ * export. Another pack that names a kit (Extensions) is the person's own: its learned lines are written and removed here.
+ */
 export const KIT_PACK = 'raj-standard';
 const GENERIC_PACK = 'generic';
 /** The most learned lines one pack may hold of one kind. */

@@ -136,3 +136,20 @@ describe('reduce', () => {
     expect(reduce(ready, { type: 'finished', latest: latestFor(pr) })).toBe(ready);
   });
 });
+
+describe('the pull request read again while its review is on screen', () => {
+  const review: PanelState = {
+    kind: 'review', pr, latest: latestFor(pr), stale: false, notice: 'Restored.', busy: true,
+    post: { ticket: 4, kind: 'waiting' },
+  };
+  it('works out stale again and keeps the notice, the action in flight and the post sheet\'s answer', () => {
+    const moved = prSummary({ headSha: 'd'.repeat(40) });
+    expect(reduce(review, { type: 'head', pr: moved })).toEqual({ ...review, pr: moved, stale: true });
+  });
+  it('is the same state when nothing changed, and changes nothing but a review of that pull request', () => {
+    expect(reduce(review, { type: 'head', pr: prSummary() })).toBe(review);
+    expect(reduce(review, { type: 'head', pr: prSummary({ number: 2, headSha: 'd'.repeat(40) }) })).toBe(review);
+    const ready: PanelState = { kind: 'ready', pr };
+    expect(reduce(ready, { type: 'head', pr: prSummary({ headSha: 'd'.repeat(40) }) })).toBe(ready);
+  });
+});

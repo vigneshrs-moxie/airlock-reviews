@@ -45,4 +45,17 @@ describe('settings', () => {
     expect(await settings.getDefaultDepth()).toBeNull();
     expect(await createSettingsStore(fakeArea({ 'airlock.token': '' })).getToken()).toBeNull();
   });
+
+  it('shows notes in the diff unless the person turned them off', async () => {
+    const area = fakeArea();
+    const settings = createSettingsStore(area);
+    expect(await settings.getShowNotes()).toBe(true);
+    await settings.setShowNotes(false);
+    expect(area.data).toEqual({ 'airlock.showNotes': false });
+    expect(await settings.getShowNotes()).toBe(false);
+    await settings.setShowNotes(true);
+    expect(await settings.getShowNotes()).toBe(true);
+    // Anything but a stored false leaves them on.
+    for (const odd of ['false', 0, null]) expect(await createSettingsStore(fakeArea({ 'airlock.showNotes': odd })).getShowNotes()).toBe(true);
+  });
 });

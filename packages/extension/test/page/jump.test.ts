@@ -176,7 +176,8 @@ describe('answering a jump on the Files changed page', () => {
 
   it('answers not-files-page on any other page and leaves its address alone', async () => {
     load(CLASSIC_HTML);
-    for (const href of ['https://github.com/acme/widgets/pull/1', 'https://github.com/acme/widgets/pull/1/commits', 'https://github.com/acme/widgets']) {
+    // One commit's diff in the newer view is not the pull request's Files changed view.
+    for (const href of ['https://github.com/acme/widgets/pull/1', 'https://github.com/acme/widgets/pull/1/commits', 'https://github.com/acme/widgets', `https://github.com/acme/widgets/pull/1/changes/${'a'.repeat(40)}`]) {
       const page = env(href);
       const reply = await createPage(page.env).answer(request());
       expect(reply).toEqual({ ok: false, reason: 'not-files-page', view: null, missing: [] });

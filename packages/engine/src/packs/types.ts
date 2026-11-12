@@ -21,6 +21,12 @@ export interface LinkRule {
  * was read from a file.
  */
 export interface LearnedEntry { date: string; repo: string; kind: 'wrong' | 'intended'; text: string; where?: string }
+/**
+ * A review kit a pack attaches, named in its manifest under `kit:`: the files are downloaded from `repo` at review time
+ * (reads only) and attached as the pack's standards, in this order, each named by its file name. `ref` is the branch, tag
+ * or commit to read (default `main`). `datedStandards` lists which of `files` are dated standards.
+ */
+export interface KitRef { repo: string; ref?: string; files: string[]; datedStandards?: string[] }
 export interface Pack {
   id: string; title: string; version: string; dir: string; repos: string[]; appRoot: string | null;
   stageRules: StageRule[]; tiers: { read: string[]; trust: string[]; ignore: string[] };
@@ -29,5 +35,12 @@ export interface Pack {
   learned: LearnedEntry[];
   /** One `<pack id>/learned/<file>:<line>` for each learned line that could not be read and was left out; none when absent. */
   learnedProblems?: string[];
+  /** The review kit attached to this pack when the review is prepared; none when absent. */
+  kit?: KitRef;
+  /**
+   * The engine's code checks this pack runs, by id (facts/checks.ts `CODE_CHECKS`), after its own `checks`. They read the
+   * pull request's files and give facts, never findings; none when absent.
+   */
+  codeChecks?: string[];
 }
 export interface Holdout { pr: number; reviewedAt: string }

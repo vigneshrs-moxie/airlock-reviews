@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { MAX_SAFE_READ_BYTES, safeRead } from '../../src/util/safe-read.js';
+import { MAX_SAFE_READ_BYTES, safeRead, safeSize } from '../../src/util/safe-read.js';
 
 /** Lets a test act right after realpath resolves a path, to swap a file for a link before it is opened. */
 const race = vi.hoisted(() => ({ afterRealpath: null as null | ((resolved: string) => Promise<void>) }));
@@ -110,5 +110,15 @@ describe('safeRead', () => {
     expect(await safeRead(root, 'src/missing.ts')).toBeNull();
     expect(await safeRead(join(top, 'no-such-root'), 'src/a.ts')).toBeNull();
     expect(await safeRead(root, 42 as unknown as string)).toBeNull();
+  });
+});
+
+describe('safeSize', () => {
+  it('gives the size of a file of any size, and null for what safeRead refuses', async () => {
+    expect(await safeSize(root, 'src/a.ts')).toBe(20);
+    expect(await safeSize(root, 'big.bin')).toBe(MAX_SAFE_READ_BYTES + 1);
+    for (const path of ['src/link.ts', 'out/secret.txt', 'src/alias.ts', '.git/config', '../outside/secret.txt', 'src', 'missing.ts', 'SRC/a.ts']) {
+      expect(await safeSize(root, path), path).toBeNull();
+    }
   });
 });

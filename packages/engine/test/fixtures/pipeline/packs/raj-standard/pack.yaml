@@ -1,5 +1,9 @@
 id: raj-standard
 title: Team standard
 repos: [acme/app]
+kit:
+  repo: Moxie-Pest-Control-Phoenix/moxie-review-kit
+  files: [skills/review/profile.md, skills/review/orbit.md, skills/review/calibration.md]
+  datedStandards: [skills/review/calibration.md]
 lenses:
   - { id: boundary, title: Boundary, file: lenses/boundary.md }
