@@ -56,9 +56,15 @@ const StageRuleSchema = z.object({ base: text.optional(), default: z.literal(tru
 const TiersSchema = z.object({ read: list.default([]), trust: list.default([]), ignore: list.default([]) });
 const KitSchema = z.strictObject({ repo: z.string(), ref: z.string().optional(), files: list, datedStandards: list.optional() });
 
-/** The kit the manifest names under `kit:`, checked as `kitRefProblem` checks it; undefined when there is none. */
-function kitOf(doc: Obj, file: string): KitRef | undefined {
-  if (doc.kit === undefined || doc.kit === null) return undefined;
+/**
+ * The kit the manifest names under `kit:`, checked as `kitRefProblem` checks it; undefined when there is no `kit:` line. A
+ * `kit:` with no value is refused: it would read as no kit, and the pack's briefs would point at files never attached.
+ */
+function kitOf(doc: Obj, file: string, id: string): KitRef | undefined {
+  if (doc.kit === undefined) return undefined;
+  if (doc.kit === null) {
+    throw new Error(`${file}: the pack ${id} has "kit:" with nothing under it; name the kit's repo and files, or remove the line.`);
+  }
   const parsed = KitSchema.safeParse(doc.kit);
   if (!parsed.success) {
     const issue = parsed.error.issues[0]!;
@@ -210,7 +216,7 @@ export async function loadPack(dir: string): Promise<Pack> {
   const appRoot = doc.appRoot ?? null;
   if (appRoot !== null && typeof appRoot !== 'string') throw new Error(`${yamlPath}: "appRoot" must be text`);
   const version = doc.version;
-  const kit = kitOf(doc, yamlPath);
+  const kit = kitOf(doc, yamlPath, id);
   const codeChecks = codeChecksOf(doc, yamlPath);
 
   return {

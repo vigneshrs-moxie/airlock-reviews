@@ -105,11 +105,25 @@ describe('syncKit', () => {
     expect((await readdir(kitCacheRoot(OTHER))).sort()).toEqual([SHA, other].sort());
   });
 
-  it("the cache key holds the repository and a short hash of the kit's file list, whatever their order", () => {
+  it("the cache key holds the repository and a short hash of the ref and the kit's file list, whatever their order", () => {
     const root = kitCacheRoot(TEAM);
     expect(relative(join(home, 'kit'), root).split(sep)).toEqual([TEAM_SLUG, expect.stringMatching(/^[0-9a-f]{12}$/)]);
-    expect(kitCacheRoot({ ...TEAM, files: [...TEAM.files].reverse(), datedStandards: [], ref: 'v2' })).toBe(root);
+    expect(kitCacheRoot({ ...TEAM, files: [...TEAM.files].reverse(), datedStandards: [] })).toBe(root);
+    expect(kitCacheRoot({ ...TEAM, ref: 'main' })).toBe(root); // no ref is main
+    expect(kitCacheRoot({ ...TEAM, ref: 'v2' })).not.toBe(root);
     expect(kitCacheRoot({ ...TEAM, files: TEAM.files.slice(0, 2) })).not.toBe(root);
+  });
+
+  it('two packs naming one kit at different refs keep their own copies, and one never stands in for the other', async () => {
+    const release = { ...TEAM, ref: 'release' };
+    const first = await syncKit(fakeGh().exec, release);
+    expect(first.dir).toBe(join(kitCacheRoot(release), SHA));
+    // the kit at main cannot be fetched and has no copy of its own: the copy at release is not used
+    await expect(syncKit(fakeGh({ resolveFails: true }).exec, TEAM)).rejects.toThrow(/none is cached/);
+    expect(await syncKit(fakeGh({ resolveFails: true }).exec, release)).toEqual({ ...first, stale: true });
+    // a ref given to syncKit is cached under that ref
+    const v2 = await syncKit(fakeGh().exec, TEAM, { ref: 'v2' });
+    expect(v2.dir).toBe(join(kitCacheRoot({ ...TEAM, ref: 'v2' }), SHA));
   });
 
   it("two kits naming one repository with different files keep their own copies and never delete each other's", async () => {
