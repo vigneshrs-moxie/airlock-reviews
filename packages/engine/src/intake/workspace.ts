@@ -2,7 +2,7 @@ import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PrInfo, ReviewDocument, ReviewRange } from '@airlock/shared';
 import { planRereview, type RereviewPlan } from '../rereview/range.js';
-import { must, SLOW_EXEC_TIMEOUT_MS, TIMED_OUT, type Exec } from '../util/exec.js';
+import { must, SLOW_EXEC_TIMEOUT_MS, STOPPED, TIMED_OUT, type Exec } from '../util/exec.js';
 import { airlockHome, repoSlug } from '../util/paths.js';
 
 export interface Workspace {
@@ -13,6 +13,11 @@ export interface Workspace {
   range: ReviewRange;
   /** For a re-review: what it covers. A push is reviewed from the earlier head (the base worktree); otherwise everything. */
   plan?: RereviewPlan;
+  /**
+   * For a re-review of a push: the pull request's whole range (its base, found as a first review finds it, to the head),
+   * which is what GitHub shows. Absent when that base could not be found.
+   */
+  whole?: ReviewRange;
   dispose(): Promise<void>;
 }
 
@@ -115,6 +120,7 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
 
   let range: ReviewRange;
   let plan: RereviewPlan | undefined;
+  let whole: ReviewRange | undefined;
   if (req.explicit) {
     range = { baseSha: req.explicit.baseSha, headSha: req.explicit.headSha, kind: 'explicit' };
   } else if (req.pr) {
@@ -126,18 +132,28 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     // Once merged, the base branch contains the head, so its tip would leave nothing to review; a deleted base branch has
     // no tip. Then the base GitHub recorded is used. An open pull request keeps the branch's current tip, since the
     // recorded base can be older than a base the branch has merged in since.
-    const branch = `refs/heads/${baseRef}`; // the full ref, so a tag of the same name cannot stand in for the branch
-    const useRecorded = merged === true || !(await has(exec, mirror, branch));
-    if (useRecorded && recordedSha === undefined) {
-      throw new Error(`Pull request #${number} is merged or its base branch ${baseRef} no longer exists, and no base commit was given.`);
-    }
-    const from = useRecorded ? await recordedBase(exec, mirror, number, recordedSha!) : branch;
-    const baseSha = must(await exec('git', ['--git-dir', mirror, 'merge-base', from, headSha]), `git merge-base ${from} ${headSha}`).trim();
-    range = { baseSha, headSha, kind: 'full' };
-    if (req.rereview) {
-      // Only the push when it can be reviewed alone; otherwise the whole pull request, as on a first review.
-      plan = await planRereview(exec, mirror, req.rereview.previous, { ...req.rereview.pr, headSha });
-      if (plan.kind === 'push') range = { baseSha: plan.baseSha, headSha: plan.headSha, kind: 'rereview' };
+    const wholeBase = async (): Promise<string> => {
+      const branch = `refs/heads/${baseRef}`; // the full ref, so a tag of the same name cannot stand in for the branch
+      const useRecorded = merged === true || !(await has(exec, mirror, branch));
+      if (useRecorded && recordedSha === undefined) {
+        throw new Error(`Pull request #${number} is merged or its base branch ${baseRef} no longer exists, and no base commit was given.`);
+      }
+      const from = useRecorded ? await recordedBase(exec, mirror, number, recordedSha!) : branch;
+      return must(await exec('git', ['--git-dir', mirror, 'merge-base', from, headSha]), `git merge-base ${from} ${headSha}`).trim();
+    };
+    // A re-review covers only the push when it can be reviewed alone; otherwise the whole pull request, as a first review.
+    if (req.rereview) plan = await planRereview(exec, mirror, req.rereview.previous, { ...req.rereview.pr, headSha });
+    if (plan?.kind === 'push') {
+      range = { baseSha: plan.baseSha, headSha: plan.headSha, kind: 'rereview' };
+      // The whole pull request's range, as a first review would take it, is what GitHub shows. When its base cannot be
+      // found the review goes on with the push alone, and the caller says so.
+      try {
+        whole = { baseSha: await wholeBase(), headSha, kind: 'full' };
+      } catch (err) {
+        if (err instanceof Error && err.message === STOPPED) throw err;
+      }
+    } else {
+      range = { baseSha: await wholeBase(), headSha, kind: 'full' };
     }
   } else {
     throw new Error('prepareWorkspace needs either pr or explicit');
@@ -175,5 +191,5 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     throw err;
   }
 
-  return { headDir, baseDir, gitDir: mirror, range, ...(plan === undefined ? {} : { plan }), dispose };
+  return { headDir, baseDir, gitDir: mirror, range, ...(plan === undefined ? {} : { plan }), ...(whole === undefined ? {} : { whole }), dispose };
 }

@@ -250,6 +250,7 @@ function everythingNote(plan: Extract<RereviewPlan, { kind: 'everything' }>, pre
     ? `The branch was rewritten since the last review (its earlier head ${previous.pr.headSha.slice(0, 7)} is no longer part of it), so the whole pull request was reviewed again.`
     : `A commit pushed since the last review merges the base branch ${pr.baseRef} in, so the whole pull request was reviewed again.`;
 }
+const NO_WHOLE_DIFF_NOTE = 'Airlock could not work out the pull request\'s whole diff, so which lines GitHub shows was judged from the push alone.';
 const EMPTY_PUSH_NOTE = 'The push since the last review changed no files Airlock reviews, so the earlier findings are carried as they were.';
 
 /** What became of the earlier review's findings: still open or moved (by code or by the fixed check), and fixed. */
@@ -273,8 +274,13 @@ function asKept(f: Finding): KeptCandidate {
 /** Every stage from packs to select, inside the workspace. */
 async function reviewInWorkspace(
   req: ReviewRequest, deps: EngineDeps & { gate: UsageGate }, log: StageLog, settings: Settings, pr: PrInfo, ws: Workspace,
-  files: FileDiff[], diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; ms: number }, previous: ReviewDocument | null,
+  files: FileDiff[], diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; ms: number },
+  again: { previous: ReviewDocument | null; push: LensContext['push'] },
 ): Promise<Reviewed> {
+  const { previous, push } = again;
+  // What decides a line's place in the diff GitHub shows: the whole diff on a push re-review (the push's when it could not
+  // be worked out); otherwise the review's own diff.
+  const whole = push === undefined ? undefined : (push.whole ?? undefined);
   const { exec, runner } = deps;
   // A re-review's push is a range Airlock chose, as an explicit one is: GitHub's file count is about the whole pull request.
   const givenRange = req.explicit !== undefined || ws.range.kind === 'rereview';
@@ -368,7 +374,7 @@ async function reviewInWorkspace(
 
   const ctx: LensContext = {
     pr, map, files, tiers, facts, brief, packs, repoRules: prepared.repoRules, missingHelpers: prepared.missingHelpers,
-    headDir: ws.headDir, baseDir: ws.baseDir, models, run,
+    headDir: ws.headDir, baseDir: ws.baseDir, models, run, ...(push === undefined ? {} : { push }),
   };
   const quick = depth === 'quick';
   // Quick depth is one combined lens request per group; the other depths combine only when the request says so.
@@ -413,8 +419,9 @@ async function reviewInWorkspace(
   if (sync && previous === null) log.skip('anchor', skipWhy);
   else {
     const r = await log.run('anchor', async (rec) => {
-      const a = sync ? { anchored: [], dropped: [] } : await anchorCandidates(candidates, files, readHead);
-      const c = previous === null ? earlier : await rec.attempt(() => carryOver(previous, files, readHead), unplaced());
+      const a = sync ? { anchored: [], dropped: [] } : await anchorCandidates(candidates, files, readHead, whole);
+      const judge = push === undefined ? files : whole;
+      const c = previous === null ? earlier : await rec.attempt(() => carryOver(previous, files, readHead, judge), unplaced());
       return { ...a, carried: c };
     });
     anchored = r?.anchored ?? [];
@@ -522,7 +529,7 @@ async function reviewInWorkspace(
   limits.push(...selection.limits);
   const rereviewNotes = previous === null ? []
     : ws.plan?.kind === 'everything' ? [everythingNote(ws.plan, previous, pr)]
-      : files.length === 0 ? [EMPTY_PUSH_NOTE] : [];
+      : [...(push?.whole === null ? [NO_WHOLE_DIFF_NOTE] : []), ...(files.length === 0 ? [EMPTY_PUSH_NOTE] : [])];
   return {
     range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
     dropped: [...schemaDropped, ...anchorDropped, ...carryDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
@@ -577,7 +584,9 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
 
   // Kept outside the stage so a workspace opened just before a stop is still disposed.
   let opened: Workspace | undefined;
-  let intake: { pr: PrInfo; ws: Workspace; files: FileDiff[]; diffFacts: Fact[]; previous: ReviewDocument | null };
+  let intake: {
+    pr: PrInfo; ws: Workspace; files: FileDiff[]; diffFacts: Fact[]; previous: ReviewDocument | null; push: LensContext['push'];
+  };
   let reviewed: Reviewed;
   try {
     intake = (await log.run('intake', async (rec) => {
@@ -594,10 +603,17 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
         await loadDiff(exec, ws.gitDir, ws.range),
         (path, bytes) => safeRead(ws.headDir, path, { firstBytes: bytes }),
       ), { files: [] as FileDiff[], facts: [] as Fact[] });
-      return { pr, ws, files: loaded.files, diffFacts: [...loaded.facts, ...linkFacts(loaded.files)], previous };
+      // On a push re-review, the pull request's whole diff too: it decides what GitHub shows and what the pull request
+      // touched. Null when it cannot be worked out; the push's diff then stands in, and the document says so.
+      const whole = ws.plan?.kind !== 'push' ? undefined : ws.whole === undefined ? null : await loadDiff(exec, ws.gitDir, ws.whole)
+        .then((d) => recheckBinary(d, (path, bytes) => safeRead(ws.headDir, path, { firstBytes: bytes })))
+        .then((d) => d.files, () => null);
+      const push = whole === undefined ? undefined : { whole };
+      return { pr, ws, files: loaded.files, diffFacts: [...loaded.facts, ...linkFacts(loaded.files)], previous, push };
     }, { rethrow: true }))!;
     reviewed = await reviewInWorkspace(
-      req, deps, log, settings, intake.pr, intake.ws, intake.files, intake.diffFacts, { ...chosen, ms: choiceMs }, intake.previous,
+      req, deps, log, settings, intake.pr, intake.ws, intake.files, intake.diffFacts, { ...chosen, ms: choiceMs },
+      { previous: intake.previous, push: intake.push },
     );
   } finally {
     await (opened as Workspace | undefined)?.dispose().catch(() => undefined);

@@ -104,7 +104,9 @@ async function apply(ctx: LensContext, f: Finding, answer: FixedCheckOutput): Pr
     const said = [answer.explanation, answer.checked].map((t) => t.trim()).find((t) => t !== '') ?? 'The check found it fixed';
     return { fixed: asFixed(f, `${asSentence(said)} Proof: ${evidence.path}:${found[0]!.startLine} on the head.`) };
   }
-  const { anchored } = await anchorCandidates([{ ...f, path: evidence.path, quote: evidence.quote, lineHint: null }], ctx.files, read);
+  const { anchored } = await anchorCandidates(
+    [{ ...f, path: evidence.path, quote: evidence.quote, lineHint: null }], ctx.files, read, ctx.push?.whole ?? undefined,
+  );
   const placed = anchored[0];
   if (placed === undefined) return failed(`the check said it is still open, but its quote was not found in ${evidence.path} at the head; the finding stays open`);
   return { open: withPlace({ ...placed, lineHint: f.lineHint, status: 'moved' }) };

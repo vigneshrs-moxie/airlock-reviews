@@ -43,6 +43,9 @@ export interface ChallengeResult {
 type Item = AnchoredCandidate;
 type Outcome = { kept: KeptCandidate } | { dropped: Dropped };
 
+/** Told to the challenger on a re-review of a push, where the base worktree is the earlier review's head. Fixed text. */
+export const PUSH_BASE_SIDE = 'This review covers only a push made since an earlier review. The base side in the extra directory is this pull request as it was at that review, not the branch it will merge into, so code that is there may still be this pull request\'s own.';
+
 const NOT_CHALLENGED = 'not challenged';
 const DID_NOT_COMPLETE = 'challenge did not complete';
 const NOTHING_SAID = 'checked, no refutation found';
@@ -160,8 +163,10 @@ export async function challenge(
     return out;
   }
 
-  const instructions = instructionsFor(await loadTemplate('challenge'), ctx.packs, ctx.missingHelpers);
-  const evidence = createEvidence(read, ctx.files, ctx.packs);
+  const template = await loadTemplate('challenge');
+  const instructions = instructionsFor(ctx.push === undefined ? template : `${template.trim()}\n\n${PUSH_BASE_SIDE}`, ctx.packs, ctx.missingHelpers);
+  // What the pull request touched is judged by its whole diff on a push re-review, whose base side is the earlier head.
+  const evidence = createEvidence(read, ctx.push?.whole ?? ctx.files, ctx.packs);
   const tier = tierOf(ctx.tiers);
   type ItemResult = Outcome & { usage?: AgentUsage; error?: StageError; limit?: string };
   const failed = (item: Item, message: string, usage: AgentUsage | undefined, kind?: StageErrorKind): ItemResult => ({

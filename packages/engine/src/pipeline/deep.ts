@@ -78,7 +78,7 @@ export async function deepPass(rec: StageRecorder, input: DeepInput, sink: DeepS
     return true;
   });
   const candidates = input.uniqueIds(fresh.map(back));
-  const anchored = await anchorCandidates(candidates, ctx.files, input.readHead);
+  const anchored = await anchorCandidates(candidates, ctx.files, input.readHead, ctx.push?.whole ?? undefined);
   const repeats = new Set<string>();
   const anchoredFresh = anchored.anchored.filter((c) => {
     const print = fingerprint(c);

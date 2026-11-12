@@ -1,5 +1,7 @@
 import type { Dropped, FileDiff, Finding, ReviewDocument } from '@airlock/shared';
 import { anchorCandidates, findQuote } from '../anchor/anchor.js';
+import { commentLine } from '../anchor/comment-line.js';
+import { lineInDiff } from '../diff/parse.js';
 import { fingerprint } from '../anchor/fingerprint.js';
 import { plainCandidate, type AnchoredCandidate } from '../merge/merge.js';
 
@@ -23,9 +25,13 @@ export function withPlace(f: Finding): Finding {
  * place; found elsewhere by the anchoring the anchor stage uses, `moved` with that new anchor and comment line, its quote
  * the file's own lines; not found (or its file gone or unreadable), vanished, as it was. The earlier review's `fixed`
  * list is not carried. A carried finding names no group, since its group belongs to the earlier review's change map.
+ *
+ * `judge` is the diff GitHub shows for the pull request (its whole diff on a push re-review): when given, a still-open
+ * finding's status and comment line are judged again against it, and a moved one's come from it (see anchorCandidates).
+ * Without it a still-open finding keeps its earlier anchor whole.
  */
 export async function carryOver(
-  prev: ReviewDocument, files: FileDiff[], read: (path: string) => Promise<string | null>,
+  prev: ReviewDocument, files: FileDiff[], read: (path: string) => Promise<string | null>, judge?: FileDiff[],
 ): Promise<{ open: Finding[]; vanished: Finding[] }> {
   const cache = new Map<string, Promise<string | null>>();
   const readOnce = (path: string): Promise<string | null> => {
@@ -49,11 +55,11 @@ export async function carryOver(
     const onSameLines = path === f.path && startLine !== null && endLine !== null
       && findQuote(text, f.quote).some((at) => at.startLine === startLine && at.endLine === endLine);
     if (onSameLines) {
-      open.push({ ...f, status: 'still-open' });
+      open.push({ ...f, status: 'still-open', anchor: judge === undefined ? f.anchor : judged(judge.find((d) => d.path === path), startLine, endLine) });
       continue;
     }
     const hint = startLine ?? f.lineHint;
-    const { anchored } = await anchorCandidates([{ ...f, path, lineHint: hint }], files, readOnce);
+    const { anchored } = await anchorCandidates([{ ...f, path, lineHint: hint }], files, readOnce, judge);
     const found = anchored[0];
     if (found === undefined) {
       vanished.push(f);
@@ -62,6 +68,12 @@ export async function carryOver(
     open.push(withPlace({ ...found, lineHint: f.lineHint, status: 'moved' }));
   }
   return { open, vanished };
+}
+
+/** The anchor of lines that did not move, judged against the file's entry in the diff GitHub shows. */
+function judged(file: FileDiff | undefined, startLine: number, endLine: number): Finding['anchor'] {
+  const shown = file !== undefined && lineInDiff(file, startLine);
+  return { status: shown ? 'in-diff' : 'outside-diff', startLine, endLine, comment: commentLine(file, startLine, endLine) };
 }
 
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
