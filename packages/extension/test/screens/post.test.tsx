@@ -123,7 +123,8 @@ describe('the post sheet', () => {
     expect(within(places[0]!).getByText(ON_LINE('src/file1.ts, line 10'))).toBeTruthy();
     expect(within(places[1]!).getByText('The line is not part of the diff GitHub shows. The comment names the file and line.')).toBeTruthy();
     expect(within(places[2]!).getByText('You chose the summary. The comment names the file.')).toBeTruthy();
-    expect(d.getByText('Posted together as one review by bob, as comments. Open each to read or edit its exact text. Nothing has been sent yet.')).toBeTruthy();
+    expect(d.getByText(`Posts as bob on acme/widgets#1, as 3 comments in one review. Airlock never approves, requests changes or merges. ${NOTHING_SENT}`)).toBeTruthy();
+    expect(d.queryByText(/Open each to read or edit|Posted together/)).toBeNull();
     expect(button('Post 3 comments')).toBeTruthy();
   });
 

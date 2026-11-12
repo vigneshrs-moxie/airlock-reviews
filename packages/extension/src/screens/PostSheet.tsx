@@ -15,13 +15,12 @@ import { shortTitle } from './summary';
 export const ONLY_COMMENTS = 'Airlock never approves, requests changes or merges.';
 export const NOTHING_SENT = 'Nothing has been sent yet.';
 /**
- * Who posts, where, and as what: for one comment with the promise that nothing else is done, for several (the
- * prototype's `post_many()`) that they go together as one review. `nothingSent` adds that nothing has been sent yet.
+ * Who posts, where, and as what, with the promise that nothing else is done: one comment, or several in one review.
+ * `nothingSent` adds that nothing has been sent yet.
  */
 export function accountLine(viewer: string, pr: { repo: string; number: number }, n: number, nothingSent: boolean): string {
-  const line = n === 1
-    ? `Posts as ${viewer} on ${pr.repo}#${pr.number}, as a comment. ${ONLY_COMMENTS}`
-    : `Posted together as one review by ${viewer}, as comments. Open each to read or edit its exact text.`;
+  const as = n === 1 ? 'as a comment' : `as ${n} comments in one review`;
+  const line = `Posts as ${viewer} on ${pr.repo}#${pr.number}, ${as}. ${ONLY_COMMENTS}`;
   return nothingSent ? `${line} ${NOTHING_SENT}` : line;
 }
 export const GETTING_PREVIEW = 'Getting the preview…';
