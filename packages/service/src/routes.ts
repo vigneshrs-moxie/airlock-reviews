@@ -2,13 +2,17 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { airlockHome, choosePacks, fetchPr, findClaude, latestReview, repoSlug, runReview, type ReviewRequest } from '@airlock/engine';
 import {
-  ApiErrorSchema, DismissalSchema, DismissBodySchema, LatestReplySchema, PrNumberSchema, PrSummarySchema, RepoSchema, RestoreBodySchema, RestoreReplySchema, ReviewIdSchema, RunIdSchema, ServiceStatusSchema,
-  StartReviewBodySchema, StartReviewReplySchema, suggestedDepth, type DismissBody, type Dismissal, type LatestReply, type RestoreBody, type RestoreReply, type PrSummary,
-  type PrInfo, type ReviewDocument, type ServiceStatus, type StartReviewBody,
+  ApiErrorSchema, DismissalSchema, DismissBodySchema, ForgetPostBodySchema, LatestReplySchema, PostBodySchema, PostPreviewBodySchema,
+  PostPreviewReplySchema, PostRecordSchema, PrNumberSchema, PrSummarySchema, RepoSchema, RestoreBodySchema, RestoreReplySchema, ReviewIdSchema,
+  RunIdSchema, ServiceStatusSchema, StartReviewBodySchema, StartReviewReplySchema, suggestedDepth, type DismissBody, type Dismissal,
+  type ForgetPostBody, type LatestReply, type PostBody, type PostPreviewBody, type PostPreviewReply, type PostRecord, type RestoreBody,
+  type RestoreReply, type PrSummary, type PrInfo, type ReviewDocument, type ServiceStatus, type StartReviewBody,
 } from '@airlock/shared';
 import { z, type ZodType } from 'zod';
 import { dismiss, DismissError, restore } from './dismissals.js';
-import { plainMessage, type Req, type Res, type Route } from './http.js';
+import { plainMessage, type Handler, type Req, type Res, type Route } from './http.js';
+import { buildPreview, Previews } from './posts/preview.js';
+import { forget, post, PostError, postsFor, type PostDeps } from './posts/records.js';
 import { LimitError, realTimers, Runs } from './runs.js';
 import type { ServiceDeps } from './server.js';
 import { RUN_GONE, runStream } from './sse.js';
@@ -44,6 +48,18 @@ function reply<T>(schema: ZodType<T>, status: number, value: T): Res {
 
 const refuse = (status: number, error: string): Res => reply(ApiErrorSchema, status, { error });
 
+const ForgetReplySchema = z.object({ forgotten: z.boolean() });
+
+/** A posting handler: its PostError is the refusal it answers with. */
+const posting = (handler: Handler): Handler => async (req) => {
+  try {
+    return await handler(req);
+  } catch (e) {
+    if (e instanceof PostError) return refuse(e.status, e.message);
+    throw e;
+  }
+};
+
 /** The engine request for a start body; depth and pack ids only when the body has them. */
 export function engineRequest(body: StartReviewBody, packsDir: string): ReviewRequest {
   return {
@@ -75,6 +91,9 @@ export function reviewRoutes(
   const timers = deps.timers ?? realTimers;
   const review = deps.review ?? runReview;
   const { dismissals } = deps;
+  const posts: PostDeps = {
+    home: config.home, exec: engine.exec, now: deps.now, log: deps.log, previews: new Previews(), dismissals, hidePaths,
+  };
   const runs = new Runs({
     timers,
     ...(deps.limits?.runMinutes === undefined ? {} : { runMinutes: deps.limits.runMinutes }),
@@ -157,7 +176,9 @@ export function reviewRoutes(
         const { repo, number } = prOf(req);
         const document = await latestReview(repo, number);
         if (document === null) return refuse(404, NO_REVIEW);
-        return reply<LatestReply>(LatestReplySchema, 200, { document, dismissals: await dismissals(repo, number), posts: [] });
+        return reply<LatestReply>(LatestReplySchema, 200, {
+          document, dismissals: await dismissals(repo, number), posts: await postsFor(config.home, repo, number),
+        });
       },
     },
     {
@@ -190,6 +211,20 @@ export function reviewRoutes(
           throw e;
         }
       },
+    },
+    // The routes that can lead to the one GitHub write require the paired extension's Origin, not only the token.
+    {
+      method: 'POST', path: '/posts/preview', requiresOrigin: true, body: PostPreviewBodySchema,
+      handler: posting(async (req) =>
+        reply<PostPreviewReply>(PostPreviewReplySchema, 200, await buildPreview(posts, req.body as PostPreviewBody))),
+    },
+    {
+      method: 'POST', path: '/posts', requiresOrigin: true, body: PostBodySchema,
+      handler: posting(async (req) => reply<PostRecord>(PostRecordSchema, 200, await post(posts, (req.body as PostBody).previewId))),
+    },
+    {
+      method: 'POST', path: '/posts/forget', requiresOrigin: true, body: ForgetPostBodySchema,
+      handler: posting(async (req) => reply(ForgetReplySchema, 200, await forget(posts, req.body as ForgetPostBody))),
     },
   ];
   return { routes, stop: () => runs.close() };

@@ -114,7 +114,8 @@ async function listForChange(path: string, now: Date, log: (line: string) => voi
   return list;
 }
 
-async function writeList(path: string, list: Dismissal[]): Promise<void> {
+/** Writes a list as JSON atomically: a temporary file in the same folder, synced, then renamed over the old one. */
+export async function writeList(path: string, list: readonly unknown[]): Promise<void> {
   const folder = dirname(path);
   await mkdir(folder, { recursive: true });
   const temporary = join(folder, `.${basename(path)}.${randomBytes(4).toString('hex')}.tmp`);
