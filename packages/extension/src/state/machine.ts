@@ -1,7 +1,7 @@
 import { prRefFromUrl, type Depth, type Finding, type LatestReply, type PostRecord, type PrSummary, type ReviewDocument } from '@airlock/shared';
 import { ServiceError, type ServiceClient } from '../client/service';
 import { realTimers, type Timers } from '../client/timers';
-import type { PageNotes } from './notes';
+import type { PageHead, PageNotes } from './notes';
 import {
   isFor, POST_NOT_LEARNED, POST_UNKNOWN, reduce, withStage, type Action, type PanelState, type PostReply, type ReviewView, type StageLine,
   type UserAction,
@@ -55,8 +55,11 @@ export interface PanelDeps {
   timers?: Timers;
   /** The clock, in milliseconds since 1970; `Date.now` unless a test passes its own. */
   now?: () => number;
-  /** The notes on the tab's page, told which review is on screen with every state. */
-  notes?: Pick<PageNotes, 'review'>;
+  /**
+   * The notes on the tab's page, told which review is on screen with every state, and which commit the page shows: the
+   * head read when the tab last loaded or moved within the pull request, or at the panel's first read of it.
+   */
+  notes?: Pick<PageNotes, 'review' | 'head'>;
 }
 
 type PrRef = { repo: string; number: number };
@@ -126,6 +129,15 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
   /** The post records and dismissals last on screen, and whose they are, for a finished review whose own read fails. */
   let records: { repo: string; number: number; posts: PostRecord[]; dismissals: LatestReply['dismissals'] } | null = null;
   const sleeping = new Set<unknown>();
+  /**
+   * The commit the tab's page shows, as best the panel knows: `unset` until the first read of this pull request,
+   * `unknown` when the read made after the page loaded or moved failed (or the service was away then).
+   */
+  let page: { kind: 'unset' } | { kind: 'unknown' } | { kind: 'known'; sha: string } = { kind: 'unset' };
+  /** The read of the head after the tab loaded or moved: only the newest one's answer counts. */
+  let headRead: AbortController | null = null;
+  /** The tab's address as last heard, without its fragment (a jump changes only the fragment). */
+  let heard: string | undefined;
 
   const emit = (next: PanelState): void => {
     if (stopped || next === state) return;
@@ -137,6 +149,12 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     deps.notes?.review(reviewOnScreen(next));
   };
   const apply = (action: Action): void => emit(reduce(state, action));
+  /** Tells the notes which commit the page shows; while it is being read, or not read yet, they wait. */
+  const tellPage = (): void => {
+    const told: PageHead = headRead !== null || page.kind === 'unset' ? { state: 'reading' }
+      : page.kind === 'unknown' ? { state: 'unknown' } : { state: 'known', sha: page.sha };
+    deps.notes?.head(told);
+  };
   const current = (g: number): boolean => g === generation && !stopped;
 
   const sleep = (ms: number): Promise<void> =>
@@ -263,6 +281,12 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
       }
       pr = await client.pr(target.repo, target.number, signal);
       if (!current(g)) return;
+      // The panel's first read of this pull request is its best guess at what a page already open shows. A later load of
+      // its own (Retry, the service back) does not change it: the page did not load again.
+      if (page.kind === 'unset') {
+        page = { kind: 'known', sha: pr.headSha };
+        tellPage();
+      }
       const runId = await client.running(target.repo, target.number, signal);
       if (!current(g)) return;
       if (runId !== null) {
@@ -365,6 +389,12 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     const same = latest !== null && latest.document.id === document.id;
     const kept = records !== null && isFor(records, pr) ? records : { posts: [], dismissals: [] };
     apply({ type: 'finished', latest: same && latest !== null ? latest : { document, dismissals: kept.dismissals, posts: kept.posts } });
+    // The head may have moved during the run: `stale` is worked out from a read made now, quietly. The page's commit is
+    // not changed by it: the page did not load again.
+    client.pr(pr.repo, pr.number, live.signal).then(
+      (fresh) => { if (current(g)) apply({ type: 'head', pr: fresh }); },
+      () => undefined,
+    );
     watch(g);
   };
 
@@ -382,6 +412,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     tab.current().then(
       ({ url }) => {
         if (stopped || ref !== undefined) return;
+        heard ??= url?.split('#')[0];
         ref = refOf(url);
         begin(false);
       },
@@ -618,13 +649,74 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     }
   };
 
+  /**
+   * The tab finished loading again at the same pull request, or moved within it (GitHub changes tabs inside the page), and
+   * may now show newer commits: the pull request is read again quietly, whatever is on screen, and its head is taken as
+   * the commit the page shows. With a review on screen, `stale` is worked out again from it too (nothing on screen changes
+   * but what the answer changes; a sheet, a notice and an action in flight stay); a running review is not touched. The
+   * notes wait for the answer. A read that fails, or a load while the service is away, leaves the page's commit unknown,
+   * and the notes are cleared. A newer trigger replaces a read in flight, and only its answer counts.
+   */
+  const readHead = (): void => {
+    const target = ref;
+    if (target === undefined || target === null) return;
+    headRead?.abort();
+    headRead = null;
+    // Not paired: nothing can be read; the first read once paired is the best guess, as for a panel just opened.
+    if (state.kind === 'unpaired') {
+      page = { kind: 'unset' };
+      tellPage();
+      return;
+    }
+    if (state.kind === 'offline') {
+      page = { kind: 'unknown' };
+      tellPage();
+      return;
+    }
+    const read = new AbortController();
+    headRead = read;
+    tellPage();
+    const newest = (): boolean => headRead === read && !stopped;
+    client.pr(target.repo, target.number, read.signal).then(
+      (pr) => {
+        if (!newest()) return;
+        headRead = null;
+        // The panel went away from the service meanwhile: the answer is not trusted, as a load at that moment would not be.
+        if (state.kind === 'offline') page = { kind: 'unknown' };
+        else {
+          page = { kind: 'known', sha: pr.headSha };
+          apply({ type: 'head', pr });
+        }
+        tellPage();
+      },
+      () => {
+        if (!newest()) return;
+        headRead = null;
+        page = { kind: 'unknown' };
+        tellPage();
+      },
+    );
+  };
+
   // The screens have a state from the first moment, before the tab's address is known.
   deps.onState(state);
 
-  const unsubscribe = tab.onChange((url) => {
+  const unsubscribe = tab.onChange((url, status) => {
     const next = refOf(url);
-    if (ref !== undefined && sameRef(next, ref)) return;
+    const path = url?.split('#')[0];
+    const moved = path !== heard;
+    heard = path;
+    if (ref !== undefined && sameRef(next, ref)) {
+      // A page that is still loading is read when it is complete.
+      if (status === 'complete' || (moved && status !== 'loading')) readHead();
+      return;
+    }
     ref = next;
+    // Another pull request, or none: what its page shows is read with it.
+    headRead?.abort();
+    headRead = null;
+    page = { kind: 'unset' };
+    tellPage();
     begin(false);
   });
   readTab();
@@ -636,6 +728,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
       stopped = true;
       generation += 1;
       live.abort();
+      headRead?.abort();
       clearTimers();
       unsubscribe();
     },

@@ -29,7 +29,10 @@ export function startRealPanel(
   return run({ client, tab, settings, onState, timers: realTimers, ...(notes ? { notes } : {}) });
 }
 
-/** The real notes: sent to the tab the panel sits beside, through the jump's tab messaging. */
+/**
+ * The real notes: sent to the tab the panel sits beside, through the jump's tab messaging. What the page says it
+ * recognised comes back in the notes' state (`page`), which the App gives the Packs screen.
+ */
 export function browserNotes(settings: SettingsStore, tab: TabWatcher): PageNotes {
   const chrome = browserJumpChrome(() => undefined);
   return startNotes({ tab, settings, send: (tabId, message, options) => sendToPage(chrome, tabId, message, options) });
@@ -115,6 +118,9 @@ export function App({ start = (onState) => startRealPanel(onState), services }: 
   const notesState = useSyncExternalStore(notes?.subscribe ?? noSubscribe, notes?.current ?? noNotes);
   const openFinding = useOpenFinding(state, services?.noteOpen);
   const [pageReport, setPageReport] = useState<PageReport | null>(null);
+  // The page's report on the notes is the same report as a jump's: the latest of either is what Packs shows.
+  const notesPage = notesState.page;
+  useEffect(() => { if (notesPage !== undefined) setPageReport(notesPage); }, [notesPage]);
   const jump = services?.jump;
   // Only the latest jump runs and reports: starting one aborts the one before, and a late report is dropped.
   const latestJump = useRef(0);

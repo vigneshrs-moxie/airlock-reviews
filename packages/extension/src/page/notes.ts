@@ -11,6 +11,9 @@ import { FILES, missingFor } from './selectors';
 
 /** At most one pass over the notes per this many milliseconds after GitHub changes the files. */
 export const PASS_MS = 200;
+/** A note the page keeps removing is put back at most this many times in `PUT_BACK_MS`; after that it waits. */
+export const PUT_BACKS = 5;
+export const PUT_BACK_MS = 10_000;
 
 export interface Notes {
   /** Shows exactly these notes (adding and removing the difference) and says how many are placed and waiting. */
@@ -32,6 +35,8 @@ interface Held {
   cell: HTMLTableCellElement;
   /** GitHub's row the note is under; null while it waits for its line. */
   line: HTMLElement | null;
+  /** When the note was put under its line, in the last `PUT_BACK_MS`. */
+  puts: number[];
 }
 
 // The pull request a notes message is for (written out: the repository's guard reads an indexed 'pr' as a gh call).
@@ -99,8 +104,9 @@ export function createNotes(doc: Document, send: (m: NoteOpenMessage) => void, a
 
   /**
    * Puts every note that is not in place under its line when the line is on the page; a note whose line is not stays off
-   * the page and waits. A page that is no longer the pull request's Files changed view (it can change before the address
-   * watcher says so) loses every note instead.
+   * the page and waits, as does one the page took off more than `PUT_BACKS` times in `PUT_BACK_MS`. A page that is no
+   * longer the pull request's Files changed view (it can change before the address watcher says so) loses every note
+   * instead. With no notes held, nothing is watched.
    */
   function pass(): ReturnType<typeof detectView> {
     if (timer !== null) clearTimeout(timer);
@@ -119,6 +125,14 @@ export function createNotes(doc: Document, send: (m: NoteOpenMessage) => void, a
         continue;
       }
       if (!under(h.line, h.row)) {
+        const now = Date.now();
+        h.puts = h.puts.filter((at) => now - at < PUT_BACK_MS);
+        if (h.puts.length > PUT_BACKS) {
+          h.line = null;
+          h.row.remove();
+          continue;
+        }
+        h.puts.push(now);
         let last: Element = h.line;
         while (last.nextElementSibling !== null && ours.has(last.nextElementSibling)) last = last.nextElementSibling;
         last.after(h.row);
@@ -126,7 +140,12 @@ export function createNotes(doc: Document, send: (m: NoteOpenMessage) => void, a
       const span = columns(h.line);
       if (h.cell.colSpan !== span) h.cell.colSpan = span;
     }
-    watch(view);
+    // With no notes held there is nothing to watch for.
+    if (held.size > 0) watch(view);
+    else {
+      observer.disconnect();
+      watched = null;
+    }
     return view;
   }
 
@@ -157,7 +176,7 @@ export function createNotes(doc: Document, send: (m: NoteOpenMessage) => void, a
         }
         const { row, cell } = noteView(doc, note, () => send({ type: 'airlock:note-open', id: note.id }));
         ours.add(row);
-        next.set(note.id, { note, row, cell, line: null });
+        next.set(note.id, { note, row, cell, line: null, puts: [] });
       }
       for (const [id, h] of held) if (next.get(id) !== h) h.row.remove();
       held = next;

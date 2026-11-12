@@ -1,12 +1,15 @@
 // @vitest-environment happy-dom
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App, type PanelServices } from '../../src/panel/App';
+import { ServiceClient } from '../../src/client/service';
 import { PanelScreen, type PanelScreenProps } from '../../src/screens/PanelScreen';
-import type { PanelState, UserAction } from '../../src/state/machine';
+import { startPanel, type PanelState, type UserAction } from '../../src/state/machine';
 import { COULD_NOT_REACH_PAGE, notesLine, type NotesState, type PageNotes } from '../../src/state/notes';
 import type { NotesResult } from '../../src/state/jump';
 import type { SettingsStore } from '../../src/state/settings';
+import type { TabWatcher } from '../../src/state/tab';
+import { BASE, FakeService, TOKEN, prUrl } from '../helpers/fake-service';
 import type { OpenFinding } from '../../src/screens/Verdict';
 import type { PostReply } from '../../src/state/reduce';
 import { FakeTimers } from '../helpers/fake-timers';
@@ -115,7 +118,7 @@ function app() {
   let notesState: NotesState = { on: true, line: null, failed: false };
   const subscribers = new Set<(s: NotesState) => void>();
   const notes: PageNotes = {
-    review: vi.fn(), setShown: vi.fn(), reload: vi.fn(), stop: vi.fn(),
+    review: vi.fn(), setShown: vi.fn(), reload: vi.fn(), head: vi.fn(), stop: vi.fn(),
     current: () => notesState,
     subscribe: (fn) => { subscribers.add(fn); return () => subscribers.delete(fn); },
   };
@@ -175,6 +178,15 @@ describe('Open in Airlock in the panel', () => {
     c.send({ kind: 'ready', pr: prSummary() });
     c.send(reviewState([finding(1), finding(2)]));
     expect(detailHeading()).toBeNull();
+  });
+
+  it('gives the Packs screen what the page said it recognised when sent notes', async () => {
+    const a = app();
+    a.send(reviewState([finding(1), finding(2)]));
+    a.setNotes({ on: true, line: null, failed: false, page: { view: 'react', missing: ['react-row'] } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
+    const section = within(screen.getByRole('region', { name: 'GitHub page' }));
+    expect(section.getByText('Recognised as the newer view. Selectors that found nothing: react-row.')).toBeTruthy();
   });
 
   it('feeds the notes line and the setting through the panel', async () => {
@@ -241,5 +253,51 @@ describe('Open in Airlock while a sheet is open', () => {
     fireEvent.click(within(dialog()!).getByRole('button', { name: 'Cancel' }));
     expect(dialog()).toBeNull();
     expect(detailHeading()?.textContent).toBe('Problem 2');
+  });
+});
+
+describe('the GitHub tab loads again while a sheet is open', () => {
+  it('the dismiss sheet stays open with its text while the pull request is read again, and the review is then known as stale', async () => {
+    const svc = new FakeService();
+    svc.latest.set('acme/widgets#1', reviewState([finding(1), finding(2)], { pr: {} }).latest);
+    const listeners = new Set<(url: string | undefined, status?: string) => void>();
+    const files = prUrl('acme/widgets', 1, '/files');
+    const tab: TabWatcher = {
+      current: async () => ({ tabId: 3, url: files }),
+      onChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+    };
+    const paired: SettingsStore = { ...settings, getToken: async () => TOKEN };
+    const client = new ServiceClient(BASE, () => paired.getToken(), svc.fetch, new FakeTimers(), () => 0);
+    const heads: string[] = [];
+    const quiet: NotesState = { on: true, line: null, failed: false };
+    const notes: PageNotes = {
+      review: vi.fn(), setShown: vi.fn(), reload: vi.fn(), stop: vi.fn(), head: (h) => void heads.push(h.state),
+      current: () => quiet, subscribe: () => () => undefined,
+    };
+    let stop = (): void => undefined;
+    render(<App
+      start={(onState) => { const p = startPanel({ client, tab, settings: paired, onState, timers: new FakeTimers(), notes }); stop = p.stop; return p; }}
+      services={{ settings: paired, fetchStatus: () => new Promise(() => undefined), notes }}
+    />);
+    fireEvent.click(await screen.findByRole('button', { name: /Problem 1/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Wrong' }));
+    const line = 'Flagged "Problem 1" in src/file1.ts. Wrong because: the caller checks it first.';
+    const field = () => screen.getByRole('textbox', { name: 'The line that will be saved to your pack' }) as HTMLTextAreaElement;
+    fireEvent.change(field(), { target: { value: line } });
+    const reads = svc.calls.filter((c) => c === 'GET /pr').length;
+
+    // The author pushed; the person reloads the GitHub tab.
+    svc.addPr(prSummary({ headSha: 'd'.repeat(40) }));
+    act(() => { for (const fn of listeners) fn(files, 'loading'); });
+    act(() => { for (const fn of listeners) fn(files, 'complete'); });
+    await waitFor(() => expect(heads.at(-1)).toBe('known'));
+    expect(heads.slice(-2)).toEqual(['reading', 'known']);
+    expect(svc.calls.filter((c) => c === 'GET /pr').length).toBe(reads + 1);
+    const lastReview = vi.mocked(notes.review).mock.calls.at(-1)?.[0];
+    expect(lastReview?.stale).toBe(true);
+    expect(screen.queryByRole('dialog')).not.toBeNull();
+    expect(field().value).toBe(line);
+    stop();
   });
 });

@@ -3,7 +3,7 @@ import { SEVERITY_WORD } from '@airlock/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { findFile, findLine } from '../../src/page/locate';
 import { NOTE_LABEL } from '../../src/page/note-view';
-import { PASS_MS, createNotes, listenNotes, type Notes, type NotesRuntime } from '../../src/page/notes';
+import { PASS_MS, PUT_BACKS, PUT_BACK_MS, createNotes, listenNotes, type Notes, type NotesRuntime } from '../../src/page/notes';
 import {
   NOTES_MAX, TITLE_MAX, readNotesMessage, type NoteOpenMessage, type NotesMessage, type PageNote, type View,
 } from '../../src/page/protocol';
@@ -258,6 +258,29 @@ describe('when GitHub renders the diff again', () => {
     }
   });
 
+  it('a note the page removes again and again is put back five times in ten seconds, then waits until they have passed', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    load(CLASSIC_HTML);
+    const { notes } = setup();
+    notes.set(message([note(), GUARD_NOTE]));
+    for (let i = 1; i <= PUT_BACKS; i++) {
+      rowOf(note().id)!.remove();
+      await settle();
+      expect(rowOf(note().id)?.previousElementSibling, `put back ${i}`).toBe(lineRow('classic', PAUSE, 11));
+    }
+    rowOf(note().id)!.remove();
+    await settle();
+    expect(rowOf(note().id)).toBeUndefined();
+    // Left out, and counted as waiting; the other note is untouched.
+    expect(notes.set(message([note(), GUARD_NOTE]))).toMatchObject({ placed: 1, waiting: 1 });
+    expect(rowOf(GUARD_NOTE.id)!.previousElementSibling).toBe(lineRow('classic', GUARD, 4));
+    // Ten seconds on, the next change on the page puts it back.
+    await vi.advanceTimersByTimeAsync(PUT_BACK_MS);
+    document.getElementById(GUARD)!.append(document.createElement('i'));
+    await settle();
+    expect(rowOf(note().id)!.previousElementSibling).toBe(lineRow('classic', PAUSE, 11));
+  });
+
   it('a note whose row was left behind when its line was rendered anew moves under the new line', async () => {
     load(REACT_HTML);
     const { notes } = setup();
@@ -338,6 +361,29 @@ describe('when GitHub renders the diff again', () => {
     looked.mockClear();
     await settle();
     expect(asked(PAUSE)).toBeGreaterThan(0);
+    expect(rowOf(note().id)!.previousElementSibling).toBe(lineRow('classic', PAUSE, 11));
+  });
+
+  it('with no notes held, nothing is watched: page changes start no pass', async () => {
+    load(CLASSIC_HTML);
+    const github = live();
+    const { notes } = setup();
+    notes.set(message([note()]));
+    const disconnect = vi.spyOn(MutationObserver.prototype, 'disconnect');
+    // Every finding dismissed: an empty list.
+    expect(notes.set(message([]))).toMatchObject({ placed: 0, waiting: 0 });
+    expect(rows()).toEqual([]);
+    expect(disconnect).toHaveBeenCalled();
+    // GitHub mounts the files again and re-renders a line: nothing runs.
+    const served = new DOMParser().parseFromString(CLASSIC_HTML, 'text/html').querySelector(FILES.classic.css)!;
+    document.querySelector(FILES.classic.css)!.replaceWith(document.importNode(served, true));
+    github.rerender(PAUSE);
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+    // Notes again: watched again.
+    notes.set(message([note()]));
+    github.rerender(PAUSE);
+    await settle();
     expect(rowOf(note().id)!.previousElementSibling).toBe(lineRow('classic', PAUSE, 11));
   });
 
