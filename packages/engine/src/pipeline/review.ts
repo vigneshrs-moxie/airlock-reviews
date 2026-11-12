@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
 import { ReviewDocumentSchema } from '@airlock/shared';
 import type {
@@ -509,10 +510,16 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
     engineFault.error = new Error(`Airlock built a review document that does not match its own schema: ${parsed.error.message}`);
     throw engineFault.error;
   };
-  // The store stage's own timing is its time up to the write, since the saved document carries it.
+  // The store stage's own timing is its time up to the write, since the saved document carries it. A stopped review
+  // stores nothing: the signal is checked just before the save, and a stop during the save removes the file it wrote.
   let document = await log.run('store', async () => {
     const doc = checked(draft());
-    await saveReview(doc);
+    if (signal?.aborted) throw new Error(REVIEW_STOPPED);
+    const path = await saveReview(doc);
+    if (signal?.aborted) {
+      await rm(path, { force: true });
+      throw new Error(REVIEW_STOPPED);
+    }
     return doc;
   });
   if (engineFault.error) throw engineFault.error;
