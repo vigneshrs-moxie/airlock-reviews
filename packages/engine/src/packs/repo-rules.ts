@@ -1,5 +1,6 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { join, posix, sep } from 'node:path';
+import { FULL_COMMIT_ID } from '../intake/git-ids.js';
 import type { Exec } from '../util/exec.js';
 
 const ROOT_FILES = ['CLAUDE.md', 'AGENTS.md', 'REVIEW.md', '.cursorrules', '.github/copilot-instructions.md'];
@@ -52,6 +53,32 @@ function linkTarget(path: string, target: string): string | null {
   return resolved === '..' || resolved.startsWith('../') || resolved === '.' ? null : resolved;
 }
 
+/** A rule file that exists: its size in bytes, and how to read its text (null when it cannot be read). */
+interface Found { size: number; read: () => Promise<string | null> }
+
+/**
+ * The rule files among `paths`, in that order, at most MAX_FILES files and MAX_BYTES bytes in all. `find` gives each
+ * path's file, or null when there is none to read. A file that would pass the size limit is skipped and the rest are
+ * still read; every file left out by a limit is named.
+ */
+async function collect(paths: string[], find: (path: string) => Promise<Found | null>): Promise<RepoRules> {
+  const out: RepoRules = { rules: [], leftOut: [] };
+  let total = 0;
+  for (const path of paths) {
+    const found = await find(path);
+    if (found === null) continue;
+    if (out.rules.length >= MAX_FILES) { out.leftOut.push({ path, reason: TOO_MANY }); continue; }
+    if (total + found.size > MAX_BYTES) { out.leftOut.push({ path, reason: TOO_LARGE }); continue; }
+    const text = await found.read();
+    if (text === null) continue;
+    const bytes = Buffer.byteLength(text, 'utf8');
+    if (total + bytes > MAX_BYTES) { out.leftOut.push({ path, reason: TOO_LARGE }); continue; }
+    total += bytes;
+    out.rules.push({ path, text });
+  }
+  return out;
+}
+
 /**
  * Rule files (CLAUDE.md and friends) read from the base checkout only, at most MAX_FILES files and MAX_BYTES bytes in all.
  * A file that would pass the size limit is skipped and the rest are still read; every file left out is named. With
@@ -60,36 +87,71 @@ function linkTarget(path: string, target: string): string | null {
  */
 export async function loadRepoRules(baseDir: string, changedPaths: string[], exec?: Exec): Promise<RepoRules> {
   const root = await realpath(baseDir);
-  const out: RepoRules = { rules: [], leftOut: [] };
   const paths = candidates(changedPaths);
   const links = exec === undefined ? new Set<string>() : await trackedLinks(exec, baseDir, paths);
-  let total = 0;
-  for (const path of paths) {
+  return collect(paths, async (path) => {
     let source = path;
     if (links.has(path)) {
       const held = await readFile(join(baseDir, path), 'utf8').catch(() => null);
       const target = held === null ? null : linkTarget(path, held);
-      if (target === null || links.has(target)) continue;
+      if (target === null || links.has(target)) return null;
       source = target;
     }
-    const full = join(baseDir, source);
     let real: string;
     let size: number;
     try {
-      real = await realpath(full);
+      real = await realpath(join(baseDir, source));
       const info = await stat(real);
-      if (!info.isFile()) continue;
+      if (!info.isFile()) return null;
       size = info.size;
-    } catch { continue; }
-    if (real !== root && !real.startsWith(root + sep)) continue;
-    if (out.rules.length >= MAX_FILES) { out.leftOut.push({ path, reason: TOO_MANY }); continue; }
-    if (total + size > MAX_BYTES) { out.leftOut.push({ path, reason: TOO_LARGE }); continue; }
-    let text: string;
-    try { text = await readFile(real, 'utf8'); } catch { continue; }
-    const bytes = Buffer.byteLength(text, 'utf8');
-    if (total + bytes > MAX_BYTES) { out.leftOut.push({ path, reason: TOO_LARGE }); continue; }
-    total += bytes;
-    out.rules.push({ path, text });
+    } catch { return null; }
+    if (real !== root && !real.startsWith(root + sep)) return null;
+    return { size, read: () => readFile(real, 'utf8').catch(() => null) };
+  });
+}
+
+/** One entry of a commit's tree, as `git ls-tree -l` gives it; `size` is null for anything but a blob. */
+interface TreeEntry { mode: string; type: string; id: string; size: number | null }
+
+/** The entries of `commit`'s tree at `paths` (taken literally, from the top of the tree), by path. */
+async function treeEntries(exec: Exec, gitDir: string, commit: string, paths: string[]): Promise<Map<string, TreeEntry>> {
+  const entries = new Map<string, TreeEntry>();
+  if (paths.length === 0) return entries;
+  const res = await exec('git', ['--git-dir', gitDir, '--literal-pathspecs', 'ls-tree', '-z', '-l', '--full-tree', commit, '--', ...paths]);
+  if (res.code !== 0) throw new Error(`git ls-tree failed (exit ${res.code}): ${res.stderr}`);
+  for (const record of res.stdout.split('\0')) {
+    const m = /^(\d{6}) (\w+) ([0-9a-f]+) +(\d+|-)\t(.+)$/s.exec(record);
+    if (m) entries.set(m[5]!, { mode: m[1]!, type: m[2]!, id: m[3]!, size: m[4] === '-' ? null : Number(m[4]) });
   }
-  return out;
+  return entries;
+}
+
+/**
+ * The rule files `loadRepoRules` would read from a checkout of `commit`, read from the git folder `gitDir` instead (a
+ * re-review has no checkout of the pull request's base), with the same order and limits. Each file is read as git
+ * stores it, with no filter or conversion; a link is read from the file it points to, when that is inside the
+ * repository and not a link itself. `commit` must be a full commit id. Throws when git cannot list the tree.
+ */
+export async function loadRepoRulesAt(exec: Exec, gitDir: string, commit: string, changedPaths: string[]): Promise<RepoRules> {
+  if (!FULL_COMMIT_ID.test(commit)) throw new Error(`The base commit ${JSON.stringify(commit)} is not a full commit id.`);
+  const paths = candidates(changedPaths);
+  const entries = await treeEntries(exec, gitDir, commit, paths);
+  const blob = async (id: string): Promise<string | null> => {
+    const res = await exec('git', ['--git-dir', gitDir, 'cat-file', 'blob', id]);
+    return res.code === 0 ? res.stdout : null;
+  };
+  return collect(paths, async (path) => {
+    let entry = entries.get(path);
+    if (entry === undefined) return null;
+    if (entry.mode === LINK_MODE) {
+      const held = await blob(entry.id);
+      const target = held === null ? null : linkTarget(path, held);
+      if (target === null) return null;
+      entry = (await treeEntries(exec, gitDir, commit, [target])).get(target);
+      if (entry === undefined || entry.mode === LINK_MODE) return null;
+    }
+    if (entry.type !== 'blob' || entry.size === null) return null;
+    const { id, size } = entry;
+    return { size, read: () => blob(id) };
+  });
 }

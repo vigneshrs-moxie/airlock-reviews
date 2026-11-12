@@ -113,6 +113,29 @@ export function unaccounted(prev: ReviewDocument, findings: Finding[], fixed: Fi
   });
 }
 
+/**
+ * A vanished earlier finding raised again elsewhere is that finding, moved: each vanished finding whose fingerprint or
+ * an alias equals the fingerprint or an alias of a new item (the first that matches) is carried as `moved` to that item's
+ * place (its path, quote, anchor and connected places), keeping its identity, with its old fingerprint kept as an alias.
+ * The items are left as they are, so mergeIntoCarried then merges each into the finding it matched. The rest stay
+ * vanished. The inputs are not changed.
+ */
+export function claimVanished(items: AnchoredCandidate[], vanished: Finding[]): { moved: Finding[]; vanished: Finding[] } {
+  const moved: Finding[] = [];
+  const left: Finding[] = [];
+  for (const f of vanished) {
+    const own = [f.fingerprint, ...(f.aliases ?? [])];
+    const item = items.find((i) => [fingerprint(i), ...(i.aliases ?? [])].some((p) => own.includes(p)));
+    if (item === undefined) {
+      left.push(f);
+      continue;
+    }
+    const { path, quote, anchor, connected } = item;
+    moved.push(withPlace({ ...f, cohortId: null, path, quote, anchor, connected, status: 'moved' }));
+  }
+  return { moved, vanished: left };
+}
+
 const SERIOUSNESS: Severity[] = ['note', 'ask', 'fix', 'block'];
 const moreSerious = (a: Severity, than: Severity): boolean => SERIOUSNESS.indexOf(a) > SERIOUSNESS.indexOf(than);
 

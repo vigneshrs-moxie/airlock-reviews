@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { candidate, minimalDocument, type Finding, type ReviewDocument } from '@airlock/shared';
 import { renderReview } from '../../src/render/terminal.js';
+import { baseMergeNote, everythingNote, reviewedAgainInFull } from '../../src/rereview/notes.js';
 
 function finding(over: Partial<Finding> = {}): Finding {
   return {
@@ -229,12 +230,30 @@ describe('renderReview', () => {
     it('says under the header what it covered: the push, a pushed merge, or everything again', () => {
       expect(renderReview(rereviewed('rereview')).split('\n')[2]).toBe('Review of the push ccccccc to bbbbbbb');
       expect(renderReview(rereviewed('full')).split('\n')[2]).toBe('Reviewed again in full since ccccccc');
-      expect(renderReview(rereviewed('sync-merge')).split('\n')[2])
+      const merged = (mergeReview?: ReviewDocument['mergeReview'], notes: string[] = []): ReviewDocument =>
+        ({ ...rereviewed('sync-merge'), ...(mergeReview === undefined ? {} : { mergeReview }), notes });
+      expect(renderReview(merged('by-hand')).split('\n')[2])
         .toBe('Review of the merge pushed since ccccccc: only what was changed by hand was reviewed.');
+      expect(renderReview(merged('nothing-by-hand')).split('\n')[2])
+        .toBe('Review of the merge pushed since ccccccc: git merged it without conflicts and nothing was changed by hand.');
+      // A merge Airlock could not review gets neither line (its stage error says what happened); nor does one that does not say.
+      expect(renderReview(merged('not-reviewed')).split('\n')[2]).toBe('');
+      expect(renderReview(merged()).split('\n')[2]).toBe('');
+      // A pull request that is only a merge, reviewed again in full: not "pushed".
+      const inFull = merged('by-hand', ['The last review did not finish, so everything was reviewed again.']);
+      expect(renderReview(inFull).split('\n')[2]).toBe('Reviewed again in full since ccccccc');
       // Decided by where the range starts, not by its kind: a push range whose kind says otherwise is still the push.
       const pushAsFull = { ...rereviewed('full'), range: { baseSha: 'c'.repeat(40), headSha: 'b'.repeat(40), kind: 'full' as const } };
       expect(renderReview(pushAsFull).split('\n')[2]).toBe('Review of the push ccccccc to bbbbbbb');
       expect(renderReview(fullDocument()).split('\n')[2]).toBe('');
+    });
+
+    it('recognises the note of every reason for reviewing everything again, and no other re-review note', () => {
+      const doc = fullDocument();
+      for (const reason of ['rewritten', 'base-merged-in', 'earlier-incomplete', 'retargeted', 'earlier-partial'] as const) {
+        expect(reviewedAgainInFull([everythingNote(reason, doc, doc.pr)])).toBe(true);
+      }
+      expect(reviewedAgainInFull([baseMergeNote(doc.pr), 'The push changed no files.'])).toBe(false);
     });
 
     it('shows each finding\'s status, also under also found, and the fixed ones after also found with their reason', () => {

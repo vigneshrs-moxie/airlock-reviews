@@ -1,4 +1,5 @@
-import type { Anchor, Finding, StageError, StageErrorKind } from '@airlock/shared';
+import { posix } from 'node:path';
+import type { Anchor, FileDiff, Finding, StageError, StageErrorKind } from '@airlock/shared';
 import { z } from 'zod';
 import { asMaterial, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner, AgentUsage } from '../agent/runner.js';
@@ -88,6 +89,15 @@ interface Outcome { fixed?: Finding; open?: Finding; error?: StageError; usage?:
 
 const squash = (text: string): string => text.replace(/\s+/g, '');
 
+/**
+ * True when one of the head file's lines `startLine` to `endLine` is a line of substance that the review's diff (the push's,
+ * on a push re-review) adds: a line already there before, or in a file the diff does not touch, cannot be what fixed it.
+ */
+function addedHere(files: FileDiff[], path: string, lines: { startLine: number; endLine: number }): boolean {
+  return files.filter((d) => d.path === path).some((d) => d.hunks.some((h) => h.lines.some((l) =>
+    l.kind === 'add' && l.newNo !== null && l.newNo >= lines.startLine && l.newNo <= lines.endLine && hasSubstance(l.text))));
+}
+
 /** True when a line of `quote` with substance is a line of the finding's own earlier quote, white space aside. */
 function quotesOwnCode(f: Finding, quote: string): boolean {
   const own = new Set(f.quote.split('\n').map(squash).filter((l) => l !== ''));
@@ -96,7 +106,8 @@ function quotesOwnCode(f: Finding, quote: string): boolean {
 
 /**
  * Applies the answer. `fixed` counts only when its quote is real code at the head (a safe path, at least one line of
- * substance, not only comments) and code finds the whole quote in that file. `still-open` counts only when the anchoring
+ * substance, not only comments), code finds the whole quote in that file, and the place found holds a line of substance
+ * the push added or changed (see addedHere); the proof names that place. `still-open` counts only when the anchoring
  * the anchor stage uses finds its quote at the head: the finding is then `moved` there, keeping its old fingerprint as an
  * alias. Anything else leaves it open with no place and is an error.
  */
@@ -110,8 +121,13 @@ async function apply(ctx: LensContext, f: Finding, answer: FixedCheckOutput): Pr
     const proves = isSafePath(evidence.path) && hasSubstance(evidence.quote) && !onlyComments(evidence.quote);
     const found = proves ? findQuote(await read(evidence.path), evidence.quote) : [];
     if (found.length === 0) return failed(`the check said it is fixed, but its quote was not found as code in ${evidence.path} at the head; the finding stays open`);
+    const path = posix.normalize(evidence.path);
+    const added = found.find((at) => addedHere(ctx.files, path, at));
+    if (added === undefined) {
+      return failed(`the check said it is fixed, but its quote in ${evidence.path} is not on a line the push added or changed; the finding stays open`);
+    }
     const said = [answer.explanation, answer.checked].map((t) => t.trim()).find((t) => t !== '') ?? 'The check found it fixed';
-    return { fixed: asFixed(f, `${asSentence(said)} Proof: ${evidence.path}:${found[0]!.startLine} on the head.`) };
+    return { fixed: asFixed(f, `${asSentence(said)} Proof: ${evidence.path}:${added.startLine} on the head.`) };
   }
   const { anchored } = await anchorCandidates(
     [{ ...f, path: evidence.path, quote: evidence.quote, lineHint: null }], ctx.files, read, ctx.push?.whole ?? undefined,

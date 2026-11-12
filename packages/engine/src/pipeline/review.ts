@@ -29,9 +29,9 @@ import { fallbackMap, buildChangeMap } from '../map/mapper.js';
 import { findNeighbours } from '../map/neighbours.js';
 import { mergeSameProblems, withMergedCount, type AnchoredCandidate } from '../merge/merge.js';
 import type { Holdout, Pack } from '../packs/types.js';
-import { carryOver, mergeIntoCarried, unaccounted } from '../rereview/carry.js';
+import { carryOver, claimVanished, mergeIntoCarried, unaccounted } from '../rereview/carry.js';
 import { confirmFixed, fixedByCode, leftOpen, needsCheck, type FixedCheckResult } from '../rereview/fixed.js';
-import type { RereviewPlan } from '../rereview/range.js';
+import { baseMergeNote, CARRIED_QUESTIONS_NOTE, everythingNote } from '../rereview/notes.js';
 import { runSweep } from '../rules/sweep.js';
 import { decideVerdict, sameTextOnce, select, selfReviewText, type RereviewText, type SelectResult } from '../select/select.js';
 import { mergeNote, mergeNoteBlock, settledSentence, type MergeScope } from '../shape/merge-range.js';
@@ -158,14 +158,17 @@ export function withUniqueIds(candidates: Candidate[], used: Set<string>): Candi
 /** What a re-review fails with when the pull request's head is the earlier review's head. */
 export const NOTHING_PUSHED = 'Nothing was pushed since the last review.';
 
-/** The stored review a re-review continues: one of this repository and number, or the review fails before any model call. */
+/**
+ * The stored review a re-review continues: one of this repository and number, or the review fails before any model call.
+ * Its head is taken in lower case, as the document writes commit ids.
+ */
 async function earlierReview(req: ReviewRequest, reviewId: string): Promise<ReviewDocument> {
   if (req.explicit !== undefined) throw new Error('A re-review covers what was pushed since the last review, so it cannot be given a range.');
   const doc = await reviewById(req.repo, req.number, reviewId);
   if (doc === null || doc.pr.repo !== req.repo || doc.pr.number !== req.number) {
     throw new Error(`There is no stored review ${reviewId} of this pull request.`);
   }
-  return doc;
+  return { ...doc, pr: { ...doc.pr, headSha: doc.pr.headSha.toLowerCase() } };
 }
 
 /** Prepares the workspace; a clone or fetch refused for lack of credentials says how to fix it. */
@@ -263,22 +266,6 @@ function nothingReadNote(files: FileDiff[], tiers: FileFact[], what: 'pull reque
   return `Nothing in this ${what} was read closely: all ${files.length} changed files are of kinds Airlock trusts (tests, documents, generated files).`;
 }
 
-/** A re-review's note when the whole pull request was reviewed again, saying which and why. */
-function everythingNote(plan: Extract<RereviewPlan, { kind: 'everything' }>, previous: ReviewDocument, pr: PrInfo): string {
-  switch (plan.reason) {
-    case 'rewritten':
-      return `The branch was rewritten since the last review (its earlier head ${previous.pr.headSha.slice(0, 7)} is no longer part of it), so the whole pull request was reviewed again.`;
-    case 'base-merged-in':
-      return `A commit pushed since the last review merges the base branch ${pr.baseRef} in, so the whole pull request was reviewed again.`;
-    case 'earlier-incomplete':
-      return 'The last review did not finish, so everything was reviewed again.';
-    case 'base-missing':
-      return `The base commit of this pull request could not be found, so Airlock could not tell whether the push merges ${pr.baseRef} in, and everything was reviewed again.`;
-  }
-}
-/** A re-review's note when the push was one merge of the base branch, of which only the changes made by hand were reviewed. */
-const baseMergeNote = (pr: PrInfo): string =>
-  `The push since the last review only merges the base branch ${pr.baseRef} in, so only what was changed by hand in that merge was reviewed.`;
 const NO_WHOLE_DIFF_NOTE = 'Airlock could not work out the pull request\'s whole diff, so which lines GitHub shows was judged from the push alone.';
 const EMPTY_PUSH_NOTE = 'The push changed no files.';
 /** A push of only files Airlock ignores is not an unreviewed pull request: the earlier findings carry the verdict. */
@@ -292,8 +279,11 @@ interface Settings { depth: Depth; models: ModelConfig; parallel: number; combin
 interface Reviewed {
   range: ReviewRange; packs: Pack[]; tiers: FileFact[]; facts: Fact[]; map: ChangeMap; brief: Brief; questions: Question[];
   candidates: Candidate[]; dropped: Dropped[]; selection: SelectResult; limits: string[]; notes: string[];
+  whoseCall: string[]; checksAfterMerge: string[];
   /** On a re-review, the findings fixed since the earlier review. */
   fixed: Finding[];
+  /** Whenever the range is a merge: whether what was changed by hand in it was reviewed (see ReviewDocument). */
+  mergeReview?: ReviewDocument['mergeReview'];
 }
 
 /** A carried finding as an item for selection: its status kept, its list place and fingerprint made again there. */
@@ -315,7 +305,8 @@ async function reviewInWorkspace(
   // A merge whose hand-made changes are reviewed is reviewed as any change, and every request is told what it is.
   const { merge } = ws;
   const { exec } = deps;
-  const scope: MergeScope = previous !== null ? 'push' : req.explicit !== undefined ? 'given range' : 'pull request';
+  // A merge pushed since the last review is the push's; a pull request reviewed again in full is the pull request's.
+  const scope: MergeScope = push !== undefined ? 'push' : req.explicit !== undefined ? 'given range' : 'pull request';
   const runner = merge?.kind === 'by-hand' ? withMergeNote(deps.runner, scope, pr) : deps.runner;
   // A re-review's push is a range Airlock chose, as an explicit one is: GitHub's file count is about the whole pull request.
   // So is a merge with nothing changed by hand, whose diff is left empty on purpose.
@@ -350,6 +341,9 @@ async function reviewInWorkspace(
     const p = await preparePacks(chosen.packs, {
       exec, kitDir: req.kitDir, kitSha: req.kitSha, holdout: req.holdout, baseDir: ws.baseDir, changedPaths: files.map((f) => f.path),
       baseIsMerge: merge?.kind === 'by-hand',
+      // A push re-review's base worktree is the pull request's own earlier code (or a merge git made of it), whose rule
+      // files are the author's: the rules are read from the pull request's base commit, as a first review reads them.
+      ...(push === undefined ? {} : { rulesAt: { gitDir: ws.gitDir, commit: ws.whole?.baseSha ?? null } }),
     });
     rec.error(...p.errors);
     return p;
@@ -492,11 +486,14 @@ async function reviewInWorkspace(
   // A finding raised again is the earlier one: merged into it before the merge stage, so it is neither asked about nor
   // challenged again, and once more after it, for a keeper that took the carried fingerprint as an alias there.
   const carryDropped: Dropped[] = [];
+  // A vanished earlier finding raised again elsewhere (by its fingerprint or an alias) is that finding, moved there: it is
+  // carried, not checked for a fix, and the new item is merged into it.
   const intoCarried = (): void => {
     if (previous === null) return;
-    const r = mergeIntoCarried(anchored, earlier.open);
+    const claimed = claimVanished(anchored, earlier.vanished);
+    const r = mergeIntoCarried(anchored, [...earlier.open, ...claimed.moved]);
     anchored = r.items;
-    earlier = { ...earlier, open: r.carried };
+    earlier = { open: r.carried, vanished: claimed.vanished };
     carryDropped.push(...r.dropped);
   };
   intoCarried();
@@ -624,22 +621,36 @@ async function reviewInWorkspace(
   };
 
   limits.push(...selection.limits);
+  // A push re-review repeats the last review's questions, whose-call lines and checks after merge, before its own: they
+  // still stand, and the panel shows this document. A review of everything again asks its own.
+  const repeated = previous !== null && push !== undefined;
+  const earlierQuestions = repeated ? previous.questions.map((q) => ({ ...q, cohortId: null })) : [];
+  const earlierWhoseCall = repeated ? previous.whoseCall : [];
+  const earlierChecks = repeated ? previous.checksAfterMerge : [];
+  const asked = new Set(earlierQuestions.map((q) => q.text));
+  const questionsShown = [...earlierQuestions, ...[...selection.questions, ...engineQuestions].filter((q) => !asked.has(q.text))];
+  const earlierFirst = (earlierOnes: string[], own: string[]): string[] => [...earlierOnes, ...own.filter((t) => !earlierOnes.includes(t))];
+  const anyRepeated = earlierQuestions.length + earlierWhoseCall.length + earlierChecks.length > 0;
+
   const rereviewNotes = previous === null ? []
-    : ws.plan?.kind === 'everything' ? [everythingNote(ws.plan, previous, pr)]
+    : ws.plan?.kind === 'everything' ? [everythingNote(ws.plan.reason, previous, pr)]
       : [
         ...(ws.plan?.kind === 'base-merge' ? [baseMergeNote(pr)] : []),
         ...(push?.whole === null ? [NO_WHOLE_DIFF_NOTE] : []),
         ...(files.length === 0 && merge?.kind !== 'nothing-by-hand' ? [EMPTY_PUSH_NOTE] : []),
         ...(pushed && notReviewed(files, tiers) !== null ? [IGNORED_PUSH_NOTE] : []),
+        ...(anyRepeated ? [CARRIED_QUESTIONS_NOTE] : []),
       ];
   return {
-    range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
+    range, packs, tiers, facts, map, brief, questions: questionsShown, candidates, selection,
+    whoseCall: earlierFirst(earlierWhoseCall, selection.whoseCall), checksAfterMerge: earlierFirst(earlierChecks, selection.checksAfterMerge),
     dropped: [...schemaDropped, ...anchorDropped, ...carryDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
     notes: [
       ...chosen.notes, ...rereviewNotes, ...(sync ? [] : [nothingReadNote(files, tiers, pushed ? 'push' : 'pull request')].filter((n) => n !== null)),
       ...mergeNotes, ...selection.notes,
     ],
     fixed: carried.fixed,
+    ...(merge === undefined ? {} : { mergeReview: merge.kind === 'unsupported' ? 'not-reviewed' as const : merge.kind }),
   };
 }
 
@@ -736,9 +747,10 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
     packs: reviewed.packs.map((p) => ({ id: p.id, version: p.version, title: p.title })), models: settings.models,
     files: reviewed.tiers, facts: reviewed.facts, map: reviewed.map, brief: reviewed.brief, verdict: selection.verdict,
     findings: selection.findings, questions: reviewed.questions, dropped: reviewed.dropped, candidates: reviewed.candidates,
-    whoseCall: selection.whoseCall, checksAfterMerge: selection.checksAfterMerge, selfReviewText: selection.selfReviewText,
+    whoseCall: reviewed.whoseCall, checksAfterMerge: reviewed.checksAfterMerge, selfReviewText: selection.selfReviewText,
     stageErrors: [...log.errors], timings: log.timings(), limits: reviewed.limits, notes: reviewed.notes,
     ...(previous === null ? {} : { previous: { reviewId: previous.id, headSha: previous.pr.headSha }, fixed: reviewed.fixed }),
+    ...(reviewed.mergeReview === undefined ? {} : { mergeReview: reviewed.mergeReview }),
   });
   // A draft that fails the schema is the engine's own fault, so it rejects rather than becoming a stage error.
   const engineFault: { error: Error | null } = { error: null };

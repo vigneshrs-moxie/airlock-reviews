@@ -142,13 +142,9 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     };
     // A re-review covers only the push when it can be reviewed alone; otherwise the whole pull request, as a first review.
     // The recorded base is fetched first, so a merged pull request or a deleted base branch can be planned; when it cannot
-    // be had, the plan says so (everything again) rather than failing here.
+    // be had, the review fails here with the sentence a first review gives, since every plan needs it.
     if (req.rereview) {
-      try {
-        await baseFrom();
-      } catch (err) {
-        if (err instanceof Error && err.message === STOPPED) throw err;
-      }
+      await baseFrom();
       plan = await planRereview(exec, mirror, req.rereview.previous, { ...req.rereview.pr, headSha });
     }
     if (plan?.kind === 'push' || plan?.kind === 'base-merge') {
