@@ -1,11 +1,14 @@
 // One note as the person sees it on GitHub's page: a row under the line, and inside a closed shadow root the severity word,
-// the title and `Open in Airlock`. The page sees only the row, its id attribute, a role and a fixed label.
+// the title and `Open in Airlock`. The page sees only the row, its id attribute, and a host with a role and a fixed label.
 // Imported by path, not from '@airlock/shared': this module has no zod, and the content script must stay small.
 import { SEVERITY_WORD } from '../../../shared/src/words';
 import type { PageNote } from './protocol';
 
 export const NOTE_ATTR = 'data-airlock-note';
-/** The accessible name of the row and of the host. Fixed: nothing of the finding is in the page's attributes. */
+/**
+ * The accessible name of the host, which is the note (the row stays a row of GitHub's table). Fixed: nothing of the
+ * finding is in the page's attributes.
+ */
 export const NOTE_LABEL = 'Airlock note';
 
 // GitHub's own custom properties carry both its themes; the fallbacks are its light theme's values. The host's inline-size
@@ -33,10 +36,8 @@ export function noteView(doc: Document, note: PageNote, open: () => void): NoteV
   row.setAttribute(NOTE_ATTR, note.id);
   const cell = row.insertCell();
   const host = cell.appendChild(doc.createElement('div'));
-  for (const el of [row, host]) {
-    el.setAttribute('role', 'note');
-    el.setAttribute('aria-label', NOTE_LABEL);
-  }
+  host.setAttribute('role', 'note');
+  host.setAttribute('aria-label', NOTE_LABEL);
   const root = host.attachShadow({ mode: 'closed' });
   const part = <K extends keyof HTMLElementTagNameMap>(tag: K, text: string): HTMLElementTagNameMap[K] => {
     const el = doc.createElement(tag);
@@ -47,7 +48,8 @@ export function noteView(doc: Document, note: PageNote, open: () => void): NoteV
   box.className = note.severity;
   const button = part('button', 'Open in Airlock');
   button.type = 'button';
-  button.addEventListener('click', open);
+  // Only the person's own click: a click a script makes is not trusted.
+  button.addEventListener('click', (event) => { if (event.isTrusted) open(); });
   box.append(part('b', SEVERITY_WORD[note.severity]), part('span', note.title), button);
   root.append(part('style', CSS), box);
   return { row, cell };

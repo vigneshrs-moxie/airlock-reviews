@@ -144,12 +144,12 @@ for (const [view, url] of [['classic', CLASSIC_URL], ['react', REACT_URL]] as co
       ['c_00000001', `Fix ${TITLE} Open in Airlock`],
       ['c_00000002', 'Block The guard is never read Open in Airlock'],
     ]);
-    // The page's own scripts see a row with an id, a role and a fixed label, and no text of the finding.
+    // The page's own scripts see a row with an id, a host with a role and a fixed label, and no text of the finding.
     const pageView = await github.evaluate(() => ({
       text: document.body.innerText,
       html: document.documentElement.outerHTML,
       roots: [...document.querySelectorAll('[data-airlock-note] td > *')].map((host) => host.shadowRoot),
-      labels: [...document.querySelectorAll('[data-airlock-note], [data-airlock-note] td > *')].map((el) => el.getAttribute('aria-label')),
+      labels: [...document.querySelectorAll('[data-airlock-note], [data-airlock-note] td > *')].map((el) => [el.getAttribute('role'), el.getAttribute('aria-label')]),
       bold: document.querySelectorAll('b').length,
     }));
     for (const word of ['Pause skips', 'Open in Airlock', 'guard is never']) {
@@ -157,7 +157,8 @@ for (const [view, url] of [['classic', CLASSIC_URL], ['react', REACT_URL]] as co
       expect(pageView.html).not.toContain(word);
     }
     expect(pageView.roots).toEqual([null, null]);
-    expect(pageView.labels).toEqual(['Airlock note', 'Airlock note', 'Airlock note', 'Airlock note']);
+    const host = ['note', 'Airlock note'];
+    expect(pageView.labels).toEqual([[null, null], host, [null, null], host]);
     expect(pageView.bold).toBe(0);
 
     expect(await seenByWorker()).toEqual([]);

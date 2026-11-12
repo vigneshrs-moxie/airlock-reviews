@@ -71,33 +71,47 @@ export function createNotes(doc: Document, send: (m: NoteOpenMessage) => void, a
     return false;
   };
 
-  /** A note is waiting, or GitHub removed, replaced, moved or re-laid-out what it was under. */
-  const needsPass = (): boolean => {
-    for (const h of held.values()) {
-      if (h.line === null || !h.line.isConnected || !under(h.line, h.row) || h.cell.colSpan !== columns(h.line)) return true;
-    }
-    return false;
-  };
+  /** The note is under its line, which is on the page, and spans the line's columns. */
+  const inPlace = (h: Held): boolean =>
+    h.line !== null && h.line.isConnected && under(h.line, h.row) && h.cell.colSpan === columns(h.line);
 
+  // A pass is needed when a note is waiting, GitHub removed, replaced, moved or re-laid-out what one was under, or the
+  // watched container left the page.
   const observer = new MutationObserver(() => {
-    if (timer === null && needsPass()) timer = setTimeout(pass, PASS_MS);
+    if (timer === null && ((watched !== null && !watched.isConnected) || [...held.values()].some((h) => !inPlace(h)))) {
+      timer = setTimeout(pass, PASS_MS);
+    }
   });
 
-  /** Watches the view's files container, or the body while there is none. */
+  /**
+   * Watches the view's files container, or the body while there is none, and the children of each of its ancestors, so a
+   * container rendered anew in its place is seen; the next pass watches the new one.
+   */
   const watch = (view: ReturnType<typeof detectView>): void => {
     const target = (view === null ? null : doc.querySelector(FILES[view].css)) ?? doc.body;
     if (target === watched) return;
     observer.disconnect();
     watched = target;
-    if (target !== null) observer.observe(target, { childList: true, subtree: true });
+    if (target === null) return;
+    observer.observe(target, { childList: true, subtree: true });
+    for (let up = target.parentNode; up !== null; up = up.parentNode) observer.observe(up, { childList: true });
   };
 
-  /** Puts every note under its line when the line is on the page; a note whose line is not stays off the page and waits. */
+  /**
+   * Puts every note that is not in place under its line when the line is on the page; a note whose line is not stays off
+   * the page and waits. A page that is no longer the pull request's Files changed view (it can change before the address
+   * watcher says so) loses every note instead.
+   */
   function pass(): ReturnType<typeof detectView> {
     if (timer !== null) clearTimeout(timer);
     timer = null;
+    if (pr !== null && !isFilesOf(address(), pr)) {
+      clear();
+      return null;
+    }
     const view = detectView(doc);
     for (const h of held.values()) {
+      if (inPlace(h)) continue;
       const file = view === null ? null : findFile(doc, h.note.anchorId);
       h.line = file === null || view === null ? null : findLine(doc, view, file, h.note.anchorId, h.note.line);
       if (h.line === null) {

@@ -26,7 +26,11 @@ beforeEach(() => {
   });
 });
 
+// Every Notes a test made, stopped after it: one left running watches the document and would act on the next test's page.
+const made: Notes[] = [];
+
 afterEach(() => {
+  for (const notes of made.splice(0)) notes.stop();
   vi.restoreAllMocks();
   vi.useRealTimers();
   document.documentElement.innerHTML = '<head></head><body></body>';
@@ -43,6 +47,7 @@ function setup(href = FILES_URL): { notes: Notes; sent: NoteOpenMessage[]; go(ne
   let address = href;
   const sent: NoteOpenMessage[] = [];
   const notes = createNotes(document, (m) => void sent.push(m), () => address);
+  made.push(notes);
   return { notes, sent, go: (next) => { address = next; } };
 }
 
@@ -101,10 +106,11 @@ describe('placing notes', () => {
         expect(cell.colSpan).toBe(3);
         expect(cell.children).toHaveLength(1);
         const host = cell.firstElementChild!;
-        for (const el of [row, host]) {
-          expect(el.getAttribute('role')).toBe('note');
-          expect(el.getAttribute('aria-label')!.startsWith('Airlock note')).toBe(true);
-        }
+        // The row stays a table row for screen readers; the note is the host inside its cell.
+        expect(row.hasAttribute('role')).toBe(false);
+        expect(row.hasAttribute('aria-label')).toBe(false);
+        expect(host.getAttribute('role')).toBe('note');
+        expect(host.getAttribute('aria-label')).toBe(NOTE_LABEL);
         const seen = inside(row);
         expect(seen.word).toBe(SEVERITY_WORD[n.severity]);
         expect(seen.title).toBe(n.title);
@@ -267,6 +273,91 @@ describe('when GitHub renders the diff again', () => {
     expect(rows()).toHaveLength(1);
   });
 
+  it('a files container rendered anew is watched in its place, and the body is watched when none is left', async () => {
+    for (const [html, view] of [[CLASSIC_HTML, 'classic'], [REACT_HTML, 'react']] as const) {
+      load(html);
+      const github = live();
+      const { notes } = setup();
+      notes.set(message([note(), GUARD_NOTE]));
+      // GitHub mounts the whole list again, as served, with no change of address.
+      const served = new DOMParser().parseFromString(html, 'text/html').querySelector(FILES[view].css)!;
+      document.querySelector(FILES[view].css)!.replaceWith(document.importNode(served, true));
+      await settle();
+      expect(rows(), view).toHaveLength(2);
+      expect(rowOf(note().id)!.previousElementSibling).toBe(lineRow(view, PAUSE, 11));
+      // The new container is the one watched: a re-render inside it is seen.
+      github.rerender(PAUSE);
+      await settle();
+      expect(rowOf(note().id)!.previousElementSibling, view).toBe(lineRow(view, PAUSE, 11));
+
+      // The container goes and its files stay: the body is watched.
+      const list = document.querySelector(FILES[view].css)!;
+      list.replaceWith(...list.childNodes);
+      await settle();
+      github.rerender(GUARD);
+      await settle();
+      expect(rowOf(GUARD_NOTE.id)!.previousElementSibling, view).toBe(lineRow(view, GUARD, 4));
+      expect(rows()).toHaveLength(2);
+      notes.stop();
+    }
+  });
+
+  it('a pass after the page left the Files changed view places nothing and removes every note', async () => {
+    load(REACT_HTML);
+    const github = live();
+    const page = setup();
+    page.notes.set(message([note(), GUARD_NOTE]));
+    // The newer view moves to one commit's diff: the files change before the address watcher says so.
+    page.go('https://github.com/acme/widgets/pull/1/commits/0123456');
+    github.rerender(PAUSE);
+    await settle();
+    expect(rows()).toEqual([]);
+    // Nothing comes back by itself, even on the Files changed view again.
+    page.go(FILES_URL);
+    github.rerender(GUARD);
+    await settle();
+    expect(rows()).toEqual([]);
+  });
+
+  it('a pass looks up only the notes that are waiting or were taken off', async () => {
+    load(CLASSIC_HTML);
+    const github = live();
+    github.unload(GUARD);
+    const { notes } = setup();
+    notes.set(message([note(), GUARD_NOTE]));
+    const looked = vi.spyOn(document, 'getElementById');
+    // Something unrelated changes inside the files while a note waits: a pass runs for the waiting note only.
+    document.getElementById(PAUSE)!.append(document.createElement('i'));
+    looked.mockClear();
+    await settle();
+    const asked = (anchor: string) => looked.mock.calls.filter(([id]) => id.startsWith(anchor)).length;
+    expect(asked(GUARD)).toBeGreaterThan(0);
+    expect(asked(PAUSE)).toBe(0);
+    // A placed note taken off by a re-render is looked up again.
+    github.rerender(PAUSE);
+    looked.mockClear();
+    await settle();
+    expect(asked(PAUSE)).toBeGreaterThan(0);
+    expect(rowOf(note().id)!.previousElementSibling).toBe(lineRow('classic', PAUSE, 11));
+  });
+
+  it('page changes that leave every note in place start no pass', async () => {
+    load(REACT_HTML);
+    const { notes } = setup();
+    notes.set(message([note(), GUARD_NOTE]));
+    const header = document.getElementById(GUARD)!.querySelector('h3')!;
+    const line = lineRow('react', PAUSE, 11)!;
+    const looked = vi.spyOn(document, 'getElementById');
+    header.append(document.createElement('i'));
+    document.body.append(document.createElement('div'));
+    line.setAttribute('aria-selected', 'true');
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+    await settle();
+    expect(looked).not.toHaveBeenCalled();
+    expect(rows()).toHaveLength(2);
+  });
+
   it('switching to split view keeps one note per line spanning the row', async () => {
     for (const [html, view] of [[CLASSIC_HTML, 'classic'], [REACT_HTML, 'react']] as const) {
       load(html);
@@ -358,13 +449,13 @@ describe('what the page can see', () => {
     expect(seen.root.querySelector('span')!.children).toHaveLength(0);
     expect(seen.root.querySelectorAll('img')).toHaveLength(0);
     expect(document.querySelectorAll('img').length).toBe(images);
-    // The page's view of the note: the id, a role and a fixed label, and an empty host whose root it cannot open.
+    // The page's view of the note: the id, and an empty host with a role and a fixed label whose root it cannot open.
     const host = row.querySelector('td')!.firstElementChild!;
-    expect(row.getAttributeNames().sort()).toEqual(['aria-label', 'data-airlock-note', 'role']);
+    expect(row.getAttributeNames()).toEqual(['data-airlock-note']);
     expect(row.getAttribute(ATTR)).toBe(note().id);
-    expect(row.getAttribute('aria-label')).toBe(NOTE_LABEL);
     expect(row.querySelector('td')!.getAttributeNames()).toEqual(['colspan']);
     expect(host.getAttributeNames().sort()).toEqual(['aria-label', 'role']);
+    expect(host.getAttribute('aria-label')).toBe(NOTE_LABEL);
     expect(host.shadowRoot).toBeNull();
     expect(host.childNodes).toHaveLength(0);
     for (const text of ['loud', 'onerror', 'quoted', 'Pause', 'Fix', 'Open in Airlock']) {
@@ -373,17 +464,48 @@ describe('what the page can see', () => {
     }
   });
 
-  it('Open in Airlock sends the note id and nothing else', () => {
+  it('Open in Airlock sends the note id and nothing else, and only for a click the person made', () => {
     load(REACT_HTML);
     const { notes, sent } = setup();
     notes.set(message([note(), GUARD_NOTE]));
     const row = rowOf(GUARD_NOTE.id)!;
-    row.click();
-    inside(row).root.querySelector('b')!.click();
+    const trusted = (): MouseEvent => {
+      const event = new MouseEvent('click', { bubbles: true });
+      // What the browser sets on a real click (happy-dom has no isTrusted of its own).
+      Object.defineProperty(event, 'isTrusted', { value: true });
+      return event;
+    };
+    row.dispatchEvent(trusted());
+    inside(row).root.querySelector('b')!.dispatchEvent(trusted());
     expect(sent).toEqual([]);
+    // A click made by a script (as a page script would make one) sends nothing.
     inside(row).button.click();
+    inside(row).button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(sent).toEqual([]);
+    inside(row).button.dispatchEvent(trusted());
     expect(sent).toEqual([{ type: 'airlock:note-open', id: GUARD_NOTE.id }]);
     expect(Object.keys(sent[0]!)).toEqual(['type', 'id']);
+  });
+
+  it('a row that only carries a copied note attribute is not taken for Airlock\'s note', async () => {
+    load(CLASSIC_HTML);
+    const { notes } = setup();
+    notes.set(message([note()]));
+    const line = lineRow('classic', PAUSE, 11)!;
+    const ours = rowOf(note().id)!;
+    // A page script puts its own row, with the same attribute and id, between the line and the note.
+    const copy = document.createElement('tr');
+    copy.setAttribute(ATTR, note().id);
+    line.after(copy);
+    await settle();
+    expect(line.nextElementSibling).toBe(ours);
+    expect(ours.nextElementSibling).toBe(copy);
+    // The same notes again: Airlock's row is kept and the copy is left alone, neither used nor removed.
+    notes.set(message([note()]));
+    expect(rows()).toEqual([ours, copy]);
+    expect(line.nextElementSibling).toBe(ours);
+    notes.set(message([]));
+    expect(rows()).toEqual([copy]);
   });
 
   it('no GitHub element is changed: the page without Airlock rows is identical before and after', async () => {
