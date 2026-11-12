@@ -7,7 +7,9 @@ import { MESSAGE_MAX, PostRecordSchema, visibleText, type ForgetPostBody, type P
 import { z } from 'zod';
 import { writeList } from '../dismissals.js';
 import { pathsForLog } from '../http.js';
-import { listReviews, readLogin, readPull, reviewToSend, sendReview, type SendResult } from './github.js';
+import {
+  listReviewComments, listReviews, readLogin, readPull, reviewToSend, sendReview, type GitHubComment, type GitHubReview, type SendResult,
+} from './github.js';
 import type { PreviewDeps } from './preview.js';
 
 /** A refusal with the status the route answers with; the message is for the person. */
@@ -31,11 +33,46 @@ const BROKEN =
   'Airlock could not read its record of what was posted on this pull request, so it will not post. Fix or move that file in the posts folder of the Airlock home.';
 export const FOUND_ON_GITHUB = 'GitHub has this review: it was posted. Nothing was forgotten.';
 const NOT_ASKED = 'Airlock could not ask GitHub whether this review exists, so the record was kept.';
+const MORE_THAN_ONE = 'GitHub has more than one review that could be this post. Look at the pull request; the record was kept.';
 /** How many times the posted record is written after GitHub accepted the post (local writes; GitHub is never asked twice). */
 const POSTED_WRITES = 3;
 
 /** The SHA-256, in lower-case hex, of a review's text: how a review GitHub holds is recognised as a post, without its text. */
 export const bodyHash = (body: string): string => createHash('sha256').update(body).digest('hex');
+
+/** One inline comment as its hash reads it: start line null for a comment on one line. */
+interface HashedComment { path: string; line: number; startLine: number | null; body: string }
+
+/**
+ * The SHA-256, in lower-case hex, of a review's inline comments: each one's path, line, start line (null for one line) and
+ * text, in order. With the text's hash it tells a post's review apart from another post's review with the same text.
+ */
+export const commentsHash = (comments: readonly HashedComment[]): string =>
+  createHash('sha256').update(JSON.stringify(comments.map((c) => [c.path, c.line, c.startLine, c.body]))).digest('hex');
+
+/**
+ * The hashes a review's comments, as GitHub holds them now, could have been sent with: by their lines as now and by the
+ * lines at the commit they were posted at (a push since can make a comment outdated, with no line as now), each with
+ * the text as it is and with `\r\n` read as `\n`. A comment with no line either way gives no hash.
+ */
+function heldCommentsHashes(comments: readonly GitHubComment[]): string[] {
+  type Lines = (c: GitHubComment) => [number | null, number | null];
+  const hashOf = (lines: Lines, text: (t: string) => string): string | null => {
+    const hashed: HashedComment[] = [];
+    for (const c of comments) {
+      const [line, startLine] = lines(c);
+      if (line === null) return null;
+      hashed.push({ path: c.path, line, startLine, body: text(c.body) });
+    }
+    return commentsHash(hashed);
+  };
+  const now: Lines = (c) => [c.line, c.startLine];
+  const posted: Lines = (c) => [c.originalLine, c.originalStartLine];
+  const asIs = (t: string): string => t;
+  const lineFeeds = (t: string): string => t.replace(/\r\n/g, '\n');
+  const all = [hashOf(now, asIs), hashOf(now, lineFeeds), hashOf(posted, asIs), hashOf(posted, lineFeeds)];
+  return [...new Set(all.filter((h): h is string => h !== null))];
+}
 
 /** A message for the log: paths in the Airlock home written from it (`posts/<slug>/<n>.json`), any other of the person's paths hidden. */
 const forLog = (home: string, e: unknown): string => pathsForLog(e instanceof Error ? e.message : String(e), [home], [homedir()]);
@@ -227,6 +264,7 @@ export async function post(deps: PostDeps, previewId: string): Promise<PostRecor
       outcome: 'unknown', githubReviewId: null, url: null,
       items: preview.items.map((i) => ({ fingerprint: i.fingerprint, aliases: i.aliases, placement: i.placement })),
       bodyHash: bodyHash(sent.body), postedAs: login,
+      commentsHash: commentsHash(sent.comments.map((c) => ({ path: c.path, line: c.line, startLine: c.start_line ?? null, body: c.body }))),
     });
     // The preview is spent before anything can reach GitHub; it comes back only if nothing was sent.
     deps.previews.remove(previewId);
@@ -286,11 +324,38 @@ export async function post(deps: PostDeps, previewId: string): Promise<PostRecor
 export type ForgetResult = { forgotten: boolean } | { found: PostRecord };
 
 /**
+ * The reviews GitHub holds that could be the record's post: by the record's account, at its commit, with its text's
+ * hash, not held by another record of the pull request, and, when the record has its comments' hash, with comments of
+ * that hash (each such review's comments are read, side by side; a list that is read but is not comments matches
+ * nothing). Null when a list of comments could not be read.
+ */
+async function candidatesFor(
+  exec: PostDeps['exec'], record: PostRecord, others: readonly PostRecord[], reviews: readonly GitHubReview[],
+): Promise<GitHubReview[] | null> {
+  const { bodyHash: hash, postedAs } = record;
+  const held = new Set(others.map((r) => r.githubReviewId).filter((id) => id !== null));
+  const byText = reviews.filter((r) => !held.has(r.id)
+    && r.login !== null && postedAs !== undefined && r.login.toLowerCase() === postedAs.toLowerCase()
+    && r.commitId !== null && r.commitId.toLowerCase() === record.headSha.toLowerCase()
+    && (bodyHash(r.body) === hash || bodyHash(r.body.replace(/\r\n/g, '\n')) === hash));
+  const wanted = record.commentsHash;
+  // A record kept before the comments' hash was is matched by its text alone.
+  if (wanted === undefined) return byText;
+  const reads = await Promise.all(byText.map((r) => listReviewComments(exec, record.repo, record.number, r.id)));
+  if (reads.some((read) => read.kind === 'no-answer')) return null;
+  return byText.filter((_, i) => {
+    const read = reads[i];
+    return read?.kind === 'comments' && heldCommentsHashes(read.comments).includes(wanted);
+  });
+}
+
+/**
  * Removes a record whose outcome is unknown, once the person says it was not posted; a posted one is kept (409). First
- * GitHub is asked (`listReviews`, a read) for a review by the record's account, at the record's commit, whose text has the
- * record's hash: when there is one, the record becomes `posted` with that review's id and is returned as found; when the
- * list cannot be read, the record is kept (502). A record kept before the hash and the account were (no `bodyHash` or no
- * `postedAs`) cannot be recognised, so it is forgotten without asking.
+ * GitHub is asked (`listReviews`, then `listReviewComments`, reads) for the reviews that could be the post (see
+ * `candidatesFor`). Exactly one: the record becomes `posted` with that review's id and is returned as found. None: the
+ * record is forgotten. More than one: the record is kept (409), and the person is told to look at the pull request. When
+ * a list cannot be read, the record is kept (502). A record kept before the text's hash and the account were (no
+ * `bodyHash` or no `postedAs`) cannot be recognised, so it is forgotten without asking.
  */
 export async function forget(deps: Pick<PostDeps, 'home' | 'exec' | 'write'>, body: ForgetPostBody): Promise<ForgetResult> {
   const write = deps.write ?? writeList;
@@ -299,13 +364,13 @@ export async function forget(deps: Pick<PostDeps, 'home' | 'exec' | 'write'>, bo
     const found = list.find((r) => r.id === body.id);
     if (found === undefined) return { forgotten: false };
     if (found.outcome !== 'unknown') throw new PostError(409, KEPT);
-    const { bodyHash: hash, postedAs } = found;
-    if (hash !== undefined && postedAs !== undefined) {
+    if (found.bodyHash !== undefined && found.postedAs !== undefined) {
       const reviews = await listReviews(deps.exec, found.repo, found.number);
       if (reviews === null) throw new PostError(502, NOT_ASKED);
-      const match = reviews.find((r) => r.login !== null && r.login.toLowerCase() === postedAs.toLowerCase()
-        && r.commitId !== null && r.commitId.toLowerCase() === found.headSha.toLowerCase()
-        && (bodyHash(r.body) === hash || bodyHash(r.body.replace(/\r\n/g, '\n')) === hash));
+      const candidates = await candidatesFor(deps.exec, found, list.filter((r) => r.id !== found.id), reviews);
+      if (candidates === null) throw new PostError(502, NOT_ASKED);
+      if (candidates.length > 1) throw new PostError(409, MORE_THAN_ONE);
+      const [match] = candidates;
       if (match !== undefined) {
         const posted = PostRecordSchema.parse({
           ...found, outcome: 'posted', githubReviewId: match.id,

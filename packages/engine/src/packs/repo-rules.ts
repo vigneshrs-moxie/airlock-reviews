@@ -113,24 +113,71 @@ export async function loadRepoRules(baseDir: string, changedPaths: string[], exe
 /** One entry of a commit's tree, as `git ls-tree -l` gives it; `size` is null for anything but a blob. */
 interface TreeEntry { mode: string; type: string; id: string; size: number | null }
 
-/** The entries of `commit`'s tree at `paths` (taken literally, from the top of the tree), by path. */
+/** One entry of a folder of the tree: its full path in the tree, its own name, and what `git ls-tree -l` says of it. */
+interface Listed { path: string; name: string; entry: TreeEntry }
+
+/**
+ * The entries directly inside each folder of `dirs` ('' for the top of the tree; real paths, taken literally) of
+ * `commit`'s tree, in git's order, by folder: one `git ls-tree` for the top and one for all the other folders.
+ */
+async function listFolders(exec: Exec, gitDir: string, commit: string, dirs: string[]): Promise<Map<string, Listed[]>> {
+  const out = new Map<string, Listed[]>(dirs.map((d) => [d, []]));
+  const inner = dirs.filter((d) => d !== '');
+  const calls = [...(dirs.includes('') ? [[]] : []), ...(inner.length > 0 ? [['--', ...inner.map((d) => `${d}/`)]] : [])];
+  for (const paths of calls) {
+    const res = await exec('git', ['--git-dir', gitDir, '--literal-pathspecs', 'ls-tree', '-z', '-l', '--full-tree', commit, ...paths]);
+    if (res.code !== 0) throw new Error(`git ls-tree failed (exit ${res.code}): ${res.stderr}`);
+    for (const record of res.stdout.split('\0')) {
+      const m = /^(\d{6}) (\w+) ([0-9a-f]+) +(\d+|-)\t(.+)$/s.exec(record);
+      if (!m) continue;
+      const path = m[5]!;
+      const dir = posix.dirname(path);
+      const entry = { mode: m[1]!, type: m[2]!, id: m[3]!, size: m[4] === '-' ? null : Number(m[4]) };
+      out.get(dir === '.' ? '' : dir)?.push({ path, name: posix.basename(path), entry });
+    }
+  }
+  return out;
+}
+
+/** Of a folder's entries, the one named `name`: spelled exactly so first, else the first whose name differs only by case. */
+function named(entries: Listed[], name: string): Listed | undefined {
+  const lower = name.toLowerCase();
+  return entries.find((e) => e.name === name) ?? entries.find((e) => e.name.toLowerCase() === lower);
+}
+
+/**
+ * The entries of `commit`'s tree at `paths` (from the top of the tree), by the path as given, each part of the path matched
+ * as a disk that ignores letter case would match it (see named): a first review reads the rule files from a checkout on
+ * such a disk, so `Claude.md` is read for `CLAUDE.md`. One tree level is listed per git call.
+ */
 async function treeEntries(exec: Exec, gitDir: string, commit: string, paths: string[]): Promise<Map<string, TreeEntry>> {
   const entries = new Map<string, TreeEntry>();
-  if (paths.length === 0) return entries;
-  const res = await exec('git', ['--git-dir', gitDir, '--literal-pathspecs', 'ls-tree', '-z', '-l', '--full-tree', commit, '--', ...paths]);
-  if (res.code !== 0) throw new Error(`git ls-tree failed (exit ${res.code}): ${res.stderr}`);
-  for (const record of res.stdout.split('\0')) {
-    const m = /^(\d{6}) (\w+) ([0-9a-f]+) +(\d+|-)\t(.+)$/s.exec(record);
-    if (m) entries.set(m[5]!, { mode: m[1]!, type: m[2]!, id: m[3]!, size: m[4] === '-' ? null : Number(m[4]) });
+  const listed = new Map<string, Listed[]>();
+  /** Each path still being looked for, and the real path of the folder its parts so far were found in. */
+  let looking = paths.map((path) => ({ path, parts: path.split('/'), dir: '' }));
+  for (let depth = 0; looking.length > 0; depth++) {
+    const dirs = [...new Set(looking.map((l) => l.dir))].filter((d) => !listed.has(d));
+    for (const [dir, found] of await listFolders(exec, gitDir, commit, dirs)) listed.set(dir, found);
+    const deeper: typeof looking = [];
+    for (const l of looking) {
+      const last = depth === l.parts.length - 1;
+      const here = listed.get(l.dir) ?? [];
+      const hit = named(last ? here : here.filter((e) => e.entry.type === 'tree'), l.parts[depth]!);
+      if (hit === undefined) continue;
+      if (last) entries.set(l.path, hit.entry);
+      else deeper.push({ ...l, dir: hit.path });
+    }
+    looking = deeper;
   }
   return entries;
 }
 
 /**
- * The rule files `loadRepoRules` would read from a checkout of `commit`, read from the git folder `gitDir` instead (a
- * re-review has no checkout of the pull request's base), with the same order and limits. Each file is read as git
- * stores it, with no filter or conversion; a link is read from the file it points to, when that is inside the
- * repository and not a link itself. `commit` must be a full commit id. Throws when git cannot list the tree.
+ * The rule files `loadRepoRules` would read from a checkout of `commit` on a disk that ignores letter case (this Mac's),
+ * read from the git folder `gitDir` instead (a re-review has no checkout of the pull request's base), with the same order,
+ * names and limits: a name in another letter case is found (see treeEntries). Each file is read as git stores it, with
+ * no filter or conversion; a link is read from the file it points to, when that is inside the repository and not a link
+ * itself. `commit` must be a full commit id. Throws when git cannot list the tree.
  */
 export async function loadRepoRulesAt(exec: Exec, gitDir: string, commit: string, changedPaths: string[]): Promise<RepoRules> {
   if (!FULL_COMMIT_ID.test(commit)) throw new Error(`The base commit ${JSON.stringify(commit)} is not a full commit id.`);

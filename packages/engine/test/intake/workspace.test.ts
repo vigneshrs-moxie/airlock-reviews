@@ -143,6 +143,47 @@ describe('prepareWorkspace', () => {
     }
   });
 
+  it('checks the pull request out without the person\'s git filters or hooks, so the worktrees hold the committed bytes', async () => {
+    const r = await remote();
+    // The pull request's own attributes send .txt files to a filter that only the person's configuration defines.
+    await r.write('.gitattributes', '*.txt filter=probe\n');
+    await r.write('a.txt', 'one\n');
+    const base = await r.commit('one');
+    await r.write('a.txt', 'two\n');
+    const head = await r.commit('two');
+    const dir = await mkdtemp(join(tmpdir(), 'airlock-person-'));
+    try {
+      // The person's global configuration: a smudge filter and a post-checkout hook, each leaving a marker of its own.
+      await mkdir(join(dir, 'hooks'));
+      await writeFile(join(dir, 'hooks', 'post-checkout'), `#!/bin/sh\ntouch "${join(dir, 'hook-ran')}"\n`, { mode: 0o755 });
+      const config = join(dir, 'person.gitconfig');
+      await writeFile(config, `[filter "probe"]\n\tsmudge = touch "${join(dir, 'smudge-ran')}" && sed s/o/0/g\n[core]\n\thooksPath = ${join(dir, 'hooks')}\n`);
+      const asThePerson: Exec = (cmd, args, opts) => realExec(cmd, args, { ...opts, env: { GIT_CONFIG_GLOBAL: config, ...opts?.env } });
+      const ran = async (): Promise<string[]> =>
+        (await Promise.all(['smudge-ran', 'hook-ran'].map(async (m) => ((await exists(join(dir, m))) ? [m] : [])))).flat();
+
+      // The filter and the hook are real: a checkout run as the person runs both.
+      await asThePerson('git', ['clone', '-q', r.dir, join(dir, 'control')]);
+      expect(await ran()).toEqual(['smudge-ran', 'hook-ran']);
+      expect(await readFile(join(dir, 'control', 'a.txt'), 'utf8')).toBe('tw0\n');
+      await rm(join(dir, 'smudge-ran'));
+      await rm(join(dir, 'hook-ran'));
+
+      const ws = await prepareWorkspace(asThePerson, {
+        repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: base, headSha: head }, reviewId: 'no-filters',
+      });
+      try {
+        expect(await ran()).toEqual([]);
+        expect(await readFile(join(ws.baseDir, 'a.txt'), 'utf8')).toBe('one\n');
+        expect(await readFile(join(ws.headDir, 'a.txt'), 'utf8')).toBe('two\n');
+      } finally {
+        await ws.dispose();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('fails with a clear message when a SHA is unknown', async () => {
     const r = await remote();
     await r.write('a.txt', 'one');

@@ -272,3 +272,61 @@ export async function listReviews(exec: Exec, repo: string, number: number): Pro
   if (!parsed.success) return null;
   return parsed.data.map((r) => ({ id: r.id, login: r.user?.login ?? null, commitId: r.commit_id ?? null, body: r.body ?? '' }));
 }
+
+/**
+ * How long the read of one review's comments may take: every page of it. With the list of reviews before it, under the
+ * panel's 60-second limit on a call.
+ */
+export const COMMENTS_TIMEOUT_MS = 20_000;
+
+const lineOf = z.number().int().positive().nullable().optional();
+const GitHubCommentSchema = z.object({
+  path: z.string(), line: lineOf, start_line: lineOf, original_line: lineOf, original_start_line: lineOf, body: z.string(),
+});
+
+/**
+ * An inline comment of a review as GitHub holds it: its path, its line and start line in the diff as now (null once a push
+ * made it outdated, or for one line), the same at the commit it was posted at, and its text.
+ */
+export interface GitHubComment {
+  path: string;
+  line: number | null;
+  startLine: number | null;
+  originalLine: number | null;
+  originalStartLine: number | null;
+  body: string;
+}
+
+export type CommentsRead = { kind: 'comments'; comments: GitHubComment[] } | { kind: 'unparsed' } | { kind: 'no-answer' };
+
+/**
+ * The inline comments of one review: `gh api repos/<repo>/pulls/<number>/reviews/<id>/comments --paginate`, a read, within
+ * COMMENTS_TIMEOUT_MS. Says whether they were read, read but not a list of comments (`unparsed`), or not read at all (gh
+ * missing, an error, no answer in time). Throws, before running anything, for a repository name, a number or a review id
+ * that is not one: the id is GitHub's and must be a positive safe integer.
+ */
+export async function listReviewComments(exec: Exec, repo: string, number: number, reviewId: number): Promise<CommentsRead> {
+  if (!isRepo(repo) || !PrNumberSchema.safeParse(number).success || !Number.isSafeInteger(reviewId) || reviewId <= 0) {
+    throw new Error('Airlock will not read that address.');
+  }
+  let result: { stdout: string; stderr: string; code: number };
+  try {
+    result = await exec('gh', ['api', `repos/${repo}/pulls/${number}/reviews/${reviewId}/comments`, '--paginate'], {
+      timeoutMs: COMMENTS_TIMEOUT_MS,
+    });
+  } catch {
+    return { kind: 'no-answer' };
+  }
+  if (result.code !== 0) return { kind: 'no-answer' };
+  const pages = jsonValues(result.stdout);
+  if (pages === null || pages.length === 0 || !pages.every((page) => Array.isArray(page))) return { kind: 'unparsed' };
+  const parsed = z.array(GitHubCommentSchema).safeParse(pages.flat());
+  if (!parsed.success) return { kind: 'unparsed' };
+  return {
+    kind: 'comments',
+    comments: parsed.data.map((c) => ({
+      path: c.path, line: c.line ?? null, startLine: c.start_line ?? null,
+      originalLine: c.original_line ?? null, originalStartLine: c.original_start_line ?? null, body: c.body,
+    })),
+  };
+}
