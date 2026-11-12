@@ -149,6 +149,10 @@ export const PostRecordSchema = z.object({
   id: PostIdSchema, repo, number, reviewId: ReviewIdSchema, headSha: z.string().regex(/^[0-9a-f]{7,64}$/), postedAt: z.string(),
   outcome: z.enum(['posted', 'unknown']), githubReviewId: z.number().int().positive().nullable(), url: z.string().nullable(),
   items: z.array(z.object({ fingerprint: FingerprintSchema, aliases: z.array(FingerprintSchema).max(50), placement: PlacementSchema })),
+  /** The SHA-256 of the review body that was sent, so a review GitHub holds can be recognised as this post without keeping its text. */
+  bodyHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /** The GitHub account the review was posted as. */
+  postedAs: z.string().max(100).optional(),
 }).superRefine((record, ctx) => {
   const bad = (path: string, message: string): void => ctx.addIssue({ code: 'custom', path: [path], message });
   if (record.outcome === 'unknown') {

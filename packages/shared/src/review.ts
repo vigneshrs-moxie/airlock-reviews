@@ -205,5 +205,11 @@ export const ReviewDocumentSchema = z.object({
   fixed: z.array(FindingSchema).optional(),
   /** The review this one continues. */
   previous: z.object({ reviewId: z.string().regex(/^r_[0-9a-f]{10}$/), headSha: z.string().regex(/^[0-9a-f]{7,64}$/) }).optional(),
+  /**
+   * Set whenever the range is a merge (`range.kind` is `sync-merge`): `by-hand` when what was changed by hand in the merge
+   * was reviewed, `nothing-by-hand` when git merged it without conflicts and nothing was changed, `not-reviewed` when it is
+   * a merge Airlock could not review (the stage error says why). Readers must not say a merge was reviewed without it.
+   */
+  mergeReview: z.enum(['by-hand', 'nothing-by-hand', 'not-reviewed']).optional(),
 });
 export type ReviewDocument = z.infer<typeof ReviewDocumentSchema>;
