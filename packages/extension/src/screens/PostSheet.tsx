@@ -343,7 +343,7 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
         {pullLink}
         {saidLine}
         {offlineLine}
-        <ForgetAsk blocked={canSend ? null : offline ? NO_POST_OFFLINE : WAIT} onForget={forget} />
+        <ForgetAsk blocked={canSend ? null : !current ? NOT_THIS_REVIEW_POST : offline ? NO_POST_OFFLINE : WAIT} onForget={forget} />
         <div className="actions">
           <button type="button" className="btn" disabled={inFlight} onClick={onClose}>Close</button>
         </div>

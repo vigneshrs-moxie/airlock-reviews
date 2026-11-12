@@ -14,6 +14,8 @@ export const NO_REMOVE_UNPAIRED = 'Removing a line needs this panel to be paired
 export const REMOVED = 'Removed.';
 /** A removal whose answer was lost: the line may be gone or not, so the list is read again. */
 export const REMOVE_UNKNOWN = 'Airlock got no answer from its service, so it cannot tell whether the line was removed. The list below is read again.';
+/** A removal never sent: the proof that comes before it got no answer. */
+export const REMOVE_NOT_SENT = 'Airlock could not reach its service, so nothing was removed.';
 /** The team's own pack: its lines are not the person's to edit, whether or not it holds any. */
 export const KIT_PACK = 'raj-standard';
 /** A pack's count against the cap is shown only for a kind holding more lines than this. */
@@ -41,7 +43,8 @@ export interface Refusal { pack: string; kind: LearnedKind; key: string; message
  * removal itself. Only the latest read counts. What is shown belongs to one repository: a different repository drops the
  * old lines, note and refusal in the same render, and a removal answered after the repository changed is dropped and
  * not followed by a read. The result of a removal (`result`) and a refusal live here, not in the lists, so they outlast a
- * re-read that fails. A removal whose answer was lost says so and reads the lines again.
+ * re-read that fails. A removal whose answer was lost says so and reads the lines again; one never sent, because the
+ * proof before it got no answer, says nothing was removed, on its line.
  */
 export function useLearned(
   repo: string | null,
@@ -107,7 +110,7 @@ export function useLearned(
       },
       async (error: unknown) => {
         if (moved()) { settle(); return; }
-        if (error instanceof ServiceError && error.kind === 'offline') {
+        if (error instanceof ServiceError && error.kind === 'offline' && !error.beforeSending) {
           // The removal may have gone through: say the outcome is not known, and show what is there now.
           setResult({ repo, note: REMOVE_UNKNOWN, pack: line.pack, at: stamp });
           await read(true);
@@ -115,7 +118,9 @@ export function useLearned(
           return;
         }
         settle();
-        setRefusal({ repo, pack: line.pack, kind: line.kind, key: line.key, message: failureWords(error), at: stamp });
+        // Not sent (the proof got no answer), or refused: nothing was removed, so the line says why and nothing is read again.
+        const unsent = error instanceof ServiceError && error.kind === 'offline' && error.beforeSending;
+        setRefusal({ repo, pack: line.pack, kind: line.kind, key: line.key, message: unsent ? REMOVE_NOT_SENT : failureWords(error), at: stamp });
       },
     );
   };

@@ -41,7 +41,13 @@ You do this once. The token stays on this Mac.
 
 Before the panel sends the token, it asks whatever answers on Airlock's port to prove it already holds the same token, without the token itself being sent. The proof names the port, so a proof Airlock gave on another port does not count. A proof is good for one second: an action within a second of the last check is not checked again, and any action after that is. Pairing, and following a running review, always check first.
 
-If something else is listening on the port while Airlock is stopped, the panel never sends it the token. What you see depends on how that program answers. If it answers like Airlock but cannot give the proof, the panel shows the Pair screen saying "The service could not show that it holds this panel's token, so the token was not sent. If you replaced the token, paste the new one. If you did not, another program may be answering on Airlock's port." If it answers some other way, the panel shows "Airlock got a reply from its service that it does not understand." when it next loads, and until then the screen you had stays. `npm run service -- status` makes the same check.
+If something else is listening on the port while Airlock is stopped, the panel never sends it the token. What you see depends on how that program answers:
+
+- If it answers like Airlock but cannot give the proof, the panel shows the Pair screen saying "The service could not show that it holds this panel's token, so the token was not sent. If you replaced the token, paste the new one. If you did not, another program may be answering on Airlock's port."
+- If it refuses the panel (HTTP 401), the panel shows the Pair screen without that sentence.
+- If it answers with an error and a sentence of its own, the panel shows that sentence, as text. Any other answer gives "Airlock got a reply from its service that it does not understand."
+
+The panel shows this when it next loads; until then the screen you had stays. If you press a button meanwhile, the panel shows it at once instead: the Pair screen as above, or the sentence as a notice on the screen you are on. `npm run service -- status` makes the same check.
 
 ### Replacing the token
 
@@ -82,9 +88,9 @@ In the text Airlock writes, a name gets a space after the `@` (`@ carol`), so Gi
 
 Airlock refuses to post, and says why, when the pull request is closed or merged, or has new commits since the review. After new commits, review the push first (see the next section), then post. It also refuses, and sends nothing, when `gh` is signed in as another account than the one the preview named; open the preview again to post as the account `gh` is signed in as now.
 
-A post can take up to about two minutes when another post to the same pull request is in flight (from a second panel, for example): Airlock sends one at a time. The sheet then says "Waiting to hear whether GitHub accepted the comments…", and when the wait is over it shows what Airlock's record says.
+A post can take a while when GitHub is slow, or when another post to the same pull request is in flight (from a second panel, for example): Airlock sends one at a time. The panel first waits up to 75 seconds for the service's answer; meanwhile the sheet is locked and shows no new sentence. If no answer comes, the panel then reads Airlock's record of the post every 5 seconds for up to 90 seconds more, and only then does the sheet say "Waiting to hear whether GitHub accepted the comments…". When a record appears, the sheet shows what it says. If none appears, the sheet says "Airlock could not learn what happened to this post. Look at the pull request before posting again." So the whole wait can reach almost three minutes.
 
-If the panel cannot reach the service when you press the post button, the sheet says "Airlock could not reach its service, so nothing was sent." Nothing went to GitHub; press the button again once the service answers.
+If the panel cannot reach the service when it checks the service just before sending the post, the sheet says "Airlock could not reach its service, so nothing was sent." Nothing went to GitHub; press the button again once the service answers. The panel skips that check when it last checked less than a second before. If the service stops answering in that second, the panel cannot tell whether the post was sent: it waits the 90 seconds above, then says "Airlock could not learn what happened to this post. Look at the pull request before posting again."
 
 ### The first time you post
 
@@ -100,9 +106,11 @@ What to do:
 
 1. Press **Open the pull request** and look for the comments.
 2. If they are there, leave the mark as it is.
-3. If they are not there, press **It was not posted**, in the sheet or on the finding. The panel asks "Forget this record? Only do this after looking at the pull request." Press **It was not posted** again, or **Keep** to leave it. Nothing is forgotten before Airlock has asked GitHub, as the next paragraph says.
+3. If they are not there, press **It was not posted**, in the sheet or on the finding. The panel asks "Forget this record? Only do this after looking at the pull request." Press **It was not posted** again, or **Keep** to leave it. Airlock asks GitHub before it forgets the record, as the next paragraph says.
 
-Airlock then asks GitHub first. If GitHub has the review after all, the panel says "GitHub has this review: it was posted. Nothing was forgotten." and the findings show **Posted**. If GitHub cannot be asked, it says "Airlock could not ask GitHub whether this review exists, so the record was kept." Otherwise the record is forgotten and you can post those findings again.
+Airlock then asks GitHub for a review by the same account, at the same commit, with the same text and the same comments on the same lines, that is not already the record of another post. If GitHub has exactly one, the panel says "GitHub has this review: it was posted. Nothing was forgotten." and the findings show **Posted**. If it has more than one, the panel says "GitHub has more than one review that could be this post. Look at the pull request; the record was kept." If GitHub cannot be asked, it says "Airlock could not ask GitHub whether this review exists, so the record was kept." Otherwise the record is forgotten and you can post those findings again.
+
+A record made by an earlier version of Airlock may lack what GitHub is asked about. A record without the review's text or account is forgotten without asking GitHub; one without the comments is matched by its account, commit and text alone.
 
 ## After a push
 
@@ -126,7 +134,7 @@ When the push is only a merge (usually of the base branch), the line says what w
 
 - "Review of the merge pushed since 1a2b3c4: only what was changed by hand was reviewed." when the merge had changes made by hand, and those were reviewed.
 - "The push only merged another branch in; git merged it without conflicts and nothing was changed by hand." when there was nothing to review. It names no branch, because Airlock cannot always be sure which branch the push merged.
-- No line when Airlock could not review the merge. The verdict is Incomplete, and the error under it says why.
+- No such line when Airlock could not review the merge. A note under the verdict says only that the push merges the base branch in, the verdict is Incomplete, and the error under it says why.
 
 A first review of a pull request that only merges its base branch in says the same in the heading above what it does.
 
@@ -141,7 +149,7 @@ To take a line out:
 1. Press **Remove** under it.
 2. The panel asks "Remove this line? The reviewer stops following it from the next review." Press **Remove** again, or **Keep** to leave it.
 
-The finding you dismissed stays dismissed. Lines of the team's own pack say "Managed by the team; not edited here." and have no Remove button. If the connection drops while a line is being removed, the panel says "Airlock got no answer from its service, so it cannot tell whether the line was removed. The list below is read again." and shows the lines as they are now.
+The finding you dismissed stays dismissed. Lines of the team's own pack say "Managed by the team; not edited here." and have no Remove button. If the connection drops while a line is being removed, the panel says "Airlock got no answer from its service, so it cannot tell whether the line was removed. The list below is read again." and shows the lines as they are now. If the panel cannot reach the service when it checks the service just before sending the removal, it says "Airlock could not reach its service, so nothing was removed." under the line, which stays.
 
 The lines are plain text files, so you can also edit them by hand (see the end of this guide). If a line you edited no longer reads as a learned line, Airlock skips that one line and still uses the rest of the pack.
 
