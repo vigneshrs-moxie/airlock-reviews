@@ -1,18 +1,14 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { saveReview } from '@airlock/engine';
 import { commentBody } from '@airlock/shared';
 import { buildPreview, Previews } from '../../src/posts/preview.js';
 import { FINDING_A, FINDING_B, FINDING_C, FP_A, FP_B, FP_C, NUMBER, REPO, REVIEW, review } from './rig.js';
 
-// The shared mentionsIn is changing to report every `@name` wherever it stands, code or not, because it is for text the
-// person typed. This stand-in behaves that way, so the preview is tested against it.
-vi.mock('@airlock/shared', async (original) => ({
-  ...(await original<typeof import('@airlock/shared')>()),
-  mentionsIn: (text: string): string[] => [...new Set(text.match(/@[A-Za-z0-9][A-Za-z0-9-]*/g) ?? [])],
-}));
+// The preview is tested against the shared mentionsIn itself: it reports every `@name` wherever it stands, code or
+// not, because it is for text the person typed.
 
 const savedHome = process.env['AIRLOCK_HOME'];
 let home: string | null = null;
@@ -40,17 +36,23 @@ async function preview(
 describe('mentions in a preview', () => {
   it('are empty for a body that is exactly the one drafted from the finding, and what mentionsIn finds otherwise', async () => {
     const drafted = commentBody(FINDING_A);
-    // The drafted text names someone, in backticks, so GitHub notifies no one.
-    expect(drafted).toContain('`@carol`');
+    // The drafted text breaks the name with a space and holds no backtick in its prose, so GitHub notifies no one.
+    expect(drafted).toContain('It adds @ carol to the list.');
+    expect(drafted).not.toContain('@carol');
+    expect(drafted).not.toContain('`');
     const p = await preview([{ fingerprint: FP_A }, { fingerprint: FP_C, body: 'Please look, @dave and `@erin`.' }]);
     expect(p.items[0]?.mentions).toEqual([]);
     expect(p.items[1]?.mentions).toEqual(['@dave', '@erin']);
 
-    // The drafted text sent back unchanged is still the drafted text; changed by one character, it is the person's.
+    // The drafted text sent back unchanged is still the drafted text; once changed, it is the person's: the space taken
+    // out of the name makes it live, and it is listed.
     const same = await preview([{ fingerprint: FP_A, body: drafted }]);
     expect(same.items[0]?.mentions).toEqual([]);
-    const changed = await preview([{ fingerprint: FP_A, body: `${drafted}!` }]);
+    const changed = await preview([{ fingerprint: FP_A, body: drafted.replace('@ carol', '@carol') }]);
     expect(changed.items[0]?.mentions).toEqual(['@carol']);
+    // Changed by one character elsewhere, it is still checked, and the broken name is not one.
+    const touched = await preview([{ fingerprint: FP_A, body: `${drafted}!` }]);
+    expect(touched.items[0]?.mentions).toEqual([]);
   });
 
   it('all default text gives empty lists, the review body included', async () => {

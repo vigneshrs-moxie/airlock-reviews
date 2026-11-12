@@ -54,8 +54,9 @@ describe('POST /posts/preview', () => {
       { fingerprint: FP_B, title: FINDING_B.title, path: FINDING_B.path, line: 40, startLine: null, placement: 'summary', whySummary: 'The line is not part of the diff GitHub shows.', body: commentBody(FINDING_B), mentions: [] },
       { fingerprint: FP_C, title: FINDING_C.title, path: FINDING_C.path, line: 20, startLine: 18, placement: 'inline', whySummary: null, body: commentBody(FINDING_C), mentions: [] },
     ]);
-    // A name from the pull request's text is put in backticks, so it notifies no one.
-    expect(commentBody(FINDING_A)).toContain('`@carol`');
+    // A name from the pull request's text is broken with a space, so it notifies no one.
+    expect(commentBody(FINDING_A)).toContain('@ carol');
+    expect(commentBody(FINDING_A)).not.toContain('@carol');
     expect(p.summary).toBe('Review notes from Airlock: 3 comments.');
     // The route carries the review body's names too: none here, all of it is Airlock's own text.
     expect((await s.preview({ items: [{ fingerprint: FP_A }] })).json).toMatchObject({ reviewBodyMentions: [] });

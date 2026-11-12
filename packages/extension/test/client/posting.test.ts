@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { PostPreviewBody } from '@airlock/shared';
+import { NOT_PROVED } from '../../src/client/proof';
 import { NOT_UNDERSTOOD, POST_TIMEOUT_MS, ServiceClient, ServiceError } from '../../src/client/service';
-import { BASE, FakeService, TOKEN, json, never } from '../helpers/fake-service';
+import { BASE, FakeService, OTHER_TOKEN, TOKEN, json, never } from '../helpers/fake-service';
 import { FakeTimers } from '../helpers/fake-timers';
 import { previewItem, previewOf, recordOf } from '../helpers/post-fixtures';
 
@@ -34,10 +35,24 @@ describe('posting through the client', () => {
     const { svc, client } = setup();
     svc.on('POST /posts/preview', () => json(preview));
     expect(await client.previewPost(previewBody)).toEqual(preview);
-    const req = svc.requests[0];
-    expect(req?.url.pathname).toBe('/posts/preview');
+    // The token goes only after the service proved it holds it.
+    expect(svc.calls).toEqual(['GET /hello', 'POST /posts/preview']);
+    const [hello, req] = svc.requests;
+    expect(hello?.headers.has('authorization')).toBe(false);
     expect(req?.body).toEqual(previewBody);
     expect(req?.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it('previewPost, post and forgetPost send nothing with the token to something that cannot prove it holds it', async () => {
+    for (const key of [OTHER_TOKEN, null]) {
+      const { svc, client } = setup();
+      svc.proofKey = key;
+      expect(await failure(client.previewPost(previewBody))).toMatchObject({ kind: 'unproven', message: NOT_PROVED });
+      expect(await failure(client.post({ previewId: preview.previewId }))).toMatchObject({ kind: 'unproven', message: NOT_PROVED });
+      expect(await failure(client.forgetPost({ repo: 'acme/widgets', number: 1, id: posted.id }))).toMatchObject({ kind: 'unproven', message: NOT_PROVED });
+      expect(svc.requests.filter((r) => r.headers.has('authorization'))).toEqual([]);
+      expect(new Set(svc.calls)).toEqual(new Set(['GET /hello']));
+    }
   });
 
   it('previewPost: a refusal is a problem in the service words; a reply off the contract is not understood', async () => {
@@ -52,7 +67,9 @@ describe('posting through the client', () => {
     const { svc, client } = setup();
     svc.on('POST /posts', () => json(posted));
     expect(await client.post({ previewId: preview.previewId })).toEqual({ outcome: 'posted', record: posted });
-    expect(svc.requests[0]?.body).toEqual({ previewId: preview.previewId });
+    expect(svc.calls).toEqual(['GET /hello', 'POST /posts']);
+    expect(svc.requests[1]?.body).toEqual({ previewId: preview.previewId });
+    expect(svc.requests[1]?.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
   });
 
   it.each([
@@ -110,7 +127,8 @@ describe('posting through the client', () => {
     svc.on('POST /posts/forget', () => json({ forgotten: true }));
     const body = { repo: 'acme/widgets', number: 1, id: posted.id };
     expect(await client.forgetPost(body)).toEqual({ forgotten: true });
-    expect(svc.requests[0]?.body).toEqual(body);
+    expect(svc.calls).toEqual(['GET /hello', 'POST /posts/forget']);
+    expect(svc.requests[1]?.body).toEqual(body);
     svc.on('POST /posts/forget', () => json({ error: 'This review was posted, so Airlock keeps its record.' }, 409));
     expect(await failure(client.forgetPost(body))).toMatchObject({ kind: 'problem', message: 'This review was posted, so Airlock keeps its record.' });
     svc.on('POST /posts/forget', () => json({ forgotten: 'yes' }));

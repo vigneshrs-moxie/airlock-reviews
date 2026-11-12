@@ -1,6 +1,6 @@
 import {
   ApiErrorSchema, checkCommentText, commentBody, DismissalSchema, DismissBodySchema, ForgetPostBodySchema, HelloSchema, LatestReplySchema,
-  mentionsIn, PairReplySchema, PostBodySchema, PostPreviewBodySchema, PostPreviewReplySchema, PostRecordSchema, PrSummarySchema,
+  PairReplySchema, postMentions, PostBodySchema, PostPreviewBodySchema, PostPreviewReplySchema, PostRecordSchema, PrSummarySchema,
   RestoreBodySchema, RestoreReplySchema, RunIdSchema, ServiceEventSchema, ServiceStatusSchema, StartReviewBodySchema,
   StartReviewReplySchema, summaryBody, SUMMARY_MAX,
   type Dismissal, type Finding, type LatestReply, type Placement, type PostPreviewItem, type PostPreviewReply, type PostRecord,
@@ -348,32 +348,41 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     const comments: SentReview['comments'] = [];
     const inSummary: { path: string; line: number | null; body: string }[] = [];
     const placements: Placement[] = [];
+    const texts: { body: string; isDefault: boolean; inSummary: boolean }[] = [];
     for (const [i, item] of asked.items.entries()) {
       const finding = chosen[i] as Finding;
-      const text = item.body ?? commentBody(finding);
+      const drafted = commentBody(finding);
+      const text = item.body ?? drafted;
+      const isDefault = text === drafted;
       const problem = checkCommentText(text);
       if (problem !== null) throw new Refusal(400, problem);
       const place = finding.anchor.comment ?? null;
       if (place !== null && item.placement !== 'summary') {
         const startLine = place.startLine !== null && place.startLine < place.line ? place.startLine : null;
         comments.push({ path: finding.path, line: place.line, startLine, body: text });
-        items.push({ fingerprint: item.fingerprint, title: finding.title, path: finding.path, line: place.line, startLine, placement: 'inline', whySummary: null, body: text, mentions: mentionsIn(text) });
+        items.push({ fingerprint: item.fingerprint, title: finding.title, path: finding.path, line: place.line, startLine, placement: 'inline', whySummary: null, body: text, mentions: [] });
+        texts.push({ body: text, isDefault, inSummary: false });
         placements.push('inline');
       } else {
         const line = place?.line ?? finding.anchor.startLine ?? null;
         inSummary.push({ path: finding.path, line, body: text });
         items.push({
           fingerprint: item.fingerprint, title: finding.title, path: finding.path, line, startLine: null, placement: 'summary',
-          whySummary: item.placement === 'summary' ? CHOSEN : NOT_ON_DIFF, body: text, mentions: mentionsIn(text),
+          whySummary: item.placement === 'summary' ? CHOSEN : NOT_ON_DIFF, body: text, mentions: [],
         });
+        texts.push({ body: text, isDefault, inSummary: true });
         placements.push('summary');
       }
     }
     const count = asked.items.length;
-    const summary = asked.summary ?? `Review notes from Airlock: ${count} comment${count === 1 ? '' : 's'}.`;
+    const generated = `Review notes from Airlock: ${count} comment${count === 1 ? '' : 's'}.`;
+    const summary = asked.summary ?? generated;
     const summaryProblem = checkCommentText(summary, SUMMARY_MAX);
     if (summaryProblem !== null) throw new Refusal(400, summaryProblem);
     const reviewBody = summaryBody(inSummary, summary);
+    // As the service: no names for Airlock's own text, every name once the person typed or changed any of it.
+    const named = postMentions(texts, { text: summary, isDefault: summary === generated }, reviewBody);
+    for (const [i, item] of items.entries()) item.mentions = named.items[i] ?? [];
     const previewId = `pv_${randomBytes(8).toString('hex')}`;
     const expiresAt = Date.now() + PREVIEW_MS;
     stored.set(previewId, {
@@ -383,7 +392,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     });
     const answer: PostPreviewReply = {
       previewId, headSha: doc.pr.headSha, viewer: doc.pr.viewer, items, summary, reviewBody, expiresAt: new Date(expiresAt).toISOString(),
-      reviewBodyMentions: [],
+      reviewBodyMentions: named.reviewBody,
     };
     previews.push(answer);
     reply(res, PostPreviewReplySchema, 200, answer);
