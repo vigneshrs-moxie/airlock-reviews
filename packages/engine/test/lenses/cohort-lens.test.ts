@@ -2,6 +2,7 @@ import type { ChangeMap } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
 import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import { runCohortLenses } from '../../src/lenses/cohort-lens.js';
+import { MAX_FACTS_PER_CHECK } from '../../src/lenses/context.js';
 import { applyHoldout } from '../../src/packs/holdout.js';
 import {
   block, cohort, ctx, diff, labels, layer, lens, pack, pr, rawCandidate, tier, twoCohorts,
@@ -237,6 +238,33 @@ describe('runCohortLenses', () => {
     await runCohortLenses(runner, ctx({ facts }));
     expect(block(runner.calls[0]!.material, 'facts')).toBe('src/pause.ts:4 no-raw-sql: Raw SQL in an action');
     expect(block(runner.calls[1]!.material, 'facts')).toBe('src/totals.ts no-console: console.log left in');
+  });
+
+  it(`gives a cohort at most ${MAX_FACTS_PER_CHECK} facts of one check, with one line after them counting the rest`, async () => {
+    const sink = (n: number) => ({ checkId: 'extension-html-injection', path: 'src/pause.ts', line: n, message: 'An added line gives innerHTML something other than fixed text.' });
+    const other = { checkId: 'no-raw-sql', path: 'src/pause.ts', line: 900, message: 'Raw SQL in an action' };
+    const factsFor = async (n: number): Promise<string[]> => {
+      const facts = [...Array.from({ length: n }, (_, i) => sink(i + 1)), other];
+      const runner = createFakeRunner(empty);
+      await runCohortLenses(runner, ctx({ facts }));
+      return block(runner.calls[0]!.material, 'facts')!.split('\n');
+    };
+    // 20 are all shown
+    const twenty = await factsFor(20);
+    expect(twenty).toHaveLength(21);
+    expect(twenty.filter((l) => l.includes('extension-html-injection'))).toHaveLength(20);
+    expect(twenty.some((l) => l.includes('left out'))).toBe(false);
+    // the 21st is counted, on the line after the 20th of its kind; another check's facts are not cut
+    const more = await factsFor(21);
+    expect(more).toHaveLength(22);
+    expect(more[19]).toBe('src/pause.ts:20 extension-html-injection: An added line gives innerHTML something other than fixed text.');
+    expect(more[20]).toBe('… and 1 more extension-html-injection fact left out');
+    expect(more[21]).toBe('src/pause.ts:900 no-raw-sql: Raw SQL in an action');
+    expect(more.join('\n')).not.toContain('src/pause.ts:21 ');
+    // and many more are one line
+    const many = await factsFor(1000);
+    expect(many).toHaveLength(22);
+    expect(many[20]).toBe('… and 980 more extension-html-injection facts left out');
   });
 
   it('runs an onlyWhenAlone lens when its pack is the only one with lenses', async () => {
