@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, stat, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { loadPack, reviewById, selectPacks, type LearnedEntry, type Pack } from '@airlock/engine';
+import { readdir, readFile } from 'node:fs/promises';
+import { join, sep } from 'node:path';
+import { choosePacks, loadPack, reviewById, type LearnedEntry, type Pack } from '@airlock/engine';
 import {
   isRepo, type LearnedKind, type LearnedLine, type LearnedReply, type RemoveLearnedBody, type RemoveLearnedReply,
 } from '@airlock/shared';
@@ -11,20 +10,16 @@ import {
   writeList, type DismissDeps,
 } from './dismissals.js';
 
-const GENERIC_PACK = 'generic';
 const fileOf = (kind: LearnedKind): string => (kind === 'wrong' ? 'wrong.md' : 'product-knowledge.md');
 const engineKind = (kind: LearnedKind): LearnedEntry['kind'] => (kind === 'wrong' ? 'wrong' : 'intended');
+const serviceKind = (kind: LearnedEntry['kind']): LearnedKind => (kind === 'wrong' ? 'wrong' : 'product-knowledge');
 const forNoRepo = (field: string): boolean => field.trim() === '' || field.trim() === '-';
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-// The engine's learned-line format (packs/learned.ts): `YYYY-MM-DD · <repo> · <text>`; blank lines and `#` lines are not
-// entries. The repository field may be empty or `-` for a line written by hand.
-const LINE = /^(\d{4}-\d{2}-\d{2}) · (.*?) · (.+)$/;
-
 /** A learned line as it stands in its file: `date · repo · text` gives back the line exactly. */
-interface StoredLine { kind: LearnedKind; date: string; repo: string; text: string }
+interface StoredLine { kind: LearnedKind; date: string; repo: string; text: string; appliesHere: boolean }
 
-/** A pack chosen for the repository, with its learned lines read one by one. */
+/** A pack chosen for the repository, with every learned line it holds. */
 interface ChosenPack { pack: Pack; lines: StoredLine[] }
 
 const storedForm = (line: Pick<StoredLine, 'date' | 'repo' | 'text'>): string => `${line.date} · ${line.repo} · ${line.text}`;
@@ -34,94 +29,48 @@ export function learnedKey(kind: LearnedKind, date: string, repo: string, text: 
   return createHash('sha256').update([kind, date, repo, text].join('\n')).digest('hex').slice(0, 16);
 }
 
-/**
- * The lines of one learned file, read one by one. A line that is not an entry, or whose repository field is neither a
- * repository name nor empty or `-` (the contract cannot show it), is left out and logged by its file and line number,
- * never its text. A file that cannot be read is logged and gives no lines.
- */
-async function readLines(packDir: string, kind: LearnedKind, log: (line: string) => void): Promise<StoredLine[]> {
-  const file = join(packDir, 'learned', fileOf(kind));
-  let text: string;
-  try { text = await readFile(file, 'utf8'); } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') log(`the learned file ${file} could not be read: ${(err as NodeJS.ErrnoException).code ?? 'error'}`);
-    return [];
-  }
-  const lines: StoredLine[] = [];
-  text.split(/\r?\n/).forEach((raw, i) => {
-    if (raw.trim() === '' || raw.startsWith('#')) return;
-    const m = LINE.exec(raw);
-    if (m === null) {
-      log(`${file}:${i + 1} is not a learned line ("YYYY-MM-DD · <repo> · <text>"), so it is left out`);
-      return;
-    }
-    const repo = m[2]!;
-    if (!forNoRepo(repo) && !isRepo(repo)) {
-      log(`${file}:${i + 1} names no repository ("owner/name", "-" or nothing), so it is left out`);
-      return;
-    }
-    lines.push({ kind, date: m[1]!, repo, text: m[3]! });
-  });
-  return lines;
-}
+const keyOf = (e: LearnedEntry): string => learnedKey(serviceKind(e.kind), e.date, e.repo, e.text);
+
+/** Where an entry stands, in the engine's own form for a line it left out: `<pack id>/learned/<file>:<line number>`. */
+const placeOf = (pack: Pack, e: LearnedEntry): string =>
+  `${pack.id}/learned/${fileOf(serviceKind(e.kind))}:${/:(\d+)$/.exec(e.where ?? '')?.[1] ?? '?'}`;
 
 /**
- * The pack as the engine loads it but without its learned files. The engine refuses a whole pack for one learned line it
- * cannot read, and the list must still show that pack's other lines. A temporary folder holds a link to every entry of the
- * pack except `learned`; removing it removes only those links.
- */
-async function withoutLearned(dir: string): Promise<Pack> {
-  const root = resolve(dir);
-  const shadow = await mkdtemp(join(tmpdir(), 'airlock-pack-without-learned-'));
-  try {
-    for (const name of await readdir(root)) {
-      if (name !== 'learned') await symlink(join(root, name), join(shadow, name));
-    }
-    return { ...(await loadPack(shadow)), dir: root, learned: [] };
-  } finally {
-    await rm(shadow, { recursive: true, force: true });
-  }
-}
-
-/**
- * The packs chosen for the repository, as the engine's `choosePacks` chooses them (every folder with a `pack.yaml`, in
- * name order, then `selectPacks`), except that a pack whose only fault is a learned line is still chosen. Each comes with
- * its learned lines read one by one. A pack that cannot be loaded for another reason is logged and left out, as the
- * engine does.
+ * The packs the engine chooses for the repository (`choosePacks`), each with every learned line it holds. The engine gives
+ * the pack used for every repository only the lines that apply to this repository; the list shows that pack's other lines
+ * too, so each pack is loaded once more whole, and a line applies here when the engine kept it. A line the engine could not
+ * read (`learnedProblems`), and a line whose repository field is neither a repository name nor empty or `-` (the contract
+ * cannot show it), is left out and logged once by its place in the pack, never its text or an absolute path.
  */
 async function chosenPacks(packsDir: string, repo: string, log: (line: string) => void): Promise<ChosenPack[]> {
-  let names: string[];
-  try {
-    names = (await readdir(packsDir, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name).sort();
-  } catch (err) {
-    log(`packs for ${repo}: the packs folder could not be read: ${messageOf(err)}`);
-    return [];
+  const chosen = await choosePacks(packsDir, repo);
+  const learnedDirs = chosen.packs.map((p) => `${join(p.dir, 'learned')}${sep}`);
+  for (const e of chosen.errors) {
+    // The engine's sentence for a line with a bad repository field holds its path and that field: it is logged below.
+    if (!learnedDirs.some((dir) => e.message.startsWith(dir))) log(`packs for ${repo}: ${e.message}`);
   }
-  const all: Pack[] = [];
-  for (const name of names) {
-    const dir = join(packsDir, name);
-    if (!(await stat(join(dir, 'pack.yaml')).then((s) => s.isFile(), () => false))) continue;
-    try {
-      all.push(await loadPack(dir));
-    } catch (err) {
-      const pack = await withoutLearned(dir).catch(() => null);
-      if (pack === null) log(`packs for ${repo}: ${messageOf(err)}`);
-      else all.push(pack);
+  const result: ChosenPack[] = [];
+  for (const pack of chosen.packs) {
+    let whole: Pack;
+    try { whole = await loadPack(pack.dir); } catch (err) {
+      log(`packs for ${repo}: ${messageOf(err)}`);
+      continue;
     }
+    for (const where of whole.learnedProblems ?? []) {
+      log(`packs for ${repo}: ${where} is not a learned line ("YYYY-MM-DD · <repo> · <text>"), so it is left out`);
+    }
+    const here = new Set(pack.learned.map(keyOf));
+    const lines: StoredLine[] = [];
+    for (const e of whole.learned) {
+      if (!forNoRepo(e.repo) && !isRepo(e.repo)) {
+        log(`packs for ${repo}: ${placeOf(whole, e)} names no repository ("owner/name", "-" or nothing), so it is left out`);
+        continue;
+      }
+      lines.push({ kind: serviceKind(e.kind), date: e.date, repo: e.repo, text: e.text, appliesHere: here.has(keyOf(e)) });
+    }
+    result.push({ pack, lines });
   }
-  const chosen: ChosenPack[] = [];
-  for (const pack of selectPacks(all, repo)) {
-    chosen.push({ pack, lines: [...await readLines(pack.dir, 'wrong', log), ...await readLines(pack.dir, 'product-knowledge', log)] });
-  }
-  return chosen;
-}
-
-/**
- * Whether a review of this repository is given the line: the engine's rule (`learnedFor` in pipeline/packs.ts). A pack
- * used for every repository gives only the lines saved on this repository and those with no repository recorded.
- */
-function appliesHere(pack: Pack, line: StoredLine, repo: string): boolean {
-  if (pack.id !== GENERIC_PACK) return true;
-  return forNoRepo(line.repo) || line.repo.toLowerCase() === repo.toLowerCase();
+  return result;
 }
 
 /**
@@ -135,7 +84,7 @@ export async function listLearned(deps: Pick<DismissDeps, 'config' | 'log'>, rep
     for (const l of stored) {
       lines.push({
         pack: pack.id, packTitle: pack.title, kind: l.kind, date: l.date, repo: forNoRepo(l.repo) ? null : l.repo, text: l.text,
-        key: learnedKey(l.kind, l.date, l.repo, l.text), appliesHere: appliesHere(pack, l, repo), removable: pack.id !== KIT_PACK,
+        key: learnedKey(l.kind, l.date, l.repo, l.text), appliesHere: l.appliesHere, removable: pack.id !== KIT_PACK,
       });
     }
   }

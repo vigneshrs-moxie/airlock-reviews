@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ZodType } from 'zod';
-import { saveReview, type EngineDeps, type ReviewRequest, type runReview } from '@airlock/engine';
+import { choosePacks, saveReview, type EngineDeps, type ReviewRequest, type runReview } from '@airlock/engine';
 import {
   ApiErrorSchema, LatestReplySchema, MESSAGE_MAX, minimalDocument, PrSummarySchema, ServiceEventSchema, ServiceStatusSchema,
   StartReviewReplySchema, type Dismissal, type ReviewDocument, type ReviewEvent,
@@ -492,6 +492,24 @@ describe('GET /pr', () => {
       packs: [{ id: 'acme', title: 'Acme pack' }, { id: 'generic', title: 'Generic' }], suggestedDepth: 'quick',
       state: 'open', lastReview: null,
     });
+  });
+
+  it('a pack with a malformed learned line is still one of the packs that will run, with its stage rules', async () => {
+    const s = await startService();
+    await mkdir(join(s.home, 'packs', 'acme', 'learned'), { recursive: true });
+    await writeFile(join(s.home, 'packs', 'acme', 'learned', 'wrong.md'), `This is not a learned line.\n2026-11-05 · ${REPO} · A good line.\n`);
+    const r = await s.call('GET', `/pr?repo=${REPO}&number=7`);
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ stage: 'pr3', packs: [{ id: 'acme', title: 'Acme pack' }, { id: 'generic', title: 'Generic' }] });
+    // The start the panel then sends carries those packs to the engine, which loads that pack for the review.
+    await start(s, 7, { packIds: ['acme', 'generic'] });
+    const { req } = s.launched[0]!;
+    expect(req.packIds).toEqual(['acme', 'generic']);
+    const loaded = await choosePacks(req.packsDir, REPO, req.packIds);
+    expect(loaded.packs.map((p) => p.id)).toEqual(['acme', 'generic']);
+    expect(loaded.packs[0]!.learned.map((e) => e.text)).toEqual(['A good line.']);
+    expect(loaded.notes).toEqual(['A learned line could not be read and was left out: acme/learned/wrong.md:1.']);
+    expect(s.log.some((l) => l.includes('acme'))).toBe(false);
   });
 
   it('says standard for a large pull request, isOwn for the author, and the default stage for another base', async () => {

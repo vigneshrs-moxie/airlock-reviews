@@ -122,11 +122,14 @@ describe('GET /learned', () => {
       ['wrong', 'Good after.'], ['wrong', 'Acme wrong line.'], ['product-knowledge', 'Acme knowledge line.'],
     ]);
     expect(lines.some((l) => l.pack === 'generic')).toBe(true);
-    // Each malformed line once for the request, by file and line number, and never its text.
-    expect(s.logs.filter((l) => l.includes(`${wrong}:3`))).toHaveLength(1);
-    expect(s.logs.filter((l) => l.includes(`${wrong}:5`))).toHaveLength(1);
+    // Each malformed line once for the request, by the engine's entry for it (pack, file and line number), never its
+    // text and never an absolute path.
+    expect(s.logs.filter((l) => l.includes('acme/learned/wrong.md:3'))).toHaveLength(1);
+    expect(s.logs.filter((l) => l.includes('acme/learned/wrong.md:5'))).toHaveLength(1);
     expect(s.logs.join('\n')).not.toContain('SECRET');
-    // Loading the pack without its learned files leaves the pack itself as it was.
+    expect(s.logs.join('\n')).not.toContain(s.home);
+    expect(s.logs.join('\n')).not.toContain(wrong);
+    // Listing the lines leaves the pack itself as it was.
     expect(await readFile(join(s.packsDir, 'acme', 'pack.yaml'), 'utf8')).toContain('id: acme');
     expect(await readFile(join(s.packsDir, 'acme', 'lenses', 'look.md'), 'utf8')).toBe('Look closely.\n');
 
@@ -138,6 +141,18 @@ describe('GET /learned', () => {
       '2026-11-08 · not a repository · Also SECRET.', '',
     ].join('\n'));
     expect(s.logs.join('\n')).not.toContain('SECRET');
+  });
+
+  it('logs a malformed line of the pack used for every repository by its entry, never its text or path', async () => {
+    const s = await startService();
+    const wrong = join(s.packsDir, 'generic', 'learned', 'wrong.md');
+    await writeFile(wrong, `2026-11-01 · ${REPO} · Here line.\nNot a line, SECRET.\n2026-11-02 · not a repository SECRET · Bad field.\n`);
+    const lines = await s.lines();
+    expect(lines.filter((l) => l.pack === 'generic').map((l) => l.text)).toEqual(['Here line.']);
+    expect(s.logs.filter((l) => l.includes('generic/learned/wrong.md:2'))).toHaveLength(1);
+    expect(s.logs.filter((l) => l.includes('generic/learned/wrong.md:3'))).toHaveLength(1);
+    expect(s.logs.join('\n')).not.toContain('SECRET');
+    expect(s.logs.join('\n')).not.toContain(s.home);
   });
 
   it('refuses a missing or malformed repo', async () => {
@@ -294,6 +309,38 @@ describe('POST /learned/remove', () => {
     const line = (await s.lines())[0]!;
     expect((await s.call('POST', '/learned/remove', body(line), { Authorization: `Bearer ${s.token}` })).status).toBe(403);
     expect(await s.file('acme', 'wrong.md')).toContain('Acme wrong line.');
+  });
+});
+
+describe('a pack with a malformed learned line is still used', () => {
+  const MALFORMED = 'This is not a learned line.';
+  const GENERIC_BEFORE = `2026-11-01 · ${REPO} · Here line.\n2026-11-03 · ${OTHER} · Elsewhere line.\n2026-11-02 · - · Hand written line.\n`;
+
+  it('a dismissal on that repository writes its line into that pack, not into generic', async () => {
+    const s = await startService();
+    await writeFile(join(s.packsDir, 'acme', 'learned', 'wrong.md'), `# notes\n${MALFORMED}\n2026-11-05 · ${REPO} · Acme wrong line.\n`);
+    const made = await s.dismissOne(FINDING);
+    expect(made.status).toBe(200);
+    const learned = DismissalSchema.parse(made.json).learned!;
+    expect(learned).toMatchObject({ packId: 'acme', kind: 'wrong' });
+    expect(await s.file('acme', 'wrong.md')).toBe(
+      `# notes\n${MALFORMED}\n2026-11-05 · ${REPO} · Acme wrong line.\n${learned.date} · ${REPO} · ${TEXT}\n`);
+    expect(await s.file('generic', 'wrong.md')).toBe(GENERIC_BEFORE);
+  });
+
+  it('restoring a dismissal that wrote into that pack takes its line out again', async () => {
+    const s = await startService();
+    const made = await s.dismissOne(FINDING);
+    expect(made.status).toBe(200);
+    const { date } = DismissalSchema.parse(made.json).learned!;
+    // The person breaks a line of the pack by hand after the dismissal.
+    await writeFile(join(s.packsDir, 'acme', 'learned', 'wrong.md'), `# notes\n${MALFORMED}\n2026-11-05 · ${REPO} · Acme wrong line.\n${date} · ${REPO} · ${TEXT}\n`);
+    const r = await s.call('POST', '/dismissals/restore', { repo: REPO, number: 7, fingerprint: FP });
+    expect(r.status).toBe(200);
+    expect(r.json).toEqual({ restored: true, note: null });
+    expect(await s.file('acme', 'wrong.md')).toBe(`# notes\n${MALFORMED}\n2026-11-05 · ${REPO} · Acme wrong line.\n`);
+    expect(await s.dismissals()).toEqual([]);
+    expect(await s.file('generic', 'wrong.md')).toBe(GENERIC_BEFORE);
   });
 });
 
