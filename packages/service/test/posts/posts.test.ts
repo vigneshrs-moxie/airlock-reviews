@@ -57,6 +57,10 @@ describe('POST /posts/preview', () => {
     // A name from the pull request's text is put in backticks, so it notifies no one.
     expect(commentBody(FINDING_A)).toContain('`@carol`');
     expect(p.summary).toBe('Review notes from Airlock: 3 comments.');
+    // The route carries the review body's names too: none here, all of it is Airlock's own text.
+    expect((await s.preview({ items: [{ fingerprint: FP_A }] })).json).toMatchObject({ reviewBodyMentions: [] });
+    const edited = await s.preview({ items: [{ fingerprint: FP_B }], summary: 'For @hana.' });
+    expect((edited.json as { reviewBodyMentions: string[] }).reviewBodyMentions).toEqual(['@hana']);
     expect(p.reviewBody).toBe(summaryBody(2, [{ path: FINDING_B.path, line: 40, body: commentBody(FINDING_B) }], p.summary));
 
     const chosen = await previewed(s, { items: [{ fingerprint: FP_A, placement: 'summary' }, { fingerprint: FP_B, placement: 'inline' }] });

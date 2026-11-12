@@ -3,15 +3,15 @@ import { join } from 'node:path';
 import { airlockHome, choosePacks, fetchPr, findClaude, latestReview, repoSlug, runReview, type ReviewRequest } from '@airlock/engine';
 import {
   ApiErrorSchema, DismissalSchema, DismissBodySchema, ForgetPostBodySchema, LatestReplySchema, PostBodySchema, PostPreviewBodySchema,
-  PostPreviewReplySchema, PostRecordSchema, PrNumberSchema, PrSummarySchema, RepoSchema, RestoreBodySchema, RestoreReplySchema, ReviewIdSchema,
+  PostRecordSchema, PrNumberSchema, PrSummarySchema, RepoSchema, RestoreBodySchema, RestoreReplySchema, ReviewIdSchema,
   RunIdSchema, ServiceStatusSchema, StartReviewBodySchema, StartReviewReplySchema, suggestedDepth, type DismissBody, type Dismissal,
-  type ForgetPostBody, type LatestReply, type PostBody, type PostPreviewBody, type PostPreviewReply, type PostRecord, type RestoreBody,
+  type ForgetPostBody, type LatestReply, type PostBody, type PostPreviewBody, type PostRecord, type RestoreBody,
   type RestoreReply, type PrSummary, type PrInfo, type ReviewDocument, type ServiceStatus, type StartReviewBody,
 } from '@airlock/shared';
 import { z, type ZodType } from 'zod';
 import { dismiss, DismissError, restore } from './dismissals.js';
 import { plainMessage, type Handler, type Req, type Res, type Route } from './http.js';
-import { buildPreview, PREVIEW_BODY_MAX, Previews } from './posts/preview.js';
+import { buildPreview, PREVIEW_BODY_MAX, PreviewReplySchema, Previews, type PreviewReply } from './posts/preview.js';
 import { forget, post, PostError, postsFor, type PostDeps } from './posts/records.js';
 import { LimitError, realTimers, Runs } from './runs.js';
 import type { ServiceDeps } from './server.js';
@@ -216,7 +216,8 @@ export function reviewRoutes(
     {
       method: 'POST', path: '/posts/preview', requiresOrigin: true, maxBodyBytes: PREVIEW_BODY_MAX, body: PostPreviewBodySchema,
       handler: posting(async (req) =>
-        reply<PostPreviewReply>(PostPreviewReplySchema, 200, await buildPreview(posts, req.body as PostPreviewBody))),
+        // PreviewReplySchema is the shared one with `reviewBodyMentions`, until the contract branch is merged in.
+        reply<PreviewReply>(PreviewReplySchema, 200, await buildPreview(posts, req.body as PostPreviewBody))),
     },
     {
       // Strict: the request carries the preview id and nothing else.

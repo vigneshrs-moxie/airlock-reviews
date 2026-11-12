@@ -1,9 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { reviewById } from '@airlock/engine';
 import {
-  checkCommentText, commentBody, mentionsIn, REVIEW_BODY_MAX, summaryBody, SUMMARY_MAX, type Dismissal, type Finding, type Placement,
-  type PostPreviewBody, type PostPreviewItem, type PostPreviewReply,
+  checkCommentText, commentBody, mentionsIn, PostPreviewReplySchema, REVIEW_BODY_MAX, summaryBody, SUMMARY_MAX, type Dismissal,
+  type Finding, type Placement, type PostPreviewBody, type PostPreviewItem,
 } from '@airlock/shared';
+import { z } from 'zod';
 import type { ReviewComment, ReviewPayload } from './github.js';
 import { blockingRecord, fit, keysOf, PostError, recordsOf, shown } from './records.js';
 
@@ -78,6 +79,22 @@ export interface PreviewDeps {
   dismissals: (repo: string, number: number) => Promise<Dismissal[]>;
 }
 
+// LOCAL COPY until the contract branch is merged into this lane: the shared package gains `postMentions` (comment-text.ts)
+// and `reviewBodyMentions` on PostPreviewReplySchema. At the merge, delete this block and use the shared ones.
+/** Which names each comment and the review body would notify: none for Airlock's own text, mentionsIn otherwise. */
+export function postMentions(
+  items: { body: string; isDefault: boolean; inSummary: boolean }[], summary: { text: string; isDefault: boolean }, reviewBody: string,
+): { items: string[][]; reviewBody: string[] } {
+  const allDefault = summary.isDefault && items.every((item) => !item.inSummary || item.isDefault);
+  return {
+    items: items.map((item) => (item.isDefault ? [] : mentionsIn(item.body))),
+    reviewBody: allDefault ? [] : mentionsIn(reviewBody),
+  };
+}
+export const PreviewReplySchema = PostPreviewReplySchema.extend({ reviewBodyMentions: z.array(z.string()).default([]) });
+export type PreviewReply = z.infer<typeof PreviewReplySchema>;
+// END OF LOCAL COPY.
+
 // `summaryBody`'s first argument is unused and is being removed; only this line changes when it goes.
 const reviewText = (inSummary: { path: string; line: number | null; body: string }[], summary: string): string =>
   summaryBody(0, inSummary, summary);
@@ -90,7 +107,7 @@ const shares = (keys: readonly string[], f: Finding): boolean => keysOf(f.finger
  * one chosen twice (400); one dismissed, posted, or of a post whose outcome is not known (409); text the person gave that
  * `checkCommentText` refuses (400); and a review text over REVIEW_BODY_MAX (400).
  */
-export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Promise<PostPreviewReply> {
+export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Promise<PreviewReply> {
   const doc = await reviewById(body.repo, body.number, body.reviewId);
   if (doc === null || doc.pr.repo.toLowerCase() !== body.repo.toLowerCase() || doc.pr.number !== body.number) {
     throw new PostError(404, NO_REVIEW);
@@ -123,12 +140,15 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
   const items: PostPreviewItem[] = [];
   const comments: ReviewComment[] = [];
   const inSummary: { path: string; line: number | null; body: string }[] = [];
+  const texts: { body: string; isDefault: boolean; inSummary: boolean }[] = [];
   for (const [i, item] of body.items.entries()) {
     const finding = chosen[i] as Finding;
     const drafted = commentBody(finding);
     const text = item.body ?? drafted;
-    // The drafted text names no one by construction (every `@name` is in backticks); text the person wrote is checked.
-    const mentions = text === drafted ? [] : mentionsIn(text);
+    // The drafted text is Airlock's own; text the person wrote or changed is what `postMentions` checks.
+    // Airlock's own text when it is exactly the drafted comment; the names are filled once the review body is known.
+    const isDefault = text === drafted;
+    const mentions: string[] = [];
     const problem = checkCommentText(text);
     if (problem !== null) throw new PostError(400, problem);
     const place = finding.anchor.comment ?? null;
@@ -142,6 +162,7 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
         fingerprint: item.fingerprint, title: finding.title, path: finding.path, line: place.line, startLine, placement: 'inline',
         whySummary: null, body: text, mentions,
       });
+      texts.push({ body: text, isDefault, inSummary: false });
     } else {
       const line = place?.line ?? finding.anchor.startLine ?? null;
       inSummary.push({ path: finding.path, line, body: text });
@@ -149,11 +170,13 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
         fingerprint: item.fingerprint, title: finding.title, path: finding.path, line, startLine: null, placement: 'summary',
         whySummary: item.placement === 'summary' ? CHOSEN : NOT_ON_DIFF, body: text, mentions,
       });
+      texts.push({ body: text, isDefault, inSummary: true });
     }
   }
 
   const count = body.items.length;
-  const summary = body.summary ?? `Review notes from Airlock: ${count} comment${count === 1 ? '' : 's'}.`;
+  const generated = `Review notes from Airlock: ${count} comment${count === 1 ? '' : 's'}.`;
+  const summary = body.summary ?? generated;
   const summaryProblem = checkCommentText(summary, SUMMARY_MAX);
   if (summaryProblem !== null) throw new PostError(400, summaryProblem);
   const reviewBody = reviewText(inSummary, summary);
@@ -172,7 +195,9 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
     expiresAt: now + PREVIEW_MS,
   };
   deps.previews.add(stored);
+  const named = postMentions(texts, { text: summary, isDefault: summary === generated }, reviewBody);
+  for (const [i, item] of items.entries()) item.mentions = named.items[i] ?? [];
   return {
-    previewId, headSha: doc.pr.headSha, viewer: doc.pr.viewer, items, summary, reviewBody, expiresAt: new Date(stored.expiresAt).toISOString(),
+    previewId, headSha: doc.pr.headSha, viewer: doc.pr.viewer, items, summary, reviewBody, reviewBodyMentions: named.reviewBody, expiresAt: new Date(stored.expiresAt).toISOString(),
   };
 }
