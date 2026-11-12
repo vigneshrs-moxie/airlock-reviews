@@ -86,6 +86,14 @@ function material(ctx: LensContext, f: Finding): { text: string; cut: ReturnType
 
 interface Outcome { fixed?: Finding; open?: Finding; error?: StageError; usage?: AgentUsage; limit?: string }
 
+const squash = (text: string): string => text.replace(/\s+/g, '');
+
+/** True when a line of `quote` with substance is a line of the finding's own earlier quote, white space aside. */
+function quotesOwnCode(f: Finding, quote: string): boolean {
+  const own = new Set(f.quote.split('\n').map(squash).filter((l) => l !== ''));
+  return quote.split('\n').some((l) => hasSubstance(l) && own.has(squash(l)));
+}
+
 /**
  * Applies the answer. `fixed` counts only when its quote is real code at the head (a safe path, at least one line of
  * substance, not only comments) and code finds the whole quote in that file. `still-open` counts only when the anchoring
@@ -97,7 +105,8 @@ async function apply(ctx: LensContext, f: Finding, answer: FixedCheckOutput): Pr
   const evidence = answer.evidence;
   if (evidence === null) return failed(`the check answered "${answer.outcome}" without saying where; the finding stays open`);
   const read = (path: string): Promise<string | null> => safeRead(ctx.headDir, path);
-  if (answer.outcome === 'fixed') {
+  // The finding's own earlier code, found in another place, is the faulty code moved, not a fix: it is placed there.
+  if (answer.outcome === 'fixed' && !quotesOwnCode(f, evidence.quote)) {
     const proves = isSafePath(evidence.path) && hasSubstance(evidence.quote) && !onlyComments(evidence.quote);
     const found = proves ? findQuote(await read(evidence.path), evidence.quote) : [];
     if (found.length === 0) return failed(`the check said it is fixed, but its quote was not found as code in ${evidence.path} at the head; the finding stays open`);
@@ -108,7 +117,7 @@ async function apply(ctx: LensContext, f: Finding, answer: FixedCheckOutput): Pr
     [{ ...f, path: evidence.path, quote: evidence.quote, lineHint: null }], ctx.files, read, ctx.push?.whole ?? undefined,
   );
   const placed = anchored[0];
-  if (placed === undefined) return failed(`the check said it is still open, but its quote was not found in ${evidence.path} at the head; the finding stays open`);
+  if (placed === undefined) return failed(`the check placed it, but its quote was not found in ${evidence.path} at the head; the finding stays open`);
   return { open: withPlace({ ...placed, lineHint: f.lineHint, status: 'moved' }) };
 }
 

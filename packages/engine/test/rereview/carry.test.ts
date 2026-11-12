@@ -96,6 +96,42 @@ describe('carryOver', () => {
   });
 });
 
+describe('carryOver: gone, unreadable and connected places', () => {
+  it('a finding whose file the push deleted has vanished', async () => {
+    const r = await makeTempRepo();
+    made.push(r);
+    const files = await makeChange(r, { 'src/a.ts': 'export const total = (price: number, qty: number) => {\n  const total = price * qty;\n};\n', 'src/keep.ts': 'x\n' }, { 'src/a.ts': null });
+    expect(files.find((f) => f.path === 'src/a.ts')?.status).toBe('deleted');
+    const read = (path: string) => readFile(join(r.dir, path), 'utf8').catch(() => null);
+    const r2 = await carryOver(prevWith([earlierFinding()]), files, read);
+    expect(r2.open).toEqual([]);
+    expect(r2.vanished.map((f) => f.id)).toEqual(['c_00000001']);
+    expect(r2.errors).toEqual([]);
+  });
+
+  it('a finding whose file exists but cannot be read stays open with no place and a stage error, for any severity', async () => {
+    const { files } = await pushed();
+    const unreadable = async (path: string): Promise<string | null> => { throw new Error(`${path} is larger than Airlock reads`); };
+    for (const severity of ['note', 'block'] as const) {
+      const r = await carryOver(prevWith([earlierFinding({ severity })]), files, unreadable);
+      expect(r.vanished).toEqual([]);
+      expect(r.open.map((f) => [f.status, f.anchor])).toEqual([['still-open', { status: 'not-found', startLine: null, endLine: null, comment: null }]]);
+      expect(r.errors).toEqual([{
+        stage: 'anchor', cohortId: null,
+        message: 'c_00000001: the file src/a.ts could not be read at the head, so this earlier finding stays open.',
+      }]);
+    }
+  });
+
+  it('a still-open finding\'s connected places are anchored again at the new head', async () => {
+    const { files, read } = await pushed();
+    const f = earlierFinding({ connected: [{ path: 'src/b.ts', line: 2, role: 'the card is logged here', quote: 'log(card);' }] });
+    const { open } = await carryOver(prevWith([f]), files, read);
+    expect(open[0]!.status).toBe('still-open');
+    expect(open[0]!.connected).toEqual([{ path: 'src/b.ts', line: 4, role: 'the card is logged here', quote: '  log(card);' }]);
+  });
+});
+
 describe('mergeIntoCarried', () => {
   const carried = earlierFinding({ id: 'c_old', status: 'still-open', aliases: ['aaaaaaaaaaaaaaaa'] });
   const item = (over: Partial<AnchoredCandidate>): AnchoredCandidate => {

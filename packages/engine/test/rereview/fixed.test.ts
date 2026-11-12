@@ -87,6 +87,16 @@ describe('confirmFixed', () => {
     expect(moved.aliases).toEqual(['0123456789abcdef', earlier.fingerprint]);
   });
 
+  it('a fixed answer quoting the finding\'s own earlier quote is not fixed: the code moved, and it follows the still-open path there', async () => {
+    const earlier = vanishedFix({ quote: '  logger.info(card);', title: 'The card number is logged' });
+    const runner = createFakeRunner(() => answer({ evidence: { path: 'src/audit.ts', quote: 'logger.info(card);' } }));
+    const r = await confirmFixed(runner, checkCtx(), [earlier]);
+    expect(r.fixed).toEqual([]);
+    expect(r.errors).toEqual([]);
+    expect(r.open.map((f) => [f.status, f.path, f.anchor.startLine])).toEqual([['moved', 'src/audit.ts', 2]]);
+    expect(r.open[0]!.aliases).toContain(earlier.fingerprint);
+  });
+
   it('a failed check leaves the finding open, adds a stage error and never marks it fixed', async () => {
     const cases = [
       createFakeRunner(() => failure('the model timed out', 'timeout')),

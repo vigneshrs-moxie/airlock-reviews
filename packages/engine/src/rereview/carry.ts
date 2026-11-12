@@ -1,4 +1,4 @@
-import type { Dropped, FileDiff, Finding, ReviewDocument } from '@airlock/shared';
+import type { Dropped, FileDiff, Finding, ReviewDocument, StageError } from '@airlock/shared';
 import { anchorCandidates, findQuote } from '../anchor/anchor.js';
 import { commentLine } from '../anchor/comment-line.js';
 import { lineInDiff } from '../diff/parse.js';
@@ -19,12 +19,17 @@ export function withPlace(f: Finding): Finding {
   return { ...rest, fingerprint: print, ...(aliases.length > 0 ? { aliases } : {}) };
 }
 
+/** A file that is at the head but cannot be read (too large, a link, not a regular file): `read` throws for it. */
+const UNREADABLE = Symbol('unreadable');
+
 /**
  * The earlier review's findings at the new head, found by code. Each is looked for by its quote in its own file, or in
  * the file it was renamed to: the whole quote on its earlier lines of the same file is `still-open` with its earlier
- * place; found elsewhere by the anchoring the anchor stage uses, `moved` with that new anchor and comment line, its quote
- * the file's own lines; not found (or its file gone or unreadable), vanished, as it was. The earlier review's `fixed`
- * list is not carried. A carried finding names no group, since its group belongs to the earlier review's change map.
+ * place, its connected places anchored again; found elsewhere by the anchoring the anchor stage uses, `moved` with that
+ * new anchor and comment line, its quote the file's own lines; not found, or its file gone (`read` gives null, or the
+ * diff deletes it), vanished, as it was. A file that is there but cannot be read (`read` throws) is never taken as gone:
+ * the finding stays `still-open` with no place, and a stage error says why. The earlier review's `fixed` list is not
+ * carried. A carried finding names no group, since its group belongs to the earlier review's change map.
  *
  * `judge` is the diff GitHub shows for the pull request (its whole diff on a push re-review): when given, a still-open
  * finding's status and comment line are judged again against it, and a moved one's come from it (see anchorCandidates).
@@ -32,30 +37,45 @@ export function withPlace(f: Finding): Finding {
  */
 export async function carryOver(
   prev: ReviewDocument, files: FileDiff[], read: (path: string) => Promise<string | null>, judge?: FileDiff[],
-): Promise<{ open: Finding[]; vanished: Finding[] }> {
-  const cache = new Map<string, Promise<string | null>>();
-  const readOnce = (path: string): Promise<string | null> => {
+): Promise<{ open: Finding[]; vanished: Finding[]; errors: StageError[] }> {
+  const cache = new Map<string, Promise<string | null | typeof UNREADABLE>>();
+  const look = (path: string): Promise<string | null | typeof UNREADABLE> => {
     let hit = cache.get(path);
     if (!hit) {
-      hit = Promise.resolve().then(() => read(path)).catch(() => null);
+      hit = Promise.resolve().then(() => read(path)).catch(() => UNREADABLE);
       cache.set(path, hit);
     }
     return hit;
+  };
+  const readOnce = async (path: string): Promise<string | null> => {
+    const text = await look(path);
+    return text === UNREADABLE ? null : text;
   };
   const renamedTo = new Map(files.flatMap((d) => (d.status === 'renamed' && d.oldPath !== null ? [[d.oldPath, d.path] as const] : [])));
   const deleted = new Set(files.filter((d) => d.status === 'deleted').map((d) => d.path));
 
   const open: Finding[] = [];
   const vanished: Finding[] = [];
+  const errors: StageError[] = [];
   for (const earlier of prev.findings) {
     const f: Finding = { ...earlier, cohortId: null };
     const path = renamedTo.get(f.path) ?? f.path;
-    const text = deleted.has(path) ? null : await readOnce(path);
+    const text = deleted.has(path) ? null : await look(path);
+    if (text === UNREADABLE) {
+      open.push({ ...f, status: 'still-open', anchor: { status: 'not-found', startLine: null, endLine: null, comment: null } });
+      errors.push({ stage: 'anchor', cohortId: null, message: `${f.id}: the file ${path} could not be read at the head, so this earlier finding stays open.` });
+      continue;
+    }
     const { startLine, endLine } = f.anchor;
     const onSameLines = path === f.path && startLine !== null && endLine !== null
       && findQuote(text, f.quote).some((at) => at.startLine === startLine && at.endLine === endLine);
     if (onSameLines) {
-      open.push({ ...f, status: 'still-open', anchor: judge === undefined ? f.anchor : judged(judge.find((d) => d.path === path), startLine, endLine) });
+      // Its own lines did not move; its connected places may have, so they are found again as a moved finding's are.
+      const again = await anchorCandidates([f], files, readOnce, judge);
+      open.push({
+        ...f, status: 'still-open', connected: again.anchored[0]?.connected ?? f.connected,
+        anchor: judge === undefined ? f.anchor : judged(judge.find((d) => d.path === path), startLine, endLine),
+      });
       continue;
     }
     const hint = startLine ?? f.lineHint;
@@ -67,7 +87,7 @@ export async function carryOver(
     }
     open.push(withPlace({ ...found, lineHint: f.lineHint, status: 'moved' }));
   }
-  return { open, vanished };
+  return { open, vanished, errors };
 }
 
 /** The anchor of lines that did not move, judged against the file's entry in the diff GitHub shows. */
