@@ -12,6 +12,8 @@ function setup(token: string | null = TOKEN) {
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+/** The requests that carry the token: everything but the hello asked first to prove the service holds it. */
+const tokenCalls = (svc: FakeService) => svc.requests.filter((r) => r.url.pathname !== '/hello');
 
 async function failure(work: Promise<unknown>): Promise<ServiceError> {
   try {
@@ -43,11 +45,12 @@ describe('ServiceClient', () => {
     const { svc, client } = setup();
     await client.pr('acme/widgets', 1);
     await client.start({ repo: 'acme/widgets', number: 1, depth: 'quick' });
-    for (const req of svc.requests) expect(req.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
-    const post = svc.requests[1];
+    expect(svc.calls).toEqual(['GET /hello', 'GET /pr', 'POST /reviews']);
+    for (const req of tokenCalls(svc)) expect(req.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
+    const post = tokenCalls(svc)[1];
     expect(post?.headers.get('content-type')).toBe('application/json');
     expect(post?.body).toEqual({ repo: 'acme/widgets', number: 1, depth: 'quick' });
-    expect(svc.requests[0]?.url.href).toBe(`${BASE}/pr?repo=acme%2Fwidgets&number=1`);
+    expect(tokenCalls(svc)[0]?.url.href).toBe(`${BASE}/pr?repo=acme%2Fwidgets&number=1`);
   });
 
   it('without a stored token is unpaired and makes no request', async () => {
@@ -61,9 +64,12 @@ describe('ServiceClient', () => {
     svc.down = true;
     expect(await failure(client.pr('acme/widgets', 1))).toMatchObject({ kind: 'offline' });
     svc.down = false;
+    // A service that proves the token and then refuses it (it was replaced between the two): unpaired.
+    svc.proofKey = TOKEN;
     svc.token = OTHER_TOKEN;
     expect(await failure(client.status())).toMatchObject({ kind: 'unpaired' });
     svc.token = TOKEN;
+    svc.proofKey = undefined;
     svc.on('GET /pr', () => json({ error: 'That Origin is not the paired extension.' }, 403));
     expect(await failure(client.pr('acme/widgets', 1))).toMatchObject({
       kind: 'problem', message: 'That Origin is not the paired extension.',
@@ -101,9 +107,13 @@ describe('ServiceClient', () => {
   it('pair sends the given token, not the stored one, and returns the service words when refused', async () => {
     const { svc, client } = setup(null);
     expect(await client.pair(TOKEN)).toEqual({ paired: true, extension: 'new' });
-    expect(svc.requests[0]?.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
-    expect(svc.requests[0]?.body).toBeUndefined();
+    expect(tokenCalls(svc)[0]?.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
+    expect(tokenCalls(svc)[0]?.body).toBeUndefined();
+    // A token that proves but is refused at pairing: the service's words.
+    svc.proofKey = OTHER_TOKEN;
+    svc.on('POST /pair', () => json({ error: 'Airlock needs the pairing token. Run "npm run service -- token".' }, 401));
     expect(await client.pair(OTHER_TOKEN)).toEqual({ error: 'Airlock needs the pairing token. Run "npm run service -- token".' });
+    svc.proofKey = undefined;
     svc.on('POST /pair', () => json({ error: 'Airlock is already paired with another copy of the extension.' }, 409));
     expect(await client.pair(TOKEN)).toEqual({ error: 'Airlock is already paired with another copy of the extension.' });
     svc.down = true;
@@ -122,11 +132,13 @@ describe('ServiceClient', () => {
     expect(await client.dismiss(body)).toEqual(dismissal);
     expect(svc.requests.at(-1)?.body).toEqual(body);
     expect(await client.restore({ repo: 'acme/widgets', number: 1, fingerprint: '0123456789abcdef' })).toEqual({ restored: true, note: null });
-    expect(svc.calls).toEqual(['POST /dismissals', 'POST /dismissals/restore']);
+    expect(svc.calls).toEqual(['GET /hello', 'POST /dismissals', 'POST /dismissals/restore']);
   });
 
   it('gives up on hello after 5 seconds and on other calls after 60, through the given timers', async () => {
     const { svc, client, timers } = setup();
+    // Proved first, so the call below asks no hello of its own.
+    await client.hello();
     svc.on('GET /hello', never);
     svc.on('GET /pr', never);
     const hello = client.hello();
@@ -147,9 +159,13 @@ describe('ServiceClient', () => {
 
   it('aborts a call when the caller signal is aborted', async () => {
     const { svc, client } = setup();
+    // Proved first: the reads below go straight to their routes, and the hello asked alongside them proves again.
+    await client.pr('acme/widgets', 1);
+    svc.requests.length = 0;
     svc.on('GET /pr', never);
     svc.on('GET /reviews/running', never);
     svc.on('GET /reviews/latest', never);
+    svc.on('GET /hello', never);
     const abort = new AbortController();
     const calls = [
       client.hello(abort.signal), client.pr('acme/widgets', 1, abort.signal),
@@ -174,7 +190,8 @@ describe('ServiceClient', () => {
       }, new AbortController().signal);
       expect(await ended).toBe('ended');
       expect(seen.map((e) => e.type)).toEqual(['stage', 'stage', 'done']);
-      expect(svc.requests[0]?.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
+      expect(svc.calls).toEqual(['GET /hello', 'GET /reviews/:runId/events']);
+      expect(tokenCalls(svc)[0]?.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
     });
 
     it('ends after a failed event even when the stream stays open', async () => {
@@ -246,6 +263,8 @@ describe('ServiceClient', () => {
       const run = svc.startRun('acme/widgets', 1, 'run_00000000000a');
       const seen: ServiceEvent[] = [];
       const result = client.events('run_00000000000a', (e) => seen.push(e), new AbortController().signal);
+      // The attach proves first; the stream is open once its request has gone.
+      while (!svc.calls.includes('GET /reviews/:runId/events')) await tick();
       await tick();
       expect(timers.delays()).toEqual([45_000]);
       const armed = [...timers.pending.keys()];
@@ -270,9 +289,11 @@ describe('ServiceClient', () => {
 
     it('throws the mapped error for a refused stream', async () => {
       const { svc, client } = setup();
+      svc.proofKey = TOKEN;
       svc.token = OTHER_TOKEN;
       expect(await failure(client.events('run_00000000000a', () => {}, new AbortController().signal))).toMatchObject({ kind: 'unpaired' });
       svc.token = TOKEN;
+      svc.proofKey = undefined;
       expect(await failure(client.events('run_00000000000a', () => {}, new AbortController().signal))).toMatchObject({
         kind: 'problem', message: 'No such review run.',
       });

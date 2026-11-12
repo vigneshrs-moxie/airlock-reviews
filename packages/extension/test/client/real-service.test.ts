@@ -9,9 +9,10 @@ import { saveReview, type EngineDeps, type runReview } from '@airlock/engine';
 import {
   candidate, minimalDocument, type Finding, type ReviewDocument, type ReviewEvent, type ServiceEvent,
 } from '@airlock/shared';
+import { NOT_PROVED } from '../../src/client/proof';
 import { ServiceClient, ServiceError } from '../../src/client/service';
 import { createServer, type Service } from '../../../service/src/server';
-import { readOrCreateToken } from '../../../service/src/config';
+import { pairedOrigin, readOrCreateToken, replaceToken } from '../../../service/src/config';
 
 const REPO = 'acme/widgets';
 const ORIGIN = `chrome-extension://${'a'.repeat(32)}`;
@@ -51,7 +52,21 @@ const chromeFetch = (origin: string): typeof fetch => (input, init) => {
   return fetch(input, { ...init, headers });
 };
 
-async function startService(): Promise<{ service: Service; base: string; token: string; launched: Launched[] }> {
+/** Records every request a fetch makes: the address and the Authorization header. */
+function recorded(inner: typeof fetch): { fetch: typeof fetch; seen: Array<{ url: string; auth: string | null }> } {
+  const seen: Array<{ url: string; auth: string | null }> = [];
+  return {
+    seen,
+    fetch: (input, init) => {
+      seen.push({ url: String(input), auth: new Headers(init?.headers).get('authorization') });
+      return inner(input, init);
+    },
+  };
+}
+
+async function startService(
+  now: () => Date = () => new Date(), monotonic: () => number = () => performance.now(),
+): Promise<{ service: Service; base: string; token: string; home: string; launched: Launched[] }> {
   const home = await mkdtemp(join(tmpdir(), 'airlock-panel-client-'));
   const saved = process.env['AIRLOCK_HOME'];
   process.env['AIRLOCK_HOME'] = home;
@@ -76,7 +91,7 @@ async function startService(): Promise<{ service: Service; base: string; token: 
     now: () => new Date(),
   };
   const service = createServer({
-    config: { port: 0, home, packsDir: join(home, 'packs'), version: '1.2.3' }, engine, review, now: () => new Date(), log: () => undefined,
+    config: { port: 0, home, packsDir: join(home, 'packs'), version: '1.2.3' }, engine, review, now, monotonic, log: () => undefined,
   });
   const { port } = await service.listen();
   cleanups.push(async () => {
@@ -85,7 +100,7 @@ async function startService(): Promise<{ service: Service; base: string; token: 
     else process.env['AIRLOCK_HOME'] = saved;
     await rm(home, { recursive: true, force: true });
   });
-  return { service, base: `http://127.0.0.1:${port}`, token: await readOrCreateToken(home), launched };
+  return { service, base: `http://127.0.0.1:${port}`, token: await readOrCreateToken(home), home, launched };
 }
 
 async function until(check: () => boolean, what: string): Promise<void> {
@@ -144,14 +159,62 @@ describe('the panel\'s client and the real service', () => {
     expect((await client.latest(REPO, 7))?.dismissals).toEqual([]);
   });
 
+  it('the real service proves the token to the real client before it is sent, and a token it does not hold is never sent', async () => {
+    const s = await startService();
+    const paired = recorded(chromeFetch(ORIGIN));
+    let stored: string | null = null;
+    const client = new ServiceClient(s.base, async () => stored, paired.fetch);
+    expect(await client.pair(s.token)).toEqual({ paired: true, extension: 'new' });
+    stored = s.token;
+    await client.pr(REPO, 7);
+    expect(paired.seen.map((r) => [new URL(r.url).pathname, r.auth])).toEqual([
+      ['/hello', null], ['/pair', `Bearer ${s.token}`], ['/pr', `Bearer ${s.token}`],
+    ]);
+    expect(new URL(paired.seen[0]!.url).searchParams.get('nonce')).toMatch(/^[0-9a-f]{32}$/);
+    // The periodic check asks with a new nonce each time, and the real proof matches.
+    expect(await client.hello()).toMatchObject({ airlock: true, paired: true, proof: expect.stringMatching(/^[0-9a-f]{64}$/) });
+
+    const other = recorded(chromeFetch(ORIGIN));
+    const pasting = new ServiceClient(s.base, async () => null, other.fetch);
+    expect(await pasting.pair('e'.repeat(64))).toEqual({ error: NOT_PROVED });
+    const holding = new ServiceClient(s.base, async () => 'e'.repeat(64), other.fetch);
+    expect(await refusal(holding.start({ repo: REPO, number: 7 }))).toEqual({ kind: 'unproven', message: NOT_PROVED });
+    expect(await refusal(holding.hello())).toEqual({ kind: 'unproven', message: NOT_PROVED });
+    expect(other.seen.map((r) => new URL(r.url).pathname)).toEqual(['/hello', '/hello', '/hello']);
+    expect(other.seen.every((r) => r.auth === null)).toBe(true);
+  });
+
+  it('after the token is replaced, the old one is neither proved nor accepted, and the new one pairs again', async () => {
+    let at = Date.parse('2026-11-11T09:00:00.000Z');
+    const s = await startService(() => new Date(at), () => at);
+    let stored: string | null = s.token;
+    const client = new ServiceClient(s.base, async () => stored, chromeFetch(ORIGIN));
+    expect(await client.pair(s.token)).toEqual({ paired: true, extension: 'new' });
+    await client.pr(REPO, 7);
+
+    const fresh = await replaceToken(s.home);
+    at += 1_000;
+    // Whoever holds only the old token is refused a second after the replacement, with nothing else asked first.
+    const old = await fetch(`${s.base}/reviews/running?repo=${REPO}&number=7`, { headers: { Authorization: `Bearer ${s.token}` } });
+    expect(old.status).toBe(401);
+    // The periodic check: the service now proves the new token, so the old one is not sent again.
+    expect(await refusal(client.hello())).toEqual({ kind: 'unproven', message: NOT_PROVED });
+    expect(await refusal(client.pr(REPO, 7))).toEqual({ kind: 'unproven', message: NOT_PROVED });
+    // The Pair screen, with the new token: the paired origin was kept.
+    expect(await client.pair(fresh)).toEqual({ paired: true, extension: 'same' });
+    stored = fresh;
+    expect((await client.pr(REPO, 7)).number).toBe(7);
+    expect(await pairedOrigin(s.home)).toBe(ORIGIN);
+  });
+
   it('maps each refusal to what the panel shows: Pair, a notice in the service\'s words, or Not running', async () => {
     const s = await startService();
     const client = new ServiceClient(s.base, async () => s.token, chromeFetch(ORIGIN));
     expect(await client.pair(s.token)).toEqual({ paired: true, extension: 'new' });
 
-    // A token the service does not use, or none: the Pair screen.
+    // A token the service does not use: it cannot prove it, so the token is never sent. None stored: the Pair screen.
     const wrong = new ServiceClient(s.base, async () => 'f'.repeat(64), chromeFetch(ORIGIN));
-    expect(await refusal(wrong.pr(REPO, 7))).toEqual({ kind: 'unpaired', message: 'Airlock needs its pairing token.' });
+    expect(await refusal(wrong.pr(REPO, 7))).toEqual({ kind: 'unproven', message: NOT_PROVED });
     const none = new ServiceClient(s.base, async () => null, chromeFetch(ORIGIN));
     expect((await refusal(none.latest(REPO, 7))).kind).toBe('unpaired');
 

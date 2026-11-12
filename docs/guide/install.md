@@ -39,6 +39,24 @@ After loading, Airlock's card on `chrome://extensions` should show no **Errors**
 
 You do this once. The token stays on this Mac.
 
+Before the panel sends the token, it asks whatever answers on Airlock's port to prove it already holds the same token, without the token itself being sent. A proof is good for one second, so each action you take is checked again. If something else is listening on the port while Airlock is stopped, the panel shows the Pair screen saying "The service could not show that it holds this panel's token, so the token was not sent. If you replaced the token, paste the new one. If you did not, another program may be answering on Airlock's port." and sends nothing. `npm run service -- status` makes the same check.
+
+### Replacing the token
+
+If the token may have been seen by someone else, make a new one:
+
+```
+npm run service -- token --new
+```
+
+It prints the new token as its last line. Within a second the old token stops working, for the panel and for anyone else who has it: there is no need to restart the service, and the extension stays paired. The panel asks for the new token with the Pair screen and the sentence above, because the service now proves a token the panel does not have:
+
+- On Ready or a review, within a few seconds.
+- During a review that is running, the review carries on to its end (it was started with the old token and is not cut off); the panel asks a few seconds after it finishes. Any new request needs the new token.
+- On the Problem screen, or with the panel closed, at the next thing you do: Retry, Review, or opening the panel.
+
+Paste the new token and press **Pair**.
+
 ## 5. Review a pull request
 
 Open a pull request, press the Airlock button, choose a depth, and press **Review**. The panel shows what the pull request does while the findings are still being checked, then the verdict and up to five findings.
@@ -55,6 +73,7 @@ Airlock never writes to GitHub. It posts nothing, approves nothing and merges no
 |---|---|
 | `Not running` in the panel | Start the service: `npm run service`. The panel reconnects by itself. |
 | `Not paired` | Run `npm run service -- token` and paste the token. |
+| "The service could not show that it holds this panel's token, so the token was not sent." | If you just ran `npm run service -- token --new`, paste the new token. Otherwise run `npm run service -- status`: another program may hold the port while Airlock is stopped. |
 | "already paired with another copy of the extension" | Run `npm run service -- unpair`, then pair again. |
 | `Airlock could not reach the GitHub page` | Press **Reload the GitHub tab** in the panel. This happens after the extension itself is reloaded, or on a tab that was open before Airlock was loaded. |
 | A jump says "Asked GitHub to show…" and nothing is marked | GitHub's page changed in a way Airlock does not recognise yet. The Packs screen lists which parts it could not find. |

@@ -456,6 +456,11 @@ test('10. Post comment: the preview, an edit, Update preview, then the post; the
     comments: [{ path: 'src/pause.ts', line: 11, startLine: null, body: EDITED }],
   }]);
   for (const request of svc().requests.filter((r) => r.url.startsWith('/posts'))) expect(request.headers.origin).toBe(ORIGIN);
+  // The post routes carry the token, and only after a hello with a nonce: the panel asked the service to prove it first.
+  const log = svc().requests;
+  const firstPostRoute = log.findIndex((r) => r.url.startsWith('/posts'));
+  expect(log.slice(0, firstPostRoute).some((r) => r.method === 'GET' && r.url.startsWith('/hello?nonce='))).toBe(true);
+  for (const request of log.filter((r) => r.url.startsWith('/posts'))) expect(request.headers.authorization).toBe(`Bearer ${TOKEN}`);
 
   await sheet.getByRole('button', { name: 'Done' }).click();
   await expect(sheet).toHaveCount(0);
@@ -529,7 +534,7 @@ test('12. a post whose outcome is not known: the sentence and Open the pull requ
 });
 
 test('13. the post routes refuse a request without the extension Origin, and a preview body over 512 KB', async () => {
-  for (const path of ['/posts/preview', '/posts', '/posts/forget']) {
+  for (const path of ['/posts/preview', '/posts', '/posts/forget', '/learned/remove']) {
     const res = await fetch(`http://127.0.0.1:${E2E_PORT}${path}`, {
       method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
     });

@@ -4,6 +4,7 @@ import { chmod, link, lstat, mkdir, readFile, rename, rm, stat, writeFile } from
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { TokenFile } from './proof.js';
 
 export interface ServiceConfig { port: number; home: string; packsDir: string; version: string }
 
@@ -82,6 +83,51 @@ export async function readOrCreateToken(home: string): Promise<string> {
     if (((await stat(file)).mode & 0o077) !== 0) await chmod(file, 0o600);
     return existing;
   }
+  const token = randomBytes(32).toString('hex');
+  await writeAtomic(dir, 'token', `${token}\n`);
+  return token;
+}
+
+/**
+ * The token file as the running service watches it: `look` is one `lstat` (inode, size, modification time and mode,
+ * so a replaced, rewritten or re-permissioned file looks different); `read` takes the token as at start, never follows
+ * a symbolic link, never makes a token, and sets wider permissions back to 0600.
+ */
+export function tokenFile(home: string): TokenFile {
+  const file = join(serviceDir(home), 'token');
+  return {
+    async look() {
+      try {
+        const st = await lstat(file);
+        return `${st.ino}:${st.size}:${st.mtimeMs}:${st.mode}`;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw e;
+      }
+    },
+    async read() {
+      const st = await lstat(file).catch((e: unknown) => {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw e;
+      });
+      if (st === null) return { refused: 'it is missing' };
+      if (st.isSymbolicLink()) return { refused: 'it is a symbolic link' };
+      const text = (await readText(file))?.trim() ?? '';
+      if (text === '') return { refused: 'it is empty' };
+      if (!TOKEN_PATTERN.test(text)) return { refused: 'it does not hold a token' };
+      const tightened = (st.mode & 0o077) !== 0;
+      if (tightened) await chmod(file, 0o600);
+      return { token: text, tightened };
+    },
+  };
+}
+
+/**
+ * Makes a new pairing token and writes it whole in place of the old one (a temporary file in the same folder, mode
+ * 0600, then a rename). The paired origin is left as it is. A running service picks the new token up by itself.
+ */
+export async function replaceToken(home: string): Promise<string> {
+  const dir = await ensureDir(home);
   const token = randomBytes(32).toString('hex');
   await writeAtomic(dir, 'token', `${token}\n`);
   return token;

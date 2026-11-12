@@ -6,8 +6,9 @@ import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cleanForTerminal, realExec, type EngineDeps, type Exec } from '@airlock/engine';
 import { HelloSchema, ServiceStatusSchema, type Hello } from '@airlock/shared';
-import { loadConfig, readOrCreateToken, unpair, type ServiceConfig } from './config.js';
+import { loadConfig, readOrCreateToken, replaceToken, unpair, type ServiceConfig } from './config.js';
 import { hidePathsIn } from './http.js';
+import { helloProof, newNonce } from './proof.js';
 import { createServer, defaultEngineDeps, type Service, type ServiceDeps } from './server.js';
 
 export interface CliIo { out: (text: string) => void; err: (text: string) => void }
@@ -20,6 +21,10 @@ export interface CliOverrides {
   engineDeps?: () => EngineDeps;
   loadConfig?: (env: NodeJS.ProcessEnv) => ServiceConfig;
   readOrCreateToken?: (home: string) => Promise<string>;
+  /** Makes a new token in place of the old one and returns it. */
+  replaceToken?: (home: string) => Promise<string>;
+  /** Waits this many milliseconds (`status` waits one second before it asks for the proof a second time). */
+  wait?: (ms: number) => Promise<void>;
   /** Reads the token file without ever making one; null when there is none. */
   readToken?: (home: string) => Promise<string | null>;
   unpair?: (home: string) => Promise<void>;
@@ -71,6 +76,7 @@ export function usage(): string {
     'Commands:',
     '  start       Run the service in this terminal (the default: npm run service)',
     '  token       Print the pairing token (npm run service -- token)',
+    '  token --new Replace the pairing token; the old one stops working, and the panel asks to pair again',
     '  status      Say whether the service is running and what it found',
     '  unpair      Forget the paired extension so another copy can pair',
     '  install     Start the service at login (npm run service:install)',
@@ -80,7 +86,7 @@ export function usage(): string {
 }
 
 const COMMAND_NAMES = ['start', 'token', 'status', 'unpair', 'install', 'uninstall', 'help'] as const;
-type Command = (typeof COMMAND_NAMES)[number];
+type Command = (typeof COMMAND_NAMES)[number] | 'token --new';
 
 function parse(argv: string[]): Command | { error: string } {
   const [first, ...rest] = argv;
@@ -88,7 +94,8 @@ function parse(argv: string[]): Command | { error: string } {
   if (first === '--help' || first === '-h') return rest.length === 0 ? 'help' : { error: 'help takes no arguments.' };
   const command = COMMAND_NAMES.find((c) => c === first);
   if (command === undefined) return { error: `Unknown command "${clean(first)}".` };
-  if (rest.length > 0) return { error: `"${command}" takes no arguments.` };
+  if (command === 'token' && rest.length === 1 && rest[0] === '--new') return 'token --new';
+  if (rest.length > 0) return { error: command === 'token' ? '"token" takes only --new.' : `"${command}" takes no arguments.` };
   return command;
 }
 
@@ -298,18 +305,31 @@ async function token(io: CliIo, o: CliOverrides): Promise<number> {
   return 0;
 }
 
+/** The new token is the last line, alone, so it can be copied as `token` prints it. */
+async function newToken(io: CliIo, o: CliOverrides): Promise<number> {
+  const config = (o.loadConfig ?? loadConfig)(o.env ?? process.env);
+  const token = await (o.replaceToken ?? replaceToken)(config.home);
+  io.out('Made a new pairing token. The old one stops working now, and the panel asks to pair again. Paste this into it:\n');
+  io.out(`${token}\n`);
+  return 0;
+}
+
 const timeoutSignal = (o: CliOverrides, fallback: number): AbortSignal => AbortSignal.timeout(o.timeoutMs ?? fallback);
 
 const portTaken = (config: ServiceConfig): string => `Port ${config.port} is in use by another program.`;
 
+/** The service's look at a replaced token file is at most a second old; `status` waits that long before asking again. */
+const PROOF_RETRY_MS = 1_000;
+
 /**
  * What answers `/hello` on the configured port: Airlock's hello; `other` when something answered over HTTP but not as
- * Airlock; null when nothing answered.
+ * Airlock; null when nothing answered. With a nonce, Airlock's hello carries the proof that it holds the token.
  */
-async function probe(config: ServiceConfig, o: CliOverrides): Promise<Hello | 'other' | null> {
+async function probe(config: ServiceConfig, o: CliOverrides, nonce?: string): Promise<Hello | 'other' | null> {
+  const query = nonce === undefined ? '' : `?nonce=${nonce}`;
   let res: Response;
   try {
-    res = await (o.fetch ?? fetch)(`http://127.0.0.1:${config.port}/hello`, { signal: timeoutSignal(o, 5000) });
+    res = await (o.fetch ?? fetch)(`http://127.0.0.1:${config.port}/hello${query}`, { signal: timeoutSignal(o, 5000) });
   } catch {
     return null;
   }
@@ -329,7 +349,8 @@ async function answersHello(config: ServiceConfig, o: CliOverrides): Promise<boo
 
 async function status(io: CliIo, o: CliOverrides): Promise<number> {
   const config = (o.loadConfig ?? loadConfig)(o.env ?? process.env);
-  const hello = await probe(config, o);
+  let nonce = newNonce();
+  let hello = await probe(config, o, nonce);
   if (hello === null) {
     io.err(`Airlock's service is not running. Start it with: ${START_HINT}\n`);
     return 1;
@@ -342,6 +363,18 @@ async function status(io: CliIo, o: CliOverrides): Promise<number> {
   const key = await (o.readToken ?? defaultReadToken)(config.home);
   if (key === null) {
     io.err("Airlock's service is running, but no pairing token has been made yet.\n");
+    return 1;
+  }
+  // Whatever answers must prove it holds this token before it is sent. A token replaced a moment ago may not have been
+  // picked up yet, so a failed proof is asked for once more, a second later, with a new nonce.
+  if (hello.proof !== helloProof(key, nonce)) {
+    await (o.wait ?? ((ms: number) => new Promise<void>((done) => { setTimeout(done, ms); })))(PROOF_RETRY_MS);
+    nonce = newNonce();
+    hello = await probe(config, o, nonce);
+  }
+  if (hello === null || hello === 'other' || hello.proof !== helloProof(key, nonce)) {
+    io.err(`The service on port ${config.port} could not show that it holds the pairing token on disk, so the token was not sent. `
+      + `If Airlock is running from another AIRLOCK_HOME, stop it and start it again: ${START_HINT}. If not, another program may be answering on Airlock's port.\n`);
     return 1;
   }
   let res: Response;
@@ -517,6 +550,7 @@ export async function main(argv: string[], io: CliIo, overrides: CliOverrides = 
       case 'help': io.out(`${usage()}\n`); return 0;
       case 'start': return await start(io, overrides);
       case 'token': return await token(io, overrides);
+      case 'token --new': return await newToken(io, overrides);
       case 'status': return await status(io, overrides);
       case 'unpair': return await unpairCommand(io, overrides);
       case 'install': return await install(io, overrides);

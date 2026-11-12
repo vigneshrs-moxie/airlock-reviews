@@ -9,11 +9,14 @@ import type { EngineDeps } from '@airlock/engine';
 import { MESSAGE_MAX } from '@airlock/shared';
 import { pair, pairedOrigin, readOrCreateToken } from '../src/config.js';
 import { createRouter, type Auth, type Handler } from '../src/http.js';
+import { keepToken } from '../src/proof.js';
 import { createServer } from '../src/server.js';
 
 const ORIGIN = `chrome-extension://${'a'.repeat(32)}`;
 const OTHER = `chrome-extension://${'b'.repeat(32)}`;
 const TOKEN = 'f'.repeat(64);
+/** A keeper whose token file never changes. */
+const fixedToken = () => keepToken({ token: TOKEN, signature: null }, { look: async () => null, read: async () => ({ refused: 'unused' }) }, () => performance.now());
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -51,7 +54,7 @@ interface Rig { port: number; log: string[]; paired: { value: string | null } }
 async function routerRig(extra: { pairedOrigin?: string | null } = {}): Promise<Rig> {
   const log: string[] = [];
   const paired = { value: extra.pairedOrigin ?? null };
-  const auth: Auth = { token: TOKEN, port: 0, pairedOrigin: async () => paired.value };
+  const auth: Auth = { tokens: fixedToken(), port: 0, pairedOrigin: async () => paired.value };
   const ok: Handler = async (req) => ({ status: 200, json: { path: req.path, params: req.params, body: req.body ?? null, origin: req.origin, q: req.query.get('q') } });
   const listener = createRouter([
     { method: 'GET', path: '/hello', open: true, handler: async () => ({ status: 200, json: { hi: true } }) },
@@ -59,6 +62,7 @@ async function routerRig(extra: { pairedOrigin?: string | null } = {}): Promise<
     { method: 'GET', path: '/search', query: z.object({ q: z.string().min(2, 'q is too short') }), handler: ok },
     { method: 'POST', path: '/things', body: z.object({ name: z.string() }), handler: ok },
     { method: 'POST', path: '/pairing', pairing: true, handler: ok },
+    { method: 'GET', path: '/strict', requiresOrigin: true, handler: ok },
     { method: 'GET', path: '/boom', handler: async () => { throw new Error('secret detail'); } },
     { method: 'GET', path: '/long', handler: async () => { throw new Error(`one\ntwo\r\n${'é'.repeat(400)}`); } },
     { method: 'GET', path: '/enoent', handler: async () => { throw new Error(`ENOENT: no such file or directory, open '${homedir()}/.airlock/service/token'`); } },
@@ -126,6 +130,18 @@ describe('the three checks', () => {
     const r = await send(port, 'GET', '/things/1', { headers: { ...bearer, Origin: ORIGIN } });
     expect(r.status).toBe(200);
     expect((r.json as { origin: string }).origin).toBe(ORIGIN);
+  });
+
+  it('a route that requires an Origin refuses none and a foreign one, and accepts the paired one', async () => {
+    const { port } = await routerRig({ pairedOrigin: ORIGIN });
+    for (const headers of [bearer, { ...bearer, Origin: OTHER }, { ...bearer, Origin: 'null' }]) {
+      const r = await send(port, 'GET', '/strict', { headers });
+      expect([r.status, r.json]).toEqual([403, { error: 'Airlock does not accept requests from this page.' }]);
+    }
+    expect((await send(port, 'GET', '/strict', { headers: { ...bearer, Origin: ORIGIN } })).status).toBe(200);
+    // The Origin is checked before the token there too.
+    expect((await send(port, 'GET', '/strict', {})).status).toBe(403);
+    expect((await send(port, 'GET', '/strict', { headers: { Origin: ORIGIN } })).status).toBe(401);
   });
 
   it('refuses any Origin on every route while nothing is paired, except pairing and the open /hello', async () => {
@@ -355,7 +371,7 @@ describe('streams', () => {
     const log: string[] = [];
     let aborted!: () => void;
     const seen = new Promise<void>((r) => { aborted = r; });
-    const auth: Auth = { token: TOKEN, port: 0, pairedOrigin: async () => null };
+    const auth: Auth = { tokens: fixedToken(), port: 0, pairedOrigin: async () => null };
     const server = http.createServer(createRouter([{
       method: 'GET', path: '/wait',
       handler: async () => ({ status: 200 as const, stream: (emit, closed) => new Promise<void>((resolve) => {

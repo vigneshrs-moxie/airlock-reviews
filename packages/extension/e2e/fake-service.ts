@@ -2,11 +2,11 @@ import {
   ApiErrorSchema, checkCommentText, commentBody, DismissalSchema, DismissBodySchema, ForgetPostBodySchema, HelloSchema, LatestReplySchema,
   LearnedReplySchema, PairReplySchema, postMentions, PostBodySchema, PostPreviewBodySchema, PostPreviewReplySchema, PostRecordSchema, PrSummarySchema,
   RemoveLearnedBodySchema, RemoveLearnedReplySchema, RestoreBodySchema, RestoreReplySchema, RunIdSchema, ServiceEventSchema, ServiceStatusSchema, StartReviewBodySchema,
-  StartReviewReplySchema, summaryBody, SUMMARY_MAX,
+  MESSAGE_MAX, REVIEW_BODY_MAX, StartReviewReplySchema, summaryBody, SUMMARY_MAX, visibleText,
   type Dismissal, type Finding, type LatestReply, type LearnedLine, type Placement, type PostPreviewItem, type PostPreviewReply, type PostRecord,
   type PrSummary, type ReviewDocument, type ServiceEvent,
 } from '@airlock/shared';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { E2E_PORT } from './port';
@@ -69,6 +69,9 @@ const MERGED = 'The pull request has been merged. Nothing was posted.';
 const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
 const KEPT = 'This review was posted, so Airlock keeps its record.';
 const PREVIEW_MS = 10 * 60_000;
+// What a record keeps of a finding's aliases (packages/service/src/posts/preview.ts).
+const FINGERPRINT = /^[0-9a-f]{16}$/;
+const ALIASES_KEPT = 50;
 // The real router's body limits: the preview route takes a full-size preview, every other route 64 KB.
 const PREVIEW_BODY_MAX = 512 * 1024;
 const BODY_MAX = 64 * 1024;
@@ -128,6 +131,11 @@ export interface FakeServiceOptions {
   token?: string;
   /** Start with no extension paired: `POST /pair` with the token, from an extension, pairs it. */
   unpaired?: boolean;
+  /**
+   * What `GET /hello?nonce=` proves with: the token by default, as the real service does; another key to play
+   * something else on the port that answers like Airlock; null for a hello with no proof.
+   */
+  proofKey?: string | null;
   /** The pull requests it knows. */
   pulls?: FakePull[];
   /** The learned lines it holds, newest first, as `GET /learned` gives them. */
@@ -171,10 +179,17 @@ export interface FakeService {
   close(): Promise<void>;
 }
 
-type Pull = { pr: PrSummary; document: ReviewDocument | null; dismissals: Dismissal[]; posts: PostRecord[]; script: RunStep[] | null };
+/**
+ * `document` is the latest review; `reviews` holds every review stored for the pull request, as the real store keeps
+ * them, so a preview or a dismissal of an earlier review is found by its id.
+ */
+type Pull = {
+  pr: PrSummary; document: ReviewDocument | null; reviews: ReviewDocument[]; dismissals: Dismissal[]; posts: PostRecord[];
+  script: RunStep[] | null;
+};
 type StoredPreview = {
   previewId: string; repo: string; number: number; reviewId: string; headSha: string; expiresAt: number; review: SentReview;
-  items: PostRecord['items'];
+  items: Array<PostRecord['items'][number] & { title: string }>;
 };
 type Stream = { res: ServerResponse; send: (item: ServiceEvent | { comment: string }) => void };
 type LiveRun = FakeRun & { streams: Set<Stream> };
@@ -193,11 +208,19 @@ function firstProblem(error: { issues: readonly { path: readonly PropertyKey[]; 
   return `${issue.path.map(String).join('.')} ${issue.message}`;
 }
 
+/** As the service's records.ts: a sentence cut, as a whole, to MESSAGE_MAX characters, and a title shown on one line. */
+const fit = (sentence: string): string => {
+  const chars = [...sentence];
+  return chars.length <= MESSAGE_MAX ? sentence : `${chars.slice(0, MESSAGE_MAX - 1).join('')}…`;
+};
+const shown = (text: string): string => visibleText(text).text.replace(/\s+/g, ' ').trim();
+
 const today = (now: Date): string =>
   `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
 /**
- * A stand-in for the Airlock service that speaks its contract: the Host, Origin and token checks, `GET /hello`,
+ * A stand-in for the Airlock service that speaks its contract: the Host, Origin and token checks, `GET /hello` (with
+ * the proof that it holds the token, for a nonce),
  * `POST /pair`, `GET /status`, `GET /pr`, `POST /reviews`, `GET /reviews/running`, `GET /reviews/<runId>/events` (a real
  * event stream, written step by step from the pull request's script), `GET /reviews/latest`, `POST /dismissals`,
  * `POST /dismissals/restore`, and the post routes `POST /posts/preview`, `POST /posts` and `POST /posts/forget` (which
@@ -212,13 +235,13 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
   const requests: RecordedRequest[] = [];
   const problems: string[] = [];
   const runs: LiveRun[] = [];
-  const pulls: Pull[] = (options.pulls ?? []).map((p) => ({
-    pr: PrSummarySchema.parse(p.pr),
-    document: p.latest === undefined ? null : LatestReplySchema.parse(p.latest).document,
-    dismissals: p.latest?.dismissals ?? [],
-    posts: p.latest?.posts ?? [],
-    script: p.script ?? null,
-  }));
+  const pulls: Pull[] = (options.pulls ?? []).map((p) => {
+    const document = p.latest === undefined ? null : LatestReplySchema.parse(p.latest).document;
+    return {
+      pr: PrSummarySchema.parse(p.pr), document, reviews: document === null ? [] : [document],
+      dismissals: p.latest?.dismissals ?? [], posts: p.latest?.posts ?? [], script: p.script ?? null,
+    };
+  });
   const learned: LearnedLine[] = [...(options.learned ?? [])];
   const previews: PostPreviewReply[] = [];
   const stored = new Map<string, StoredPreview>();
@@ -280,7 +303,10 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       else {
         write(run, step.event);
         // As the engine does, the finished review is stored before the run ends.
-        if (step.event.type === 'done') pull.document = step.event.document;
+        if (step.event.type === 'done') {
+          pull.document = step.event.document;
+          pull.reviews.push(step.event.document);
+        }
       }
     }
     run.finished = true;
@@ -310,10 +336,10 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
   function dismiss(res: ServerResponse, body: unknown): void {
     const asked = bodyOf(DismissBodySchema, body);
     const pull = pullOf(asked.repo, asked.number);
-    const doc = pull?.document;
-    const finding = doc !== null && doc !== undefined && doc.id === asked.reviewId
-      ? doc.findings.find((f) => f.id === asked.findingId) : undefined;
-    if (pull === undefined || doc === null || doc === undefined || finding === undefined) throw new Refusal(404, NOT_FOUND);
+    // As the service: any stored review of the pull request, found by its id.
+    const doc = pull?.reviews.find((r) => r.id === asked.reviewId);
+    const finding = doc?.findings.find((f) => f.id === asked.findingId);
+    if (pull === undefined || doc === undefined || finding === undefined) throw new Refusal(404, NOT_FOUND);
     const now = new Date();
     // As the service does: the first selected pack that is neither the team kit's nor generic, else generic.
     const target = pull.pr.packs.find((p) => p.id !== KIT_PACK && p.id !== 'generic') ?? pull.pr.packs.find((p) => p.id === 'generic');
@@ -339,28 +365,28 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
   const keysOf = (f: Pick<Finding, 'fingerprint' | 'aliases'>): string[] => [f.fingerprint, ...(f.aliases ?? [])];
   const blocking = (pull: Pull, keys: readonly string[]): PostRecord | undefined =>
     pull.posts.find((r) => r.items.some((item) => [item.fingerprint, ...item.aliases].some((k) => keys.includes(k))));
-  const blockedBy = (record: PostRecord, title: string): string => record.outcome === 'posted'
-    ? `This finding is already posted on this pull request: ${title}.`
-    : `Airlock does not know whether this finding was posted: ${title}. Look at the pull request first.`;
+  const blockedBy = (record: PostRecord, title: string): string => fit(record.outcome === 'posted'
+    ? `This finding is already posted on this pull request: ${shown(title)}.`
+    : `Airlock does not know whether this finding was posted: ${shown(title)}. Look at the pull request first.`);
+  const dismissedSentence = (title: string): string => fit(`This finding is dismissed; restore it before posting it: ${shown(title)}.`);
 
   /** As the service's buildPreview: the exact review a post would send, stored for ten minutes. */
   function preview(res: ServerResponse, body: unknown): void {
     const asked = bodyOf(PostPreviewBodySchema, body);
     const pull = pullOf(asked.repo, asked.number);
-    const doc = pull?.document;
-    if (pull === undefined || doc === null || doc === undefined || doc.id !== asked.reviewId) throw new Refusal(404, NO_REVIEW_HERE);
+    // As the service: any stored review of the pull request, found by its id.
+    const doc = pull?.reviews.find((r) => r.id === asked.reviewId);
+    if (pull === undefined || doc === undefined) throw new Refusal(404, NO_REVIEW_HERE);
     const chosen: Finding[] = [];
     for (const item of asked.items) {
       const finding = doc.findings.find((f) => keysOf(f).includes(item.fingerprint));
       const asKeys = finding === undefined ? [item.fingerprint] : keysOf(finding);
       const fixed = (doc.fixed ?? []).find((f) => keysOf(f).some((k) => asKeys.includes(k)));
-      if (fixed !== undefined) throw new Refusal(404, `This finding is fixed, so it cannot be posted: ${fixed.title}.`);
+      if (fixed !== undefined) throw new Refusal(404, fit(`This finding is fixed, so it cannot be posted: ${shown(fixed.title)}.`));
       if (finding === undefined) throw new Refusal(404, NOT_FOUND);
-      if (chosen.includes(finding)) throw new Refusal(400, `This finding is chosen twice: ${finding.title}.`);
+      if (chosen.includes(finding)) throw new Refusal(400, fit(`This finding is chosen twice: ${shown(finding.title)}.`));
       const keys = keysOf(finding);
-      if (pull.dismissals.some((d) => keys.includes(d.fingerprint))) {
-        throw new Refusal(409, `This finding is dismissed; restore it before posting it: ${finding.title}.`);
-      }
+      if (pull.dismissals.some((d) => keys.includes(d.fingerprint))) throw new Refusal(409, dismissedSentence(finding.title));
       const earlier = blocking(pull, keys);
       if (earlier !== undefined) throw new Refusal(409, blockedBy(earlier, finding.title));
       chosen.push(finding);
@@ -375,6 +401,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       const finding = chosen[i] as Finding;
       const drafted = commentBody(finding);
       const text = item.body ?? drafted;
+      const isDefault = text === drafted;
       const problem = checkCommentText(text);
       if (problem !== null) throw new Refusal(400, problem);
       const place = finding.anchor.comment ?? null;
@@ -382,8 +409,8 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
         const startLine = place.startLine !== null && place.startLine < place.line ? place.startLine : null;
         comments.push({ path: finding.path, line: place.line, startLine, body: text });
         items.push({ fingerprint: item.fingerprint, title: finding.title, path: finding.path, line: place.line, startLine, placement: 'inline', whySummary: null, body: text, mentions: [] });
+        texts.push({ body: text, isDefault, inSummary: false });
         placements.push('inline');
-        texts.push({ body: text, isDefault: text === drafted, inSummary: false });
       } else {
         const line = place?.line ?? finding.anchor.startLine ?? null;
         inSummary.push({ path: finding.path, line, body: text });
@@ -391,8 +418,8 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
           fingerprint: item.fingerprint, title: finding.title, path: finding.path, line, startLine: null, placement: 'summary',
           whySummary: item.placement === 'summary' ? CHOSEN : NOT_ON_DIFF, body: text, mentions: [],
         });
+        texts.push({ body: text, isDefault, inSummary: true });
         placements.push('summary');
-        texts.push({ body: text, isDefault: text === drafted, inSummary: true });
       }
     }
     const count = asked.items.length;
@@ -401,15 +428,21 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     const summaryProblem = checkCommentText(summary, SUMMARY_MAX);
     if (summaryProblem !== null) throw new Refusal(400, summaryProblem);
     const reviewBody = summaryBody(inSummary, summary);
-    // The one rule for which names are warned about, as the service applies it.
+    if ([...reviewBody].length > REVIEW_BODY_MAX) {
+      throw new Refusal(400, `The review's text is longer than the ${REVIEW_BODY_MAX} characters GitHub accepts; put fewer comments in the summary.`);
+    }
+    // As the service: no names for Airlock's own text, every name once the person typed or changed any of it.
     const named = postMentions(texts, { isDefault: summary === generated }, reviewBody);
-    named.items.forEach((list, i) => { (items[i] as PostPreviewItem).mentions = list; });
+    for (const [i, item] of items.entries()) item.mentions = named.items[i] ?? [];
     const previewId = `pv_${randomBytes(8).toString('hex')}`;
     const expiresAt = Date.now() + PREVIEW_MS;
     stored.set(previewId, {
       previewId, repo: doc.pr.repo, number: doc.pr.number, reviewId: doc.id, headSha: doc.pr.headSha, expiresAt,
       review: { repo: doc.pr.repo, number: doc.pr.number, event: 'COMMENT', body: reviewBody, comments },
-      items: chosen.map((f, i) => ({ fingerprint: f.fingerprint, aliases: f.aliases ?? [], placement: placements[i] as Placement })),
+      items: chosen.map((f, i) => ({
+        fingerprint: f.fingerprint, aliases: (f.aliases ?? []).filter((a) => FINGERPRINT.test(a)).slice(0, ALIASES_KEPT),
+        placement: placements[i] as Placement, title: f.title,
+      })),
     });
     const answer: PostPreviewReply = {
       previewId, headSha: doc.pr.headSha, viewer: doc.pr.viewer, items, summary, reviewBody, expiresAt: new Date(expiresAt).toISOString(),
@@ -421,7 +454,8 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
 
   /** As the service's post: the stored preview, sent once to the fake GitHub, never retried. */
   function post(res: ServerResponse, body: unknown): void {
-    const asked = bodyOf(PostBodySchema, body);
+    // Strict, as the service's route: the request carries the preview id and nothing else.
+    const asked = bodyOf(PostBodySchema.strict(), body);
     const held = stored.get(asked.previewId);
     if (held === undefined || Date.now() >= held.expiresAt) throw new Refusal(404, EXPIRED);
     const pull = pullOf(held.repo, held.number);
@@ -429,14 +463,22 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     if (pull.pr.state === 'merged') throw new Refusal(409, MERGED);
     if (pull.pr.state === 'closed') throw new Refusal(409, CLOSED);
     if (pull.pr.headSha !== held.headSha) throw new Refusal(409, MOVED);
-    const earlier = blocking(pull, held.items.flatMap((item) => [item.fingerprint, ...item.aliases]));
-    if (earlier !== undefined) throw new Refusal(409, blockedBy(earlier, 'a chosen finding'));
+    // In the service's order: dismissed in another panel since the preview, then already posted or of unknown outcome.
+    for (const item of held.items) {
+      const keys = [item.fingerprint, ...item.aliases];
+      if (pull.dismissals.some((d) => keys.includes(d.fingerprint))) throw new Refusal(409, dismissedSentence(item.title));
+    }
+    for (const item of held.items) {
+      const earlier = blocking(pull, [item.fingerprint, ...item.aliases]);
+      if (earlier !== undefined) throw new Refusal(409, blockedBy(earlier, item.title));
+    }
     stored.delete(held.previewId);
     const answer = answers.shift() ?? { accept: true };
     sent.push(held.review);
     const record = {
       id: `post_${randomBytes(6).toString('hex')}`, repo: held.repo, number: held.number, reviewId: held.reviewId, headSha: held.headSha,
-      postedAt: new Date().toISOString(), items: held.items,
+      postedAt: new Date().toISOString(),
+      items: held.items.map(({ fingerprint, aliases, placement }) => ({ fingerprint, aliases, placement })),
     };
     if ('refuse' in answer) {
       // Kept for another try, for ten minutes from the refusal, as the service's Previews.keep does.
@@ -522,21 +564,34 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       req.once('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
       req.once('error', reject);
     });
+    // Parsed here to be recorded; a body that is not JSON is refused only where the real router reads it, after the checks.
     let body: unknown;
+    let notJson = false;
     if (text !== '') {
-      try { body = JSON.parse(text); } catch { refuse(res, 400, 'The request body is not valid JSON.'); return; }
+      try { body = JSON.parse(text); } catch { notJson = true; }
     }
     requests.push({ method, url: req.url ?? '', headers: req.headers, ...(body === undefined ? {} : { body }) });
+    const keys = [...url.searchParams.keys()];
+    const repeated = new Set(keys).size !== keys.length;
 
     // The checks in the real router's order: Host, OPTIONS, the address (404, then 405), then Origin and the token, which
-    // the open /hello skips.
+    // the open /hello skips, then a query value given twice, then the body (its type, its size, JSON).
     if (req.headers.host !== `127.0.0.1:${port}` && req.headers.host !== `localhost:${port}`) { refuse(res, 403, NOT_HERE); return; }
     if (method === 'OPTIONS') { refuse(res, 403, NOT_THIS_PAGE); return; }
     const known = ROUTES.filter((r) => r.path.test(url.pathname));
     if (known.length === 0) { refuse(res, 404, NOTHING_HERE); return; }
     if (!known.some((r) => r.method === method)) { refuse(res, 405, WRONG_METHOD); return; }
     if (method === 'GET' && url.pathname === '/hello') {
-      reply(res, HelloSchema, 200, { airlock: true, version: 'test', paired: pairedOrigin !== null });
+      // As the real service: a nonce, when given, is 32 lower-case hex characters, given once, and the reply proves the
+      // token with it.
+      if (repeated) { refuse(res, 400, 'A query value was given twice.'); return; }
+      const nonce = url.searchParams.get('nonce') ?? undefined;
+      if (nonce !== undefined && !/^[0-9a-f]{32}$/.test(nonce)) { refuse(res, 400, 'nonce: not a nonce'); return; }
+      const key = options.proofKey === undefined ? token : options.proofKey;
+      const proof = nonce === undefined || key === undefined || key === null
+        ? {}
+        : { proof: createHmac('sha256', key).update(`airlock-hello:${nonce}`).digest('hex') };
+      reply(res, HelloSchema, 200, { airlock: true, version: 'test', paired: pairedOrigin !== null, ...proof });
       return;
     }
     const origin = req.headers.origin ?? null;
@@ -547,7 +602,13 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     }
     if (NEEDS_ORIGIN.has(url.pathname) && origin === null) { refuse(res, 403, NOT_THIS_PAGE); return; }
     if (token === undefined || req.headers.authorization !== `Bearer ${token}`) { refuse(res, 401, NEEDS_TOKEN); return; }
+    if (repeated) { refuse(res, 400, 'A query value was given twice.'); return; }
+    if (method === 'POST' && text !== '') {
+      const type = (req.headers['content-type'] ?? '').split(';')[0]?.trim().toLowerCase();
+      if (type !== 'application/json') { refuse(res, 415, 'Airlock only accepts application/json.'); return; }
+    }
     if (Buffer.byteLength(text, 'utf8') > (url.pathname === '/posts/preview' ? PREVIEW_BODY_MAX : BODY_MAX)) { refuse(res, 413, TOO_LARGE); return; }
+    if (notJson) { refuse(res, 400, 'The request body is not valid JSON.'); return; }
 
     try {
       if (pairing) {

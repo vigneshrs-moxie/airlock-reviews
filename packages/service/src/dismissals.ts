@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdir, open, readdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
-  appendLearned, choosePacks, removeLearned, repoSlug, reviewById, type LearnedEntry, type Pack,
+  appendLearned, choosePacks, loadPack, removeLearned, repoSlug, reviewById, type LearnedEntry, type Pack,
 } from '@airlock/engine';
 import {
   checkLearnedText, DismissalSchema, type DismissBody, type Dismissal, type RestoreBody, type RestoreReply, type ReviewDocument,
@@ -30,6 +30,8 @@ export class DismissError extends Error {
 /** The team kit's pack. Must stay equal to the engine's KIT_PACK_ID (pipeline/packs.ts), which is not exported. */
 export const KIT_PACK = 'raj-standard';
 const GENERIC_PACK = 'generic';
+/** The most learned lines one pack may hold of one kind. */
+export const LEARNED_CAP = 300;
 const NOT_FOUND = 'Airlock cannot find that finding in the stored review.';
 const DismissalsFileSchema = z.array(DismissalSchema);
 
@@ -60,17 +62,18 @@ export async function assertWritable(pack: Pack, packsDir: string): Promise<void
  * requests, so a per-pull-request queue could lose a line.
  */
 let tail: Promise<unknown> = Promise.resolve();
-function serialised<T>(work: () => Promise<T>): Promise<T> {
+export function serialised<T>(work: () => Promise<T>): Promise<T> {
   const run = tail.then(work, work);
   tail = run.catch(() => undefined);
   return run;
 }
 
 /**
- * The file for a pull request. A folder that spells the repository in another letter case is the same folder, so a
- * request is matched to it whatever case it uses; a new file gets the repository's own spelling.
+ * The folder of a repository's dismissal files, one file per pull request. A folder that spells the repository in another
+ * letter case is the same folder, so a request is matched to it whatever case it uses; a new one gets the repository's
+ * own spelling.
  */
-async function dismissalsPath(home: string, repo: string, number: number): Promise<string> {
+export async function dismissalsFolder(home: string, repo: string): Promise<string> {
   const root = join(home, 'dismissals');
   const slug = repoSlug(repo);
   let folder = slug;
@@ -78,7 +81,12 @@ async function dismissalsPath(home: string, repo: string, number: number): Promi
     const names = await readdir(root);
     folder = names.includes(slug) ? slug : names.find((n) => n.toLowerCase() === slug.toLowerCase()) ?? slug;
   } catch { /* no dismissals yet */ }
-  return join(root, folder, `${number}.json`);
+  return join(root, folder);
+}
+
+/** The file for a pull request, in its repository's folder. */
+export async function dismissalsPath(home: string, repo: string, number: number): Promise<string> {
+  return join(await dismissalsFolder(home, repo), `${number}.json`);
 }
 
 async function readList(path: string): Promise<{ list: Dismissal[]; broken: boolean }> {
@@ -104,7 +112,7 @@ export async function dismissalsFor(home: string, repo: string, number: number):
 }
 
 /** The stored list for a change: a file that does not parse is renamed aside, not overwritten. */
-async function listForChange(path: string, now: Date, log: (line: string) => void): Promise<Dismissal[]> {
+export async function listForChange(path: string, now: Date, log: (line: string) => void): Promise<Dismissal[]> {
   const { list, broken } = await readList(path);
   if (broken) {
     const aside = `${path}.broken-${now.getTime()}-${randomBytes(4).toString('hex')}`;
@@ -114,14 +122,20 @@ async function listForChange(path: string, now: Date, log: (line: string) => voi
   return list;
 }
 
-async function writeList(path: string, list: Dismissal[]): Promise<void> {
+/** Writes a list as JSON atomically. */
+export async function writeList(path: string, list: readonly unknown[]): Promise<void> {
+  await replaceFile(path, `${JSON.stringify(list, null, 2)}\n`);
+}
+
+/** Replaces a file whole: a temporary file in the same folder, synced, then renamed over the old one. */
+export async function replaceFile(path: string, text: string): Promise<void> {
   const folder = dirname(path);
   await mkdir(folder, { recursive: true });
   const temporary = join(folder, `.${basename(path)}.${randomBytes(4).toString('hex')}.tmp`);
   try {
     const file = await open(temporary, 'wx');
     try {
-      await file.writeFile(`${JSON.stringify(list, null, 2)}\n`);
+      await file.writeFile(text);
       await file.sync();
     } finally {
       await file.close();
@@ -213,6 +227,11 @@ export async function dismiss(deps: DismissDeps, body: DismissBody): Promise<Dis
         if (gone.removed && gone.pack !== null && gone.entry !== null) removedOld = { pack: gone.pack, entry: gone.entry };
       }
       if (target !== null) {
+        // Counted after the replaced line is out, so replacing a dismissal in a full pack still works.
+        const held = (await loadPack(target.dir)).learned.filter((e) => e.kind === kind).length;
+        if (held >= LEARNED_CAP) {
+          throw new DismissError(409, `${target.title} already holds ${LEARNED_CAP} learned lines of this kind. Remove some under Packs first.`);
+        }
         await appendLearned(target.dir, line);
         written = true;
       }

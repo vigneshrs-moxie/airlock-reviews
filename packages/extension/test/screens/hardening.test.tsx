@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { createHmac } from 'node:crypto';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -72,15 +73,24 @@ describe('the real construction', () => {
     const tab: TabWatcher = { current: async () => ({ tabId: 1, url: undefined }), onChange: () => noop };
     let seen: PanelDeps | undefined;
     const stop = vi.fn();
-    const fetchSpy = vi.fn(async () => new Response('{}', { status: 500 }));
+    // The client asks /hello with a nonce first and sends the token only once the proof matches it.
+    const fetchSpy = vi.fn(async (input: string) => {
+      const nonce = new URL(input).searchParams.get('nonce');
+      if (new URL(input).pathname !== '/hello' || nonce === null) return new Response('{}', { status: 500 });
+      const proof = createHmac('sha256', 'tok-123').update(`airlock-hello:${nonce}`).digest('hex');
+      return new Response(JSON.stringify({ airlock: true, version: '1.0.0', paired: true, proof }), { status: 200 });
+    });
     vi.stubGlobal('fetch', fetchSpy);
     const panel = startRealPanel(noop, { settings, tab }, (deps) => { seen = deps; return { dispatch: noop, stop }; });
     expect(panel.stop).toBe(stop);
     expect(seen?.settings).toBe(settings);
     expect(seen?.tab).toBe(tab);
     await seen?.client.pr('acme/widgets', 1).catch(() => undefined);
-    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url.startsWith(`${SERVICE_URL}/`)).toBe(true);
+    const [hello, asked] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit | undefined];
+    expect(hello.startsWith(`${SERVICE_URL}/hello?nonce=`)).toBe(true);
+    expect(new Headers(asked?.headers).has('authorization')).toBe(false);
+    const [url, init] = fetchSpy.mock.calls[1] as unknown as [string, RequestInit];
+    expect(url.startsWith(`${SERVICE_URL}/pr?`)).toBe(true);
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer tok-123');
   });
 });

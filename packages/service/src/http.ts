@@ -1,8 +1,8 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import { MESSAGE_MAX } from '@airlock/shared';
 import type { ZodType } from 'zod';
 import { isExtensionOrigin } from './config.js';
+import type { TokenKeeper } from './proof.js';
 
 export interface Req {
   method: string;
@@ -35,13 +35,23 @@ export interface Route {
   open?: boolean;
   /** The pairing route: the Origin header is required and must be a chrome-extension origin; the handler decides the rest. */
   pairing?: boolean;
+  /**
+   * The Origin header must be present and equal the paired origin (not merely checked when present): the routes that can
+   * lead to a GitHub write, so a local command without the extension's Origin cannot reach them.
+   */
+  requiresOrigin?: boolean;
+  /** The most bytes this route's body may have, in place of MAX_BODY_BYTES; checked while the body is read. */
+  maxBodyBytes?: number;
   body?: ZodType;
   query?: ZodType;
   handler: Handler;
 }
 
-/** `port` is read on every request, so the server can set it once it knows the port it really listens on. */
-export interface Auth { token: string; port: number; pairedOrigin: () => Promise<string | null> }
+/**
+ * `port` is read on every request, so the server can set it once it knows the port it really listens on. `tokens`
+ * holds the pairing token and picks up a replaced one.
+ */
+export interface Auth { tokens: TokenKeeper; port: number; pairedOrigin: () => Promise<string | null> }
 
 export const MAX_BODY_BYTES = 64 * 1024;
 const METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -51,12 +61,11 @@ const NOT_HERE = 'Airlock only answers on this Mac.';
 const NOT_THIS_PAGE = 'Airlock does not accept requests from this page.';
 const NEEDS_TOKEN = 'Airlock needs its pairing token.';
 
-const sha256 = (text: string): Buffer => createHash('sha256').update(text).digest();
-
-function tokenMatches(header: string | undefined, token: string): boolean {
+/** Whether the Authorization header carries the token; the comparison is the keeper's, in constant time. */
+async function tokenMatches(header: string | undefined, tokens: TokenKeeper): Promise<boolean> {
   const match = /^Bearer (.+)$/.exec(header ?? '');
   if (match === null) return false;
-  return timingSafeEqual(sha256(match[1] as string), sha256(token));
+  return tokens.matches(match[1] as string);
 }
 
 function firstProblem(error: { issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }> }): string {
@@ -96,8 +105,8 @@ function matchRoute(route: Route, segments: string[]): Record<string, string> | 
 
 type BodyResult = { ok: true; text: string } | { ok: false; status: 413 };
 
-/** Reads at most 64 KB. Past that it stops reading and reports 413; the caller answers and closes the connection. */
-function readBody(req: IncomingMessage): Promise<BodyResult> {
+/** Reads at most `limit` bytes. Past that it stops reading and reports 413; the caller answers and closes the connection. */
+function readBody(req: IncomingMessage, limit: number): Promise<BodyResult> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -109,7 +118,7 @@ function readBody(req: IncomingMessage): Promise<BodyResult> {
     };
     const onData = (chunk: Buffer): void => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         req.pause();
         done({ ok: false, status: 413 });
         return;
@@ -239,9 +248,14 @@ export function createRouter(
     }
     const { route, params } = found;
 
-    // Check 2: an Origin header, when present, is the paired extension (or, for pairing, any extension). The open route
-    // answers any Origin, so pairing can begin whatever a browser sends with it.
+    // Check 2: an Origin header, when present, is the paired extension (or, for pairing, any extension); a route that
+    // requires one refuses a request without it. The open route answers any Origin, so pairing can begin whatever a
+    // browser sends with it.
     const origin = req.headers.origin ?? null;
+    if (route.requiresOrigin === true && origin === null) {
+      writeJson(res, 403, { error: NOT_THIS_PAGE });
+      return;
+    }
     if (route.pairing === true) {
       if (origin === null || !isExtensionOrigin(origin)) {
         writeJson(res, 403, { error: NOT_THIS_PAGE });
@@ -253,7 +267,7 @@ export function createRouter(
     }
 
     // Check 3: the pairing token, compared in constant time.
-    if (route.open !== true && !tokenMatches(req.headers.authorization, auth.token)) {
+    if (route.open !== true && !(await tokenMatches(req.headers.authorization, auth.tokens))) {
       writeJson(res, 401, { error: NEEDS_TOKEN });
       return;
     }
@@ -288,11 +302,12 @@ export function createRouter(
           writeJson(res, 415, { error: 'Airlock only accepts application/json.' }, { Connection: 'close' });
           return;
         }
-        if (length !== undefined && Number(length) > MAX_BODY_BYTES) {
+        const limit = route.maxBodyBytes ?? MAX_BODY_BYTES;
+        if (length !== undefined && Number(length) > limit) {
           writeJson(res, 413, { error: 'The request body is too large.' }, { Connection: 'close' });
           return;
         }
-        const read = await readBody(req);
+        const read = await readBody(req, limit);
         if (!read.ok) {
           res.once('finish', () => req.destroy());
           writeJson(res, 413, { error: 'The request body is too large.' }, { Connection: 'close' });

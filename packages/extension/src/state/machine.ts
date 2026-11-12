@@ -143,8 +143,9 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
    * While Ready or a review is on screen nothing else asks the service anything, so this checks every few seconds that
    * it still answers. MISSED_CHECKS unanswered checks in a row go offline (keeping the screen), and the offline retry
    * brings it back; an answered check starts the count again, and an answer that says the service is not paired goes to
-   * the Pair screen. It skips a check while an action is in flight, and stops when the screen is neither, or a newer
-   * check or load replaces it.
+   * the Pair screen. An answer that cannot prove it holds the stored token goes to the Pair screen with that sentence,
+   * and the token is not sent again until a proof matches. It skips a check while an action is in flight, and stops when
+   * the screen is neither, or a newer check or load replaces it.
    */
   const watch = (g: number, missed = 0): void => {
     const mine = ++watching;
@@ -156,7 +157,11 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
         let hello: Awaited<ReturnType<ServiceClient['hello']>> | null;
         try {
           hello = await client.hello(live.signal);
-        } catch {
+        } catch (error) {
+          if (error instanceof ServiceError && error.kind === 'unproven') {
+            if (settled()) fail(g, error);
+            return;
+          }
           // An answer that is not a hello is still an answer; the next action says what is wrong.
           hello = null;
         }
@@ -179,13 +184,17 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     });
   };
 
-  /** The one place a failed call becomes a state. */
+  /**
+   * The one place a failed call becomes a state. What answers could not prove it holds the token: the Pair screen with
+   * that sentence, as the same happens when the token was replaced with `token --new` and only a new one will do.
+   */
   const fail = (g: number, error: unknown, pr?: PrSummary | null): void => {
     if (!current(g)) return;
     const known = pr === null || pr === undefined ? {} : { pr };
     if (error instanceof ServiceError) {
       if (error.kind === 'offline') wentOffline(g);
       else if (error.kind === 'unpaired') apply({ type: 'unpaired' });
+      else if (error.kind === 'unproven') apply({ type: 'unpaired', message: error.message });
       else apply({ type: 'problem', message: error.message, ...known });
       return;
     }

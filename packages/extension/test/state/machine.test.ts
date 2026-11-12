@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Brief, ChangeMap, Dismissal, ServiceEvent } from '@airlock/shared';
+import { NOT_PROVED } from '../../src/client/proof';
 import { NOT_UNDERSTOOD, ServiceClient } from '../../src/client/service';
 import { LOST_MESSAGE, NOT_A_TOKEN, OFFLINE_RETRY_MS, RUN_STOPPED, SHOWING_PROBLEM, TAB_UNREADABLE, WATCH_MS, startPanel } from '../../src/state/machine';
 import type { PanelState } from '../../src/state/reduce';
@@ -59,8 +60,10 @@ function harness(opts: {
   const svc = new FakeService();
   opts.prepare?.(svc);
   const settings = memorySettings(opts.token === undefined ? TOKEN : opts.token);
-  // The client's own timeouts run on separate timers, so these hold only the panel's retries and waits.
-  const client = new ServiceClient(BASE, () => settings.getToken(), svc.fetch, new FakeTimers());
+  // The client's own timeouts run on separate timers, so these hold only the panel's retries and waits. Its monotonic
+  // clock, which says how long a proof is good for, moves only when a test moves `mono`.
+  const mono = { now: 0 };
+  const client = new ServiceClient(BASE, () => settings.getToken(), svc.fetch, new FakeTimers(), () => mono.now);
   const tab = fakeTab('url' in opts ? opts.url : prUrl('acme/widgets', 1), opts.failTabReads);
   const timers = new FakeTimers();
   const states: PanelState[] = [];
@@ -74,7 +77,7 @@ function harness(opts: {
   });
   panels.push(panel);
   const last = (): PanelState | undefined => states.at(-1);
-  return { svc, settings, tab, timers, states, panel, last, clock };
+  return { svc, settings, tab, timers, states, panel, last, clock, mono };
 }
 
 type Harness = ReturnType<typeof harness>;
@@ -138,9 +141,9 @@ describe('startPanel: loading', () => {
     expect(h.last()).toEqual({ kind: 'offline' });
   });
 
-  it('goes unpaired on 401 and ready after pairing', async () => {
+  it('goes unpaired when the service cannot prove the stored token, and ready after pairing', async () => {
     const h = harness({ token: OTHER_TOKEN });
-    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired' });
+    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
 
     h.panel.dispatch({ type: 'pair', token: '  not a token ' });
     const odd = await until(h, 'unpaired', (s) => s.message !== undefined);
@@ -148,8 +151,18 @@ describe('startPanel: loading', () => {
     expect(h.svc.calls).not.toContain('POST /pair');
 
     h.panel.dispatch({ type: 'pair', token: 'c'.repeat(64) });
-    await until(h, 'unpaired', (s) => s.message === 'Airlock needs the pairing token. Run "npm run service -- token".');
+    await until(h, 'unpaired', (s) => s.message === NOT_PROVED);
+    expect(h.svc.calls).not.toContain('POST /pair');
     expect(h.settings.token).toBe(OTHER_TOKEN);
+
+    // A token that proves but is refused at pairing: the service's words.
+    h.svc.on('POST /pair', () => json({ error: 'Airlock needs the pairing token. Run "npm run service -- token".' }, 401));
+    h.panel.dispatch({ type: 'pair', token: TOKEN });
+    await until(h, 'unpaired', (s) => s.message === 'Airlock needs the pairing token. Run "npm run service -- token".');
+    h.svc.on('POST /pair', (req) => {
+      h.svc.paired = true;
+      return req.headers.get('authorization') === `Bearer ${TOKEN}` ? json({ paired: true, extension: 'new' }) : json({ error: 'no' }, 401);
+    });
 
     h.panel.dispatch({ type: 'pair', token: `${TOKEN}\n` });
     await until(h, 'ready');
@@ -331,6 +344,83 @@ describe('startPanel: noticing the service stop while nothing is running (Task 1
   });
 });
 
+describe('startPanel: the proof before the token (Task 8)', () => {
+  const withToken = (h: Harness) => h.svc.requests.filter((r) => r.headers.has('authorization'));
+
+  it('a wrong proof shows the sentence and the token never leaves the panel', async () => {
+    for (const key of [OTHER_TOKEN, null]) {
+      const h = harness({ prepare: (svc) => { svc.proofKey = key; } });
+      expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+      // Pairing again with the stored token is checked the same way.
+      h.panel.dispatch({ type: 'pair', token: TOKEN });
+      await settle();
+      expect(h.last()).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+      expect(withToken(h)).toEqual([]);
+      expect(h.svc.calls).not.toContain('POST /pair');
+      expect(h.settings.token).toBe(TOKEN);
+    }
+  });
+
+  it('a periodic check with a wrong proof leaves the review for the sentence, and sends nothing more with the token', async () => {
+    const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary())) });
+    await until(h, 'review');
+    const sent = withToken(h).length;
+    h.svc.proofKey = OTHER_TOKEN;
+    h.timers.fire();
+    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+    expect(h.timers.delays()).toEqual([]);
+    expect(withToken(h)).toHaveLength(sent);
+    // Every check asked with its own nonce.
+    const nonces = h.svc.requests.filter((r) => r.url.pathname === '/hello').map((r) => r.url.searchParams.get('nonce'));
+    expect(nonces.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(nonces).size).toBe(nonces.length);
+  });
+
+  it('a wrong proof during an action is the sentence too, and the action is not sent', async () => {
+    const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary())) });
+    const shown = await until(h, 'review');
+    // One check goes unanswered (the review stays on screen), so the next call must prove again; what answers then cannot.
+    h.svc.down = true;
+    h.timers.fire();
+    await settle();
+    expect(h.last()).toBe(shown);
+    h.svc.down = false;
+    h.svc.proofKey = OTHER_TOKEN;
+    const sent = withToken(h).length;
+    h.panel.dispatch({ type: 'dismiss', body: dismissBody() });
+    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+    expect(h.svc.calls).not.toContain('POST /dismissals');
+    expect(withToken(h)).toHaveLength(sent);
+  });
+
+  it('on the Problem screen, an action more than a second after the last proof proves again, and another listener gets nothing', async () => {
+    const h = harness({ prepare: (svc) => svc.on('GET /reviews/latest', () => json({ error: 'Airlock had a problem: the disk is full.' }, 500)) });
+    const problem = await until(h, 'problem');
+    expect(problem.pr).not.toBeNull();
+    const sent = withToken(h).length;
+    // No check runs on the Problem screen. The service stops and another program takes the port; hours could pass.
+    h.svc.proofKey = OTHER_TOKEN;
+    h.mono.now += 3_600_000;
+    h.panel.dispatch({ type: 'start', depth: 'quick' });
+    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+    expect(h.svc.calls).not.toContain('POST /reviews');
+    expect(withToken(h)).toHaveLength(sent);
+  });
+
+  it('after the token is replaced, the next check shows Pair, and the new token pairs the panel', async () => {
+    const h = harness();
+    await until(h, 'ready');
+    // `token --new`: the service now proves, and accepts, only the new token.
+    h.svc.token = OTHER_TOKEN;
+    h.timers.fire();
+    expect(await until(h, 'unpaired')).toEqual({ kind: 'unpaired', message: NOT_PROVED });
+    h.panel.dispatch({ type: 'pair', token: OTHER_TOKEN });
+    await until(h, 'ready');
+    expect(h.settings.token).toBe(OTHER_TOKEN);
+    expect(withToken(h).filter((r) => r.headers.get('authorization') === `Bearer ${OTHER_TOKEN}`).length).toBeGreaterThan(0);
+  });
+});
+
 describe('startPanel: following a review', () => {
   it('attaches to a running review and replays its events', async () => {
     let run!: FakeRun;
@@ -506,7 +596,8 @@ describe('startPanel: following a review', () => {
     expect(h.timers.delays()).toEqual([]);
     expect(run.attaches).toBe(1);
     expect(run.listeners.size).toBe(0);
-    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(1);
+    // The first load's, and the proof before the one attach.
+    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(2);
   });
 
   it('network breaks where hello answers each time run to the re-attach limit and end at the lost-connection problem', async () => {
@@ -524,8 +615,8 @@ describe('startPanel: following a review', () => {
     }
     expect(await until(h, 'problem')).toEqual({ kind: 'problem', pr: prSummary(), message: LOST_MESSAGE });
     expect(h.svc.calls.filter((c) => c === 'GET /reviews/:runId/events')).toHaveLength(6);
-    // One hello after each of the six breaks, besides the first load's.
-    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(7);
+    // The first load's, one proof before each of the six attaches, and one hello after each of the six breaks.
+    expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(13);
     expect(h.timers.delays()).toEqual([]);
   });
 

@@ -63,6 +63,15 @@ describe('the front door of the real server', () => {
     }
   });
 
+  it('requires an Origin on the routes that can lead to a GitHub write, even with the token', async () => {
+    const strict = service.routes.filter((r) => r.requiresOrigin === true);
+    expect(strict.map(named)).toEqual(['POST /posts/preview', 'POST /posts', 'POST /posts/forget', 'POST /learned/remove']);
+    for (const route of strict) {
+      const r = await send(port, route.method, pathOf(route.path), { headers: { Authorization: `Bearer ${token}` } });
+      expect(r.status, named(route)).toBe(403);
+    }
+  });
+
   it('answers every route, /hello included, 403 with a rebinding Host', async () => {
     for (const route of service.routes) {
       const r = await send(port, route.method, pathOf(route.path), { headers: { Authorization: `Bearer ${token}`, Host: `evil.example:${port}` } });
