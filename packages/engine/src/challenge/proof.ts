@@ -95,7 +95,7 @@ function isWholeRecord(quote: string, record: string): boolean {
  * A repository-relative path safe to read: no backslash, `%`, `:` or NUL, not starting with `/`, and no empty or `..`
  * segment. Encoded and Windows-style paths are refused rather than decoded.
  */
-const isSafePath = (path: string): boolean =>
+export const isSafePath = (path: string): boolean =>
   path.trim() !== '' && !path.startsWith('/') && !/[\\%:\0]/.test(path)
   && path.split('/').every((s) => s !== '' && s !== '..');
 
@@ -104,7 +104,7 @@ const isSafePath = (path: string): boolean =>
  * a letter or digit: a comment beside a trivial line carries no proof.
  */
 const MIN_PROOF_CHARS = 12;
-const hasSubstance = (quote: string): boolean =>
+export const hasSubstance = (quote: string): boolean =>
   quote.split('\n').filter((l) => !COMMENT_LINE.test(l.trim())).map((l) => l.replace(/\s+/g, ''))
     .some((l) => l.length >= MIN_PROOF_CHARS && /[\p{L}\p{N}]/u.test(l));
 
@@ -128,7 +128,7 @@ const samePath = (a: string, b: string): boolean => pathKey(a) === pathKey(b);
 // A line that is only a comment: one starting with //, #, --, /*, * (which covers the closing */ too) or a JSX {/* comment.
 const COMMENT_LINE = /^(?:\/\/|#|--|\/\*|\*|\{\s*\/\*)/;
 /** True when every non-blank line of the quote is a comment: a comment states a claim, it does not enforce one. */
-const onlyComments = (quote: string): boolean => {
+export const onlyComments = (quote: string): boolean => {
   const lines = quote.split('\n').map((l) => l.trim()).filter((l) => l !== '');
   return lines.length > 0 && lines.every((l) => COMMENT_LINE.test(l));
 };

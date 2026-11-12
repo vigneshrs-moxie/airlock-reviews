@@ -1,7 +1,11 @@
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { ReviewRange } from '@airlock/shared';
-import { must, SLOW_EXEC_TIMEOUT_MS, TIMED_OUT, type Exec } from '../util/exec.js';
+import type { PrInfo, ReviewDocument, ReviewRange } from '@airlock/shared';
+import { planRereview, type RereviewPlan } from '../rereview/range.js';
+import { checkBranchName, FULL_COMMIT_ID, inMirror } from './git-ids.js';
+import { isSyncMerge } from '../shape/detect.js';
+import { mergeCommitRange, mergeRange, type MergeRange } from '../shape/merge-range.js';
+import { must, SLOW_EXEC_TIMEOUT_MS, STOPPED, TIMED_OUT, type Exec } from '../util/exec.js';
 import { airlockHome, repoSlug } from '../util/paths.js';
 
 export interface Workspace {
@@ -10,6 +14,20 @@ export interface Workspace {
   /** The bare mirror's git folder: the diff is computed here, where no file of the pull request can change how git reads it. */
   gitDir: string;
   range: ReviewRange;
+  /** For a re-review: what it covers. A push is reviewed from the earlier head (the base worktree); otherwise everything. */
+  plan?: RereviewPlan;
+  /**
+   * For a re-review of a push: the pull request's whole range (its base, found as a first review finds it, to the head),
+   * which is what GitHub shows. Absent when that base could not be found.
+   */
+  whole?: ReviewRange;
+  /**
+   * When every commit of the range is a merge, or a re-review's push is one merge of the base branch: what was changed by
+   * hand. For `by-hand`, `range` runs from the merge git makes by itself (the base worktree) to the merge as committed.
+   */
+  merge?: MergeRange;
+  /** Why git could not say whether the range is merges only; the review goes on as for any other range. */
+  shapeError?: string;
   dispose(): Promise<void>;
 }
 
@@ -21,7 +39,9 @@ export interface WorkspaceRequest {
    * its base branch no longer exists. Otherwise the base is where the head meets the base branch's current tip.
    */
   pr?: { number: number; baseRef: string; headSha: string; baseSha?: string; merged?: boolean };
-  explicit?: { baseSha: string; headSha: string }; // replay and re-review
+  explicit?: { baseSha: string; headSha: string }; // the replay
+  /** With `pr`: a re-review of the pull request after the earlier review `previous`. */
+  rereview?: { previous: ReviewDocument; pr: PrInfo };
   reviewId: string;
 }
 
@@ -59,20 +79,11 @@ async function ensureMirror(exec: Exec, mirror: string, remoteUrl: string): Prom
   must(await exec('git', ['clone', '--bare', remoteUrl, mirror], { timeoutMs: SLOW_EXEC_TIMEOUT_MS }), 'git clone --bare');
 }
 
-/** True when the mirror has the object `spec` names (a commit or a ref); a lookup that timed out throws. */
-async function has(exec: Exec, mirror: string, spec: string): Promise<boolean> {
-  const r = await exec('git', ['--git-dir', mirror, 'rev-parse', '--verify', '--quiet', spec]);
-  // A lookup that timed out says nothing about the commit.
-  if (r.code === TIMED_OUT) throw new Error(`git rev-parse ${spec}: ${r.stderr}`);
-  return r.code === 0;
-}
+const has = inMirror;
 
 async function requireCommit(exec: Exec, mirror: string, sha: string): Promise<void> {
   if (!(await has(exec, mirror, `${sha}^{commit}`))) throw new Error(`Commit ${sha} was not found in the mirror of this repository`);
 }
-
-/** A full commit id: 40 (SHA-1) or 64 (SHA-256) hexadecimal characters. */
-const FULL_COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 /**
  * The base GitHub recorded for the pull request, from the mirror; when the mirror does not have it, it is fetched once by
@@ -88,14 +99,9 @@ async function recordedBase(exec: Exec, mirror: string, number: number, baseSha:
   return baseSha;
 }
 
-/** A branch name git cannot read as an option or as anything but a branch: letters, digits, `.`, `_`, `/`, `-`. */
-const BRANCH_NAME = /^[A-Za-z0-9._/-]+$/;
-
 export async function prepareWorkspace(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   const baseRef = req.pr?.baseRef;
-  if (baseRef !== undefined && (!BRANCH_NAME.test(baseRef) || baseRef.startsWith('-'))) {
-    throw new Error(`The base branch ${JSON.stringify(baseRef)} is not a branch name Airlock can use.`);
-  }
+  if (baseRef !== undefined) checkBranchName(baseRef);
   const recorded = req.pr?.baseSha;
   if (recorded !== undefined && !FULL_COMMIT_ID.test(recorded)) {
     throw new Error(`The base commit GitHub recorded for pull request #${req.pr!.number}, ${JSON.stringify(recorded)}, is not a full commit id.`);
@@ -109,6 +115,8 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   await ensureMirror(exec, mirror, req.remoteUrl);
 
   let range: ReviewRange;
+  let plan: RereviewPlan | undefined;
+  let whole: ReviewRange | undefined;
   if (req.explicit) {
     range = { baseSha: req.explicit.baseSha, headSha: req.explicit.headSha, kind: 'explicit' };
   } else if (req.pr) {
@@ -120,19 +128,49 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     // Once merged, the base branch contains the head, so its tip would leave nothing to review; a deleted base branch has
     // no tip. Then the base GitHub recorded is used. An open pull request keeps the branch's current tip, since the
     // recorded base can be older than a base the branch has merged in since.
-    const branch = `refs/heads/${baseRef}`; // the full ref, so a tag of the same name cannot stand in for the branch
-    const useRecorded = merged === true || !(await has(exec, mirror, branch));
-    if (useRecorded && recordedSha === undefined) {
-      throw new Error(`Pull request #${number} is merged or its base branch ${baseRef} no longer exists, and no base commit was given.`);
+    const baseFrom = async (): Promise<string> => {
+      const branch = `refs/heads/${baseRef}`; // the full ref, so a tag of the same name cannot stand in for the branch
+      const useRecorded = merged === true || !(await has(exec, mirror, branch));
+      if (useRecorded && recordedSha === undefined) {
+        throw new Error(`Pull request #${number} is merged or its base branch ${baseRef} no longer exists, and no base commit was given.`);
+      }
+      return useRecorded ? recordedBase(exec, mirror, number, recordedSha!) : branch;
+    };
+    const wholeBase = async (): Promise<string> => {
+      const from = await baseFrom();
+      return must(await exec('git', ['--git-dir', mirror, 'merge-base', from, headSha]), `git merge-base ${from} ${headSha}`).trim();
+    };
+    // A re-review covers only the push when it can be reviewed alone; otherwise the whole pull request, as a first review.
+    // The recorded base is fetched first, so a merged pull request or a deleted base branch can be planned; when it cannot
+    // be had, the plan says so (everything again) rather than failing here.
+    if (req.rereview) {
+      try {
+        await baseFrom();
+      } catch (err) {
+        if (err instanceof Error && err.message === STOPPED) throw err;
+      }
+      plan = await planRereview(exec, mirror, req.rereview.previous, { ...req.rereview.pr, headSha });
     }
-    const from = useRecorded ? await recordedBase(exec, mirror, number, recordedSha!) : branch;
-    const baseSha = must(await exec('git', ['--git-dir', mirror, 'merge-base', from, headSha]), `git merge-base ${from} ${headSha}`).trim();
-    range = { baseSha, headSha, kind: 'full' };
+    if (plan?.kind === 'push' || plan?.kind === 'base-merge') {
+      range = { baseSha: plan.baseSha, headSha: plan.headSha, kind: 'rereview' };
+      // The whole pull request's range, as a first review would take it, is what GitHub shows. When its base cannot be
+      // found the review goes on with the push alone, and the caller says so.
+      try {
+        whole = { baseSha: await wholeBase(), headSha, kind: 'full' };
+      } catch (err) {
+        if (err instanceof Error && err.message === STOPPED) throw err;
+      }
+    } else {
+      range = { baseSha: await wholeBase(), headSha, kind: 'full' };
+    }
   } else {
     throw new Error('prepareWorkspace needs either pr or explicit');
   }
   await requireCommit(exec, mirror, range.baseSha);
   await requireCommit(exec, mirror, range.headSha);
+  const shape = await shapeOf(exec, mirror, range, plan);
+  // What was changed by hand is reviewed from the merge git makes by itself, made in this mirror.
+  if (shape.merge?.kind === 'by-hand') range = { ...range, baseSha: shape.merge.baseSha };
 
   const reviewDir = join(home, 'work', req.reviewId);
   const headDir = join(reviewDir, 'head');
@@ -164,5 +202,44 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     throw err;
   }
 
-  return { headDir, baseDir, gitDir: mirror, range, dispose };
+  return {
+    headDir, baseDir, gitDir: mirror, range, ...(plan === undefined ? {} : { plan }), ...(whole === undefined ? {} : { whole }), ...shape,
+    dispose,
+  };
+}
+
+const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * For a range of merges only (or a re-review's push of one merge of the base branch), what was changed by hand; when the
+ * merge git makes by itself cannot be made, `unsupported` with the reason. When git cannot say whether the range is
+ * merges only, the reason as `shapeError`. Nothing for any other range. A stop is passed on.
+ */
+async function shapeOf(
+  exec: Exec, mirror: string, range: ReviewRange, plan: RereviewPlan | undefined,
+): Promise<{ merge?: MergeRange; shapeError?: string }> {
+  if (plan?.kind !== 'base-merge') {
+    try {
+      if (!(await isSyncMerge(exec, mirror, range, null))) return {};
+    } catch (err) {
+      if (messageOf(err) === STOPPED) throw err;
+      return { shapeError: messageOf(err) };
+    }
+  }
+  // A range given with a shortened id is a merge Airlock cannot make: it gives git full ids only.
+  const short = [range.baseSha, range.headSha].find((id) => !FULL_COMMIT_ID.test(id));
+  if (short !== undefined) {
+    return {
+      merge: {
+        kind: 'unsupported',
+        reason: `The given range names the commit ${JSON.stringify(short)} by a shortened id, and a full commit id (40 or 64 hexadecimal characters) is needed to review what was changed by hand in a merge.`,
+      },
+    };
+  }
+  try {
+    return { merge: plan?.kind === 'base-merge' ? await mergeCommitRange(exec, mirror, range.headSha) : await mergeRange(exec, mirror, range) };
+  } catch (err) {
+    if (messageOf(err) === STOPPED) throw err;
+    return { merge: { kind: 'unsupported', reason: `Airlock could not make the merge git would make by itself: ${messageOf(err).trim()}` } };
+  }
 }

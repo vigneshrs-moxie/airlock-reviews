@@ -14,6 +14,8 @@ export interface ExecOptions {
    * it, `realExec` refuses such a call before anything is started.
    */
   allowGhWrite?: boolean;
+  /** Variables set for the command, over the process environment; GIT_TERMINAL_PROMPT stays 0 whatever is given. */
+  env?: Record<string, string>;
 }
 export type Exec = (cmd: string, args: string[], opts?: ExecOptions) => Promise<ExecResult>;
 
@@ -73,7 +75,8 @@ export function ghCallRefused(cmd: string, args: readonly string[], opts: Pick<E
 }
 
 /**
- * Runs a command with execFile (never a shell), with GIT_TERMINAL_PROMPT=0 so a credential prompt cannot wait for input.
+ * Runs a command with execFile (never a shell), with GIT_TERMINAL_PROMPT=0 so a credential prompt cannot wait for input,
+ * and `env` merged over the process environment.
  * A command still running at its timeout is killed and returns exit code TIMED_OUT with `timed out after <n> s`. Output
  * over `maxBuffer` returns exit code 1 with the reason in stderr. Rejects when the command cannot start or its signal
  * aborts, and, before starting anything, for a `gh` call that is not a read (see `isGhRead`) unless `allowGhWrite` is set.
@@ -91,7 +94,7 @@ export const realExec: Exec = (cmd, args, opts = {}) =>
       args,
       {
         cwd: opts.cwd, maxBuffer: opts.maxBuffer ?? DEFAULT_MAX_BUFFER, encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL',
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, ...(opts.signal ? { signal: opts.signal } : {}),
+        env: { ...process.env, ...opts.env, GIT_TERMINAL_PROMPT: '0' }, ...(opts.signal ? { signal: opts.signal } : {}),
       },
       (error, stdout, stderr) => {
         if (!error) return resolve({ stdout, stderr, code: 0 });

@@ -127,7 +127,7 @@ describe('anchorCandidates', () => {
       connected: [{ path: 'r.ts', line: null, role: 'the end', quote: 'end' }],
     };
     const res = await anchorCandidates([c], [], async () => t);
-    expect(res.anchored[0]?.anchor).toEqual({ status: 'outside-diff', startLine: 2, endLine: 2 });
+    expect(res.anchored[0]?.anchor).toEqual({ status: 'outside-diff', startLine: 2, endLine: 2, comment: null });
     expect(res.anchored[0]?.quote).toBe('    const result = compute(alpha, beta);');
     expect(res.anchored[0]?.connected[0]).toEqual({ path: 'r.ts', line: 3, role: 'the end', quote: 'end' });
     const whole = await anchorCandidates([{ ...c, quote: 'const   result = compute(alpha, beta);\nend' }], [], async () => t);

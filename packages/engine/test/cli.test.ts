@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -8,6 +8,7 @@ import { usage } from '../src/cli-args.js';
 import { createSdkRunner } from '../src/agent/sdk-runner.js';
 import { main, type CliIo, type CliOverrides } from '../src/cli.js';
 import { renderReview } from '../src/render/terminal.js';
+import { saveReview } from '../src/store/store.js';
 import type { EngineDeps, ReviewRequest } from '../src/pipeline/review.js';
 
 vi.mock('../src/agent/sdk-runner.js', () => ({ createSdkRunner: vi.fn(() => { throw new Error('the real runner was built'); }) }));
@@ -73,6 +74,42 @@ describe('main', () => {
     expect(h.requests[0]).not.toHaveProperty('packIds');
     expect(h.requests[0]).not.toHaveProperty('explicit');
     expect(h.requests[0]).not.toHaveProperty('models');
+  });
+
+  describe('--since', () => {
+    let home = '';
+    beforeEach(() => {
+      home = mkdtempSync(join(tmpdir(), 'airlock-cli-home-'));
+      vi.stubEnv('AIRLOCK_HOME', home);
+    });
+    afterEach(() => { rmSync(home, { recursive: true, force: true }); });
+
+    it('passes a review id as it is', async () => {
+      const h = harness();
+      expect(await main(['review', 'acme/widgets#42', '--since', 'r_0123456789'], h.io, h.overrides)).toBe(0);
+      expect(h.requests[0]).toMatchObject({ since: { reviewId: 'r_0123456789' } });
+    });
+
+    it('turns last into the id of the latest stored review of the pull request', async () => {
+      const stored = { ...minimalDocument(), id: 'r_00000000aa', pr: { ...minimalDocument().pr, repo: 'acme/widgets', number: 42 } };
+      await saveReview(stored);
+      const h = harness();
+      expect(await main(['review', 'acme/widgets#42', '--since', 'last'], h.io, h.overrides)).toBe(0);
+      expect(h.requests[0]).toMatchObject({ since: { reviewId: 'r_00000000aa' } });
+    });
+
+    it('returns 1 before reviewing when there is no stored review to start from', async () => {
+      const h = harness();
+      expect(await main(['review', 'acme/widgets#42', '--since', 'last'], h.io, h.overrides)).toBe(1);
+      expect(h.err.join('')).toBe('Airlock could not review this pull request: There is no stored review of this pull request to review the push against.\n');
+      expect(h.requests).toHaveLength(0);
+    });
+
+    it('leaves since out when not given', async () => {
+      const h = harness();
+      await main(['review', 'acme/widgets#42'], h.io, h.overrides);
+      expect(h.requests[0]).not.toHaveProperty('since');
+    });
   });
 
   it('passes --combine to the review, and leaves it out when not given', async () => {

@@ -45,9 +45,10 @@ function learnedFor(pack: Pack, repo: string, errors: StageError[]): Pack {
 /**
  * Loads every folder directly under `packsDir` that has a `pack.yaml` and selects the packs for the repository (or the
  * ones named in `packIds`), each with only the learned lines that apply to the repository. A pack that does not load, or
- * a selection that fails, is a stage error; the rest carry on. Makes no model call and no network call.
+ * a selection that fails, is a stage error; the rest carry on. A learned line that cannot be read is left out and named
+ * in `notes` (one sentence each), not an error. Makes no model call and no network call.
  */
-export async function choosePacks(packsDir: string, repo: string, packIds?: string[]): Promise<{ packs: Pack[]; errors: StageError[] }> {
+export async function choosePacks(packsDir: string, repo: string, packIds?: string[]): Promise<{ packs: Pack[]; errors: StageError[]; notes: string[] }> {
   const errors: StageError[] = [];
   const all: Pack[] = [];
   let names: string[] = [];
@@ -66,10 +67,12 @@ export async function choosePacks(packsDir: string, repo: string, packIds?: stri
     }
   }
   try {
-    return { packs: selectPacks(all, repo, packIds).map((p) => learnedFor(p, repo, errors)), errors };
+    const packs = selectPacks(all, repo, packIds).map((p) => learnedFor(p, repo, errors));
+    const notes = packs.flatMap((p) => p.learnedProblems ?? []).map((where) => `A learned line could not be read and was left out: ${where}.`);
+    return { packs, errors, notes };
   } catch (err) {
     errors.push(packsError(messageOf(err)));
-    return { packs: [], errors };
+    return { packs: [], errors, notes: [] };
   }
 }
 
@@ -85,7 +88,12 @@ export interface PackOptions {
   holdout?: Holdout;
   baseDir: string;
   changedPaths: string[];
+  /** The base worktree is a merge git made by itself, so a rule file there may hold conflict markers. */
+  baseIsMerge?: boolean;
 }
+
+/** A conflict as git leaves it in a file: a `<<<<<<<` line and, later, a `>>>>>>>` line. */
+const CONFLICT_MARKERS = /^<{7}(?: |$)[\s\S]*^>{7}(?: |$)/m;
 
 export interface PreparedPacks {
   packs: Pack[];
@@ -144,7 +152,10 @@ export async function preparePacks(selected: Pack[], opts: PackOptions): Promise
   const limits: string[] = [];
   try {
     const loaded = await loadRepoRules(opts.baseDir, opts.changedPaths, opts.exec);
-    repoRules = loaded.rules;
+    // Both sides of a conflict are not rules anyone wrote: such a file is left out and named.
+    const conflicted = opts.baseIsMerge === true ? loaded.rules.filter((r) => CONFLICT_MARKERS.test(r.text)) : [];
+    repoRules = loaded.rules.filter((r) => !conflicted.includes(r));
+    limits.push(...conflicted.map((r) => `${r.path} has merge conflict markers on the base side and was not used as rules.`));
     limits.push(...loaded.leftOut.map((l) => `repository rule file ${l.path} was not shown: ${l.reason}`));
   } catch (err) {
     errors.push(packsError(`The repository's rule files could not be read: ${messageOf(err)}`));

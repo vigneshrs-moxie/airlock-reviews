@@ -18,14 +18,25 @@ function formatLine(e: LearnedEntry): string {
   return `${e.date}${SEP}${e.repo}${SEP}${e.text.replace(/\s*[\r\n]+\s*/g, ' ').trim()}`;
 }
 
-export function parseLearned(text: string, kind: LearnedEntry['kind'], file: string): LearnedEntry[] {
+/**
+ * The entries of a learned file and the numbers of the lines that are not entries (blank lines and `#` comments are
+ * neither). Never throws: a line the person edited by hand into something unreadable is the caller's to report.
+ */
+export function readLearned(text: string, kind: LearnedEntry['kind'], file: string): { entries: LearnedEntry[]; badLines: number[] } {
   const entries: LearnedEntry[] = [];
+  const badLines: number[] = [];
   text.split(/\r?\n/).forEach((line, i) => {
     if (line.trim() === '' || line.startsWith('#')) return;
     const m = LINE.exec(line);
-    if (!m) throw new Error(`${file}:${i + 1}: not a learned entry (expected "YYYY-MM-DD${SEP}<repo>${SEP}<text>")`);
+    if (!m) { badLines.push(i + 1); return; }
     entries.push({ date: m[1]!, repo: m[2]!, kind, text: m[3]!, where: `${file}:${i + 1}` });
   });
+  return { entries, badLines };
+}
+
+export function parseLearned(text: string, kind: LearnedEntry['kind'], file: string): LearnedEntry[] {
+  const { entries, badLines } = readLearned(text, kind, file);
+  if (badLines.length > 0) throw new Error(`${file}:${badLines[0]}: not a learned entry (expected "YYYY-MM-DD${SEP}<repo>${SEP}<text>")`);
   return entries;
 }
 

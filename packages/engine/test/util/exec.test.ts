@@ -42,6 +42,13 @@ describe('realExec', () => {
     const r = await realExec('node', ['-e', 'process.stdout.write(String(process.env.GIT_TERMINAL_PROMPT))']);
     expect(r.stdout).toBe('0');
   });
+  it('merges a given env over the process environment, and GIT_TERMINAL_PROMPT stays 0', async () => {
+    const script = 'process.stdout.write([process.env.AIRLOCK_EXEC_TEST, process.env.PATH ? "path" : "", process.env.GIT_TERMINAL_PROMPT].join(","))';
+    const r = await realExec('node', ['-e', script], { env: { AIRLOCK_EXEC_TEST: 'given', GIT_TERMINAL_PROMPT: '1' } });
+    expect(r.stdout).toBe('given,path,0');
+    const without = await realExec('node', ['-e', 'process.stdout.write(String(process.env.AIRLOCK_EXEC_TEST))']);
+    expect(without.stdout).toBe('undefined');
+  });
   it('rejects with The command was stopped. when its signal aborts', async () => {
     const ac = new AbortController();
     const running = realExec('sleep', ['5'], { signal: ac.signal });

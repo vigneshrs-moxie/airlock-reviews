@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { StageSchema, VerdictLabelSchema, verdictWords, type VerdictLabel } from '@airlock/shared';
+import { FindingSchema, STATUS_WORD, StageSchema, VerdictLabelSchema, verdictWords, type VerdictLabel } from '@airlock/shared';
 
 describe('verdictWords', () => {
   it('says Ready for PR #2 only at stage pr1 and Ready to merge at every other stage', () => {
@@ -19,5 +19,13 @@ describe('verdictWords', () => {
         if (label !== 'ready-for-pr2') expect(said, `${label} at ${stage}`).toBe(words[label]);
       }
     }
+  });
+});
+
+describe('STATUS_WORD', () => {
+  it('has the words for every finding status', () => {
+    expect(STATUS_WORD).toEqual({ new: 'New', 'still-open': 'Still open', moved: 'Moved', fixed: 'Fixed' });
+    const statuses = FindingSchema.shape.status.unwrap().options;
+    expect(Object.keys(STATUS_WORD).sort()).toEqual([...statuses].sort());
   });
 });

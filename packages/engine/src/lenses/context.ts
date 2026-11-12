@@ -27,6 +27,16 @@ export interface LensContext {
   /** One more sentence for every cohort lens request, added after the lens's own instructions (the deep pass uses it). */
   extraInstructions?: string;
   /**
+   * Only on a re-review of a push: `files` is the push's diff and the base worktree is the earlier review's head. `whole` is
+   * the pull request's whole diff (its real base to the head), which is what GitHub shows and what decides whether a line
+   * is in the diff, its comment line, and what the pull request touched; null when it could not be worked out.
+   */
+  push?: {
+    whole: FileDiff[] | null;
+    /** True when the base worktree is the earlier review's head (not a merge git made by itself), so the challenge is told so. */
+    baseIsEarlierHead: boolean;
+  };
+  /**
    * When the lenses of a group go in one combined request: `all` for every group (quick depth), `no-read-tier` for a group
    * with no file in the read tier and for the standalone group; otherwise each lens has its own request.
    */
