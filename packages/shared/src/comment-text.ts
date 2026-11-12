@@ -9,37 +9,61 @@ export const SUMMARY_MAX = 4000;
 export const POST_MAX_ITEMS = 30;
 export const REVIEW_BODY_MAX = 60000;
 
-// A name: `@` then letters, digits and `- _ . /`; trailing punctuation is left outside it.
-const NAME_CHARS = '[\\p{L}\\p{N}._/-]*';
-// The `@` may follow anything but an ASCII letter or digit (after `_` it can still notify: `_x_@bob` is `<em>x</em>@bob`).
-const MENTION_ANYWHERE = new RegExp(`(?<![A-Za-z0-9])@(?=[\\p{L}\\p{N}])${NAME_CHARS}`, 'gu');
-const TRAILING = /[._/-]+$/;
-// Every numeric character reference, decimal or hexadecimal, with or without its `;`, and `&commat;`.
-const CHARACTER_REFERENCE = /&#(?:x([0-9a-f]+)|([0-9]+));?|&commat;?/gi;
+// An `@` as typed, or written as `&#64;` or `&#x40;` (any case, leading zeros, `;` or not; the digits are read as far as
+// they go, as a browser reads them, so `&#645;` is not an `@`) or as `&commat;`.
+const AT = /@|&(?:#(?:x0*40(?![0-9a-f])|0*64(?![0-9]))|commat);?/iy;
+// One character of a name as typed (a letter, a digit, `.`, `_`, `/` or `-`), or a reference standing in its place:
+// numeric, or one of the named references whose value is such characters.
+const NAME_UNIT = /[\p{L}\p{N}._/-]|&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?|&(fjlig|sol|period|lowbar|UnderBar);/uy;
+const NAMED: Record<string, string> = { fjlig: 'fj', sol: '/', period: '.', lowbar: '_', UnderBar: '_' };
+const NAME_CHAR = /^[\p{L}\p{N}._/-]$/u;
+const STARTS_NAME = /^[\p{L}\p{N}]/u;
+const CANDIDATE = /[@&]/g;
 
-/** The text as a browser would read its character references; one that names no character is left as it was. */
-function decodeReferences(text: string): string {
-  return text.replace(CHARACTER_REFERENCE, (whole, hex: string | undefined, decimal: string | undefined) => {
-    if (hex === undefined && decimal === undefined) return '@';
-    const code = hex === undefined ? Number.parseInt(decimal as string, 10) : Number.parseInt(hex, 16);
-    if (code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return whole;
-    return String.fromCodePoint(code);
-  });
+/** The characters of the name unit that starts at `at`, and where it ends, or null when none starts there. */
+function nameUnitAt(text: string, at: number): { chars: string; end: number } | null {
+  NAME_UNIT.lastIndex = at;
+  const match = NAME_UNIT.exec(text);
+  if (match === null) return null;
+  const [whole, hex, decimal, named] = match;
+  const end = at + whole.length;
+  if (named !== undefined) return { chars: NAMED[named] as string, end };
+  if (hex === undefined && decimal === undefined) return { chars: whole, end };
+  const code = hex === undefined ? Number.parseInt(decimal as string, 10) : Number.parseInt(hex, 16);
+  if (!(code > 0 && code <= 0x10ffff) || (code >= 0xd800 && code <= 0xdfff)) return null;
+  const chars = String.fromCodePoint(code);
+  return NAME_CHAR.test(chars) ? { chars, end } : null;
 }
 
 /**
- * Every `@name` (`@login` or `@org/team`) in text the person typed or changed, once each, in order, with the `@`,
- * wherever it stands: inside backticks, fences or HTML too, and with the `@` or the name written as character references
- * (`&#64;`, `&#x40;`, `&commat;`, `&#98;`). It does not read Markdown, so it over-reports on purpose (a name inside code
- * is reported although GitHub would not notify). Text Airlock drafts needs no such warning: see `commentBody`.
+ * Every `@name` (`@login` or `@org/team`) in text the person typed or changed, once each, in order, with the `@`. A name
+ * is reported for every `@`, typed or written as a reference, whose next character is a letter or digit, whatever
+ * stands before it and wherever it stands: inside backticks, fences or HTML too. The name's own characters may be
+ * references too (`@&#98;ob`, `@&fjlig;ord`, `@org&sol;team`); trailing `. _ / -` are left outside it. It does not read
+ * Markdown, so it over-reports on purpose: a name inside code, or the end of an email address (`a@b.com` gives
+ * `@b.com`), is reported although GitHub would not notify. Text Airlock drafts needs no such warning: see
+ * `commentBody`. It runs in time linear in the text's length.
  */
 export function mentionsIn(text: string): string[] {
-  const found: string[] = [];
-  for (const match of decodeReferences(text).matchAll(MENTION_ANYWHERE)) {
-    const name = match[0].replace(TRAILING, '');
-    if (!found.includes(name)) found.push(name);
+  const found = new Set<string>();
+  CANDIDATE.lastIndex = 0;
+  for (let next = CANDIDATE.exec(text); next !== null; next = CANDIDATE.exec(text)) {
+    AT.lastIndex = next.index;
+    const at = AT.exec(text);
+    if (at === null) continue;
+    let end = next.index + at[0].length;
+    let name = '';
+    for (let unit = nameUnitAt(text, end); unit !== null; unit = nameUnitAt(text, end)) {
+      if (name === '' && !STARTS_NAME.test(unit.chars)) break;
+      name += unit.chars;
+      end = unit.end;
+    }
+    let keep = name.length;
+    while (keep > 0 && '._/-'.includes(name.charAt(keep - 1))) keep -= 1;
+    if (keep > 0) found.add(`@${name.slice(0, keep)}`);
+    CANDIDATE.lastIndex = end;
   }
-  return found;
+  return [...found];
 }
 
 /**
@@ -50,7 +74,7 @@ export function mentionsIn(text: string): string[] {
  */
 export function postMentions(
   items: { body: string; isDefault: boolean; inSummary: boolean }[],
-  summary: { text: string; isDefault: boolean },
+  summary: { isDefault: boolean },
   reviewBody: string,
 ): { items: string[][]; reviewBody: string[] } {
   const allDefault = summary.isDefault && items.every((item) => !item.inSummary || item.isDefault);
