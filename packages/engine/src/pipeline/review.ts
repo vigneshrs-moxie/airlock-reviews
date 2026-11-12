@@ -263,9 +263,16 @@ function nothingReadNote(files: FileDiff[], tiers: FileFact[]): string | null {
 
 /** A re-review's note when the whole pull request was reviewed again, saying which and why. */
 function everythingNote(plan: Extract<RereviewPlan, { kind: 'everything' }>, previous: ReviewDocument, pr: PrInfo): string {
-  return plan.reason === 'rewritten'
-    ? `The branch was rewritten since the last review (its earlier head ${previous.pr.headSha.slice(0, 7)} is no longer part of it), so the whole pull request was reviewed again.`
-    : `A commit pushed since the last review merges the base branch ${pr.baseRef} in, so the whole pull request was reviewed again.`;
+  switch (plan.reason) {
+    case 'rewritten':
+      return `The branch was rewritten since the last review (its earlier head ${previous.pr.headSha.slice(0, 7)} is no longer part of it), so the whole pull request was reviewed again.`;
+    case 'base-merged-in':
+      return `A commit pushed since the last review merges the base branch ${pr.baseRef} in, so the whole pull request was reviewed again.`;
+    case 'earlier-incomplete':
+      return 'The last review did not finish, so everything was reviewed again.';
+    case 'base-missing':
+      return `The base commit of this pull request could not be found, so Airlock could not tell whether the push merges ${pr.baseRef} in, and everything was reviewed again.`;
+  }
 }
 /** A re-review's note when the push was one merge of the base branch, of which only the changes made by hand were reviewed. */
 const baseMergeNote = (pr: PrInfo): string =>

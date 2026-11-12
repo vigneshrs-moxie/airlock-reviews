@@ -135,11 +135,41 @@ describe('planRereview', () => {
       .toEqual({ kind: 'everything', reason: 'base-merged-in' });
   });
 
-  it('refuses an id that is not a commit id before asking git', async () => {
-    const calls: string[][] = [];
-    const exec = async (cmd: string, args: string[]) => { calls.push([cmd, ...args]); return { stdout: '', stderr: '', code: 0 }; };
-    await expect(planRereview(exec, '/nowhere', previous('--upload-pack=x'), prAt('d'.repeat(40), 'a'.repeat(40))))
-      .rejects.toThrow(/not a commit id/);
-    expect(calls).toEqual([]);
+  it('refuses a stored earlier head that is not a full commit id before asking git, naming the stored review', async () => {
+    for (const stored of ['--upload-pack=x', 'abcdef1', 'a'.repeat(39)]) {
+      const calls: string[][] = [];
+      const exec = async (cmd: string, args: string[]) => { calls.push([cmd, ...args]); return { stdout: '', stderr: '', code: 0 }; };
+      await expect(planRereview(exec, '/nowhere', previous(stored), prAt('d'.repeat(40), 'a'.repeat(40))))
+        .rejects.toThrow(`The stored review r_0123456789 records its head as ${JSON.stringify(stored)}, which is not a full commit id.`);
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it('plans everything, earlier-incomplete, when the earlier review did not finish', async () => {
+    const r = await repo();
+    const base = await commitFiles(r, { 'a.ts': 'one\n' }, 'base');
+    await r.git('checkout', '-b', 'feature');
+    const earlier = await commitFiles(r, { 'a.ts': 'two\n' }, 'first');
+    const head = await commitFiles(r, { 'a.ts': 'three\n' }, 'second');
+    const unfinished: ReviewDocument = {
+      ...previous(earlier), verdict: { label: 'incomplete', sentence: 'The review did not finish (lenses).', counts: { block: 0, fix: 0, ask: 0, note: 0 } },
+    };
+    expect(await planRereview(realExec, mirrorOf(r), unfinished, prAt(head, base)))
+      .toEqual({ kind: 'everything', reason: 'earlier-incomplete' });
+  });
+
+  it('plans everything, base-missing, when the base commit is not in the mirror, instead of failing', async () => {
+    const r = await repo();
+    await commitFiles(r, { 'a.ts': 'one\n' }, 'base');
+    await r.git('checkout', '-b', 'side');
+    await commitFiles(r, { 'side.ts': 'side\n' }, 'side');
+    await r.git('checkout', 'main');
+    await r.git('checkout', '-b', 'feature');
+    const earlier = await commitFiles(r, { 'a.ts': 'two\n' }, 'first');
+    await r.git('merge', '--no-ff', '--no-edit', 'side');
+    const head = await r.git('rev-parse', 'HEAD');
+    // The base branch is gone and GitHub's recorded base is a commit this mirror never had.
+    expect(await planRereview(realExec, mirrorOf(r), previous(earlier), prAt(head, 'e'.repeat(40), { baseRef: 'gone' })))
+      .toEqual({ kind: 'everything', reason: 'base-missing' });
   });
 });

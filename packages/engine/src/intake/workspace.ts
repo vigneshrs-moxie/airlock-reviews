@@ -2,6 +2,7 @@ import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PrInfo, ReviewDocument, ReviewRange } from '@airlock/shared';
 import { planRereview, type RereviewPlan } from '../rereview/range.js';
+import { checkBranchName, FULL_COMMIT_ID, inMirror } from './git-ids.js';
 import { isSyncMerge } from '../shape/detect.js';
 import { mergeCommitRange, mergeRange, type MergeRange } from '../shape/merge-range.js';
 import { must, SLOW_EXEC_TIMEOUT_MS, STOPPED, TIMED_OUT, type Exec } from '../util/exec.js';
@@ -78,20 +79,11 @@ async function ensureMirror(exec: Exec, mirror: string, remoteUrl: string): Prom
   must(await exec('git', ['clone', '--bare', remoteUrl, mirror], { timeoutMs: SLOW_EXEC_TIMEOUT_MS }), 'git clone --bare');
 }
 
-/** True when the mirror has the object `spec` names (a commit or a ref); a lookup that timed out throws. */
-async function has(exec: Exec, mirror: string, spec: string): Promise<boolean> {
-  const r = await exec('git', ['--git-dir', mirror, 'rev-parse', '--verify', '--quiet', spec]);
-  // A lookup that timed out says nothing about the commit.
-  if (r.code === TIMED_OUT) throw new Error(`git rev-parse ${spec}: ${r.stderr}`);
-  return r.code === 0;
-}
+const has = inMirror;
 
 async function requireCommit(exec: Exec, mirror: string, sha: string): Promise<void> {
   if (!(await has(exec, mirror, `${sha}^{commit}`))) throw new Error(`Commit ${sha} was not found in the mirror of this repository`);
 }
-
-/** A full commit id: 40 (SHA-1) or 64 (SHA-256) hexadecimal characters. */
-const FULL_COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 /**
  * The base GitHub recorded for the pull request, from the mirror; when the mirror does not have it, it is fetched once by
@@ -107,14 +99,9 @@ async function recordedBase(exec: Exec, mirror: string, number: number, baseSha:
   return baseSha;
 }
 
-/** A branch name git cannot read as an option or as anything but a branch: letters, digits, `.`, `_`, `/`, `-`. */
-const BRANCH_NAME = /^[A-Za-z0-9._/-]+$/;
-
 export async function prepareWorkspace(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   const baseRef = req.pr?.baseRef;
-  if (baseRef !== undefined && (!BRANCH_NAME.test(baseRef) || baseRef.startsWith('-'))) {
-    throw new Error(`The base branch ${JSON.stringify(baseRef)} is not a branch name Airlock can use.`);
-  }
+  if (baseRef !== undefined) checkBranchName(baseRef);
   const recorded = req.pr?.baseSha;
   if (recorded !== undefined && !FULL_COMMIT_ID.test(recorded)) {
     throw new Error(`The base commit GitHub recorded for pull request #${req.pr!.number}, ${JSON.stringify(recorded)}, is not a full commit id.`);
@@ -141,17 +128,29 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     // Once merged, the base branch contains the head, so its tip would leave nothing to review; a deleted base branch has
     // no tip. Then the base GitHub recorded is used. An open pull request keeps the branch's current tip, since the
     // recorded base can be older than a base the branch has merged in since.
-    const wholeBase = async (): Promise<string> => {
+    const baseFrom = async (): Promise<string> => {
       const branch = `refs/heads/${baseRef}`; // the full ref, so a tag of the same name cannot stand in for the branch
       const useRecorded = merged === true || !(await has(exec, mirror, branch));
       if (useRecorded && recordedSha === undefined) {
         throw new Error(`Pull request #${number} is merged or its base branch ${baseRef} no longer exists, and no base commit was given.`);
       }
-      const from = useRecorded ? await recordedBase(exec, mirror, number, recordedSha!) : branch;
+      return useRecorded ? recordedBase(exec, mirror, number, recordedSha!) : branch;
+    };
+    const wholeBase = async (): Promise<string> => {
+      const from = await baseFrom();
       return must(await exec('git', ['--git-dir', mirror, 'merge-base', from, headSha]), `git merge-base ${from} ${headSha}`).trim();
     };
     // A re-review covers only the push when it can be reviewed alone; otherwise the whole pull request, as a first review.
-    if (req.rereview) plan = await planRereview(exec, mirror, req.rereview.previous, { ...req.rereview.pr, headSha });
+    // The recorded base is fetched first, so a merged pull request or a deleted base branch can be planned; when it cannot
+    // be had, the plan says so (everything again) rather than failing here.
+    if (req.rereview) {
+      try {
+        await baseFrom();
+      } catch (err) {
+        if (err instanceof Error && err.message === STOPPED) throw err;
+      }
+      plan = await planRereview(exec, mirror, req.rereview.previous, { ...req.rereview.pr, headSha });
+    }
     if (plan?.kind === 'push' || plan?.kind === 'base-merge') {
       range = { baseSha: plan.baseSha, headSha: plan.headSha, kind: 'rereview' };
       // The whole pull request's range, as a first review would take it, is what GitHub shows. When its base cannot be

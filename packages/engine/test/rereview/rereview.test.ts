@@ -224,6 +224,24 @@ describe('re-review after a push', () => {
     expect(doc.previous?.reviewId).toBe(first.id);
   }, SLOW);
 
+  it('reviews everything again when the last review did not finish, and still carries its findings', async () => {
+    const { s, first } = await firstReview();
+    const unfinished: ReviewDocument = {
+      ...first, id: 'r_cccccccccc',
+      verdict: { ...first.verdict, label: 'incomplete', sentence: 'The review did not finish (lenses).' },
+      stageErrors: [{ stage: 'lenses', cohortId: null, message: 'the usage limit was reached' }],
+    };
+    await saveReview(unfinished);
+    const head = await push(s, { 'src/jobs/pause.ts': 'export function pauseJob(): void { audit(); }\n' });
+    const { doc } = await rereview(s, unfinished.id, head, pushScript({
+      paths: ['CLAUDE.md', 'src/billing.ts', 'src/jobs/pause.ts', 'src/money.ts', 'test/money.test.ts'],
+    }));
+    expect(doc.range).toEqual({ baseSha: s.baseSha, headSha: head, kind: 'full' });
+    expect(doc.previous).toEqual({ reviewId: unfinished.id, headSha: s.headSha });
+    expect(doc.notes).toContain('The last review did not finish, so everything was reviewed again.');
+    expect(Object.fromEntries(statuses(doc))).toEqual({ [GOOD.title as string]: 'still-open', [RULED.title as string]: 'still-open' });
+  }, SLOW);
+
   it('a push that changes no files carries the earlier findings and says so, without an empty-diff error', async () => {
     const { s, first } = await firstReview();
     await s.remote.git('commit', '--allow-empty', '-m', 'empty');
