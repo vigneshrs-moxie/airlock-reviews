@@ -1,7 +1,7 @@
 import type { Source } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { LensOutputSchema, MAX_CANDIDATES_PER_LENS, acceptCandidates } from '../../src/lenses/candidate.js';
+import { LensOutputSchema, MAX_CANDIDATES_PER_LENS, acceptCandidates, acceptCombined } from '../../src/lenses/candidate.js';
 
 const source: Source = { pack: 'core', lens: 'boundary', ruleId: null };
 
@@ -210,5 +210,14 @@ describe('LensOutputSchema', () => {
   it('accepts a severity or confidence in another case or with spaces', () => {
     const parsed = LensOutputSchema.safeParse({ candidates: [raw({ severity: ' Block', confidence: 'HIGH' })], questions: [] });
     expect(parsed.success && parsed.data.candidates[0]).toMatchObject({ severity: 'block', confidence: 'high' });
+  });
+});
+
+describe('acceptCombined', () => {
+  it('still drops a candidate naming a lens that was not given, as a backstop behind the schema', () => {
+    const lenses = new Map([['core/boundary', source]]);
+    const r = acceptCombined([{ ...raw(), lens: 'boundary' } as never, { ...raw({ title: 'Kept' }), lens: 'core/boundary' } as never], lenses, 'k1', new Set());
+    expect(r.candidates.map((c) => [c.title, c.source])).toEqual([['Kept', source]]);
+    expect(r.dropped.map((d) => [d.stage, d.reason])).toEqual([['schema', 'names a lens that was not given: boundary']]);
   });
 });

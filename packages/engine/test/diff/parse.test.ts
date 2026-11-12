@@ -216,4 +216,27 @@ describe('symbolic links', () => {
       checkId: 'symbolic-link', path: 'CLAUDE.md', line: null, message: 'CLAUDE.md is a symbolic link to docs/rules.md',
     }]);
   });
+
+  it('gives a file that changes type one entry: its path once, both contents in its diff, and the new mode', async () => {
+    const r = await makeTempRepo();
+    made.push(r.dir);
+    const baseSha = await commitFiles(r, { 'src/auth.ts': 'export const ok = check();\n', 'src/mock.ts': 'export const ok = true;\n' }, 'base');
+    await rm(join(r.dir, 'src/auth.ts'));
+    await symlink('mock.ts', join(r.dir, 'src/auth.ts'));
+    const headSha = await commitFiles(r, {}, 'head');
+    const files = await loadDiff(realExec, join(r.dir, '.git'), { baseSha, headSha, kind: 'full' });
+    expect(files.map((f) => [f.path, f.status, f.mode, f.additions, f.deletions])).toEqual([['src/auth.ts', 'modified', '120000', 1, 1]]);
+    const lines = files[0]!.hunks.flatMap((h) => h.lines).map((l) => [l.kind, l.text]);
+    expect(lines).toEqual([['del', 'export const ok = check();'], ['add', 'mock.ts']]);
+    expect(linkFacts(files)).toEqual([{
+      checkId: 'symbolic-link', path: 'src/auth.ts', line: null, message: 'src/auth.ts is a symbolic link to mock.ts',
+    }]);
+
+    await rm(join(r.dir, 'src/auth.ts'));
+    await writeFile(join(r.dir, 'src/auth.ts'), 'export const ok = check();\n');
+    const backSha = await commitFiles(r, {}, 'back');
+    const back = await loadDiff(realExec, join(r.dir, '.git'), { baseSha: headSha, headSha: backSha, kind: 'full' });
+    expect(back.map((f) => [f.path, f.status, f.mode, f.additions, f.deletions])).toEqual([['src/auth.ts', 'modified', '100644', 1, 1]]);
+    expect(linkFacts(back)).toEqual([]);
+  });
 });

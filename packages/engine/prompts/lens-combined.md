@@ -106,11 +106,11 @@ Return one JSON object with exactly this shape:
 
 ## Example
 
-A pull request lets a member send a gift voucher to a friend by email. A good candidate:
+A pull request lets a member send a gift voucher to a friend by email. The request carries a lens headed `team/access`, about who may act on what. A good candidate:
 
 ```json
 {
-  "lens": "the id of the lens about who may act on what",
+  "lens": "team/access",
   "severity": "block",
   "title": "Any member can redeem a voucher sent to someone else",
   "path": "src/vouchers/actions/redeem.ts",

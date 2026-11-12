@@ -1,14 +1,14 @@
-import { symlink } from 'node:fs/promises';
+import { rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createFakeRunner } from '../../src/agent/fake-runner.js';
-import type { AgentRequest } from '../../src/agent/runner.js';
+import { withRetry, type AgentRequest } from '../../src/agent/runner.js';
 import { runReview } from '../../src/pipeline/review.js';
 import { renderReview } from '../../src/render/terminal.js';
 import type { Exec } from '../../src/util/exec.js';
 import { block, rawCandidate } from '../helpers/lens-context.js';
 import {
-  BASE_FILES, fakeGh, HEAD_FILES, KIT_DIR, NOW, PACKS_DIR, scenarioScript, useReviewHarness,
+  BASE_FILES, DEEP_SENTENCE, fakeGh, HEAD_FILES, KIT_DIR, NOW, PACKS_DIR, scenarioScript, useReviewHarness,
 } from '../helpers/review-scenario.js';
 
 const SLOW = 20_000;
@@ -71,6 +71,51 @@ describe('a pull request cannot hide its own files', () => {
     expect(doc.selfReviewText).not.toContain('No findings.');
     const out = renderReview(doc);
     expect(out).toContain('\nNot reviewed\n\n- img/logo.png: binary file\n- package-lock.json: lock file (built-in: **/package-lock.json)\n');
+  }, SLOW);
+});
+
+describe('a file git calls binary', () => {
+  const STOPPED = 'src/auth.ts looks like source code but is a binary file to git, so it was not reviewed.';
+
+  it('makes the review incomplete when its path looks like source code', async () => {
+    const s = await scenario(
+      { 'src/auth.ts': AUTH_BASE, 'src/pay.ts': 'export const fee = 1;\n' },
+      { 'src/auth.ts': `// build \u0000 note\n${AUTH_HEAD}`, 'src/pay.ts': 'export const fee = 2;\n' },
+    );
+    const { doc } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha, changedFiles: 2 }), script: attributesScript() });
+    expect(doc.stageErrors).toContainEqual({ stage: 'facts', cohortId: null, message: STOPPED });
+    expect(doc.verdict.label).toBe('incomplete');
+    expect(doc.files).toContainEqual({ path: 'src/auth.ts', tier: 'ignored', reason: 'binary file' });
+  }, SLOW);
+
+  it('does not for an image under a skimmed folder', async () => {
+    const s = await scenario(
+      { 'src/pay.ts': 'export const fee = 1;\n' },
+      { 'src/assets/logo.png': 'PNG\u0000\u0001\u0002 not text', 'src/pay.ts': 'export const fee = 2;\n' },
+    );
+    const { doc } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha, changedFiles: 2 }), script: attributesScript() });
+    expect(doc.stageErrors).toEqual([]);
+    expect(doc.verdict.label).not.toBe('incomplete');
+    expect(renderReview(doc)).toContain('\nNot reviewed\n\n- src/assets/logo.png: binary file\n');
+  }, SLOW);
+});
+
+describe('a review that read nothing closely', () => {
+  const NOTE = 'Nothing in this pull request was read closely: all 2 changed files are of kinds Airlock trusts (tests, documents, generated files).';
+
+  it('says so in a note when every changed file is trusted, and keeps its verdict', async () => {
+    const s = await scenario({ 'src/pay.ts': PAY }, { 'src/pay.test.ts': "import { pay } from './pay';\n", 'test/more.spec.ts': 'export {};\n' });
+    const { doc, calls } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha, changedFiles: 2 }), script: attributesScript() });
+    expect(calls.filter((c) => c.role.startsWith('lens:'))).toEqual([]);
+    expect(doc.notes).toEqual([NOTE]);
+    expect(doc.stageErrors).toEqual([]);
+    expect(doc.verdict.label).not.toBe('incomplete');
+  }, SLOW);
+
+  it('adds no such note when one file is skimmed', async () => {
+    const s = await scenario({ 'src/pay.ts': PAY }, { 'src/pay.test.ts': "import { pay } from './pay';\n", 'src/pay.ts': `${PAY}// paid\n` });
+    const { doc } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha, changedFiles: 2 }), script: attributesScript() });
+    expect(doc.notes ?? []).not.toContainEqual(expect.stringMatching(/^Nothing in this pull request was read closely/));
   }, SLOW);
 });
 
@@ -166,15 +211,84 @@ describe('the request is checked before anything runs', () => {
 });
 
 describe('a symbolic link in the pull request', () => {
-  it('is trusted, and the facts say where it points', async () => {
+  it('keeps the tier its path gives it, and the facts say where it points', async () => {
     const s = await scenario({ 'docs/rules.md': 'rules\n', 'src/a.ts': 'export const a = 1;\n' }, {});
     await symlink('../docs/rules.md', join(s.remote.dir, 'src/rules.md'));
     await s.remote.write('src/a.ts', 'export const a = 2;\n');
     const head = await s.remote.commit('add a link');
     const { doc } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: head }) });
-    expect(doc.files).toContainEqual({ path: 'src/rules.md', tier: 'trust', reason: 'symbolic link' });
+    expect(doc.files).toContainEqual({ path: 'src/rules.md', tier: 'skim', reason: 'default' });
     expect(doc.facts).toContainEqual({
       checkId: 'symbolic-link', path: 'src/rules.md', line: null, message: 'src/rules.md is a symbolic link to ../docs/rules.md',
     });
+  }, SLOW);
+
+  it('a source file turned into a link to a mock is read by the lenses, with the fact, and listed once', async () => {
+    const OPEN = 'export function canEdit(): boolean {\n  return true;\n}\n';
+    const s = await scenario({ 'src/auth.ts': AUTH_BASE, 'src/mocks/auth.ts': OPEN }, {});
+    await rm(join(s.remote.dir, 'src/auth.ts'));
+    await symlink('mocks/auth.ts', join(s.remote.dir, 'src/auth.ts'));
+    const head = await s.remote.commit('point auth at the mock');
+    const LINKED = rawCandidate({
+      severity: 'block', title: 'canEdit now comes from the mock', path: 'src/auth.ts', quote: 'mocks/auth.ts', lineHint: 1,
+    });
+    const script = scenarioScript({
+      mapper: (req: AgentRequest<unknown>) => attributesScript()(req),
+      'lens:': (req: AgentRequest<unknown>) => (req.role === 'lens:core/correctness'
+        && block(req.material, 'facts')?.includes('src/auth.ts is a symbolic link to mocks/auth.ts')
+        ? { candidates: [LINKED], questions: [] }
+        : { candidates: [], questions: [] }),
+    });
+    const { doc, calls } = await review({ s, script, exec: fakeGh({ baseSha: s.baseSha, headSha: head, changedFiles: 1 }) });
+    const lensCalls = calls.filter((c) => c.role.startsWith('lens:'));
+    expect(lensCalls.length).toBeGreaterThan(0);
+    for (const c of lensCalls) {
+      expect(block(c.material, 'facts'), c.role).toContain('src/auth.ts is a symbolic link to mocks/auth.ts');
+      expect(block(c.material, 'diff'), c.role).toContain('## File: src/auth.ts');
+    }
+    expect(doc.files).toEqual([{ path: 'src/auth.ts', tier: 'skim', reason: 'default' }]);
+    expect(doc.findings.map((f) => f.title)).toEqual(['canEdit now comes from the mock']);
+    expect(['approve', 'ready-for-pr2']).not.toContain(doc.verdict.label);
+  }, SLOW);
+});
+
+describe('a combined lens request at quick depth', () => {
+  it('does not lose a finding whose lens id the model wrote without its pack: the schema refuses it and the corrected answer is used', async () => {
+    const s = await scenario({ 'src/auth.ts': AUTH_BASE }, { 'src/auth.ts': AUTH_HEAD });
+    const answer = (lens: string) => ({ candidates: [{ ...ALWAYS_TRUE, lens }], questions: [] });
+    const script = scenarioScript({
+      'lens:': (req: AgentRequest<unknown>) => (block(req.material, 'problems with your previous reply') === null
+        ? answer('correctness') : answer('core/correctness')),
+    });
+    const { doc, calls } = await review({ s, req: { depth: 'quick' }, script, wrap: (r) => withRetry(r, 1) });
+    expect(calls.filter((c) => c.role === 'lens:combined')).toHaveLength(2);
+    expect(doc.findings.map((f) => [f.title, f.source])).toEqual([['canEdit lets everyone edit', { pack: 'core', lens: 'correctness', ruleId: null }]]);
+    expect(doc.dropped).toEqual([]);
+    expect(doc.verdict.label).not.toBe('approve');
+  }, SLOW);
+});
+
+describe('the deep pass', () => {
+  it('does not challenge again a candidate the first pass anchored by one line of its quote and the challenge dropped', async () => {
+    const PARTLY = rawCandidate({
+      severity: 'fix', title: 'formatMoney does not round half up', path: 'src/money.ts', quote: 'return n.toFixed(2);\n// round here', lineHint: 3,
+    });
+    const cohortLine = (req: AgentRequest<unknown>): string => block(req.material, 'cohort')?.split('\n')[0] ?? '';
+    const script = scenarioScript({
+      'lens:': (req: AgentRequest<unknown>) => {
+        if (req.role !== 'lens:core/correctness') return { candidates: [], questions: [] };
+        const deep = req.instructions.includes(DEEP_SENTENCE);
+        return (deep ? cohortLine(req) === 'Cohort: Money: Rules' : cohortLine(req) === 'Cohort: Money')
+          ? { candidates: [PARTLY], questions: [] } : { candidates: [], questions: [] };
+      },
+      'challenge:': () => ({
+        outcome: 'drop', ground: 'guarded-elsewhere', explanation: 'bill rounds first.', newSeverity: null, checked: 'Read billing.',
+        refutation: { path: 'src/billing.ts', quote: 'export function bill(total: number): string {', where: 'head' },
+      }),
+    });
+    const { doc, calls } = await review({ req: { depth: 'deep' }, script });
+    const challenged = calls.filter((c) => c.role.startsWith('challenge:') && c.material.includes(PARTLY.title as string));
+    expect(challenged).toHaveLength(1);
+    expect(doc.dropped.filter((d) => d.stage === 'challenge' && d.candidate.title === PARTLY.title)).toHaveLength(1);
   }, SLOW);
 });

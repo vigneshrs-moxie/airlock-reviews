@@ -1,6 +1,6 @@
 import type { Anchor, Candidate, Severity, Source } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
-import type { AgentRequest } from '../../src/agent/runner.js';
+import { withRetry, type AgentRequest } from '../../src/agent/runner.js';
 import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
 import { mergeSameProblems, proposeClusters, MAX_CLUSTER, type AnchoredCandidate } from '../../src/merge/merge.js';
@@ -121,7 +121,12 @@ describe('mergeSameProblems', () => {
     const r = await mergeSameProblems(runner, ctx(), [a, b, c]);
     expect(r.items.map((i) => i.id)).toEqual(['c']);
     const keeper = r.items[0]!;
-    expect(keeper.connected.map((p) => p.path)).toEqual(['src/charge.ts', 'src/job.ts']);
+    expect(keeper.connected).toEqual([
+      { path: 'src/charge.ts', line: 4, role: 'also here', quote: ' pause(plan); ' },
+      { path: 'src/job.ts', line: 9, role: 'run', quote: 'run();' },
+      { path: 'src/pause.ts', line: 10, role: 'also raised here', quote: 'line 10 of a' },
+      { path: 'src/pause.ts', line: 10, role: 'also raised here', quote: 'line 10 of b' },
+    ]);
     expect(keeper.alsoRaisedBy).toEqual([source('correctness'), source('boundary')]);
     expect(keeper.aliases).toEqual([fingerprint(a), fingerprint(b)]);
     expect(r.dropped.map((d) => [d.candidate.id, d.stage, d.mergedInto])).toEqual([['a', 'merge', 'c'], ['b', 'merge', 'c']]);
@@ -129,6 +134,20 @@ describe('mergeSameProblems', () => {
     expect(r.dropped[0]!.refutation).toBeNull();
     expect('anchor' in r.dropped[0]!.candidate).toBe(false);
     expect(r.errors).toEqual([]);
+  });
+
+  it('adds a duplicate\'s own place to the keeper\'s places, unless it is the keeper\'s own place or already there', async () => {
+    const keeper = item('k', 10, { severity: 'block', quote: 'charge(plan);', connected: [{ path: 'src/pay.ts', line: 3, role: 'calls it', quote: 'pay();' }] });
+    const samePlace = item('s', 10, { quote: '  charge( plan );' });
+    const listed = item('l', 3, { path: 'src/pay.ts', quote: 'pay();' });
+    const elsewhere = item('e', 11, { path: 'src/pause.ts', quote: 'other();', anchor: { status: 'outside-diff', startLine: 11, endLine: 12 } });
+    const runner = createFakeRunner(() => ({ clusters: [partition([['k', 's', 'l', 'e']])] }));
+    const r = await mergeSameProblems(runner, ctx(), [keeper, samePlace, listed, elsewhere]);
+    expect(r.items.map((i) => i.id)).toEqual(['k']);
+    expect(r.items[0]!.connected).toEqual([
+      { path: 'src/pay.ts', line: 3, role: 'calls it', quote: 'pay();' },
+      { path: 'src/pause.ts', line: 11, role: 'also raised here', quote: 'other();' },
+    ]);
   });
 
   it('on a tie of severity and confidence keeps the earliest in the list', async () => {
@@ -191,6 +210,14 @@ describe('mergeSameProblems', () => {
       'Airlock could not confirm whether 7 findings at the same place are the same problem '
         + '("Finding m0", "Finding m1", "Finding m2", "Finding m3", "Finding m4" and 2 more), so they are listed separately.',
     ]);
+  });
+
+  it('marks the second ask not to be retried, so an unusable answer costs at most three requests behind the runner\'s retry', async () => {
+    const inner = createFakeRunner(() => new Error('bad json'));
+    const r = await mergeSameProblems(withRetry(inner, 1), ctx(), [item('a', 10), item('b', 11)]);
+    expect(inner.calls).toHaveLength(3);
+    expect(inner.calls.map((c) => c.noRetry === true)).toEqual([false, false, true]);
+    expect(r.notes).toHaveLength(1);
   });
 
   it('asks again after an unusable reply; a turn limit or timeout is not asked again and becomes a note', async () => {

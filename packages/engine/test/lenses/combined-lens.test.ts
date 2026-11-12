@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
 import type { ChangeMap } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { createFakeRunner } from '../../src/agent/fake-runner.js';
 import type { AgentRequest } from '../../src/agent/runner.js';
 import { MAX_CANDIDATES_COMBINED, runCohortLenses } from '../../src/lenses/cohort-lens.js';
@@ -50,12 +52,11 @@ describe('combined lens requests', () => {
     ]);
   });
 
-  it('keeps each candidate\'s lens in its source, and drops one with an unknown or missing lens id with a reason', async () => {
+  it('keeps each candidate\'s lens in its source, and drops one with a missing lens id with a reason', async () => {
     const runner = createFakeRunner(() => ({
       candidates: [
         rawCandidate({ lens: 'extra/jobs', title: 'Jobs one' }),
         rawCandidate({ lens: ' core/boundary ', title: 'Boundary one' }),
-        rawCandidate({ lens: 'core/made-up', title: 'Made up' }),
         rawCandidate({ title: 'No lens' }),
       ],
       questions: ['Who decided the limit?'],
@@ -66,11 +67,42 @@ describe('combined lens requests', () => {
       ['Boundary one', { pack: 'core', lens: 'boundary', ruleId: null }],
     ]);
     expect(r.dropped.map((d) => [d.candidate.title, d.stage, d.reason])).toEqual([
-      ['Made up', 'schema', 'names a lens that was not given: core/made-up'],
       ['No lens', 'schema', 'names no lens'],
     ]);
     expect(r.questions.map((q) => q.text)).toEqual(['Who decided the limit?']);
     expect(new Set(r.candidates.map((c) => c.cohortId))).toEqual(new Set(['k1']));
+  });
+
+  it('sends a schema whose lens field lists exactly the ids of the lenses the request carries', async () => {
+    const runner = createFakeRunner(empty);
+    const one = [pack('solo', [lens('only')])];
+    await runCohortLenses(runner, ctx({ packs, combine: 'all', map: { ...ctx().map, cohorts: [ctx().map.cohorts[0]!] } }));
+    await runCohortLenses(runner, ctx({ packs: one, combine: 'all', map: { ...ctx().map, cohorts: [ctx().map.cohorts[0]!] } }));
+    const lensField = (req: AgentRequest<unknown>) => {
+      const json = z.toJSONSchema(req.schema, { target: 'draft-7' }) as unknown as {
+        properties: { candidates: { items: { properties: { lens: { enum?: string[] } } } } };
+      };
+      return json.properties.candidates.items.properties.lens.enum;
+    };
+    expect(runner.calls.map(lensField)).toEqual([['core/boundary', 'core/money', 'extra/jobs'], ['solo/only']]);
+  });
+
+  it('refuses an answer naming a lens it was not given, so the runner asks for it again', async () => {
+    const runner = createFakeRunner(() => ({ candidates: [rawCandidate({ lens: 'correctness' })], questions: [] }));
+    const r = await runCohortLenses(runner, ctx({ packs, combine: 'all', map: { ...ctx().map, cohorts: [ctx().map.cohorts[0]!] } }));
+    expect(r.candidates).toEqual([]);
+    expect(r.errors).toEqual([expect.objectContaining({ stage: 'lenses', cohortId: 'k1', kind: 'invalid-output' })]);
+  });
+
+  it('the template\'s worked example passes the schema the request is sent with', async () => {
+    const template = readFileSync(new URL('../../prompts/lens-combined.md', import.meta.url), 'utf8');
+    const example = JSON.parse(/## Example[\s\S]*?```json\n([\s\S]*?)\n```/.exec(template)![1]!) as { lens: string };
+    const [packId, lensId] = example.lens.split('/');
+    const runner = createFakeRunner(empty);
+    await runCohortLenses(runner, ctx({ packs: [pack(packId!, [lens(lensId!)])], combine: 'all', map: { ...ctx().map, cohorts: [ctx().map.cohorts[0]!] } }));
+    const parsed = runner.calls[0]!.schema.safeParse({ candidates: [example], questions: [] });
+    expect(parsed.success).toBe(true);
+    expect(runner.calls[0]!.instructions).toContain(`### ${example.lens}:`);
   });
 
   it('keeps at most ten candidates from one combined request', async () => {

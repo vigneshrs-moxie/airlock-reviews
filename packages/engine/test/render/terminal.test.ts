@@ -232,6 +232,13 @@ describe('renderReview', () => {
     expect(renderReview(fullDocument())).not.toContain('Also raised by');
   });
 
+  it('names the pack by its title under Also raised by, and by its id when the document has no title for it', () => {
+    const doc = fullDocument();
+    doc.packs = [{ id: 'core', version: 'abcdef0', title: 'Core' }, { id: 'raj-standard', version: '1', title: 'Team standard' }];
+    doc.findings[0]!.alsoRaisedBy = [{ pack: 'raj-standard', lens: 'numbers-data', ruleId: null }, { pack: 'orbit-mine', lens: null, ruleId: 'money-rounding' }];
+    expect(renderReview(doc)).toContain('   Also raised by: Team standard · numbers-data, orbit-mine · money-rounding\n');
+  });
+
   it('prints the notes under Notes, after Not shown to the reviewer', () => {
     const doc = fullDocument();
     doc.limits = ['lenses: Totals: 1,500 of 4,556 changed lines were shown (2 files cut)'];

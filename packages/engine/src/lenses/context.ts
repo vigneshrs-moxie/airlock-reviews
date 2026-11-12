@@ -6,7 +6,7 @@ import { asMaterial, PROMPT_BOUNDARY } from '../agent/prompt.js';
 import { UNKNOWN_USAGE } from '../agent/runner.js';
 import type { AgentRequest, AgentResult, AgentRunner, AgentUsage } from '../agent/runner.js';
 import type { Pack } from '../packs/types.js';
-import { CombinedOutputSchema, LensOutputSchema, acceptCandidates, acceptCombined } from './candidate.js';
+import { LensOutputSchema, acceptCandidates, acceptCombined, combinedOutputSchema } from './candidate.js';
 import type { Accepted, CombinedOutput, LensOutput } from './candidate.js';
 
 /** What the lens stages need. `tiers` holds the read, skim, trust or ignored tier of each changed file. */
@@ -268,7 +268,7 @@ export async function runLensCall(runner: AgentRunner, ctx: LensContext, call: L
     role: call.role,
     instructions: call.instructions,
     material: call.material,
-    schema: call.lenses === undefined ? LensOutputSchema : CombinedOutputSchema,
+    schema: call.lenses === undefined ? LensOutputSchema : combinedOutputSchema([...call.lenses.keys()]),
     cwd: ctx.headDir,
     extraDirs: [ctx.baseDir],
     model: ctx.models.main,

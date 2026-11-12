@@ -109,15 +109,16 @@ describe('runSweep', () => {
     expect(r.dropped.map((d) => [d.stage, d.reason])).toEqual([['schema', 'the rule mem-1 does not apply to src/billing/a.ts']]);
   });
 
-  it('turns an invalid candidate into a question, and keeps at most 6 candidates per batch', async () => {
-    const many = Array.from({ length: 8 }, () => sweepCandidate());
+  it('turns an invalid candidate into a question, and keeps at most 12 candidates per batch, as the prompt says', async () => {
+    const many = Array.from({ length: 14 }, () => sweepCandidate());
     const runner = createFakeRunner((req) => (req.role.endsWith('#1')
       ? { candidates: [...many, { ruleId: 'bill-1', title: 'Half a thought' }], questions: ['Is this intended?'] } : { candidates: [], questions: [] }));
     const r = await runSweep(runner, sweepCtx());
-    expect(r.candidates).toHaveLength(6);
-    expect(r.dropped.map((d) => d.reason)).toEqual(Array(2).fill('more than 6 candidates from one lens'));
+    expect(r.candidates).toHaveLength(12);
+    expect(r.dropped.map((d) => d.reason)).toEqual(Array(2).fill('more than 12 candidates from one sweep request'));
     expect(r.questions.map((q) => q.text).sort()).toEqual(['Half a thought', 'Is this intended?']);
-    expect(new Set(r.candidates.map((c) => c.id)).size).toBe(6);
+    expect(new Set(r.candidates.map((c) => c.id)).size).toBe(12);
+    expect(runner.calls[0]!.instructions).toContain('Return at most 12 candidates.');
   });
 
   it('keeps a sweep candidate that fails the schema as a dropped entry with its reason', async () => {
@@ -129,12 +130,25 @@ describe('runSweep', () => {
     expect(r.dropped.map((d) => [d.stage, d.reason])).toEqual([['schema', 'it does not say why']]);
   });
 
+  it('a failed batch names at most its own eight files', async () => {
+    const ten = Array.from({ length: 10 }, (_, i) => `src/billing/f${i}.ts`);
+    const m: ChangeMap = { cohorts: [cohort('k1', 'Billing', [layer('k1.l1', 'writes', ten)])], standalone: [], links: [] };
+    const runner = createFakeRunner((req) => (req.role === 'sweep:k1#2' ? new Error('boom') : { candidates: [], questions: [] }));
+    const r = await runSweep(runner, sweepCtx({ map: m, files: ten.map((f) => diff(f)), tiers: ten.map((f) => tier(f)) }));
+    expect(r.errors.map((e) => e.message)).toEqual(['batch 2 (src/billing/f8.ts, src/billing/f9.ts): boom']);
+    const all = createFakeRunner(() => new Error('boom'));
+    const first = (await runSweep(all, sweepCtx({ map: m, files: ten.map((f) => diff(f)), tiers: ten.map((f) => tier(f)) }))).errors[0]!;
+    expect(first.message).toBe(`batch 1 (${ten.slice(0, 8).join(', ')}): boom`);
+  });
+
   it('a failed batch becomes a stage error naming the batch and the others carry on', async () => {
     const m: ChangeMap = { ...map, standalone: ['src/members/s.ts'] };
     const fs = [...files, 'src/members/s.ts'];
     const runner = createFakeRunner((req) => (req.role === 'sweep:k1#1' ? new Error('boom') : { candidates: [sweepCandidate({ ruleId: 'mem-1', path: 'src/members/s.ts' })], questions: [] }));
     const r = await runSweep(runner, sweepCtx({ map: m, files: fs.map((f) => diff(f)), tiers: fs.map((f) => tier(f)) }));
-    expect(r.errors).toEqual([{ stage: 'sweep', cohortId: 'k1', message: 'batch 1: boom', kind: 'invalid-output' }]);
+    expect(r.errors).toEqual([{
+      stage: 'sweep', cohortId: 'k1', message: 'batch 1 (src/billing/a.ts, src/billing/b.ts, src/members/m.ts): boom', kind: 'invalid-output',
+    }]);
     expect(r.candidates).toHaveLength(1);
     expect(r.usage).toHaveLength(2);
   });

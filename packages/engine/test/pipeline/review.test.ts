@@ -90,7 +90,7 @@ describe('runReview', () => {
     expect(doc.range).toEqual({ baseSha: s.baseSha, headSha: s.headSha, kind: 'full' });
     expect(doc.depth).toBe('standard');
     expect(doc.models).toEqual({ main: 'claude-opus-5-5', challenger: 'claude-opus-5-5', sweep: 'claude-opus-5-5', effort: 'high' });
-    expect(doc.packs).toEqual([{ id: 'core', version: '1' }, { id: 'raj-standard', version: 'pinned' }]);
+    expect(doc.packs).toEqual([{ id: 'core', version: '1', title: 'Core' }, { id: 'raj-standard', version: 'pinned', title: 'Team standard' }]);
     expect(doc.stageErrors).toEqual([]);
     expect(doc.verdict.label).toBe('approve-after-fixes');
     expect(doc.findings.map((f) => f.title).sort()).toEqual([GOOD.title, RULED.title].sort());
@@ -321,7 +321,7 @@ describe('runReview', () => {
     expect(doc.questions.at(-1)).toEqual({
       text: STALE_KIT_QUESTION, cohortId: null, source: { pack: 'airlock', lens: null, ruleId: null },
     });
-    expect(doc.packs).toContainEqual({ id: 'raj-standard', version: sha });
+    expect(doc.packs).toContainEqual({ id: 'raj-standard', version: sha, title: 'Team standard' });
     expect(doc.stageErrors).toEqual([]);
     expect(everything(calls)).toContain('CAL_EARLY_MARKER');
   }, SLOW);

@@ -175,7 +175,8 @@ export const StageTimingSchema = z.object({
 });
 export type StageTiming = z.infer<typeof StageTimingSchema>;
 
-export const PackRefSchema = z.object({ id: z.string(), version: z.string() });
+/** A pack the review used. `title` is absent in documents written before it was kept. */
+export const PackRefSchema = z.object({ id: z.string(), version: z.string(), title: z.string().optional() });
 export type PackRef = z.infer<typeof PackRefSchema>;
 
 export const ModelConfigSchema = z.object({

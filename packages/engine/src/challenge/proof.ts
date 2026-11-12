@@ -99,10 +99,14 @@ const isSafePath = (path: string): boolean =>
   path.trim() !== '' && !path.startsWith('/') && !/[\\%:\0]/.test(path)
   && path.split('/').every((s) => s !== '' && s !== '..');
 
-/** A quote proves nothing unless one of its lines, without whitespace, has this many characters and a letter or digit. */
+/**
+ * A quote proves nothing unless one of its lines that is not a comment, without whitespace, has this many characters and
+ * a letter or digit: a comment beside a trivial line carries no proof.
+ */
 const MIN_PROOF_CHARS = 12;
 const hasSubstance = (quote: string): boolean =>
-  quote.split('\n').map((l) => l.replace(/\s+/g, '')).some((l) => l.length >= MIN_PROOF_CHARS && /[\p{L}\p{N}]/u.test(l));
+  quote.split('\n').filter((l) => !COMMENT_LINE.test(l.trim())).map((l) => l.replace(/\s+/g, ''))
+    .some((l) => l.length >= MIN_PROOF_CHARS && /[\p{L}\p{N}]/u.test(l));
 
 const overlaps = (found: Lines, own: Anchor): boolean =>
   own.startLine !== null && found.startLine <= (own.endLine ?? own.startLine) && own.startLine <= found.endLine;

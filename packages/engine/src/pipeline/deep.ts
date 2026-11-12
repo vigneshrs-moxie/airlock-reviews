@@ -49,7 +49,8 @@ export interface DeepInput {
 /**
  * The deep pass: the cohort lenses again over each layer of every cohort with more than one layer, told to read the
  * layer's files in full. A candidate whose fingerprint was seen before, in the review or earlier in this pass, is
- * discarded; the rest are added to the review's candidates, then anchored and challenged. Everything it adds names the
+ * discarded, whether made from its own quote or, once anchored, from the file's lines; the rest are added to the review's
+ * candidates, and the anchored ones are challenged. Everything it adds names the
  * original cohort, and every error it records is named `lenses-deep`.
  */
 export async function deepPass(rec: StageRecorder, input: DeepInput, sink: DeepSink): Promise<void> {
@@ -66,6 +67,10 @@ export async function deepPass(rec: StageRecorder, input: DeepInput, sink: DeepS
   sink.limits.push(...lensed.limits.map((l) => l.replace(/^lenses: /, 'lenses-deep: ')));
   sink.questions.push(...lensed.questions.map(back));
   sink.schemaDropped.push(...lensed.dropped.map((d) => ({ ...d, candidate: back(d.candidate) })));
+  // A repeat is recognised twice: by the model's own quote before anchoring, and by the quote made from the file's lines
+  // after it, which is what the first pass's kept and dropped items carry; the two differ when a quote was anchored by
+  // one of its lines.
+  const known = new Set(seen);
   const fresh = lensed.candidates.filter((c) => {
     const print = fingerprint(c);
     if (seen.has(print)) return false;
@@ -73,16 +78,26 @@ export async function deepPass(rec: StageRecorder, input: DeepInput, sink: DeepS
     return true;
   });
   const candidates = input.uniqueIds(fresh.map(back));
-  sink.candidates.push(...candidates);
-
   const anchored = await anchorCandidates(candidates, ctx.files, input.readHead);
+  const repeats = new Set<string>();
+  const anchoredFresh = anchored.anchored.filter((c) => {
+    const print = fingerprint(c);
+    if (known.has(print)) {
+      repeats.add(c.id);
+      return false;
+    }
+    known.add(print);
+    seen.add(print);
+    return true;
+  });
+  sink.candidates.push(...candidates.filter((c) => !repeats.has(c.id)));
   sink.anchorDropped.push(...anchored.dropped);
   let challenged: Awaited<ReturnType<typeof challenge>>;
   try {
-    challenged = await challenge(runner, ctx, anchored.anchored, input.readBoth);
+    challenged = await challenge(runner, ctx, anchoredFresh, input.readBoth);
   } catch (err) {
     // Kept as findings, marked, as the main pass keeps them when its challenge fails.
-    sink.kept.push(...anchored.anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED })));
+    sink.kept.push(...anchoredFresh.map((c) => ({ ...c, checked: CHALLENGE_FAILED })));
     throw err;
   }
   rec.usage(challenged.usage);

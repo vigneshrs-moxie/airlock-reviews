@@ -107,6 +107,13 @@ describe('planSweep', () => {
     expect(batches.map((b) => b.files)).toEqual([['src/a/1.ts', 'src/a/2.ts']]);
   });
 
+  it('never includes a symbolic link, whatever its tier', () => {
+    const files = ['src/a/1.ts', 'src/a/link.ts'];
+    const diffs = [diff(files[0]!), diff(files[1]!, 1, { mode: '120000' })];
+    const batches = planSweep(one(files), files.map((f) => tier(f)), diffs, packs);
+    expect(batches.map((b) => b.files)).toEqual([['src/a/1.ts']]);
+  });
+
   it('never includes deleted or binary files', () => {
     const files = ['src/a/1.ts', 'src/a/2.ts', 'src/a/3.ts'];
     const diffs = [diff(files[0]!), diff(files[1]!, 3, { status: 'deleted' }), diff(files[2]!, 0, { binary: true })];

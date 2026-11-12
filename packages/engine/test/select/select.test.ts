@@ -153,6 +153,13 @@ describe('mergeDuplicates', () => {
     expect(r.merged[0]!.aliases).toEqual(['f00', fingerprint(b)]);
   });
 
+  it('a merge adds the place of what it absorbs to the kept item\'s places', () => {
+    const a = item('a', 'block', { path: 'src/x.ts' });
+    const b = item('b', 'fix', { path: 'src/x.ts', quote: 'const b = save();', anchor: { status: 'in-diff', startLine: 9, endLine: 9 } });
+    const r = mergeDuplicates([a, b], [['a', 'b']]);
+    expect(r.merged[0]!.connected).toEqual([{ path: 'src/x.ts', line: 9, role: 'also raised here', quote: 'const b = save();' }]);
+  });
+
   it('does not merge two different problems on the same line without a group', () => {
     const a = item('a', 'fix', { path: 'src/pause.ts', quote: 'if (plan.active) charge(plan);', source: { pack: 'core', lens: 'money', ruleId: null } });
     const b = item('b', 'block', { path: 'src/pause.ts', quote: 'if (plan.active) charge(plan);', source: { pack: 'core', lens: 'boundary', ruleId: null } });
@@ -174,7 +181,7 @@ describe('mergeDuplicates', () => {
     const p2 = { path: 'src/job.ts', line: 2, role: 'job', quote: 'nightly();' };
     const p3 = { path: 'src/other.ts', line: 2, role: 'other', quote: 'charge(plan);' };
     const a = item('a', 'block', { path: 'src/x.ts', connected: [p1] });
-    const b = item('b', 'fix', { path: 'src/x.ts', connected: [p1again, p2, p3] });
+    const b = item('b', 'fix', { path: 'src/x.ts', quote: 'const a = load();', connected: [p1again, p2, p3] });
     const r = mergeDuplicates([a, b], [['a', 'b']]);
     expect(r.merged[0]!.connected).toEqual([p1, p2, p3]);
     expect(r.merged[0]!.checked).toBe('Checked a.');
@@ -183,7 +190,7 @@ describe('mergeDuplicates', () => {
   it('never mutates its inputs', () => {
     const items = deepFreeze([
       item('a', 'fix', { path: 'src/x.ts', connected: [{ path: 'src/y.ts', line: 1, role: 'y', quote: 'y();' }] }),
-      item('b', 'block', { path: 'src/x.ts', connected: [{ path: 'src/z.ts', line: 1, role: 'z', quote: 'z();' }] }),
+      item('b', 'block', { path: 'src/x.ts', quote: 'const a = load();', connected: [{ path: 'src/z.ts', line: 1, role: 'z', quote: 'z();' }] }),
     ]);
     const groups = deepFreeze([['a', 'b']]);
     const before = structuredClone(items);

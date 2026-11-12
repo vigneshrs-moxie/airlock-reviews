@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
 import { ReviewDocumentSchema } from '@airlock/shared';
 import type {
@@ -14,12 +15,12 @@ import { challenge, type KeptCandidate } from '../challenge/challenge.js';
 import type { ReadFile } from '../challenge/proof.js';
 import { linkFacts, loadDiff, recheckBinary } from '../diff/parse.js';
 import { runChecks } from '../facts/checks.js';
-import { classifyFiles } from '../facts/classify.js';
+import { binarySourcePaths, binarySourceSentence, classifyFiles } from '../facts/classify.js';
 import { fetchPr } from '../intake/pr.js';
 import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
 import { runCohortLenses } from '../lenses/cohort-lens.js';
 import {
-  descriptionCutSentence, emptyResult, MAX_DESCRIPTION_CHARS, type LensContext, type LensStageResult,
+  descriptionCutSentence, emptyResult, MAX_DESCRIPTION_CHARS, tierOf, type LensContext, type LensStageResult,
 } from '../lenses/context.js';
 import { runSeams } from '../lenses/seams.js';
 import { placeablePaths } from '../map/check.js';
@@ -209,6 +210,17 @@ function notReviewed(files: FileDiff[], tiers: FileFact[]): string | null {
   return `${files.length === 1 ? '1 changed file was' : `${files.length} changed files were`} not reviewed: ${named}${more}`;
 }
 
+/**
+ * When every changed file is in the trust or ignored tier, so no lens request is made, the note saying nothing was read
+ * closely; otherwise null. An empty diff, and one where every file is ignored, have their own words (a stage error).
+ */
+function nothingReadNote(files: FileDiff[], tiers: FileFact[]): string | null {
+  if (files.length === 0 || notReviewed(files, tiers) !== null) return null;
+  const tier = tierOf(tiers);
+  if (!files.every((f) => tier(f.path) === 'trust' || tier(f.path) === 'ignored')) return null;
+  return `Nothing in this pull request was read closely: all ${files.length} changed files are of kinds Airlock trusts (tests, documents, generated files).`;
+}
+
 interface Settings { depth: Depth; models: ModelConfig; parallel: number; combine: 'never' | 'no-read-tier' }
 
 interface Reviewed {
@@ -264,6 +276,7 @@ async function reviewInWorkspace(
     const tiers = await rec.attempt(() => classifyFiles(files, packs), [] as FileFact[]);
     const unreviewed = notReviewed(files, tiers) ?? emptyDiff(files, pr, req.explicit !== undefined);
     if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
+    for (const path of binarySourcePaths(files, packs)) rec.error({ stage: 'facts', cohortId: null, message: binarySourceSentence(path) });
     const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead), [] as Fact[])];
     const found = await rec.attempt(
       () => findLinks(exec, ws.headDir, files, packs), { links: [] as Link[], skippedNames: 0, limits: [] as string[] },
@@ -412,7 +425,7 @@ async function reviewInWorkspace(
   return {
     range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
     dropped: [...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
-    notes: [...mergeNotes, ...selection.notes],
+    notes: [...(sync ? [] : [nothingReadNote(files, tiers)].filter((n) => n !== null)), ...mergeNotes, ...selection.notes],
   };
 }
 
@@ -483,7 +496,7 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
   // `createdAt` is when the document is assembled, at the end; `startedAt` is when the review began.
   const draft = (): ReviewDocument => ({
     schemaVersion: 1, id, createdAt: given.now().toISOString(), startedAt, pr: intake.pr, range: reviewed.range, depth: settings.depth,
-    packs: reviewed.packs.map((p) => ({ id: p.id, version: p.version })), models: settings.models,
+    packs: reviewed.packs.map((p) => ({ id: p.id, version: p.version, title: p.title })), models: settings.models,
     files: reviewed.tiers, facts: reviewed.facts, map: reviewed.map, brief: reviewed.brief, verdict: selection.verdict,
     findings: selection.findings, questions: reviewed.questions, dropped: reviewed.dropped, candidates: reviewed.candidates,
     whoseCall: selection.whoseCall, checksAfterMerge: selection.checksAfterMerge, selfReviewText: selection.selfReviewText,
@@ -497,10 +510,16 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
     engineFault.error = new Error(`Airlock built a review document that does not match its own schema: ${parsed.error.message}`);
     throw engineFault.error;
   };
-  // The store stage's own timing is its time up to the write, since the saved document carries it.
+  // The store stage's own timing is its time up to the write, since the saved document carries it. A stopped review
+  // stores nothing: the signal is checked just before the save, and a stop during the save removes the file it wrote.
   let document = await log.run('store', async () => {
     const doc = checked(draft());
-    await saveReview(doc);
+    if (signal?.aborted) throw new Error(REVIEW_STOPPED);
+    const path = await saveReview(doc);
+    if (signal?.aborted) {
+      await rm(path, { force: true });
+      throw new Error(REVIEW_STOPPED);
+    }
     return doc;
   });
   if (engineFault.error) throw engineFault.error;
