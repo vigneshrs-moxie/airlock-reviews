@@ -65,7 +65,63 @@ Open a pull request, press the Airlock button, choose a depth, and press **Revie
 - **Copy fix prompt** puts a prompt for a coding agent on the clipboard, for one finding or for the ones you ticked.
 - **Dismiss** hides a finding. Wrong and Intended also save one line to your rule pack, which the reviewer follows from the next review on. You see and can edit that line before it is saved.
 
-Airlock never writes to GitHub. It posts nothing, approves nothing and merges nothing.
+Airlock writes to GitHub only when you press the post button described next, and then only comments. It never approves, never requests changes and never merges.
+
+## Posting comments
+
+1. Open a finding and press **Post comment**. Or tick several findings and press **Post selected (n)** above the list. One post holds at most 30 comments.
+2. The **Post to GitHub** sheet shows each comment, the summary, and "The review's own text, as it will be posted:". It says "This is the exact text. Nothing has been sent yet."
+3. You can edit any comment and the summary. A comment GitHub cannot place on a line goes in the summary, and the sheet says why. You can also tick **Put in the summary instead**. After an edit, press **Update preview** to see the exact text again.
+4. Press **Post n comments to GitHub**. Nothing is posted until you press it.
+
+Airlock posts them as one review with the **Comment** action, as the sheet says, under your own GitHub name. When it is done, the sheet says "Posted n comments." with **Open on GitHub**, and each finding shows **Posted**. A finding that is already posted cannot be posted again.
+
+In the text Airlock writes, a name gets a space after the `@` (`@ carol`), so GitHub notifies no one. If a comment or the summary you typed names someone, the sheet warns you with "GitHub notifies them unless the name is inside code."
+
+Airlock refuses to post, and says why, when the pull request is closed or merged, or has new commits since the review. After new commits, review the push first (see the next section), then post.
+
+### "Not known whether this was posted"
+
+Sometimes Airlock gets no clear answer from GitHub, for example when the connection drops. It then cannot tell whether the comments went up. The sheet says "Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again." and those findings show **Not known whether this was posted**. Airlock never tries again by itself, and you cannot post those findings again while the mark is there.
+
+What to do:
+
+1. Press **Open the pull request** and look for the comments.
+2. If they are there, leave the mark as it is.
+3. If they are not there, press **It was not posted**. The panel asks "Forget this record? Only do this after looking at the pull request." Press **It was not posted** again. You can now post those findings again.
+
+## After a push
+
+When the pull request has new commits since its review, the panel says "New commits since this review." with two buttons:
+
+- **Review the push** reviews only what changed since the last review. It is shown only when Airlock has an earlier review of this pull request to start from.
+- **Review everything again** reviews the whole pull request again, from the start.
+
+After **Review the push**, a line under the verdict says what was reviewed, for example "Review of the push 1a2b3c4 to 5d6e7f8". Each finding has a word on its card:
+
+- **New**: found in this review.
+- **Still open**: found before, and still there.
+- **Moved**: found before, and the same problem is now in another place. The card shows the new place.
+- **Fixed**: found before, and no longer there. These are folded under **Fixed since the last review (n)**, each with the reason.
+
+A Block or Fix finding is marked Fixed only when Airlock finds, at the new commit, the line of code that fixes it, never on a model's word alone. When it cannot tell, the finding stays open. An Ask or Note whose code is gone is marked Fixed with "The quoted code is gone; not checked further."
+
+Sometimes Airlock reviews the whole pull request again instead, for example when the branch was rewritten. A sentence under the verdict says why. When the push is only a merge of the base branch, the line reads "Review of the merge pushed since 1a2b3c4: only what was changed by hand was reviewed."
+
+Findings you posted or dismissed keep that mark in the new review.
+
+## What Airlock learned
+
+When you dismiss a finding as Wrong or Intended, Airlock saves one line to a rule pack, and the reviewer follows it from the next review on. To see these lines, press **Packs** at the top of the panel. Under **Packs for this repository**, each pack lists its lines, newest first. Each line shows its date, its kind (**Wrong** or **Product fact**), and whether it applies to this repository.
+
+To take a line out:
+
+1. Press **Remove** under it.
+2. The panel asks "Remove this line? The reviewer stops following it from the next review." Press **Remove** again, or **Keep** to leave it.
+
+The finding you dismissed stays dismissed. Lines of the team's own pack say "Managed by the team; not edited here." and have no Remove button.
+
+The lines are plain text files, so you can also edit them by hand (see the end of this guide). If a line you edited no longer reads as a learned line, Airlock skips that one line and still uses the rest of the pack.
 
 ## If something is off
 

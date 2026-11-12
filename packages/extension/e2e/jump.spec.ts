@@ -30,7 +30,7 @@ function pull(number: number): { pr: PrSummary; latest: LatestReply } {
     bucket: 'top', rank: 1, status: 'new',
   };
   const document = ReviewDocumentSchema.parse({
-    ...base, id: `r_00000000${number}`,
+    ...base, id: `r_${String(number).padStart(10, '0')}`,
     pr: { ...base.pr, number, headSha: HEAD, url: `https://github.com/acme/widgets/pull/${number}` },
     range: { ...base.range, headSha: HEAD },
     files: [{ path: 'src/pause.ts', tier: 'read', reason: '' }, { path: 'src/guard.ts', tier: 'read', reason: '' }],

@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import type { Finding } from '@airlock/shared';
+import { ReviewDocumentSchema, type Finding } from '@airlock/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PanelScreen } from '../../src/screens/PanelScreen';
 import { recordOf } from '../helpers/post-fixtures';
+import { prSummary } from './fixtures';
 import { also, finding, reviewState, type ReviewOptions } from './review-fixtures';
 
 afterEach(cleanup);
@@ -22,8 +23,12 @@ const cards = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>('.
 const follows = (a: HTMLElement, b: HTMLElement) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
 
 describe('starting a re-review', () => {
+  // What the service's /pr says of the last stored review: here, one of an earlier head.
+  const LAST = { reviewId: 'r_0000000001', headSha: EARLIER, createdAt: '2026-11-10T00:00:00.000Z', depth: 'deep' as const };
+  const moved = { stale: true, doc: { depth: 'deep' as const }, pr: { lastReview: LAST } };
+
   it('a moved head shows the banner with both buttons, and Review the push starts with since last', () => {
-    const { dispatch } = review([finding(1)], { stale: true, doc: { depth: 'deep' } });
+    const { dispatch } = review([finding(1)], moved);
     expect(screen.getByText('New commits since this review.')).toBeTruthy();
     fireEvent.click(button('Review the push'));
     expect(dispatch).toHaveBeenCalledWith({ type: 'start', depth: 'deep', since: 'last' });
@@ -37,9 +42,22 @@ describe('starting a re-review', () => {
     expect(screen.queryByRole('button', { name: 'Review the push' })).toBeNull();
   });
   it('disables both buttons while busy', () => {
-    review([], { stale: true, busy: true });
+    review([], { ...moved, busy: true });
     expect((button('Review the push') as HTMLButtonElement).disabled).toBe(true);
     expect((button('Review everything again') as HTMLButtonElement).disabled).toBe(true);
+  });
+  it('offers no push review when the service has no stored review: only Review everything again', () => {
+    review([finding(1)], { ...moved, pr: { lastReview: null } });
+    expect(screen.getByText('New commits since this review.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Review the push' })).toBeNull();
+    expect(button('Review everything again')).toBeTruthy();
+  });
+  it('offers no push review when the last stored review is already of the pull request\'s head', () => {
+    // Another panel reviewed the new head; this one still shows the older review.
+    review([finding(1)], { ...moved, pr: { lastReview: { ...LAST, headSha: prSummary().headSha } } });
+    expect(screen.getByText('New commits since this review.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Review the push' })).toBeNull();
+    expect(button('Review everything again')).toBeTruthy();
   });
 });
 
@@ -87,6 +105,88 @@ describe('showing a re-review', () => {
     cleanup();
     review([finding(1)], { doc: { brief: doc.brief } });
     expect(screen.getByRole('heading', { name: 'What this does' })).toBeTruthy();
+  });
+});
+
+describe('a merge pushed since the earlier review, as the engine writes it', () => {
+  // Copied from the document the engine's own test writes for this case (packages/engine/test/rereview/fix-round.test.ts,
+  // "a push of one merge of the base is a sync-merge range with previous"): the range's base is not the earlier head, the
+  // brief is the pull request's own, the engine adds its note, and the findings carry Moved, Still open and New.
+  const EARLIER_HEAD = 'c3eee29a592f3b73206cd161ee020c0d8271aa87';
+  const MERGE_HEAD = 'df3c441a8deee1d25e16684545330dbdb9564527';
+  const NOTE = 'The push since the last review only merges the base branch main in, so only what was changed by hand in that merge was reviewed.';
+  const doc = {
+    id: 'r_1af82a364b',
+    range: { baseSha: '83e7843503f4fb77d66c70ca1382d89df6f2e31d', headSha: MERGE_HEAD, kind: 'sync-merge' as const },
+    previous: { reviewId: 'r_bec2ea7ab6', headSha: EARLIER_HEAD },
+    notes: [NOTE],
+    brief: { whatItDoes: ['Adds refunds and a pause job.'], claims: [] },
+    verdict: { label: 'approve-after-fixes' as const, sentence: '3 things to fix, none of them blocking. The first: A TODO is left in formatMoney.', counts: { block: 0, fix: 3, ask: 0, note: 0 } },
+    fixed: [],
+  };
+  const findings = [
+    finding(1, { title: 'A TODO is left in formatMoney', status: 'moved', anchor: { status: 'in-diff', startLine: 4, endLine: 4, comment: { line: 4, startLine: null } } }),
+    finding(2, { title: 'A refund formats a negative amount', status: 'still-open', anchor: { status: 'in-diff', startLine: 8, endLine: 8, comment: { line: 8, startLine: null } } }),
+    finding(3, { title: 'Too many digits throws', status: 'new', anchor: { status: 'in-diff', startLine: 3, endLine: 3, comment: { line: 3, startLine: null } } }),
+  ];
+
+  it('is a valid stored document', () => {
+    expect(ReviewDocumentSchema.safeParse(reviewState(findings, { doc, pr: { headSha: MERGE_HEAD } }).latest.document).success).toBe(true);
+  });
+
+  it('shows the merge line and the engine\'s note under the verdict, the pull request\'s brief, and a status on every card', () => {
+    review(findings, { doc, pr: { headSha: MERGE_HEAD } });
+    const heading = screen.getByRole('heading', { name: 'Approve after fixes' });
+    const line = screen.getByText('Review of the merge pushed since c3eee29: only what was changed by hand was reviewed.');
+    const note = screen.getByText(NOTE);
+    expect(follows(heading, line)).toBe(true);
+    expect(follows(line, note)).toBe(true);
+    expect(follows(note, screen.getByRole('heading', { name: 'Findings' }))).toBe(true);
+    expect(screen.queryByRole('button', { name: /^Notes/ })).toBeNull();
+    expect(screen.queryByText(/^Review of the push/)).toBeNull();
+    // A re-review of a merge shows the pull request's brief under its usual heading, not the first merge review's heading.
+    expect(screen.getByRole('heading', { name: 'What this does' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: /^A merge of/ })).toBeNull();
+    expect(cards().map((c) => within(c).getByTestId('status').textContent)).toEqual(['Moved', 'Still open', 'New']);
+    expect(screen.getByText('Reviewed at df3c441 · Standard · Generic')).toBeTruthy();
+  });
+});
+
+describe('notes of every kind the engine writes', () => {
+  // The engine's sentences: packs (choosePacks), merge (unconfirmedNote), select (a merged question), and the re-review's
+  // own notes in pipeline/review.ts. The merged question quotes pull request text, so it carries markup that must stay text.
+  const NOTES = [
+    'A learned line could not be read and was left out: acme/learned/wrong.md:3.',
+    'Airlock could not confirm whether 2 findings at the same place are the same problem ("Totals drift", "Totals round wrong"), so they are listed separately.',
+    'A question was merged into the question "Is <b>rounding</b> intended?": "Is <img src=x onerror=alert(1)> rounding on purpose?"',
+    'The branch was rewritten since the last review (its earlier head aaaaaaa is no longer part of it), so the whole pull request was reviewed again.',
+    'The push changed only files Airlock does not review.',
+    'The push changed no files.',
+  ];
+  const noMarkup = () => {
+    expect(document.querySelector('.card.verdict b, .card.verdict img, section b, section img, li b, li img')).toBeNull();
+  };
+
+  it('on a re-review, every note is a line of text under the verdict', () => {
+    review([finding(1)], { doc: { previous: PREVIOUS, notes: NOTES } });
+    const verdict = screen.getByRole('heading', { name: 'Approve after fixes' }).closest('section')!;
+    expect([...verdict.querySelectorAll('p')].map((p) => p.textContent).filter((t) => NOTES.includes(t ?? ''))).toEqual(NOTES);
+    for (const note of NOTES) expect(within(verdict).getByText(note)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Notes/ })).toBeNull();
+    noMarkup();
+  });
+
+  it('on a first review, every note is a line of text in the collapsed Notes', () => {
+    review([finding(1, { status: null })], { doc: { notes: NOTES } });
+    const toggle = button(`Notes (${NOTES.length})`);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText(NOTES[0]!)).toBeNull();
+    fireEvent.click(toggle);
+    const section = toggle.closest('section')!;
+    expect([...section.querySelectorAll('li')].map((li) => li.textContent)).toEqual(NOTES);
+    const verdict = screen.getByRole('heading', { name: 'Approve after fixes' }).closest('section')!;
+    expect(within(verdict).queryByText(NOTES[0]!)).toBeNull();
+    noMarkup();
   });
 });
 

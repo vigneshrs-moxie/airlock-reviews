@@ -187,6 +187,10 @@ type Pull = {
   pr: PrSummary; document: ReviewDocument | null; reviews: ReviewDocument[]; dismissals: Dismissal[]; posts: PostRecord[];
   script: RunStep[] | null;
 };
+/** `/pr`'s `lastReview`, as the real service gives it: the latest stored review of the pull request, or null. */
+const lastReviewOf = (pull: Pull): PrSummary['lastReview'] => (pull.document === null ? null : {
+  reviewId: pull.document.id, headSha: pull.document.pr.headSha, createdAt: pull.document.createdAt, depth: pull.document.depth,
+});
 type StoredPreview = {
   previewId: string; repo: string; number: number; reviewId: string; headSha: string; expiresAt: number; review: SentReview;
   items: Array<PostRecord['items'][number] & { title: string }>;
@@ -645,7 +649,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
         const pull = pullOf(repo, number);
         if (url.pathname === '/pr') {
           if (pull === undefined) refuse(res, 404, NO_SUCH_PR);
-          else reply(res, PrSummarySchema, 200, pull.pr);
+          else reply(res, PrSummarySchema, 200, { ...pull.pr, lastReview: lastReviewOf(pull) });
         } else if (url.pathname === '/reviews/running') {
           const run = runs.find((r) => r.repo === repo && r.number === number && !r.finished);
           if (run === undefined) refuse(res, 404, NOT_RUNNING);

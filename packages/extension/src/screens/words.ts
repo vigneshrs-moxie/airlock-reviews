@@ -1,19 +1,15 @@
-import type { Depth, DismissReason, Dropped, Finding, PrSummary, Severity, Source } from '@airlock/shared';
+import { SEVERITY_WORD, type Depth, type DismissReason, type Dropped, type Finding, type PrSummary, type Severity, type Source } from '@airlock/shared';
 import { placeText } from '../place-text';
 
 export const CODE_QUOTE_LIMIT = 160;
 
-const SEVERITY: Record<Severity, string> = { block: 'Block', fix: 'Fix', ask: 'Ask', note: 'Note' };
 const REASON: Record<DismissReason, string> = { wrong: 'Wrong', intended: 'Intended', 'not-now': 'Not now' };
 const DEPTH: Record<Depth, string> = { quick: 'Quick', standard: 'Standard', deep: 'Deep' };
 const SIDE: Record<string, string> = {
   head: 'in the pull request', base: 'before the pull request', standard: "the team's corrections log", learned: 'a recorded decision',
 };
 
-const STATUS: Record<NonNullable<Finding['status']>, string> = { new: 'New', 'still-open': 'Still open', moved: 'Moved', fixed: 'Fixed' };
-
-export const statusWord = (status: NonNullable<Finding['status']>): string => STATUS[status];
-export const severityWord = (severity: Severity): string => SEVERITY[severity];
+export const severityWord = (severity: Severity): string => SEVERITY_WORD[severity];
 export const dismissReasonWord = (reason: DismissReason): string => REASON[reason];
 export const depthWord = (depth: Depth): string => DEPTH[depth];
 export const proofSide = (role: string): string => (Object.hasOwn(SIDE, role) ? (SIDE[role] as string) : role);

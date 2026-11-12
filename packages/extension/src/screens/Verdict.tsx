@@ -2,7 +2,7 @@ import { fixPrompt, POST_MAX_ITEMS, verdictWords, type Dismissal, type Finding, 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Timers } from '../client/timers';
 import { listFindings, neighbours, postOf, selectedInOrder, toggled } from '../state/selection';
-import type { PostReply, ReviewView, UserAction } from '../state/reduce';
+import { pushReviewable, type PostReply, type ReviewView, type UserAction } from '../state/reduce';
 import { AlsoFound } from './AlsoFound';
 import { BriefBlock } from './BriefBlock';
 import { Collapsible } from './Collapsible';
@@ -180,9 +180,11 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
         <section className="card banner">
           <p>New commits since this review.</p>
           <div className="bar">
-            <button type="button" className="btn" disabled={disabled} onClick={() => dispatch({ type: 'start', depth: doc.depth, since: 'last' })}>
-              Review the push
-            </button>
+            {pushReviewable(pr) && (
+              <button type="button" className="btn" disabled={disabled} onClick={() => dispatch({ type: 'start', depth: doc.depth, since: 'last' })}>
+                Review the push
+              </button>
+            )}
             <ReviewAgain doc={doc} disabled={disabled} dispatch={dispatch} label="Review everything again" />
           </div>
         </section>

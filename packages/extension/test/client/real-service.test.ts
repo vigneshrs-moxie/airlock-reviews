@@ -5,12 +5,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { saveReview, type EngineDeps, type runReview } from '@airlock/engine';
+import { saveReview, type EngineDeps, type ReviewRequest, type runReview } from '@airlock/engine';
 import {
   candidate, minimalDocument, type Finding, type ReviewDocument, type ReviewEvent, type ServiceEvent,
 } from '@airlock/shared';
 import { NOT_PROVED } from '../../src/client/proof';
 import { ServiceClient, ServiceError } from '../../src/client/service';
+import { pushReviewable } from '../../src/state/reduce';
 import { createServer, type Service } from '../../../service/src/server';
 import { pairedOrigin, readOrCreateToken, replaceToken } from '../../../service/src/config';
 
@@ -64,7 +65,7 @@ async function writePack(packsDir: string): Promise<string> {
   return file;
 }
 
-interface Launched { emit: (e: ReviewEvent) => void; finish: (doc: ReviewDocument) => Promise<void> }
+interface Launched { req: ReviewRequest; emit: (e: ReviewEvent) => void; finish: (doc: ReviewDocument) => Promise<void> }
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -98,6 +99,8 @@ async function startService(
   now: () => Date = () => new Date(), monotonic: () => number = () => performance.now(),
 ): Promise<{
   service: Service; base: string; token: string; home: string; launched: Launched[];
+  /** What the fake `gh` answers, by command line; a test may change an answer (the pull request's head, say). */
+  answers: Map<string, { stdout: string; stderr: string; code: number }>;
   /** Every command the fake `gh` was asked to run, with what it was given on standard input. */
   gh: Array<{ line: string; input: string | undefined }>;
 }> {
@@ -105,10 +108,10 @@ async function startService(
   const saved = process.env['AIRLOCK_HOME'];
   process.env['AIRLOCK_HOME'] = home;
   const launched: Launched[] = [];
-  const review: typeof runReview = (_req, given, onEvent) => new Promise<ReviewDocument>((resolve, reject) => {
+  const review: typeof runReview = (req, given, onEvent) => new Promise<ReviewDocument>((resolve, reject) => {
     given.signal?.addEventListener('abort', () => reject(new Error('The review was stopped.')), { once: true });
     const emit = (e: ReviewEvent): void => onEvent?.(e);
-    launched.push({ emit, finish: async (doc) => { await saveReview(doc); emit({ type: 'done', document: doc }); resolve(doc); } });
+    launched.push({ req, emit, finish: async (doc) => { await saveReview(doc); emit({ type: 'done', document: doc }); resolve(doc); } });
   });
   const answers = new Map([
     [`gh api repos/${REPO}/pulls/7`, { stdout: pull, stderr: '', code: 0 }],
@@ -138,7 +141,7 @@ async function startService(
     else process.env['AIRLOCK_HOME'] = saved;
     await rm(home, { recursive: true, force: true });
   });
-  return { service, base: `http://127.0.0.1:${port}`, token: await readOrCreateToken(home), home, launched, gh };
+  return { service, base: `http://127.0.0.1:${port}`, token: await readOrCreateToken(home), home, launched, answers, gh };
 }
 
 async function until(check: () => boolean, what: string): Promise<void> {
@@ -353,6 +356,43 @@ describe('the panel\'s client and the real service', () => {
     // Every request that carried the token came after a hello the real service proved.
     expect(asked.seen.filter((r) => r.auth !== null).every((r) => r.auth === `Bearer ${s.token}`)).toBe(true);
     expect(asked.seen[0]).toEqual({ url: expect.stringContaining('/hello?nonce='), auth: null });
+  });
+
+  it('after a push, /pr gives the last review and the moved head, the panel offers the push, and since last reaches the review with that review', async () => {
+    const s = await startService();
+    const client = new ServiceClient(s.base, async () => s.token, chromeFetch(ORIGIN));
+    expect(await client.pair(s.token)).toEqual({ paired: true, extension: 'new' });
+
+    // No stored review: nothing to review the push from.
+    const first = await client.pr(REPO, 7);
+    expect(first).toMatchObject({ state: 'open', lastReview: null });
+    expect(pushReviewable(first)).toBe(false);
+
+    // A stored review of the pull request's head: nothing pushed since, and the service agrees.
+    const earlier: ReviewDocument = { ...reviewOf(7), depth: 'deep', pr: { ...reviewOf(7).pr, headSha: 'b'.repeat(40) } };
+    await saveReview(earlier);
+    const same = await client.pr(REPO, 7);
+    expect(same.lastReview).toEqual({ reviewId: 'r_0123456789', headSha: 'b'.repeat(40), createdAt: earlier.createdAt, depth: 'deep' });
+    expect(pushReviewable(same)).toBe(false);
+    expect(await refusal(client.start({ repo: REPO, number: 7, since: 'last' }))).toEqual({
+      kind: 'problem', message: 'Nothing was pushed since the last review.',
+    });
+    expect(s.launched).toHaveLength(0);
+
+    // A push: GitHub now answers another head.
+    s.answers.set(`gh api repos/${REPO}/pulls/7`, { stdout: pull.replaceAll('b'.repeat(40), 'd'.repeat(40)), stderr: '', code: 0 });
+    const moved = await client.pr(REPO, 7);
+    expect(moved).toMatchObject({ state: 'open', headSha: 'd'.repeat(40), lastReview: { reviewId: 'r_0123456789', headSha: 'b'.repeat(40) } });
+    expect(pushReviewable(moved)).toBe(true);
+
+    // What the panel sends for Review the push reaches the review function with that review, its depth and packs.
+    const { reused } = await client.start({ repo: REPO, number: 7, depth: earlier.depth, since: 'last' });
+    expect(reused).toBe(false);
+    await until(() => s.launched.length === 1, 'the review launched');
+    expect(s.launched[0]!.req).toEqual({
+      repo: REPO, number: 7, depth: 'deep', packIds: earlier.packs.map((p) => p.id), since: { reviewId: 'r_0123456789' },
+      packsDir: join(s.home, 'packs'),
+    });
   });
 
   it('lists the learned lines of the packs chosen for the repository, newest first, and removes one', async () => {

@@ -133,6 +133,13 @@ export function withStage(lines: StageLine[], event: Extract<ServiceEvent, { typ
   return at === -1 ? [...lines, line] : lines.map((l, i) => (i === at ? line : l));
 }
 
+/**
+ * Whether `Review the push` is offered: the service reviews a push from its last stored review (`/pr`'s `lastReview`), and
+ * refuses when there is none or when that review is already of the pull request's head.
+ */
+export const pushReviewable = ({ lastReview, headSha }: Pick<PrSummary, 'lastReview' | 'headSha'>): boolean =>
+  lastReview !== null && lastReview.headSha.toLowerCase() !== headSha.toLowerCase();
+
 function reviewOf(pr: PrSummary, latest: LatestReply): Extract<PanelState, { kind: 'review' }> {
   return { kind: 'review', pr, latest, stale: latest.document.pr.headSha !== pr.headSha };
 }
