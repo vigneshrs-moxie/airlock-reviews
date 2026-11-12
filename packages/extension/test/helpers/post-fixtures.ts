@@ -16,7 +16,7 @@ export function previewOf(items: PostPreviewItem[], over: Partial<PostPreviewRep
   const summary = `Review notes from Airlock: ${n} comment${n === 1 ? '' : 's'}.`;
   return {
     previewId: 'pv_0123456789abcdef', headSha: HEAD, viewer: 'bob', items, summary, reviewBody: summary,
-    expiresAt: '2026-11-11T10:10:00.000Z', ...over,
+    expiresAt: '2026-11-11T10:10:00.000Z', reviewBodyMentions: [], ...over,
   };
 }
 

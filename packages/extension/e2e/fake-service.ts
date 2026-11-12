@@ -377,6 +377,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     });
     const answer: PostPreviewReply = {
       previewId, headSha: doc.pr.headSha, viewer: doc.pr.viewer, items, summary, reviewBody, expiresAt: new Date(expiresAt).toISOString(),
+      reviewBodyMentions: [],
     };
     previews.push(answer);
     reply(res, PostPreviewReplySchema, 200, answer);

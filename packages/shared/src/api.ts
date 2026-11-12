@@ -130,9 +130,14 @@ export const PostPreviewItemSchema = z.object({
 });
 export type PostPreviewItem = z.infer<typeof PostPreviewItemSchema>;
 
+/**
+ * `reviewBodyMentions` is every name in `reviewBody` once the person typed the summary or changed a comment placed in
+ * the summary, and empty while all of it is Airlock's own text (`postMentions` in comment-text.ts says which).
+ */
 export const PostPreviewReplySchema = z.object({
   previewId: PreviewIdSchema, headSha: z.string().regex(/^[0-9a-f]{7,64}$/), viewer: z.string(),
   items: z.array(PostPreviewItemSchema), summary: z.string(), reviewBody: z.string(), expiresAt: z.string(),
+  reviewBodyMentions: z.array(z.string()).default([]),
 });
 export type PostPreviewReply = z.infer<typeof PostPreviewReplySchema>;
 

@@ -11,26 +11,53 @@ export const REVIEW_BODY_MAX = 60000;
 
 // A name: `@` then letters, digits and `- _ . /`; trailing punctuation is left outside it.
 const NAME_CHARS = '[\\p{L}\\p{N}._/-]*';
-const MENTION_IN_PROSE = new RegExp(`@(?=[\\p{L}\\p{N}])${NAME_CHARS}`, 'gu');
-// For text the person typed: the `@` may follow anything but an ASCII letter, digit or `_`.
-const MENTION_ANYWHERE = new RegExp(`(?<![A-Za-z0-9_])@(?=[\\p{L}\\p{N}])${NAME_CHARS}`, 'gu');
+// The `@` may follow anything but an ASCII letter or digit (after `_` it can still notify: `_x_@bob` is `<em>x</em>@bob`).
+const MENTION_ANYWHERE = new RegExp(`(?<![A-Za-z0-9])@(?=[\\p{L}\\p{N}])${NAME_CHARS}`, 'gu');
 const TRAILING = /[._/-]+$/;
+// Every numeric character reference, decimal or hexadecimal, with or without its `;`, and `&commat;`.
+const CHARACTER_REFERENCE = /&#(?:x([0-9a-f]+)|([0-9]+));?|&commat;?/gi;
 
-const AT_FORMS = /&(?:#0*64(?!\d)|#x0*40(?![0-9a-f])|commat);?/gi;
+/** The text as a browser would read its character references; one that names no character is left as it was. */
+function decodeReferences(text: string): string {
+  return text.replace(CHARACTER_REFERENCE, (whole, hex: string | undefined, decimal: string | undefined) => {
+    if (hex === undefined && decimal === undefined) return '@';
+    const code = hex === undefined ? Number.parseInt(decimal as string, 10) : Number.parseInt(hex, 16);
+    if (code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return whole;
+    return String.fromCodePoint(code);
+  });
+}
 
 /**
  * Every `@name` (`@login` or `@org/team`) in text the person typed or changed, once each, in order, with the `@`,
- * wherever it stands: inside backticks, fences or HTML too, and written as `&#64;`, `&#x40;` or `&commat;`. It does not
- * try to read Markdown, so it over-reports (a name inside code is reported although GitHub would not notify). It is not
- * for `commentBody`'s output, which is safe by construction.
+ * wherever it stands: inside backticks, fences or HTML too, and with the `@` or the name written as character references
+ * (`&#64;`, `&#x40;`, `&commat;`, `&#98;`). It does not read Markdown, so it over-reports on purpose (a name inside code
+ * is reported although GitHub would not notify). Text Airlock drafts needs no such warning: see `commentBody`.
  */
 export function mentionsIn(text: string): string[] {
   const found: string[] = [];
-  for (const match of text.replace(AT_FORMS, '@').matchAll(MENTION_ANYWHERE)) {
+  for (const match of decodeReferences(text).matchAll(MENTION_ANYWHERE)) {
     const name = match[0].replace(TRAILING, '');
     if (!found.includes(name)) found.push(name);
   }
   return found;
+}
+
+/**
+ * The names the preview warns about. An item's list is empty when its body is Airlock's own, and every name in it
+ * otherwise. The review body's list is empty only when the summary and every comment placed in the summary are
+ * Airlock's own text; once the person typed or changed any of them, it is every name in the whole review body, since
+ * what they typed can change how the drafted text around it reads.
+ */
+export function postMentions(
+  items: { body: string; isDefault: boolean; inSummary: boolean }[],
+  summary: { text: string; isDefault: boolean },
+  reviewBody: string,
+): { items: string[][]; reviewBody: string[] } {
+  const allDefault = summary.isDefault && items.every((item) => !item.inSummary || item.isDefault);
+  return {
+    items: items.map((item) => (item.isDefault ? [] : mentionsIn(item.body))),
+    reviewBody: allDefault ? [] : mentionsIn(reviewBody),
+  };
 }
 
 /** Hidden characters and blank letters dropped, every kind of line break a line feed. */
@@ -39,22 +66,25 @@ function seen(value: string): string {
   return dropBlankLetters(text).text;
 }
 
+// An `@` directly followed by a letter or digit, in any script.
+const AT_BEFORE_NAME = /@(?=[\p{L}\p{N}])/gu;
+
 /**
- * Text taken from a pull request, as prose that cannot notify anyone: hidden characters out, `&` and `<` as entities
- * (no tag, comment or entity is live), every backslash doubled (none escapes what follows), every `~` escaped and
- * every line's leading white space dropped (no line can open a fence or a code block), every backtick an apostrophe, and then every `@name` in backticks, so the only backticks left are the pairs that hold a name.
+ * Text taken from a pull request, as prose that cannot notify anyone whatever stands around it: hidden characters out,
+ * `&` and `<` as entities (no tag, comment or entity is live), every backslash doubled (none escapes what follows),
+ * every `~` and `$` escaped and every line's leading white space dropped (no line can open a fence, a code block or
+ * math), every backtick an apostrophe (no code span), and then a space after every `@` that is directly followed by a
+ * letter or digit (`@alice` becomes `@ alice`), so no `@` stands directly before a name.
  */
 export function plainProse(value: string): string {
   return seen(value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/\\/g, '\\\\')
     .replace(/~/g, '\\~')
+    .replace(/\$/g, '\\$')
     .replace(/^[ \t]+/gm, '')
     .replace(/`/g, "'")
-    .replace(MENTION_IN_PROSE, (match) => {
-      const name = match.replace(TRAILING, '');
-      return `\`${name}\`${match.slice(name.length)}`;
-    })
+    .replace(AT_BEFORE_NAME, '@ ')
     .trim();
 }
 
@@ -68,15 +98,22 @@ function fencedBlock(value: string): string {
   return `${fence}\n${text}\n${fence}`;
 }
 
-/** A path (it comes from the pull request) in a code span, its own backticks turned into apostrophes. */
+/**
+ * A path (it comes from the pull request) in a code span, its own backticks turned into apostrophes and its line breaks
+ * into spaces, so the span is one backtick, some text and one backtick. A path with nothing left is the plain words
+ * `(no path)`, never an empty span (two backticks in a row).
+ */
 function place(path: string, line: number | null): string {
-  const text = seen(line === null ? path : `${path}:${line}`).replace(/\s+/g, ' ').replace(/`/g, "'").trim();
-  return `\`${text}\``;
+  const text = seen(path).replace(/\s+/g, ' ').replace(/`/g, "'").trim();
+  if (text === '') return '(no path)';
+  return `\`${line === null ? text : `${text}:${line}`}\``;
 }
 
 /**
- * The comment drafted from a finding. It is built from prose parts (through `plainProse`) and fenced code parts only,
- * joined by blank lines, so text taken from the pull request cannot notify anyone.
+ * The comment drafted from a finding. It is built from prose parts (through `plainProse`), paths in code spans and
+ * fenced code parts only, joined by blank lines. Prose holds no backtick, so the only backticks are those spans and
+ * fences, each written whole here; and no `@` in prose stands directly before a letter or digit. So text taken from
+ * the pull request cannot notify anyone (proven against a Markdown renderer in the tests).
  */
 export function commentBody(f: Finding): string {
   const parts = [`**${SEVERITY_WORD[f.severity]}: ${oneLine(f.title)}**`, plainProse(f.happens), plainProse(f.why)];
@@ -91,7 +128,8 @@ export function commentBody(f: Finding): string {
 
 /**
  * The review's own text: the summary, then the comments that could not go on a changed line, each under its place.
- * The summary is the person's own text; each body is a comment body.
+ * With the default summary and untouched `commentBody` bodies it notifies no one. Once the person typed the summary or
+ * changed a body, it is their text, and the preview lists every name in it (`postMentions`).
  */
 export function summaryBody(inSummary: { path: string; line: number | null; body: string }[], summary: string): string {
   const parts = [summary.trim()];
