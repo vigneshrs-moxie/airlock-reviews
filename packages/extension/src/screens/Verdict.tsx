@@ -31,7 +31,7 @@ export interface VerdictProps {
   timers?: Timers;
 }
 
-type Fold = 'limits' | 'also' | 'dismissed' | 'timing';
+type Fold = 'limits' | 'notes' | 'also' | 'dismissed' | 'timing';
 
 const noDismiss = (): void => undefined;
 
@@ -162,6 +162,11 @@ export function Verdict({ state, dispatch, readOnly = false, onJump = notConnect
       {doc.limits !== undefined && doc.limits.length > 0 && (
         <Collapsible title="Not shown to the reviewer" open={folds.has('limits')} onToggle={() => fold('limits')}>
           <ul className="plain">{doc.limits.map((line, i) => <li key={i}>{line}</li>)}</ul>
+        </Collapsible>
+      )}
+      {doc.notes !== undefined && doc.notes.length > 0 && (
+        <Collapsible title={`Notes (${doc.notes.length})`} open={folds.has('notes')} onToggle={() => fold('notes')}>
+          <ul className="plain">{doc.notes.map((line, i) => <li key={i}>{line}</li>)}</ul>
         </Collapsible>
       )}
       {lists.top.length > 0 && (

@@ -96,9 +96,11 @@ function reviewDocument(): ReviewDocument {
       stage: 'challenge', reason: 'Every caller awaits it.', refutation: { path: 'src/guard.ts', line: 3, role: 'head', quote: 'code 3 3' },
     }],
     limits: ['The rule file docs/rules.md was left out because it is too long.'],
+    notes: [NOTE],
   });
 }
 
+const NOTE = 'The team standard could not be refreshed; the copy from 2026-11-10 was used.';
 const document = reviewDocument();
 const stage = (name: string, status: 'start' | 'done', detail = ''): RunStep => ({ event: { type: 'stage', stage: name, status, detail } satisfies ServiceEvent });
 const briefSeen = signal();
@@ -251,6 +253,13 @@ test('4. the verdict: its words and sentence, three top findings in rank order, 
   await expect(cards().locator('.sev')).toHaveText(['Block', 'Fix', 'Ask']);
   await expect(cards().first()).toContainText('Also raised by 1 more');
   await expect(panel.getByRole('button', { name: 'Not shown to the reviewer' })).toHaveAttribute('aria-expanded', 'false');
+  const notes = panel.getByRole('button', { name: 'Notes (1)' });
+  await expect(notes).toHaveAttribute('aria-expanded', 'false');
+  await expect(panel.getByText(NOTE, { exact: true })).toHaveCount(0);
+  await notes.click();
+  await expect(panel.getByText(NOTE, { exact: true })).toBeVisible();
+  await notes.click();
+  await expect(notes).toHaveAttribute('aria-expanded', 'false');
 
   const fold = panel.getByRole('button', { name: 'Also found' });
   await expect(fold).toHaveAttribute('aria-expanded', 'false');

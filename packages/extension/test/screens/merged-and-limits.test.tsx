@@ -54,6 +54,37 @@ describe('what the reviewer was not shown', () => {
   });
 });
 
+describe('the review\'s notes (second round)', () => {
+  const NOTES = ['The kit was a day old.', 'Two files were <img src=x onerror=alert(1)> skipped [click](javascript:alert(1)).'];
+
+  it('is a collapsed section Notes (n) directly after Not shown to the reviewer, one item per note, as text', () => {
+    show([finding(1)], { doc: { limits: ['The diff was cut.'], notes: NOTES } });
+    const toggle = button('Notes (2)');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText(NOTES[0]!)).toBeNull();
+    const limits = button('Not shown to the reviewer');
+    expect(follows(limits, toggle)).toBe(true);
+    // Directly after: no other section between the two.
+    expect(limits.closest('section')?.nextElementSibling).toBe(toggle.closest('section'));
+    fireEvent.click(toggle);
+    const items = within(toggle.closest('section')!).getAllByRole('listitem').map((li) => li.textContent);
+    expect(items).toEqual(NOTES);
+    expect(document.querySelector('img')).toBeNull();
+    expect(document.querySelector('a')).toBeNull();
+  });
+  it('sits before the findings when nothing was left out', () => {
+    show([finding(1)], { doc: { notes: [NOTES[0]!] } });
+    expect(follows(button('Notes (1)'), heading('Findings'))).toBe(true);
+  });
+  it('is absent when there are no notes or the field is missing', () => {
+    show([finding(1)], { doc: { notes: [] } });
+    expect(queryButton(/^Notes/)).toBeNull();
+    cleanup();
+    show([finding(1)]);
+    expect(queryButton(/^Notes/)).toBeNull();
+  });
+});
+
 describe('a finding also raised by other lenses and rules', () => {
   const merged = finding(1, {
     alsoRaisedBy: [{ pack: 'orbit', lens: null, ruleId: 'R-7' }, { pack: 'generic', lens: 'security', ruleId: null }, { pack: 'mystery', lens: null, ruleId: null }],
