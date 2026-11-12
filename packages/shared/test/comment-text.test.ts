@@ -34,7 +34,7 @@ describe('limits', () => {
 describe('plainProse', () => {
   it('drops hidden characters and blank letters, and neutralises & < \\ ~ $ and backticks', () => {
     expect(plainProse('Za\u200Bp\u2800 a&b <i> c\\d `e`')).toBe("Zap a&amp;b &lt;i> c\\\\d 'e'");
-    expect(plainProse('&#64;ann &commat;bob')).toBe('&amp;# 64;ann &amp;commat;bob');
+    expect(plainProse('&#64;ann &commat;bob')).toBe('&amp;\\# 64;ann &amp;commat;bob');
     expect(plainProse('~~~ and ~x~')).toBe('\\~\\~\\~ and \\~x\\~');
     expect(plainProse('a\n    b\n\t c\n  ~~~')).toBe('a\nb\nc\n\\~\\~\\~');
     expect(plainProse('$x$ and\n$$\ny\n$$ \\$')).toBe('\\$x\\$ and\n\\$\\$\ny\n\\$\\$ \\\\\\$');
@@ -46,12 +46,14 @@ describe('plainProse', () => {
     expect(plainProse('$@alice$')).toBe('\\$@ alice\\$');
     expect(plainProse('@a\u200B@b')).toBe('@ a@ b');
   });
-  it('breaks every # directly before a digit with a space, so no reference to an issue or pull request is made', () => {
+  it('writes every # directly before a digit as \\# and a space, wherever it stands: no reference with #<number>, and no heading', () => {
     expect(plainProse('see #12, acme/widgets#3, # 4, #x, ##5, x#6 and &#64;')).toBe(
-      'see # 12, acme/widgets# 3, # 4, #x, ## 5, x# 6 and &amp;# 64;');
-    // At the start of a line it would be a heading: the first `#` is escaped, so it is shown as it is written.
+      'see \\# 12, acme/widgets\\# 3, # 4, #x, \\## 5, x\\# 6 and &amp;\\# 64;');
+    // At the start of a line, after a quote marker or a list marker, it would be a heading: escaped, it is shown as written.
     expect(plainProse('#7 at the start')).toBe('\\# 7 at the start');
     expect(plainProse('one\n#12 two\n  ##3 three\n# 4 four')).toBe('one\n\\# 12 two\n\\## 3 three\n# 4 four');
+    expect(plainProse('> #12 quoted\n- #3 item\n1. #4 numbered\n> - ##5 both')).toBe(
+      '> \\# 12 quoted\n- \\# 3 item\n1. \\# 4 numbered\n> - \\## 5 both');
   });
 });
 
@@ -130,7 +132,7 @@ describe('commentBody of a finding too long to post as drafted', () => {
   it('cuts a long title, a long one-line change and long prose, and keeps every part that fits whole', () => {
     const title = commentBody(finding({ title: `Ask @carol about #12 ${'and more '.repeat(600)}` }));
     expect(chars(title)).toBeLessThanOrEqual(COMMENT_MAX);
-    expect(title.startsWith('**Fix: Ask @ carol about # 12 and more')).toBe(true);
+    expect(title.startsWith('**Fix: Ask @ carol about \\# 12 and more')).toBe(true);
     expect(title).toMatch(/[a-z]\*\*\n\n\(Cut to fit; the full finding is in Airlock\.\)$/);
 
     const oneLine = commentBody(finding({ suggestedChange: `Round it ${'please '.repeat(700)}`, connected: [] }));
@@ -393,7 +395,11 @@ describe('commentBody against a Markdown renderer', () => {
     }
   });
   it('makes no heading of a line that starts with # and a number, and no live reference, in every field', () => {
-    const cases = ['#1 is the issue', '##12 twice', 'a\n#3 on a line', 'a\n   ###45 indented', '#6', '#7\n#8'];
+    const cases = [
+      '#1 is the issue', '##12 twice', 'a\n#3 on a line', 'a\n   ###45 indented', '#6', '#7\n#8',
+      // Inside a quote and a list item (the re-check's cases).
+      '> #1', '> ##12 quoted', 'a\n> #3', '- #1', '* #2 item', '+ #3', '1. #1', '2) #4', '> - #5', '- > #6', '>#7', '-  #8',
+    ];
     const headings = (text: string): number =>
       renderers.reduce((n, md) => n + md.parse(text, {}).filter((t) => t.type === 'heading_open').length, 0);
     for (const text of cases) {
@@ -405,6 +411,8 @@ describe('commentBody against a Markdown renderer', () => {
     }
     // The check can fail.
     expect(headings('# 1 heading')).toBe(2);
+    expect(headings('> # 1 quoted')).toBe(2);
+    expect(headings('- # 1 item')).toBe(2);
   });
   it('leaves no live @name for an empty, blank or hidden path next to a chain of names (the second re-review\'s cases)', () => {
     const connected = (...places: [string, number | null, string][]): Finding =>

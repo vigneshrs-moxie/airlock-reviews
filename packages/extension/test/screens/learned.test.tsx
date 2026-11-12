@@ -287,6 +287,20 @@ describe('learned lines under Packs', () => {
     expect(document.querySelector('[aria-live]')?.textContent).toBe(said);
   });
 
+  it('a removal never sent because the proof got no answer says nothing was removed, on its line, and reads nothing again', async () => {
+    const { removeLearned, fetchLearned } = await show(reply([line(1), line(2)]));
+    removeLearned.mockRejectedValue(new ServiceError('offline', 'The Airlock service is not answering.', true));
+    const generic = pack('Generic');
+    await click(generic.getAllByRole('button', { name: 'Remove' })[0]!);
+    await click(generic.getAllByRole('button', { name: 'Remove' })[0]!);
+    const said = 'Airlock could not reach its service, so nothing was removed.';
+    expect(generic.getByRole('alert').textContent).toBe(said);
+    expect(screen.queryByText(/cannot tell whether the line was removed/)).toBeNull();
+    expect(fetchLearned).toHaveBeenCalledTimes(1);
+    expect(generic.getByText('Learned line 1.')).toBeTruthy();
+    expect(generic.getAllByRole('button', { name: 'Remove' })).toHaveLength(2);
+  });
+
   it('a removal answered after the repository changed fills in nothing of the old repository and reads nothing again', async () => {
     let answer: (r: RemoveLearnedReply) => void = () => undefined;
     const view = await show(reply([line(1)]));

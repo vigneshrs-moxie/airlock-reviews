@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { realExec, type Exec } from '@airlock/engine';
 import { isGhRead } from '../../../engine/src/util/exec.js';
-import { listReviews, readLogin, readPull, reviewToSend, sendReview, type ReviewPayload } from '../../src/posts/github.js';
+import { listReviewComments, listReviews, readLogin, readPull, reviewToSend, sendReview, type ReviewPayload } from '../../src/posts/github.js';
 
 const WRITE_SUBCOMMANDS = 'pr|issue|repo|release|workflow|label|gist|secret';
 
@@ -240,6 +240,57 @@ describe('listReviews', () => {
     const { exec, seen } = fakeExec(answer('[]', '', 0));
     await expect(listReviews(exec, 'a/b/c', 7)).rejects.toThrow();
     expect(seen).toEqual([]);
+  });
+});
+
+describe('listReviewComments', () => {
+  const comment = (over: Record<string, unknown> = {}) => ({
+    id: 1, pull_request_review_id: 901, path: 'src/total.ts', line: 12, start_line: null, original_line: 12, original_start_line: null,
+    body: 'First.', ...over,
+  });
+
+  it('reads one review\'s comments with `gh api repos/<repo>/pulls/<number>/reviews/<id>/comments --paginate`, a read, and joins the pages', async () => {
+    const pages = `${JSON.stringify([comment()])}\n${JSON.stringify([comment({ id: 2, path: 'src/rows.ts', line: null, start_line: null, original_line: 20, original_start_line: 18, body: 'A ][ "b" \\ c.' })])}`;
+    const { exec, seen } = fakeExec(answer(pages, '', 0));
+    expect(await listReviewComments(exec, REPO, 7, 901)).toEqual({
+      kind: 'comments',
+      comments: [
+        { path: 'src/total.ts', line: 12, startLine: null, originalLine: 12, originalStartLine: null, body: 'First.' },
+        { path: 'src/rows.ts', line: null, startLine: null, originalLine: 20, originalStartLine: 18, body: 'A ][ "b" \\ c.' },
+      ],
+    });
+    expect(seen).toEqual([{
+      cmd: 'gh', args: ['api', `repos/${REPO}/pulls/7/reviews/901/comments`, '--paginate'], input: undefined, timeoutMs: 20_000, allowGhWrite: undefined,
+    }]);
+    expect(isGhRead(seen[0]?.args ?? [])).toBe(true);
+    expect(await listReviewComments(fakeExec(answer('[]', '', 0)).exec, REPO, 7, 901)).toEqual({ kind: 'comments', comments: [] });
+  });
+
+  it('says when a list was read but is not comments, and when it could not be read', async () => {
+    const unparsed: Array<() => Promise<{ stdout: string; stderr: string; code: number }>> = [
+      answer('not json', '', 0),
+      answer('[{"id":1}', '', 0),
+      answer('{"id":1}', '', 0),
+      answer(JSON.stringify([comment({ path: 7 })]), '', 0),
+      answer(JSON.stringify([comment({ body: null })]), '', 0),
+      answer(JSON.stringify([comment({ line: 'twelve' })]), '', 0),
+    ];
+    for (const run of unparsed) expect(await listReviewComments(fakeExec(run).exec, REPO, 7, 901)).toEqual({ kind: 'unparsed' });
+    const unread: Array<() => Promise<{ stdout: string; stderr: string; code: number }>> = [
+      answer('{"message":"Server Error"}', 'gh: Server Error (HTTP 500)', 1),
+      answer('{"message":"Not Found"}', 'gh: Not Found (HTTP 404)', 1),
+      answer('', 'timed out after 20 s', 124),
+      async () => { throw new Error('spawn gh ENOENT'); },
+    ];
+    for (const run of unread) expect(await listReviewComments(fakeExec(run).exec, REPO, 7, 901)).toEqual({ kind: 'no-answer' });
+  });
+
+  it('throws, before running anything, for a review id that is not a positive safe integer or an address that is not one', async () => {
+    for (const [repo, id] of [[REPO, 0], [REPO, -3], [REPO, 1.5], [REPO, Number.MAX_SAFE_INTEGER + 2], [REPO, Number.NaN], ['a/b/c', 901]] as const) {
+      const { exec, seen } = fakeExec(answer('[]', '', 0));
+      await expect(listReviewComments(exec, repo, 7, id)).rejects.toThrow();
+      expect(seen).toEqual([]);
+    }
   });
 });
 

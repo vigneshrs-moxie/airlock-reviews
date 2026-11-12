@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import type { Finding, PostPreviewReply } from '@airlock/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PanelScreen } from '../../src/screens/PanelScreen';
+import { NOT_THIS_REVIEW_POST } from '../../src/screens/PostSheet';
 import type { PanelState, PostReply, UserAction } from '../../src/state/reduce';
 import { CANNOT_ASK_GITHUB, GITHUB_HAS_IT } from '../helpers/fake-service';
 import { UNKNOWN_SENTENCE, previewItem, previewOf, recordOf } from '../helpers/post-fixtures';
@@ -393,6 +394,19 @@ describe('the post sheet', () => {
     const forget = dialog().getByRole('button', { name: 'It was not posted' }) as HTMLButtonElement;
     expect(forget.disabled).toBe(true);
     expect(document.getElementById(forget.getAttribute('aria-describedby')!)?.textContent).toBe('Posting needs the Airlock service, which is not answering.');
+  });
+
+  it.each([
+    ['a newer review of the pull request lands', { doc: { id: 'r_0000000002' } }],
+    ['the tab moved to another pull request', { pr: { number: 2 }, doc: { id: 'r_0000000002' } }],
+  ] as const)('It was not posted in the sheet is disabled with the stale-review reason when %s, not told to wait', (_, over) => {
+    const f = finding(1);
+    const { m, record } = unknownInSheet(f);
+    m.show(reviewState([f], { ...over, posts: [record] }));
+    const forget = dialog().getByRole('button', { name: 'It was not posted' }) as HTMLButtonElement;
+    expect(forget.disabled).toBe(true);
+    expect(document.getElementById(forget.getAttribute('aria-describedby')!)?.textContent).toBe(NOT_THIS_REVIEW_POST);
+    expect(dialog().queryByText(WAIT)).toBeNull();
   });
 
   it('GitHub has the review after all: the sheet says so, shows it as posted, and nothing was forgotten', () => {

@@ -153,6 +153,11 @@ export const PostRecordSchema = z.object({
   bodyHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   /** The GitHub account the review was posted as. */
   postedAs: z.string().max(100).optional(),
+  /**
+   * The SHA-256 of the inline comments that were sent (each one's path, line, start line and text, in order), so a review
+   * GitHub holds is told apart from another post's review with the same text.
+   */
+  commentsHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 }).superRefine((record, ctx) => {
   const bad = (path: string, message: string): void => ctx.addIssue({ code: 'custom', path: [path], message });
   if (record.outcome === 'unknown') {
