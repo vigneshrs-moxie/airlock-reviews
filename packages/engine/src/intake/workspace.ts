@@ -2,6 +2,8 @@ import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PrInfo, ReviewDocument, ReviewRange } from '@airlock/shared';
 import { planRereview, type RereviewPlan } from '../rereview/range.js';
+import { isSyncMerge } from '../shape/detect.js';
+import { mergeCommitRange, mergeRange, type MergeRange } from '../shape/merge-range.js';
 import { must, SLOW_EXEC_TIMEOUT_MS, STOPPED, TIMED_OUT, type Exec } from '../util/exec.js';
 import { airlockHome, repoSlug } from '../util/paths.js';
 
@@ -18,6 +20,13 @@ export interface Workspace {
    * which is what GitHub shows. Absent when that base could not be found.
    */
   whole?: ReviewRange;
+  /**
+   * When every commit of the range is a merge, or a re-review's push is one merge of the base branch: what was changed by
+   * hand. For `by-hand`, `range` runs from the merge git makes by itself (the base worktree) to the merge as committed.
+   */
+  merge?: MergeRange;
+  /** Why git could not say whether the range is merges only; the review goes on as for any other range. */
+  shapeError?: string;
   dispose(): Promise<void>;
 }
 
@@ -143,7 +152,7 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     };
     // A re-review covers only the push when it can be reviewed alone; otherwise the whole pull request, as a first review.
     if (req.rereview) plan = await planRereview(exec, mirror, req.rereview.previous, { ...req.rereview.pr, headSha });
-    if (plan?.kind === 'push') {
+    if (plan?.kind === 'push' || plan?.kind === 'base-merge') {
       range = { baseSha: plan.baseSha, headSha: plan.headSha, kind: 'rereview' };
       // The whole pull request's range, as a first review would take it, is what GitHub shows. When its base cannot be
       // found the review goes on with the push alone, and the caller says so.
@@ -160,6 +169,9 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   }
   await requireCommit(exec, mirror, range.baseSha);
   await requireCommit(exec, mirror, range.headSha);
+  const shape = await shapeOf(exec, mirror, range, plan);
+  // What was changed by hand is reviewed from the merge git makes by itself, made in this mirror.
+  if (shape.merge?.kind === 'by-hand') range = { ...range, baseSha: shape.merge.baseSha };
 
   const reviewDir = join(home, 'work', req.reviewId);
   const headDir = join(reviewDir, 'head');
@@ -191,5 +203,34 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     throw err;
   }
 
-  return { headDir, baseDir, gitDir: mirror, range, ...(plan === undefined ? {} : { plan }), ...(whole === undefined ? {} : { whole }), dispose };
+  return {
+    headDir, baseDir, gitDir: mirror, range, ...(plan === undefined ? {} : { plan }), ...(whole === undefined ? {} : { whole }), ...shape,
+    dispose,
+  };
+}
+
+const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * For a range of merges only (or a re-review's push of one merge of the base branch), what was changed by hand; when the
+ * merge git makes by itself cannot be made, `unsupported` with the reason. When git cannot say whether the range is
+ * merges only, the reason as `shapeError`. Nothing for any other range. A stop is passed on.
+ */
+async function shapeOf(
+  exec: Exec, mirror: string, range: ReviewRange, plan: RereviewPlan | undefined,
+): Promise<{ merge?: MergeRange; shapeError?: string }> {
+  if (plan?.kind !== 'base-merge') {
+    try {
+      if (!(await isSyncMerge(exec, mirror, range, null))) return {};
+    } catch (err) {
+      if (messageOf(err) === STOPPED) throw err;
+      return { shapeError: messageOf(err) };
+    }
+  }
+  try {
+    return { merge: plan?.kind === 'base-merge' ? await mergeCommitRange(exec, mirror, range.headSha) : await mergeRange(exec, mirror, range) };
+  } catch (err) {
+    if (messageOf(err) === STOPPED) throw err;
+    return { merge: { kind: 'unsupported', reason: `Airlock could not make the merge git would make by itself: ${messageOf(err).trim()}` } };
+  }
 }

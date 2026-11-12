@@ -1,9 +1,14 @@
 import type { PrInfo, ReviewDocument } from '@airlock/shared';
 import { must, TIMED_OUT, type Exec } from '../util/exec.js';
 
-/** What a re-review covers: only what was pushed since the earlier review, or the whole pull request again, and why. */
+/**
+ * What a re-review covers: only what was pushed since the earlier review; or, when the push is exactly one merge of the
+ * base branch onto the earlier head (`headSha`, whose first parent is `baseSha`), what was changed by hand in that merge;
+ * or the whole pull request again, and why.
+ */
 export type RereviewPlan =
   | { kind: 'push'; baseSha: string; headSha: string }
+  | { kind: 'base-merge'; baseSha: string; headSha: string }
   | { kind: 'everything'; reason: 'rewritten' | 'base-merged-in' };
 
 /** A commit id as GitHub and the store write it: 7 to 64 hexadecimal characters, so git cannot read it as an option. */
@@ -32,10 +37,31 @@ async function isAncestor(exec: Exec, mirror: string, ancestor: string, descenda
 }
 
 /**
+ * True when the only commit pushed since `earlier` that the base branch does not have is `head` itself, a merge of two
+ * parents whose first is `earlier` and whose second the base branch reaches and `earlier` does not.
+ */
+async function isOneBaseMerge(exec: Exec, mirror: string, earlier: string, head: string, baseTip: string): Promise<boolean> {
+  const listed = must(
+    await exec('git', ['--git-dir', mirror, 'rev-list', '--parents', '--end-of-options', head, `^${earlier}`, `^${baseTip}`]),
+    `git rev-list ${head} ^${earlier} ^${baseTip}`,
+  ).split('\n').filter((l) => l.trim() !== '');
+  if (listed.length !== 1) return false;
+  const [sha, ...parents] = listed[0]!.trim().split(/\s+/).map((id) => checkedId('commit', id));
+  if (parents.length !== 2 || !sameCommit(sha!, head)) return false;
+  const [first, second] = parents as [string, string];
+  return sameCommit(first, earlier) && await isAncestor(exec, mirror, second, baseTip) && !(await isAncestor(exec, mirror, second, earlier));
+}
+
+/** True when `full` (a full id from git) is the commit `id` names, `id` being a full or abbreviated id. */
+const sameCommit = (full: string, id: string): boolean => full.toLowerCase().startsWith(id.toLowerCase());
+
+/**
  * Which range a re-review covers. When the earlier review's head is an ancestor of the new head and no commit pushed
  * since is a merge that brings the base branch in, only the push: the earlier head to the new head. When the earlier
- * head is not in the branch any more (or not in the mirror at all), `rewritten`. When a pushed merge commit has a parent
- * that the base branch reaches and the earlier head does not, `base-merged-in`. The base branch is the pull request's
+ * head is not in the branch any more (or not in the mirror at all), `rewritten`. When the push is exactly one merge
+ * commit, the new head, of two parents, the first the earlier head and the second one the base branch reaches and the
+ * earlier head does not, `base-merge`. When any other pushed merge commit has a parent that the base branch reaches and
+ * the earlier head does not, `base-merged-in`. The base branch is the pull request's
  * branch in the mirror, or the base GitHub recorded when the pull request is merged or its branch is gone, as the
  * workspace chooses. Throws when an id or the branch name is not one git can be given safely, or when git cannot answer.
  */
@@ -50,6 +76,7 @@ export async function planRereview(exec: Exec, mirror: string, prev: ReviewDocum
 
   const branch = `refs/heads/${pr.baseRef}`;
   const baseTip = pr.merged === true || !(await has(exec, mirror, branch)) ? checkedId('base commit', pr.baseSha) : branch;
+  if (await isOneBaseMerge(exec, mirror, earlier, head, baseTip)) return { kind: 'base-merge', baseSha: earlier, headSha: head };
   const listed = must(
     await exec('git', ['--git-dir', mirror, 'rev-list', '--parents', '--end-of-options', head, `^${earlier}`]),
     `git rev-list ${head} ^${earlier}`,

@@ -11,13 +11,14 @@ const isMerge = (line: string): boolean => line.trim().split(/\s+/).length >= 3;
 
 /**
  * True when the range has at least one commit and every commit in base..head is a merge commit or is already contained
- * in `baseRefOfNextStage` (null in step 1: then every commit must be a merge). Throws when git cannot list the range.
+ * in `baseRefOfNextStage` (null in step 1: then every commit must be a merge). `dir` is a worktree or the mirror itself.
+ * Throws when git cannot list the range.
  */
-export async function isSyncMerge(exec: Exec, headDir: string, range: ReviewRange, baseRefOfNextStage: string | null): Promise<boolean> {
-  const all = await commitsWithParents(exec, headDir, range.headSha, [range.baseSha]);
+export async function isSyncMerge(exec: Exec, dir: string, range: ReviewRange, baseRefOfNextStage: string | null): Promise<boolean> {
+  const all = await commitsWithParents(exec, dir, range.headSha, [range.baseSha]);
   if (all.length === 0) return false;
   const rest = baseRefOfNextStage === null
     ? all
-    : await commitsWithParents(exec, headDir, range.headSha, [range.baseSha, baseRefOfNextStage]);
+    : await commitsWithParents(exec, dir, range.headSha, [range.baseSha, baseRefOfNextStage]);
   return rest.every(isMerge);
 }

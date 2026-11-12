@@ -34,7 +34,7 @@ import { confirmFixed, fixedByCode, leftOpen, needsCheck, type FixedCheckResult 
 import type { RereviewPlan } from '../rereview/range.js';
 import { runSweep } from '../rules/sweep.js';
 import { decideVerdict, sameTextOnce, select, selfReviewText, type RereviewText, type SelectResult } from '../select/select.js';
-import { isSyncMerge } from '../shape/detect.js';
+import { MERGE_NOTE, mergeNoteBlock } from '../shape/merge-range.js';
 import { reviewById, saveReview } from '../store/store.js';
 import type { Exec } from '../util/exec.js';
 import { limiter } from '../util/limit.js';
@@ -130,6 +130,10 @@ const SYNC_MERGE_BRIEF: Brief = {
 const EMPTY_SYNC_MERGE_BRIEF: Brief = {
   whatItDoes: ['This branch only merges its target branch into itself and changes no files.'], claims: [],
 };
+const cleanMergeBrief = (base: string): Brief => ({
+  whatItDoes: [`This pull request only merges ${base} into the branch. Git merged it without conflicts and nothing was changed by hand.`],
+  claims: [],
+});
 const EMPTY_BRIEF: Brief = { whatItDoes: [], claims: [] };
 const EMPTY_MAP: ChangeMap = { cohorts: [], standalone: [], links: [] };
 const NO_PACKS: PreparedPacks = { packs: [], missingHelpers: [], repoRules: [], questions: [], errors: [], limits: [] };
@@ -176,6 +180,19 @@ async function openWorkspace(exec: Exec, req: ReviewRequest, pr: PrInfo, reviewI
     if (!CREDENTIAL_TROUBLE.test(messageOf(err))) throw err;
     throw new Error(`${messageOf(err).trim()}\nGit may not be signed in to GitHub. Run "gh auth setup-git" so git uses your GitHub CLI sign-in, then try again.`);
   }
+}
+
+/**
+ * Wraps the runner for a review of what was changed by hand in a merge: every request is told so once, as the fixed
+ * MERGE_NOTE after its own instructions (after the boundary, so the cached part is unchanged), with the two branch names
+ * as material.
+ */
+function withMergeNote(inner: AgentRunner, pr: PrInfo): AgentRunner {
+  const names = mergeNoteBlock(pr.baseRef, pr.headRef);
+  return {
+    run: <T>(req: AgentRequest<T>) =>
+      inner.run({ ...req, instructions: `${req.instructions}\n\n${MERGE_NOTE}`, material: `${req.material}\n\n${names}` }),
+  };
 }
 
 /** Runs a lens-like stage and records its usage and errors. */
@@ -250,6 +267,9 @@ function everythingNote(plan: Extract<RereviewPlan, { kind: 'everything' }>, pre
     ? `The branch was rewritten since the last review (its earlier head ${previous.pr.headSha.slice(0, 7)} is no longer part of it), so the whole pull request was reviewed again.`
     : `A commit pushed since the last review merges the base branch ${pr.baseRef} in, so the whole pull request was reviewed again.`;
 }
+/** A re-review's note when the push was one merge of the base branch, of which only the changes made by hand were reviewed. */
+const baseMergeNote = (pr: PrInfo): string =>
+  `The push since the last review only merges the base branch ${pr.baseRef} in, so only what was changed by hand in that merge was reviewed.`;
 const NO_WHOLE_DIFF_NOTE = 'Airlock could not work out the pull request\'s whole diff, so which lines GitHub shows was judged from the push alone.';
 const EMPTY_PUSH_NOTE = 'The push since the last review changed no files Airlock reviews, so the earlier findings are carried as they were.';
 
@@ -281,9 +301,13 @@ async function reviewInWorkspace(
   // What decides a line's place in the diff GitHub shows: the whole diff on a push re-review (the push's when it could not
   // be worked out); otherwise the review's own diff.
   const whole = push === undefined ? undefined : (push.whole ?? undefined);
-  const { exec, runner } = deps;
+  // A merge whose hand-made changes are reviewed is reviewed as any change, and every request is told what it is.
+  const { merge } = ws;
+  const { exec } = deps;
+  const runner = merge?.kind === 'by-hand' ? withMergeNote(deps.runner, pr) : deps.runner;
   // A re-review's push is a range Airlock chose, as an explicit one is: GitHub's file count is about the whole pull request.
-  const givenRange = req.explicit !== undefined || ws.range.kind === 'rereview';
+  // So is a merge with nothing changed by hand, whose diff is left empty on purpose.
+  const givenRange = req.explicit !== undefined || ws.range.kind === 'rereview' || merge?.kind === 'nothing-by-hand';
   /** After the usage limit, a stage that needs a model records once why it did not run, and is skipped. */
   const limitedOut = async (stage: StageName): Promise<boolean> => {
     const why = deps.gate.stoppedBy();
@@ -314,13 +338,17 @@ async function reviewInWorkspace(
   engineQuestions.push(...prepared.questions);
   limits.push(...prepared.limits);
 
-  const sync = (await log.run('shape', async (rec) => {
-    const merged = await isSyncMerge(exec, ws.headDir, ws.range, null);
+  // A merge with nothing changed by hand, or one Airlock cannot review, runs no model stage: `sync`.
+  const sync = merge !== undefined && merge.kind !== 'by-hand';
+  await log.run('shape', async (rec) => {
+    if (ws.shapeError !== undefined) throw new Error(ws.shapeError);
     // A merge that changes no files leaves nothing unreviewed.
-    if (merged && files.length > 0) rec.error({ stage: 'shape', cohortId: null, message: unreviewedMerge(files.length) });
-    return merged;
-  })) ?? false;
-  const range: ReviewRange = sync ? { ...ws.range, kind: 'sync-merge' } : ws.range;
+    if (merge?.kind === 'unsupported' && files.length > 0) {
+      rec.error({ stage: 'shape', cohortId: null, message: `${unreviewedMerge(files.length)} ${merge.reason}` });
+    }
+  });
+  // A re-review keeps its own kind, which says what it covered.
+  const range: ReviewRange = merge !== undefined && ws.range.kind !== 'rereview' ? { ...ws.range, kind: 'sync-merge' } : ws.range;
 
   const gathered = (await log.run('facts', async (rec) => {
     const tiers = await rec.attempt(() => classifyFiles(files, packs), [] as FileFact[]);
@@ -349,7 +377,8 @@ async function reviewInWorkspace(
     log.skip('brief', skipWhy);
     // A merge with no files is one that changes nothing only when GitHub agrees (or the range was given explicitly).
     const nothingChanged = files.length === 0 && emptyDiff(files, pr, givenRange) === null;
-    brief = nothingChanged ? EMPTY_SYNC_MERGE_BRIEF : files.length === 0 ? EMPTY_BRIEF : SYNC_MERGE_BRIEF;
+    brief = merge?.kind === 'nothing-by-hand' ? cleanMergeBrief(pr.baseRef)
+      : nothingChanged ? EMPTY_SYNC_MERGE_BRIEF : files.length === 0 ? EMPTY_BRIEF : SYNC_MERGE_BRIEF;
   } else {
     map = ((await limitedOut('map')) ? undefined : await log.run('map', async (rec) => {
       const r = await buildChangeMap(capped, {
@@ -529,7 +558,10 @@ async function reviewInWorkspace(
   limits.push(...selection.limits);
   const rereviewNotes = previous === null ? []
     : ws.plan?.kind === 'everything' ? [everythingNote(ws.plan, previous, pr)]
-      : [...(push?.whole === null ? [NO_WHOLE_DIFF_NOTE] : []), ...(files.length === 0 ? [EMPTY_PUSH_NOTE] : [])];
+      : [
+        ...(ws.plan?.kind === 'base-merge' ? [baseMergeNote(pr)] : []),
+        ...(push?.whole === null ? [NO_WHOLE_DIFF_NOTE] : []), ...(files.length === 0 ? [EMPTY_PUSH_NOTE] : []),
+      ];
   return {
     range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
     dropped: [...schemaDropped, ...anchorDropped, ...carryDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
@@ -599,13 +631,17 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
       const ws = await openWorkspace(exec, req, fetched, id, previous);
       opened = ws;
       const pr = req.explicit ? { ...fetched, baseSha: ws.range.baseSha, headSha: ws.range.headSha } : fetched;
-      const loaded = await rec.attempt(async () => recheckBinary(
+      // A merge with nothing changed by hand has nothing to review, whatever its range's diff holds.
+      const noFiles = { files: [] as FileDiff[], facts: [] as Fact[] };
+      const loaded = ws.merge?.kind === 'nothing-by-hand' ? noFiles : await rec.attempt(async () => recheckBinary(
         await loadDiff(exec, ws.gitDir, ws.range),
         (path, bytes) => safeRead(ws.headDir, path, { firstBytes: bytes }),
-      ), { files: [] as FileDiff[], facts: [] as Fact[] });
-      // On a push re-review, the pull request's whole diff too: it decides what GitHub shows and what the pull request
-      // touched. Null when it cannot be worked out; the push's diff then stands in, and the document says so.
-      const whole = ws.plan?.kind !== 'push' ? undefined : ws.whole === undefined ? null : await loadDiff(exec, ws.gitDir, ws.whole)
+      ), noFiles);
+      // On a push re-review (a push of one merge of the base too), the pull request's whole diff as well: it decides what
+      // GitHub shows and what the pull request touched. Null when it cannot be worked out; the push's diff then stands in,
+      // and the document says so.
+      const pushed = ws.plan?.kind === 'push' || ws.plan?.kind === 'base-merge';
+      const whole = !pushed ? undefined : ws.whole === undefined ? null : await loadDiff(exec, ws.gitDir, ws.whole)
         .then((d) => recheckBinary(d, (path, bytes) => safeRead(ws.headDir, path, { firstBytes: bytes })))
         .then((d) => d.files, () => null);
       const push = whole === undefined ? undefined : { whole };

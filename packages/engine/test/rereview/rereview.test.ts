@@ -214,7 +214,8 @@ describe('re-review after a push', () => {
     await commitFiles(s.remote, { 'README.md': 'main moved on\n' }, 'main');
     await s.remote.git('checkout', 'feature');
     await s.remote.git('merge', '--no-ff', '--no-edit', 'main');
-    const head = await s.remote.git('rev-parse', 'HEAD');
+    // A commit after the merge: the push is not only a merge of the base, whose hand-made changes would be reviewed alone.
+    const head = await commitFiles(s.remote, { 'src/jobs/pause.ts': 'export function pauseJob(): void { audit(); }\n' }, 'after the merge');
     const { doc } = await rereview(s, first.id, head, pushScript({
       paths: ['CLAUDE.md', 'src/billing.ts', 'src/jobs/pause.ts', 'src/money.ts', 'test/money.test.ts'],
     }));

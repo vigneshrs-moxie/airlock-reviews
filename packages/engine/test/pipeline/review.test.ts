@@ -259,9 +259,10 @@ describe('runReview', () => {
     expect(events.at(-1)).toEqual({ type: 'done', document: doc });
   }, SLOW);
 
-  it('never reports a sync merge as reviewed: verdict incomplete, a shape error with the count, and the map event', async () => {
+  it('never reports a sync merge it cannot review as reviewed: verdict incomplete, a shape error with the count, and the map event', async () => {
     const s = await scenario({ 'a.txt': 'root\n' }, {});
-    // `feature` sits at the base; main moves on and feature merges it in, changing one more file in the merge itself
+    // `feature` sits at the base; main moves on and feature merges it in, changing one more file in the merge itself;
+    // then main moves on again and feature merges it once more. Two merges are not reviewed.
     await s.remote.git('checkout', 'main');
     await s.remote.write('b.txt', 'main moved on\n');
     await s.remote.commit('main advances');
@@ -270,6 +271,11 @@ describe('runReview', () => {
     await s.remote.write('a.txt', 'changed inside the merge\n');
     await s.remote.git('add', 'a.txt');
     await s.remote.git('commit', '-m', 'Merge main into feature');
+    await s.remote.git('checkout', 'main');
+    await s.remote.write('c.txt', 'main moved on again\n');
+    await s.remote.commit('main advances again');
+    await s.remote.git('checkout', 'feature');
+    await s.remote.git('merge', '--no-ff', '-m', 'Merge main into feature again', 'main');
     const head = await s.remote.git('rev-parse', 'HEAD');
     const { doc, calls, events } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: head }) });
     expect(doc.range.kind).toBe('sync-merge');
@@ -277,7 +283,8 @@ describe('runReview', () => {
     expect(doc.verdict.label).toBe('incomplete');
     expect(doc.stageErrors).toEqual([{
       stage: 'shape', cohortId: null,
-      message: 'This pull request only merges another branch in. Airlock did not review it: 1 changed file was not looked at.',
+      message: 'This pull request only merges another branch in. Airlock did not review it: 1 changed file was not looked at. '
+        + 'It has 2 merge commits, and Airlock reviews what was changed by hand only in a single merge.',
     }]);
     expect(doc.brief.whatItDoes).toHaveLength(1);
     expect(doc.brief.whatItDoes[0]).toMatch(/only conflict resolutions need review/);
@@ -288,7 +295,7 @@ describe('runReview', () => {
     expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge']);
   }, SLOW);
 
-  it('a sync merge that changes no files has no stage error and its brief says it changes no files', async () => {
+  it('a sync merge with nothing changed by hand has no stage error and its brief says so', async () => {
     const s = await scenario({ 'a.txt': 'root\n' }, {});
     await s.remote.git('checkout', 'main');
     await s.remote.write('b.txt', 'main moved on\n');
@@ -301,7 +308,7 @@ describe('runReview', () => {
     expect(doc.range.kind).toBe('sync-merge');
     expect(calls).toEqual([]);
     expect(doc.stageErrors).toEqual([]);
-    expect(doc.brief.whatItDoes).toEqual(['This branch only merges its target branch into itself and changes no files.']);
+    expect(doc.brief.whatItDoes).toEqual(['This pull request only merges main into the branch. Git merged it without conflicts and nothing was changed by hand.']);
   }, SLOW);
 
   it('a kit that cannot be fetched gives a packs stage error and verdict incomplete', async () => {

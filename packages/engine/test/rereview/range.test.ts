@@ -98,6 +98,40 @@ describe('planRereview', () => {
     const head = await r.git('rev-parse', 'HEAD');
     await r.git('branch', '-D', 'main');
     expect(await planRereview(realExec, mirrorOf(r), previous(earlier), prAt(head, moved, { baseRef: 'gone' })))
+      .toEqual({ kind: 'base-merge', baseSha: earlier, headSha: head });
+    const after = await commitFiles(r, { 'b.ts': 'three\n' }, 'after the merge');
+    expect(await planRereview(realExec, mirrorOf(r), previous(earlier), prAt(after, moved, { baseRef: 'gone' })))
+      .toEqual({ kind: 'everything', reason: 'base-merged-in' });
+  });
+
+  it('plans a base merge when the push is exactly one merge of the base branch onto the earlier head', async () => {
+    const r = await repo();
+    const base = await commitFiles(r, { 'a.ts': 'one\n' }, 'base');
+    await r.git('checkout', '-b', 'feature');
+    const earlier = await commitFiles(r, { 'b.ts': 'two\n' }, 'first');
+    await r.git('checkout', 'main');
+    await commitFiles(r, { 'c.ts': 'main moved on\n' }, 'main');
+    await commitFiles(r, { 'd.ts': 'and again\n' }, 'main again');
+    await r.git('checkout', 'feature');
+    await r.git('merge', '--no-ff', '--no-edit', 'main');
+    const head = await r.git('rev-parse', 'HEAD');
+    expect(await planRereview(realExec, mirrorOf(r), previous(earlier), prAt(head, base)))
+      .toEqual({ kind: 'base-merge', baseSha: earlier, headSha: head });
+  });
+
+  it('plans everything when the one pushed merge brings the base in on top of a commit not reviewed', async () => {
+    const r = await repo();
+    const base = await commitFiles(r, { 'a.ts': 'one\n' }, 'base');
+    await r.git('checkout', '-b', 'feature');
+    const earlier = await commitFiles(r, { 'b.ts': 'two\n' }, 'first');
+    await r.git('checkout', 'main');
+    await commitFiles(r, { 'c.ts': 'main moved on\n' }, 'main');
+    // The merge is made on main, with the earlier head as its second parent: its first parent is not the earlier head.
+    await r.git('merge', '--no-ff', '--no-edit', 'feature');
+    const head = await r.git('rev-parse', 'HEAD');
+    await r.git('checkout', '--detach');
+    await r.git('branch', '-f', 'main', 'HEAD~1');
+    expect(await planRereview(realExec, mirrorOf(r), previous(earlier), prAt(head, base)))
       .toEqual({ kind: 'everything', reason: 'base-merged-in' });
   });
 
