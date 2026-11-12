@@ -1,7 +1,7 @@
 import {
   DismissBodySchema, ForgetPostBodySchema, LatestReplySchema, PostBodySchema, PostPreviewBodySchema, PrSummarySchema, RemoveLearnedBodySchema, RestoreBodySchema,
   ReviewDocumentSchema, StartReviewBodySchema, candidate, commentBody, fixPrompt, minimalDocument, verdictWords,
-  type Brief, type ChangeMap, type Finding, type LearnedLine, type PrSummary, type ReviewDocument, type ServiceEvent,
+  type Brief, type ChangeMap, type Finding, type LatestReply, type LearnedLine, type PrSummary, type ReviewDocument, type ServiceEvent,
 } from '@airlock/shared';
 import { chromium, expect, test, type BrowserContext, type Page, type Worker } from '@playwright/test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -188,13 +188,13 @@ test.afterEach(() => {
 });
 
 /** Makes the GitHub tab the active one, from the extension's service worker. */
-async function activate(): Promise<void> {
+async function activate(address = FILES_URL): Promise<void> {
   await worker.evaluate(async (address) => {
     const chrome = (globalThis as unknown as { chrome: typeof browser }).chrome;
     const [tab] = await chrome.tabs.query({ url: address });
     if (tab?.id === undefined) throw new Error(`no tab at ${address}`);
     await chrome.tabs.update(tab.id, { active: true });
-  }, FILES_URL);
+  }, address);
 }
 
 const svc = (): FakeService => {
@@ -503,7 +503,11 @@ test('11. Post selected skips the posted finding; GitHub refuses, and every text
   expect(svc().sent).toHaveLength(2);
 });
 
-test('12. a post whose outcome is not known: the sentence and Open the pull request; It was not posted from the card forgets it', async () => {
+const FORGET_ASK = 'Forget this record? Only do this after looking at the pull request.';
+const CANNOT_ASK = 'Airlock could not ask GitHub whether this review exists, so the record was kept.';
+const GITHUB_HAS_IT = 'GitHub has this review: it was posted. Nothing was forgotten.';
+
+test('12. a post whose outcome is not known: the sentence and Open the pull request; It was not posted asks first, GitHub cannot be asked, and the card then forgets it', async () => {
   svc().answerNextPost({ unknown: true });
   const sheet = panel.getByRole('dialog');
   await sheet.getByRole('button', { name: 'Update preview' }).click();
@@ -517,6 +521,20 @@ test('12. a post whose outcome is not known: the sentence and Open the pull requ
   // One call to GitHub per press, never a second try.
   expect(svc().sent).toHaveLength(3);
   expect(postBodies()).toHaveLength(3);
+
+  // In the sheet, as on the finding, It was not posted asks first; Keep sends nothing.
+  await sheet.getByRole('button', { name: 'It was not posted' }).click();
+  await expect(sheet.getByText(FORGET_ASK)).toBeVisible();
+  await sheet.getByRole('button', { name: 'Keep' }).click();
+  await expect(sheet.getByText(FORGET_ASK)).toHaveCount(0);
+  expect(bodiesOf('POST', '/posts/forget')).toEqual([]);
+  // Asked and answered, the service asks GitHub first; GitHub cannot be asked, so the record is kept and the sheet says so.
+  svc().answerNextForget({ cannotAsk: true });
+  await sheet.getByRole('button', { name: 'It was not posted' }).click();
+  await sheet.getByRole('button', { name: 'It was not posted' }).click();
+  await expect(sheet.getByText(CANNOT_ASK)).toBeVisible();
+  expect(svc().posts(REPO, NUMBER).map((r) => r.outcome)).toEqual(['posted', 'unknown']);
+  await expect(sheet.getByRole('button', { name: 'It was not posted' })).toBeEnabled();
   await sheet.getByRole('button', { name: 'Close' }).click();
   await expect(sheet).toHaveCount(0);
 
@@ -525,15 +543,97 @@ test('12. a post whose outcome is not known: the sentence and Open the pull requ
   await expect(card).toContainText('Not known whether this was posted');
   await expect(card.getByRole('link', { name: 'Open the pull request' })).toHaveAttribute('href', `https://github.com/${REPO}/pull/${NUMBER}`);
   await card.getByRole('button', { name: 'It was not posted' }).click();
-  await expect(card.getByText('Forget this record? Only do this after looking at the pull request.')).toBeVisible();
+  await expect(card.getByText(FORGET_ASK)).toBeVisible();
   await card.getByRole('button', { name: 'It was not posted' }).click();
   await expect(card).not.toContainText('Not known whether this was posted');
   await expect(card).not.toContainText('Posted');
-  expect(bodiesOf('POST', '/posts/forget').map((b) => ForgetPostBodySchema.parse(b))).toEqual([{ repo: REPO, number: NUMBER, id: unknown?.id }]);
+  const asked = { repo: REPO, number: NUMBER, id: unknown?.id };
+  expect(bodiesOf('POST', '/posts/forget').map((b) => ForgetPostBodySchema.parse(b))).toEqual([asked, asked]);
   expect(svc().posts(REPO, NUMBER).map((r) => r.outcome)).toEqual(['posted']);
 });
 
-test('13. the post routes refuse a request without the extension Origin, and a preview body over 512 KB', async () => {
+test('13. GitHub has the review after all: It was not posted finds it, nothing is forgotten, and the finding is marked Posted', async () => {
+  const third = top[2]!;
+  svc().answerNextPost({ unknown: true });
+  await cards().nth(1).getByRole('button').click();
+  await expect(panel.getByRole('heading', { name: third.title })).toBeVisible();
+  await panel.getByRole('button', { name: 'Post comment' }).click();
+  const sheet = panel.getByRole('dialog');
+  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await expect(sheet.getByRole('alert')).toHaveText(UNKNOWN);
+  await sheet.getByRole('button', { name: 'Close' }).click();
+  await expect(sheet).toHaveCount(0);
+  expect(svc().sent).toHaveLength(4);
+
+  // From the finding: asked, then the service finds the review on GitHub.
+  svc().answerNextForget({ githubHas: true });
+  await panel.getByRole('button', { name: 'It was not posted' }).click();
+  await panel.getByRole('button', { name: 'It was not posted' }).click();
+  await expect(panel.locator('.notice', { hasText: GITHUB_HAS_IT })).toBeVisible();
+  await expect(panel.getByText('Not known whether this was posted')).toHaveCount(0);
+  await expect(panel.locator('.mark').getByText('Posted', { exact: true })).toBeVisible();
+  const [, found] = svc().posts(REPO, NUMBER);
+  expect(found?.outcome).toBe('posted');
+  await expect(panel.locator('.mark').getByRole('link', { name: 'Open on GitHub' })).toHaveAttribute('href', found?.url ?? 'missing');
+  expect(svc().sent).toHaveLength(4);
+  await panel.getByRole('button', { name: 'Back to the review' }).click();
+  await expect(cards().nth(1)).toContainText('Posted');
+});
+
+test('14. a post whose proof gets no answer was never sent: it says so, and the same post goes through once the service answers', async () => {
+  const fourth = alsoFound[0]!;
+  await panel.getByRole('button', { name: 'Also found' }).click();
+  await panel.locator('button.line').filter({ hasText: fourth.title }).click();
+  await expect(panel.getByRole('heading', { name: fourth.title })).toBeVisible();
+  await panel.getByRole('button', { name: 'Post comment' }).click();
+  const sheet = panel.getByRole('dialog');
+  const post = sheet.getByRole('button', { name: 'Post 1 comment to GitHub' });
+  await expect(post).toBeEnabled();
+  // The service stops answering /hello, and the proof of a second ago has run out: the post proves first, and gets no answer.
+  svc().hellosDown(true);
+  await panel.waitForTimeout(1_200);
+  const before = postBodies().length;
+  await post.click();
+  await expect(sheet.getByRole('alert')).toHaveText('Airlock could not reach its service, so nothing was sent.');
+  expect(postBodies()).toHaveLength(before);
+  expect(svc().sent).toHaveLength(4);
+  // Not a post whose outcome is unknown: no Open the pull request, and the same preview is offered again.
+  await expect(sheet.getByRole('link', { name: 'Open the pull request' })).toHaveCount(0);
+  svc().hellosDown(false);
+  await expect(post).toBeEnabled(RETRY_WAIT);
+  await post.click();
+  await expect(sheet.getByText('Posted 1 comment.')).toBeVisible();
+  expect(postBodies()).toHaveLength(before + 1);
+  expect(svc().sent).toHaveLength(5);
+  await sheet.getByRole('button', { name: 'Done' }).click();
+  await panel.getByRole('button', { name: 'Back to the review' }).click();
+});
+
+test('15. GitHub refuses a post and the service cannot clear its record: the records are read again, so It was not posted is offered', async () => {
+  const fifth = alsoFound[1]!;
+  svc().answerNextPost({ refuseKept: 'Validation Failed' });
+  await panel.locator('button.line').filter({ hasText: fifth.title }).click();
+  await expect(panel.getByRole('heading', { name: fifth.title })).toBeVisible();
+  await panel.getByRole('button', { name: 'Post comment' }).click();
+  const sheet = panel.getByRole('dialog');
+  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await expect(sheet.getByRole('alert')).toHaveText(
+    'GitHub refused the comments: Validation Failed. Nothing was posted, but Airlock could not clear its own record: press "It was not posted" before trying again.',
+  );
+  await sheet.getByRole('button', { name: 'Cancel' }).click();
+  await expect(sheet).toHaveCount(0);
+  // The record the service kept is on screen without a reload, and can be cleared where the finding is.
+  await expect(panel.getByText('Not known whether this was posted')).toBeVisible();
+  await panel.getByRole('button', { name: 'It was not posted' }).click();
+  await panel.getByRole('button', { name: 'It was not posted' }).click();
+  await expect(panel.getByText('Not known whether this was posted')).toHaveCount(0);
+  await expect(panel.getByRole('button', { name: 'Post comment' })).toBeEnabled();
+  expect(svc().posts(REPO, NUMBER).map((r) => r.outcome)).toEqual(['posted', 'posted', 'posted']);
+  expect(svc().sent).toHaveLength(6);
+  await panel.getByRole('button', { name: 'Back to the review' }).click();
+});
+
+test('16. the post routes refuse a request without the extension Origin, and a preview body over 512 KB', async () => {
   for (const path of ['/posts/preview', '/posts', '/posts/forget', '/learned/remove']) {
     const res = await fetch(`http://127.0.0.1:${E2E_PORT}${path}`, {
       method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
@@ -550,7 +650,7 @@ test('13. the post routes refuse a request without the extension Origin, and a p
   expect(await big.json()).toEqual({ error: 'The request body is too large.' });
 });
 
-test('14. a push: the banner, Review the push starts with since last, and the re-review shows what is new, still open, moved and fixed', async () => {
+test('17. a push: the banner, Review the push starts with since last, and the re-review shows what is new, still open, moved and fixed', async () => {
   svc().push(REPO, NUMBER, PUSHED_HEAD, rereviewScript);
   await panel.reload();
   await expect(panel.getByText('New commits since this review.')).toBeVisible();
@@ -579,10 +679,43 @@ test('14. a push: the banner, Review the push starts with since last, and the re
   await expect(fixed).toContainText('The quoted code is gone; not checked further.');
   await expect(fixed.getByRole('checkbox')).toHaveCount(0);
   await expect(fixed.getByRole('button')).toHaveCount(1);
-  expect(svc().sent).toHaveLength(3);
+  expect(svc().sent).toHaveLength(6);
 });
 
-test('15. Packs shows the learned lines under their packs; Remove asks, removes and shows the note; a line already gone says so', async () => {
+test('18. a post whose connection is cut before any answer: the panel waits, reads the records, and shows Posted when the record appears', async () => {
+  // First, straight to the service: when it cannot read its records of the pull request it posts nothing (500).
+  const asService = { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json', Origin: ORIGIN };
+  const asked = await fetch(`http://127.0.0.1:${E2E_PORT}/posts/preview`, {
+    method: 'POST', headers: asService,
+    body: JSON.stringify({ repo: REPO, number: NUMBER, reviewId: 'r_0123456790', items: [{ fingerprint: NEW_FINDING.fingerprint }] }),
+  });
+  expect(asked.status).toBe(200);
+  const { previewId } = (await asked.json()) as { previewId: string };
+  svc().answerNextPost({ brokenRecords: true });
+  const broken = await fetch(`http://127.0.0.1:${E2E_PORT}/posts`, { method: 'POST', headers: asService, body: JSON.stringify({ previewId }) });
+  expect(broken.status).toBe(500);
+  expect(await broken.json()).toEqual({
+    error: 'Airlock could not read its record of what was posted on this pull request, so it will not post. Fix or move that file in the posts folder of the Airlock home.',
+  });
+  expect(svc().sent).toHaveLength(6);
+
+  svc().answerNextPost({ cut: true, recordAfterMs: 2_000 });
+  await cards().nth(1).getByRole('button').click();
+  await expect(panel.getByRole('heading', { name: NEW_FINDING.title })).toBeVisible();
+  await panel.getByRole('button', { name: 'Post comment' }).click();
+  const sheet = panel.getByRole('dialog');
+  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await expect(sheet.getByText('Waiting to hear whether GitHub accepted the comments…')).toBeVisible();
+  await expect(sheet.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+  await expect(sheet.getByText('Posted 1 comment.')).toBeVisible(RETRY_WAIT);
+  // One press, one review: the panel read the records and sent nothing again.
+  expect(svc().sent).toHaveLength(7);
+  await sheet.getByRole('button', { name: 'Done' }).click();
+  await panel.getByRole('button', { name: 'Back to the review' }).click();
+  await expect(cards().nth(1)).toContainText('Posted');
+});
+
+test('19. Packs shows the learned lines under their packs; Remove asks, removes and shows the note; a line already gone says so', async () => {
   await panel.getByRole('button', { name: 'Packs' }).click();
   const generic = panel.locator('.packs-screen li').filter({ hasText: 'Generic' });
   const orbit = panel.locator('.packs-screen li').filter({ hasText: 'Orbit' });
@@ -592,6 +725,13 @@ test('15. Packs shows the learned lines under their packs; Remove asks, removes 
   await expect(orbit.locator('.learned-line')).toHaveText(/<b>not bold<\/b>/);
   await expect(panel.locator('.packs-screen b')).toHaveCount(0);
 
+  // A pack the service will not change: the refusal is said under the line, which stays.
+  svc().lockPack('orbit');
+  await orbit.getByRole('button', { name: 'Remove' }).click();
+  await orbit.getByRole('button', { name: 'Remove' }).click();
+  await expect(orbit.getByRole('alert')).toHaveText('Airlock will not change the pack "orbit".');
+  await expect(orbit.locator('.learned-line')).toHaveCount(1);
+
   const second = generic.locator('.learned-line').nth(1);
   await second.getByRole('button', { name: 'Remove' }).click();
   await expect(second.getByText('Remove this line? The reviewer stops following it from the next review.')).toBeVisible();
@@ -600,12 +740,76 @@ test('15. Packs shows the learned lines under their packs; Remove asks, removes 
   await expect(generic.locator('.learned-line')).toHaveCount(1);
   expect(RemoveLearnedBodySchema.parse(bodiesOf('POST', '/learned/remove').at(-1))).toEqual({ repo: REPO, pack: 'generic', kind: 'wrong', key: '0000000000000002' });
 
+  // A line whose file changed by hand between two reads cannot be matched exactly: the note says so, and the line stays.
+  svc().unmatchLine('0000000000000003');
+  const kept = generic.locator('.learned-line');
+  await kept.getByRole('button', { name: 'Remove' }).click();
+  await kept.getByRole('button', { name: 'Remove' }).click();
+  await expect(panel.locator('.packs-screen .notice').first()).toHaveText('This line could not be matched exactly in the file; edit the file by hand.');
+  await expect(generic.locator('.learned-line')).toHaveCount(1);
+
   // A line edited by hand since the list was read is already gone: the service says so, and the empty state follows.
   svc().learned.splice(svc().learned.findIndex((l) => l.key === '0000000000000003'), 1);
   const last = generic.locator('.learned-line');
+  await expect(last.getByRole('button', { name: 'Remove' })).toBeEnabled();
   await last.getByRole('button', { name: 'Remove' }).click();
   await last.getByRole('button', { name: 'Remove' }).click();
   await expect(panel.locator('.packs-screen .notice').first()).toHaveText("That line was no longer in Generic's product-knowledge.md; nothing was removed.");
   await expect(generic.getByText('Nothing learned yet.')).toBeVisible();
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
+});
+
+/** A merge pull request, reviewed first or as a push since an earlier review, with what the document says was reviewed. */
+const MERGE_PULLS: Array<{ number: number; kind: ReviewDocument['mergeReview']; pushed: boolean }> = [
+  { number: 8, kind: 'by-hand', pushed: false },
+  { number: 9, kind: 'nothing-by-hand', pushed: false },
+  { number: 10, kind: 'not-reviewed', pushed: false },
+  { number: 11, kind: undefined, pushed: false },
+  { number: 12, kind: 'by-hand', pushed: true },
+  { number: 13, kind: 'nothing-by-hand', pushed: true },
+];
+
+function mergePull({ number, kind, pushed }: (typeof MERGE_PULLS)[number]): { pr: PrSummary; latest: LatestReply } {
+  const merge = PrSummarySchema.parse({ ...pr, number, title: `Merge main into the branch (${number})` });
+  const base = minimalDocument();
+  const doc = ReviewDocumentSchema.parse({
+    ...base, id: `r_00000000${String(number).padStart(2, '0')}`,
+    pr: { ...base.pr, repo: REPO, number, title: merge.title, headSha: HEAD, url: `https://github.com/${REPO}/pull/${number}` },
+    range: { baseSha: 'e'.repeat(40), headSha: HEAD, kind: 'sync-merge' },
+    brief: { whatItDoes: ['This branch only merges its target branch into itself.'], claims: [] },
+    ...(kind === undefined ? {} : { mergeReview: kind }),
+    ...(pushed ? { previous: { reviewId: 'r_0000000001', headSha: 'f'.repeat(40) } } : {}),
+    ...(kind === 'not-reviewed' ? {
+      verdict: { label: 'incomplete', sentence: 'The review did not finish.', counts: { block: 0, fix: 0, ask: 0, note: 0 } },
+      stageErrors: [{ stage: 'shape', cohortId: null, message: 'This pull request only merges another branch in. Airlock did not review it: 2 changed files were not looked at.' }],
+    } : {}),
+  });
+  return { pr: merge, latest: { document: doc, dismissals: [], posts: [] } };
+}
+
+test('20. a merge review says it reviewed what was changed by hand only when its document says so', async () => {
+  if (context === undefined) throw new Error('no browser');
+  const classic = await readFile(join(FIXTURES, 'files-classic.html'), 'utf8');
+  for (const one of MERGE_PULLS) {
+    svc().addPull(mergePull(one));
+    await context.route(`https://github.com/${REPO}/pull/${one.number}/files`, (route) => route.fulfill({ contentType: 'text/html', body: classic }));
+  }
+  const expected: Record<number, { heading: string; line: string | null }> = {
+    8: { heading: 'A merge of main: only what was changed by hand was reviewed', line: null },
+    9: { heading: 'A merge of main: git merged it without conflicts and nothing was changed by hand.', line: null },
+    10: { heading: 'What this does', line: null },
+    11: { heading: 'What this does', line: null },
+    12: { heading: 'What this does', line: `Review of the merge pushed since ${'f'.repeat(7)}: only what was changed by hand was reviewed.` },
+    13: { heading: 'What this does', line: 'The push only merged main in; git merged it without conflicts and nothing was changed by hand.' },
+  };
+  for (const { number } of MERGE_PULLS) {
+    await github.goto(`https://github.com/${REPO}/pull/${number}/files`);
+    await activate(`https://github.com/${REPO}/pull/${number}/files`);
+    const want = expected[number]!;
+    await expect(panel.getByRole('heading', { name: want.heading })).toBeVisible();
+    const sentences = panel.locator('main').getByText(/changed by hand/);
+    if (want.line !== null) await expect(panel.getByText(want.line, { exact: true })).toBeVisible();
+    const count = (want.heading.includes('by hand') ? 1 : 0) + (want.line === null ? 0 : 1);
+    await expect(sentences).toHaveCount(count);
+  }
 });

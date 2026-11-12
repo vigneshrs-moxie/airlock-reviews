@@ -53,6 +53,8 @@ const KIT_PACK = 'raj-standard';
 // (403), then the line itself; a removal that went through carries no note.
 const NOT_CHOSEN = 'Airlock does not use that pack for this repository.';
 const KIT_KEPT = 'Lines of the team standard cannot be removed here.';
+const notChanged = (pack: string): string => `Airlock will not change the pack "${pack}".`;
+const NOT_MATCHED = 'This line could not be matched exactly in the file; edit the file by hand.';
 const goneFrom = (title: string, kind: string): string =>
   `That line was no longer in ${title}'s ${kind === 'wrong' ? 'wrong.md' : 'product-knowledge.md'}; nothing was removed.`;
 const LEARNED_CAP = 300;
@@ -68,6 +70,12 @@ const CLOSED = 'The pull request is closed. Nothing was posted.';
 const MERGED = 'The pull request has been merged. Nothing was posted.';
 const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
 const KEPT = 'This review was posted, so Airlock keeps its record.';
+const BROKEN =
+  'Airlock could not read its record of what was posted on this pull request, so it will not post. Fix or move that file in the posts folder of the Airlock home.';
+// The forget's answers once it asks GitHub first (the service's part of the step 3 fix wave).
+const GITHUB_HAS_IT = 'GitHub has this review: it was posted. Nothing was forgotten.';
+const CANNOT_ASK_GITHUB = 'Airlock could not ask GitHub whether this review exists, so the record was kept.';
+const FoundReplySchema = z.object({ error: z.string(), record: PostRecordSchema });
 const PREVIEW_MS = 10 * 60_000;
 // What a record keeps of a finding's aliases (packages/service/src/posts/preview.ts).
 const FINGERPRINT = /^[0-9a-f]{16}$/;
@@ -78,8 +86,25 @@ const BODY_MAX = 64 * 1024;
 const TOO_LARGE = 'The request body is too large.';
 const ForgetReplySchema = z.object({ forgotten: z.boolean() });
 
-/** What the fake's GitHub does with the next post: takes it (the default), refuses it with a message, or never answers clearly. */
-export type GithubAnswer = { accept: true } | { refuse: string } | { unknown: true };
+/**
+ * What happens to the next post, as the real service can answer it:
+ * - `accept` (the default): GitHub takes it.
+ * - `refuse`: GitHub refuses it with this message; nothing was posted (502).
+ * - `refuseKept`: GitHub refuses it, and the service cannot clear its unknown record, which stays (502).
+ * - `unknown`: GitHub's answer is not known; the record says so (504).
+ * - `brokenRecords`: the service cannot read its records of the pull request, so it posts nothing (500).
+ * - `cut`: the connection is cut before any answer, while the service is still reading the pull request; GitHub takes the
+ *   review and its record appears `recordAfterMs` later.
+ */
+export type GithubAnswer =
+  | { accept: true } | { refuse: string } | { refuseKept: string } | { unknown: true } | { brokenRecords: true }
+  | { cut: true; recordAfterMs: number };
+
+/**
+ * What the service's forget finds when it asks GitHub first: nothing (the default: the record is forgotten), the review
+ * (`githubHas`: 409, the record is now posted), or no answer (`cannotAsk`: 502, the record is kept).
+ */
+export type ForgetAnswer = { githubHas: true } | { cannotAsk: true };
 
 /** One review the fake would have sent to GitHub, exactly as the stored preview held it. */
 export interface SentReview {
@@ -171,6 +196,16 @@ export interface FakeService {
   sent: SentReview[];
   /** What GitHub does with the next post; after it, posts are taken again. */
   answerNextPost(answer: GithubAnswer): void;
+  /** What the next forget finds on GitHub; after it, forgets find nothing again. */
+  answerNextForget(answer: ForgetAnswer): void;
+  /** The service will not change this pack's files (it is not writable): a removal from it is refused with 403. */
+  lockPack(packId: string): void;
+  /** The line with this key no longer matches its file exactly (edited by hand between two reads): its removal says so. */
+  unmatchLine(key: string): void;
+  /** Adds a pull request, with its stored review, as `pulls` in the options does. */
+  addPull(pull: FakePull): void;
+  /** While on, `GET /hello` gets no answer (its connection is cut), as when the service stops; every other route answers. */
+  hellosDown(on: boolean): void;
   /** Stops listening and cuts every open connection; what it holds is kept. */
   stop(): Promise<void>;
   /** Listens again on the same port, with everything it held. */
@@ -224,13 +259,14 @@ const today = (now: Date): string =>
 
 /**
  * A stand-in for the Airlock service that speaks its contract: the Host, Origin and token checks, `GET /hello` (with
- * the proof that it holds the token, for a nonce),
+ * the proof that it holds the token, for a nonce and the port it listens on),
  * `POST /pair`, `GET /status`, `GET /pr`, `POST /reviews`, `GET /reviews/running`, `GET /reviews/<runId>/events` (a real
  * event stream, written step by step from the pull request's script), `GET /reviews/latest`, `POST /dismissals`,
  * `POST /dismissals/restore`, and the post routes `POST /posts/preview`, `POST /posts` and `POST /posts/forget` (which
- * require an Origin, and whose GitHub is in memory: it records what it is sent and answers as `answerNextPost` says), and the learned
- * routes `GET /learned` (for the repository asked, newest first) and `POST /learned/remove` (which requires an Origin and
- * answers in the real service's order: 404 for a pack not chosen, 403 for the kit, then the line). Request bodies and query values are checked with the shared schemas, and every reply is
+ * require an Origin, and whose GitHub is in memory: it records what it is sent and answers as `answerNextPost` and
+ * `answerNextForget` say), and the learned routes `GET /learned` (for the repository asked, newest first) and
+ * `POST /learned/remove` (which requires an Origin and answers in the real service's order: 404 for a pack not chosen, 403
+ * for the kit or a pack it will not change, then the line). Request bodies and query values are checked with the shared schemas, and every reply is
  * checked against its schema before it is sent; a reply that does not match is answered with a 500 and recorded in
  * `problems`. It remembers every request, and can be stopped and started again on the same port.
  */
@@ -239,18 +275,25 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
   const requests: RecordedRequest[] = [];
   const problems: string[] = [];
   const runs: LiveRun[] = [];
-  const pulls: Pull[] = (options.pulls ?? []).map((p) => {
+  const pullFrom = (p: FakePull): Pull => {
     const document = p.latest === undefined ? null : LatestReplySchema.parse(p.latest).document;
     return {
       pr: PrSummarySchema.parse(p.pr), document, reviews: document === null ? [] : [document],
       dismissals: p.latest?.dismissals ?? [], posts: p.latest?.posts ?? [], script: p.script ?? null,
     };
-  });
+  };
+  const pulls: Pull[] = (options.pulls ?? []).map(pullFrom);
   const learned: LearnedLine[] = [...(options.learned ?? [])];
   const previews: PostPreviewReply[] = [];
   const stored = new Map<string, StoredPreview>();
   const sent: SentReview[] = [];
   const answers: GithubAnswer[] = [];
+  const forgetAnswers: ForgetAnswer[] = [];
+  const lockedPacks = new Set<string>();
+  const unmatched = new Set<string>();
+  let helloCut = false;
+  /** Previews whose post was cut and is still with GitHub. */
+  const cutting = new Set<string>();
   let githubIds = 9000;
   let pairedOrigin: string | null = token !== undefined && !unpaired ? EXTENSION_ORIGIN : null;
   let closed = false;
@@ -460,6 +503,9 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
   function post(res: ServerResponse, body: unknown): void {
     // Strict, as the service's route: the request carries the preview id and nothing else.
     const asked = bodyOf(PostBodySchema.strict(), body);
+    // Chromium sends a request again by itself, once, when a reused connection closes before any answer. While a cut post
+    // is still with GitHub, that copy gets no answer either, as from a service that has stopped answering.
+    if (cutting.has(asked.previewId)) { res.socket?.destroy(); return; }
     const held = stored.get(asked.previewId);
     if (held === undefined || Date.now() >= held.expiresAt) throw new Refusal(404, EXPIRED);
     const pull = pullOf(held.repo, held.number);
@@ -476,37 +522,79 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       const earlier = blocking(pull, [item.fingerprint, ...item.aliases]);
       if (earlier !== undefined) throw new Refusal(409, blockedBy(earlier, item.title));
     }
-    stored.delete(held.previewId);
     const answer = answers.shift() ?? { accept: true };
+    // As the service: a cut while it still reads the pull request leaves no answer and, as yet, no record.
+    if ('cut' in answer) {
+      res.socket?.destroy();
+      stored.delete(held.previewId);
+      cutting.add(held.previewId);
+      setTimeout(() => {
+        cutting.delete(held.previewId);
+        sent.push(held.review);
+        pull.posts = [...pull.posts, postedRecord(held)];
+      }, answer.recordAfterMs);
+      return;
+    }
+    // Its records cannot be read: refused before anything is spent or sent.
+    if ('brokenRecords' in answer) throw new Refusal(500, BROKEN);
+    stored.delete(held.previewId);
     sent.push(held.review);
-    const record = {
-      id: `post_${randomBytes(6).toString('hex')}`, repo: held.repo, number: held.number, reviewId: held.reviewId, headSha: held.headSha,
-      postedAt: new Date().toISOString(),
-      items: held.items.map(({ fingerprint, aliases, placement }) => ({ fingerprint, aliases, placement })),
-    };
+    const record = recordOf(held);
     if ('refuse' in answer) {
       // Kept for another try, for ten minutes from the refusal, as the service's Previews.keep does.
       stored.set(held.previewId, { ...held, expiresAt: Date.now() + PREVIEW_MS });
       throw new Refusal(502, `GitHub refused the comments: ${answer.refuse}. Nothing was posted.`);
     }
+    if ('refuseKept' in answer) {
+      // The unknown record could not be removed, so it stays and blocks these findings; the preview is not kept.
+      pull.posts = [...pull.posts, { ...record, outcome: 'unknown', githubReviewId: null, url: null }];
+      throw new Refusal(502,
+        `GitHub refused the comments: ${answer.refuseKept}. Nothing was posted, but Airlock could not clear its own record: press "It was not posted" before trying again.`);
+    }
     if ('unknown' in answer) {
       pull.posts = [...pull.posts, { ...record, outcome: 'unknown', githubReviewId: null, url: null }];
       throw new Refusal(504, UNKNOWN);
     }
-    githubIds += 1;
-    const posted: PostRecord = {
-      ...record, outcome: 'posted', githubReviewId: githubIds, url: `https://github.com/${held.repo}/pull/${held.number}#pullrequestreview-${githubIds}`,
-    };
+    const posted = postedRecord(held, record);
     pull.posts = [...pull.posts, posted];
     reply(res, PostRecordSchema, 200, posted);
   }
 
+  /** A record of a stored preview, its outcome still to be set. */
+  function recordOf(held: StoredPreview): Omit<PostRecord, 'outcome' | 'githubReviewId' | 'url'> {
+    return {
+      id: `post_${randomBytes(6).toString('hex')}`, repo: held.repo, number: held.number, reviewId: held.reviewId, headSha: held.headSha,
+      postedAt: new Date().toISOString(),
+      items: held.items.map(({ fingerprint, aliases, placement }) => ({ fingerprint, aliases, placement })),
+    };
+  }
+
+  /** The record of a review GitHub took: its new id and address. */
+  function postedRecord(held: StoredPreview, record = recordOf(held)): PostRecord {
+    githubIds += 1;
+    return {
+      ...record, outcome: 'posted', githubReviewId: githubIds, url: `https://github.com/${held.repo}/pull/${held.number}#pullrequestreview-${githubIds}`,
+    };
+  }
+
+  /** As the service's forget: an unknown record is forgotten only after GitHub was asked and does not have the review. */
   function forget(res: ServerResponse, body: unknown): void {
     const asked = bodyOf(ForgetPostBodySchema, body);
     const pull = pullOf(asked.repo, asked.number);
     const record = pull?.posts.find((r) => r.id === asked.id);
     if (pull === undefined || record === undefined) { reply(res, ForgetReplySchema, 200, { forgotten: false }); return; }
     if (record.outcome === 'posted') throw new Refusal(409, KEPT);
+    const answer = forgetAnswers.shift();
+    if (answer !== undefined && 'cannotAsk' in answer) throw new Refusal(502, CANNOT_ASK_GITHUB);
+    if (answer !== undefined && 'githubHas' in answer) {
+      githubIds += 1;
+      const found: PostRecord = {
+        ...record, outcome: 'posted', githubReviewId: githubIds, url: `https://github.com/${record.repo}/pull/${record.number}#pullrequestreview-${githubIds}`,
+      };
+      pull.posts = pull.posts.map((r) => (r.id === record.id ? found : r));
+      reply(res, FoundReplySchema, 409, { error: GITHUB_HAS_IT, record: found });
+      return;
+    }
     pull.posts = pull.posts.filter((r) => r.id !== asked.id);
     reply(res, ForgetReplySchema, 200, { forgotten: true });
   }
@@ -536,8 +624,10 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     const title = chosenFor(asked.repo).get(asked.pack);
     if (title === undefined) throw new Refusal(404, NOT_CHOSEN);
     if (asked.pack === KIT_PACK) throw new Refusal(403, KIT_KEPT);
+    if (lockedPacks.has(asked.pack)) throw new Refusal(403, notChanged(asked.pack));
     const at = learned.findIndex((l) => l.pack === asked.pack && l.kind === asked.kind && l.key === asked.key);
     if (at === -1) { reply(res, RemoveLearnedReplySchema, 200, { removed: false, note: goneFrom(title, asked.kind) }); return; }
+    if (unmatched.has(asked.key)) { reply(res, RemoveLearnedReplySchema, 200, { removed: false, note: NOT_MATCHED }); return; }
     learned.splice(at, 1);
     reply(res, RemoveLearnedReplySchema, 200, { removed: true, note: null });
   }
@@ -585,6 +675,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     const known = ROUTES.filter((r) => r.path.test(url.pathname));
     if (known.length === 0) { refuse(res, 404, NOTHING_HERE); return; }
     if (!known.some((r) => r.method === method)) { refuse(res, 405, WRONG_METHOD); return; }
+    if (method === 'GET' && url.pathname === '/hello' && helloCut) { res.socket?.destroy(); return; }
     if (method === 'GET' && url.pathname === '/hello') {
       // As the real service: a nonce, when given, is 32 lower-case hex characters, given once, and the reply proves the
       // token with it.
@@ -594,7 +685,8 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       const key = options.proofKey === undefined ? token : options.proofKey;
       const proof = nonce === undefined || key === undefined || key === null
         ? {}
-        : { proof: createHmac('sha256', key).update(`airlock-hello:${nonce}`).digest('hex') };
+        // As the real service: the proof names the port it listens on.
+        : { proof: createHmac('sha256', key).update(`airlock-hello:${port}:${nonce}`).digest('hex') };
       reply(res, HelloSchema, 200, { airlock: true, version: 'test', paired: pairedOrigin !== null, ...proof });
       return;
     }
@@ -717,6 +809,11 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     previews,
     sent,
     answerNextPost: (answer) => { answers.push(answer); },
+    answerNextForget: (answer) => { forgetAnswers.push(answer); },
+    lockPack: (packId) => { lockedPacks.add(packId); },
+    unmatchLine: (key) => { unmatched.add(key); },
+    hellosDown: (on) => { helloCut = on; },
+    addPull: (pull) => { pulls.push(pullFrom(pull)); },
     stop,
     start: async () => { if (server === null) await listen(); },
     close: async () => {
