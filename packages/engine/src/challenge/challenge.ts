@@ -164,7 +164,8 @@ export async function challenge(
   }
 
   const template = await loadTemplate('challenge');
-  const instructions = instructionsFor(ctx.push === undefined ? template : `${template.trim()}\n\n${PUSH_BASE_SIDE}`, ctx.packs, ctx.missingHelpers);
+  const told = ctx.push?.baseIsEarlierHead === true ? `${template.trim()}\n\n${PUSH_BASE_SIDE}` : template;
+  const instructions = instructionsFor(told, ctx.packs, ctx.missingHelpers);
   // What the pull request touched is judged by its whole diff on a push re-review, whose base side is the earlier head.
   const evidence = createEvidence(read, ctx.push?.whole ?? ctx.files, ctx.packs);
   const tier = tierOf(ctx.tiers);

@@ -250,7 +250,7 @@ describe('re-review after a push', () => {
     expect(doc.range.kind).toBe('rereview');
     expect(doc.files).toEqual([]);
     expect(doc.stageErrors).toEqual([]);
-    expect(doc.notes).toContain('The push since the last review changed no files Airlock reviews, so the earlier findings are carried as they were.');
+    expect(doc.notes).toContain('The push changed no files.');
     expect(Object.fromEntries(statuses(doc))).toEqual({ [GOOD.title as string]: 'still-open', [RULED.title as string]: 'still-open' });
     expect(doc.verdict.label).toBe('approve-after-fixes');
   }, SLOW);

@@ -96,6 +96,23 @@ function judged(file: FileDiff | undefined, startLine: number, endLine: number):
   return { status: shown ? 'in-diff' : 'outside-diff', startLine, endLine, comment: commentLine(file, startLine, endLine) };
 }
 
+/**
+ * The earlier findings the document does not account for: neither among `findings` nor in `fixed`, nor dropped with a
+ * `mergedInto` chain that ends at one of the findings. Each earlier finding must say what became of it.
+ */
+export function unaccounted(prev: ReviewDocument, findings: Finding[], fixed: Finding[], dropped: Dropped[]): Finding[] {
+  const shown = new Set([...findings, ...fixed].map((f) => f.id));
+  const into = new Map(dropped.flatMap((d) => (d.mergedInto ? [[d.candidate.id, d.mergedInto] as const] : [])));
+  return prev.findings.filter((f) => {
+    let id: string | undefined = f.id;
+    for (let step = 0; id !== undefined && step <= into.size; step++) {
+      if (shown.has(id)) return false;
+      id = into.get(id);
+    }
+    return true;
+  });
+}
+
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
 /**

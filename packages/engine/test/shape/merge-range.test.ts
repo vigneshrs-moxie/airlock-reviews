@@ -286,7 +286,7 @@ describe('runReview of a pull request that only merges its base in', () => {
     });
     const { doc, calls } = await review({ s, req: { since: { reviewId: first.doc.id } }, exec: fakeGh({ baseSha: s.baseSha, headSha: head }), script });
     expect(doc.stageErrors).toEqual([]);
-    expect(doc.range).toEqual({ baseSha: expect.stringMatching(/^[0-9a-f]{40}$/), headSha: head, kind: 'rereview' });
+    expect(doc.range).toEqual({ baseSha: expect.stringMatching(/^[0-9a-f]{40}$/), headSha: head, kind: 'sync-merge' });
     // The mechanical merge was made in Airlock's own mirror, on the earlier head, and never in the remote.
     const mirror = join(home(), 'repos', 'acme__app.git');
     const parents = await realExec('git', ['--git-dir', mirror, 'rev-list', '--parents', '-n', '1', doc.range.baseSha]);

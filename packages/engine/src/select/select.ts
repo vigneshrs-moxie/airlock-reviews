@@ -1,4 +1,4 @@
-import { SEVERITY_WORD } from '@airlock/shared';
+import { SEVERITY_WORD, STATUS_WORD } from '@airlock/shared';
 import type {
   Depth, Dropped, Finding, PrInfo, Question, StageError, Verdict, VerdictLabel,
 } from '@airlock/shared';
@@ -423,7 +423,6 @@ export const INCOMPLETE_TEXT = 'Airlock could not finish reviewing this pull req
 /** What a re-review adds to the self-review text: the earlier review's head, the findings with their status, and the fixed ones. */
 export interface RereviewText { earlierHead: string; findings: Finding[]; fixed: Finding[] }
 
-const STATUS_WORD: Record<NonNullable<Finding['status']>, string> = { new: 'New', 'still-open': 'Still open', moved: 'Moved', fixed: 'Fixed' };
 
 /** One line per finding with its status, then the findings fixed since the last review. */
 function rereviewLines({ findings, fixed }: RereviewText): string[] {

@@ -1,4 +1,4 @@
-import { verdictWords } from '@airlock/shared';
+import { STATUS_WORD, verdictWords } from '@airlock/shared';
 import type { Finding, ReviewDocument, Severity, VerdictLabel } from '@airlock/shared';
 
 const WIDTH = 100;
@@ -13,7 +13,6 @@ const VERDICT_COLORS: Record<VerdictLabel, string> = {
   'approve-after-fixes': '33', incomplete: '33',
 };
 const STAGE_WORDS = { pr1: 'PR #1 (fork to org branch)', pr2: 'PR #2 (into staging)', pr3: 'PR #3 (release)', other: '' };
-const STATUS_WORDS = { new: 'New', 'still-open': 'Still open', fixed: 'Fixed', moved: 'Moved' };
 
 /** Wraps prose on word boundaries; the prefix counts toward the width and continuation lines use `hang`. */
 function wrap(text: string, prefix: string, hang: string = ' '.repeat(prefix.length)): string[] {
@@ -72,7 +71,7 @@ function location(f: Finding): string {
 }
 
 function renderFinding(f: Finding, n: number, color: boolean, packTitle: PackTitle): string[] {
-  const status = f.status === null ? '' : ` (${STATUS_WORDS[f.status]})`;
+  const status = f.status === null ? '' : ` (${STATUS_WORD[f.status]})`;
   const word = SEVERITY_WORDS[f.severity];
   const title = wrap(`${n}. [${word}] ${f.title}${status}`, '', ' '.repeat(`${n}. `.length));
   title[0] = title[0]!.replace(`[${word}]`, `[${paint(color, SEVERITY_COLORS[f.severity], word)}]`);
@@ -124,13 +123,16 @@ function droppedItem(d: ReviewDocument['dropped'][number]): string[] {
   return [head, ...wrap(`proof: ${place} "${r.quote}"`, '  ', '    ')];
 }
 
-/** For a re-review, what it covered: only the push since the earlier head, or the whole pull request again. */
+/**
+ * For a re-review, what it covered: what was changed by hand in a merge pushed since the earlier head; only the push,
+ * when the range starts at the earlier head; otherwise the whole pull request again.
+ */
 function rereviewLine(doc: ReviewDocument): string[] {
   if (doc.previous === undefined) return [];
   const earlier = doc.previous.headSha.slice(0, 7);
-  return [doc.range.kind === 'rereview'
-    ? `Review of the push ${earlier} to ${doc.range.headSha.slice(0, 7)}`
-    : `Reviewed again in full since ${earlier}`];
+  if (doc.range.kind === 'sync-merge') return [`Review of the merge pushed since ${earlier}: only what was changed by hand was reviewed.`];
+  if (doc.range.baseSha === doc.previous.headSha) return [`Review of the push ${earlier} to ${doc.range.headSha.slice(0, 7)}`];
+  return [`Reviewed again in full since ${earlier}`];
 }
 
 function countsLine(doc: ReviewDocument): string {
@@ -216,7 +218,7 @@ export function renderReview(input: ReviewDocument, opts: { color?: boolean } = 
     section('Findings', top.flatMap((f, i) => [...(i > 0 ? [''] : []), ...renderFinding(f, i + 1, color, packTitle)])),
     section('Also found', also.flatMap((f) => {
       const line = f.anchor.startLine ?? f.lineHint;
-      const status = f.status === null ? '' : ` (${STATUS_WORDS[f.status]})`;
+      const status = f.status === null ? '' : ` (${STATUS_WORD[f.status]})`;
       const head = `- [${paint(color, SEVERITY_COLORS[f.severity], SEVERITY_WORDS[f.severity])}] ${f.title}${status}  (${f.path}${line === null ? '' : `:${line}`})`;
       const others = alsoRaisedBy(f, packTitle);
       return others === null ? [head] : [head, ...wrap(others, '  ')];

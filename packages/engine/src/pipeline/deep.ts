@@ -3,6 +3,7 @@ import type { AgentRunner } from '../agent/runner.js';
 import { anchorCandidates } from '../anchor/anchor.js';
 import { fingerprint } from '../anchor/fingerprint.js';
 import { challenge, type KeptCandidate } from '../challenge/challenge.js';
+import type { AnchoredCandidate } from '../merge/merge.js';
 import type { ReadFile } from '../challenge/proof.js';
 import { runCohortLenses } from '../lenses/cohort-lens.js';
 import type { LensContext } from '../lenses/context.js';
@@ -44,6 +45,11 @@ export interface DeepInput {
   uniqueIds: (candidates: Candidate[]) => Candidate[];
   readHead: (path: string) => Promise<string | null>;
   readBoth: ReadFile;
+  /**
+   * On a re-review: takes out, before the challenge, the anchored items that are an earlier finding raised again (merged
+   * into it at stage `merge` by the caller), and returns the rest.
+   */
+  sameAsEarlier?: (items: AnchoredCandidate[]) => AnchoredCandidate[];
 }
 
 /**
@@ -92,12 +98,13 @@ export async function deepPass(rec: StageRecorder, input: DeepInput, sink: DeepS
   });
   sink.candidates.push(...candidates.filter((c) => !repeats.has(c.id)));
   sink.anchorDropped.push(...anchored.dropped);
+  const toChallenge = input.sameAsEarlier ? input.sameAsEarlier(anchoredFresh) : anchoredFresh;
   let challenged: Awaited<ReturnType<typeof challenge>>;
   try {
-    challenged = await challenge(runner, ctx, anchoredFresh, input.readBoth);
+    challenged = await challenge(runner, ctx, toChallenge, input.readBoth);
   } catch (err) {
     // Kept as findings, marked, as the main pass keeps them when its challenge fails.
-    sink.kept.push(...anchoredFresh.map((c) => ({ ...c, checked: CHALLENGE_FAILED })));
+    sink.kept.push(...toChallenge.map((c) => ({ ...c, checked: CHALLENGE_FAILED })));
     throw err;
   }
   rec.usage(challenged.usage);

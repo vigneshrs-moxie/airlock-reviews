@@ -210,9 +210,10 @@ describe('renderReview', () => {
   });
 
   describe('a re-review', () => {
-    const rereviewed = (kind: 'rereview' | 'full'): ReviewDocument => {
+    const rereviewed = (kind: 'rereview' | 'full' | 'sync-merge'): ReviewDocument => {
       const doc = fullDocument();
-      doc.range = { baseSha: 'c'.repeat(40), headSha: 'b'.repeat(40), kind };
+      // A push starts at the earlier head; everything again starts at the pull request's base; a merge at git's own merge.
+      doc.range = { baseSha: kind === 'rereview' ? 'c'.repeat(40) : 'a'.repeat(40), headSha: 'b'.repeat(40), kind };
       doc.previous = { reviewId: 'r_0123456789', headSha: 'c'.repeat(40) };
       doc.findings = [
         finding({ severity: 'block', title: 'Total is not rounded', status: 'still-open' }),
@@ -225,9 +226,14 @@ describe('renderReview', () => {
       return doc;
     };
 
-    it('says under the header what it covered: the push, or everything again', () => {
+    it('says under the header what it covered: the push, a pushed merge, or everything again', () => {
       expect(renderReview(rereviewed('rereview')).split('\n')[2]).toBe('Review of the push ccccccc to bbbbbbb');
       expect(renderReview(rereviewed('full')).split('\n')[2]).toBe('Reviewed again in full since ccccccc');
+      expect(renderReview(rereviewed('sync-merge')).split('\n')[2])
+        .toBe('Review of the merge pushed since ccccccc: only what was changed by hand was reviewed.');
+      // Decided by where the range starts, not by its kind: a push range whose kind says otherwise is still the push.
+      const pushAsFull = { ...rereviewed('full'), range: { baseSha: 'c'.repeat(40), headSha: 'b'.repeat(40), kind: 'full' as const } };
+      expect(renderReview(pushAsFull).split('\n')[2]).toBe('Review of the push ccccccc to bbbbbbb');
       expect(renderReview(fullDocument()).split('\n')[2]).toBe('');
     });
 
