@@ -1,6 +1,7 @@
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { ReviewRange } from '@airlock/shared';
+import type { PrInfo, ReviewDocument, ReviewRange } from '@airlock/shared';
+import { planRereview, type RereviewPlan } from '../rereview/range.js';
 import { must, SLOW_EXEC_TIMEOUT_MS, TIMED_OUT, type Exec } from '../util/exec.js';
 import { airlockHome, repoSlug } from '../util/paths.js';
 
@@ -10,6 +11,8 @@ export interface Workspace {
   /** The bare mirror's git folder: the diff is computed here, where no file of the pull request can change how git reads it. */
   gitDir: string;
   range: ReviewRange;
+  /** For a re-review: what it covers. A push is reviewed from the earlier head (the base worktree); otherwise everything. */
+  plan?: RereviewPlan;
   dispose(): Promise<void>;
 }
 
@@ -21,7 +24,9 @@ export interface WorkspaceRequest {
    * its base branch no longer exists. Otherwise the base is where the head meets the base branch's current tip.
    */
   pr?: { number: number; baseRef: string; headSha: string; baseSha?: string; merged?: boolean };
-  explicit?: { baseSha: string; headSha: string }; // replay and re-review
+  explicit?: { baseSha: string; headSha: string }; // the replay
+  /** With `pr`: a re-review of the pull request after the earlier review `previous`. */
+  rereview?: { previous: ReviewDocument; pr: PrInfo };
   reviewId: string;
 }
 
@@ -109,6 +114,7 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   await ensureMirror(exec, mirror, req.remoteUrl);
 
   let range: ReviewRange;
+  let plan: RereviewPlan | undefined;
   if (req.explicit) {
     range = { baseSha: req.explicit.baseSha, headSha: req.explicit.headSha, kind: 'explicit' };
   } else if (req.pr) {
@@ -128,6 +134,11 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     const from = useRecorded ? await recordedBase(exec, mirror, number, recordedSha!) : branch;
     const baseSha = must(await exec('git', ['--git-dir', mirror, 'merge-base', from, headSha]), `git merge-base ${from} ${headSha}`).trim();
     range = { baseSha, headSha, kind: 'full' };
+    if (req.rereview) {
+      // Only the push when it can be reviewed alone; otherwise the whole pull request, as on a first review.
+      plan = await planRereview(exec, mirror, req.rereview.previous, { ...req.rereview.pr, headSha });
+      if (plan.kind === 'push') range = { baseSha: plan.baseSha, headSha: plan.headSha, kind: 'rereview' };
+    }
   } else {
     throw new Error('prepareWorkspace needs either pr or explicit');
   }
@@ -164,5 +175,5 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
     throw err;
   }
 
-  return { headDir, baseDir, gitDir: mirror, range, dispose };
+  return { headDir, baseDir, gitDir: mirror, range, ...(plan === undefined ? {} : { plan }), dispose };
 }
