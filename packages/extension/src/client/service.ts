@@ -1,8 +1,9 @@
 import {
-  ApiErrorSchema, DismissalSchema, HelloSchema, LatestReplySchema, PairReplySchema, PrSummarySchema, RestoreReplySchema,
-  RunIdSchema, ServiceEventSchema, ServiceStatusSchema, StartReviewReplySchema,
-  type DismissBody, type Dismissal, type Hello, type LatestReply, type PairReply, type PrSummary, type RestoreBody,
-  type RestoreReply, type ServiceEvent, type ServiceStatus, type StartReviewBody, type StartReviewReply,
+  ApiErrorSchema, DismissalSchema, HelloSchema, LatestReplySchema, PairReplySchema, PostPreviewReplySchema, PostRecordSchema,
+  PrSummarySchema, RestoreReplySchema, RunIdSchema, ServiceEventSchema, ServiceStatusSchema, StartReviewReplySchema,
+  type DismissBody, type Dismissal, type ForgetPostBody, type Hello, type LatestReply, type PairReply, type PostBody,
+  type PostPreviewBody, type PostPreviewReply, type PostRecord, type PrSummary, type RestoreBody, type RestoreReply,
+  type ServiceEvent, type ServiceStatus, type StartReviewBody, type StartReviewReply,
 } from '@airlock/shared';
 import { z } from 'zod';
 import { EventDataError, readEventStream } from './event-stream';
@@ -26,6 +27,11 @@ const HelloReplySchema = HelloSchema.extend({ proof: z.string().optional() });
 /** How long a call may take, reply read included, before the service counts as not answering. */
 export const HELLO_TIMEOUT_MS = 5_000;
 export const CALL_TIMEOUT_MS = 60_000;
+/**
+ * How long a post may take: the service reads the pull request, then gives GitHub up to 45 seconds. When it runs out the
+ * panel does not guess; it reads the post records.
+ */
+export const POST_TIMEOUT_MS = 75_000;
 /** The service sends a keep-alive every 15 seconds; a stream silent for three of them is lost. */
 export const STREAM_IDLE_MS = 45_000;
 
@@ -46,6 +52,19 @@ interface Schema<T> {
 }
 
 const RunningReplySchema = StartReviewReplySchema.pick({ runId: true });
+const ForgetReplySchema = z.object({ forgotten: z.boolean() });
+
+/**
+ * What came of a post, as far as the reply says.
+ * - `posted`: GitHub took the review; the record holds its address.
+ * - `refused`: nothing was posted (the service refused it, or GitHub did), in the service's words.
+ * - `unclear`: the reply does not say (504, any other server error, no answer in time, a cut connection, a reply off the
+ *   contract); only the post records can tell.
+ */
+export type PostOutcome =
+  | { outcome: 'posted'; record: PostRecord }
+  | { outcome: 'refused'; message: string }
+  | { outcome: 'unclear'; message?: string };
 
 /** Thrown inside the stream reader to stop it after a `done` or `failed` event. */
 const LAST_EVENT = new Error('last event');
@@ -144,6 +163,39 @@ export class ServiceClient {
 
   restore(body: RestoreBody): Promise<RestoreReply> {
     return this.call({ method: 'POST', path: '/dismissals/restore', body }, RestoreReplySchema);
+  }
+
+  previewPost(body: PostPreviewBody): Promise<PostPreviewReply> {
+    return this.call({ method: 'POST', path: '/posts/preview', body }, PostPreviewReplySchema);
+  }
+
+  /**
+   * Asks the service to post the preview it stored, once; nothing here ever sends it again. Only a refused or missing
+   * token throws (`unpaired`), before or instead of an answer; every other ending is a `PostOutcome`.
+   */
+  async post(body: PostBody): Promise<PostOutcome> {
+    const token = await this.storedToken();
+    try {
+      return await this.timed(POST_TIMEOUT_MS, undefined, async (signal): Promise<PostOutcome> => {
+        const res = await this.send({ method: 'POST', path: '/posts', body }, token, signal);
+        if (res.ok) {
+          const record = PostRecordSchema.safeParse(await bodyOf(res));
+          return record.success && record.data.outcome === 'posted' ? { outcome: 'posted', record: record.data } : { outcome: 'unclear' };
+        }
+        if (res.status === 401) throw await failure(res);
+        const said = ApiErrorSchema.safeParse(await bodyOf(res));
+        // A 4xx, or the 502 that says GitHub refused (or could not be read before anything was sent): nothing was posted.
+        if (res.status < 500 || res.status === 502) return { outcome: 'refused', message: said.success ? said.data.error : NOT_UNDERSTOOD };
+        return said.success ? { outcome: 'unclear', message: said.data.error } : { outcome: 'unclear' };
+      });
+    } catch (error) {
+      if (error instanceof ServiceError && error.kind === 'offline') return { outcome: 'unclear' };
+      throw error;
+    }
+  }
+
+  forgetPost(body: ForgetPostBody): Promise<{ forgotten: boolean }> {
+    return this.call({ method: 'POST', path: '/posts/forget', body }, ForgetReplySchema);
   }
 
   /**

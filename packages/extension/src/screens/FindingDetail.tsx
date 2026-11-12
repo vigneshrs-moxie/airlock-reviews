@@ -1,8 +1,9 @@
-import type { Finding, PrSummary } from '@airlock/shared';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import type { Finding, PostRecord, PrSummary } from '@airlock/shared';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { Timers } from '../client/timers';
 import { connectedPlace, COULD_NOT_JUMP, ownPlace, type Jump, type JumpOptions, type JumpPlace, type JumpResult } from '../state/jump';
 import { CopyButton } from './CopyButton';
+import { PostedMark } from './PostedMark';
 import { useVisible } from './visible';
 import { fromText, locationText, placeText, severityWord, sourceText } from './words';
 
@@ -34,12 +35,23 @@ export interface FindingDetailProps {
   /** The paths of the review's files: a place among them is on the Files changed page. */
   changedPaths: ReadonlySet<string>;
   onDismiss: (finding: Finding) => void;
+  /** The finding's post record, when it is posted or its post's outcome is not known. */
+  posted?: PostRecord | undefined;
+  /** Why nothing can be posted from this review now; null when it can. */
+  postBlocked?: string | null;
+  /** False while another action is in flight. */
+  canPost?: boolean;
+  onPost?: (finding: Finding) => void;
   timers?: Timers;
 }
 
 /** One finding in full. Keyed by the caller on the finding's id, so each finding starts with its own focus and notes. */
-export function FindingDetail({ finding, packs, previous, next, canDismiss, fixPrompt, onBack, onOpen, onJump, changedPaths, onDismiss, timers }: FindingDetailProps) {
+export function FindingDetail({
+  finding, packs, previous, next, canDismiss, fixPrompt, onBack, onOpen, onJump, changedPaths, onDismiss, posted, postBlocked = null,
+  canPost = true, onPost = () => undefined, timers,
+}: FindingDetailProps) {
   const title = useRef<HTMLHeadingElement>(null);
+  const postWhy = useId();
   // `reloadFor`: the place to jump to again after reloading the GitHub tab, when the jump said a reload is needed.
   const [note, setNote] = useState<{ key: string; text: string; reloadFor: JumpPlace | null } | null>(null);
   const visible = useVisible();
@@ -80,7 +92,7 @@ export function FindingDetail({ finding, packs, previous, next, canDismiss, fixP
     <>
       <button type="button" className="btn small back" onClick={onBack}>Back to the review</button>
       <section className="card">
-        <h2 className="title" tabIndex={-1} ref={title}>{finding.title}</h2>
+        <h2 className="title" tabIndex={-1} ref={title} data-focus="detail">{finding.title}</h2>
         <p><span className="sev">{severityWord(finding.severity)}</span></p>
         <code className="path block">{locationText(finding)}</code>
         <Part title="What happens"><p>{finding.happens}</p></Part>
@@ -117,6 +129,15 @@ export function FindingDetail({ finding, packs, previous, next, canDismiss, fixP
           {noteFor('own')}
         </div>
         <div className="action"><CopyButton text={fixPrompt} label="Copy fix prompt" {...(timers ? { timers } : {})} /></div>
+        <div className="action">
+          <button
+            type="button" className="btn" data-post-for={finding.id} disabled={posted !== undefined || postBlocked !== null || !canPost}
+            {...(posted !== undefined || postBlocked !== null ? { 'aria-describedby': postWhy } : {})} onClick={() => onPost(finding)}
+          >
+            Post comment
+          </button>
+          {posted !== undefined ? <PostedMark record={posted} id={postWhy} /> : postBlocked !== null && <p className="muted" id={postWhy}>{postBlocked}</p>}
+        </div>
         <div className="action">
           <button type="button" className="btn" data-dismiss-for={finding.id} disabled={!canDismiss} onClick={() => onDismiss(finding)}>Dismiss</button>
         </div>

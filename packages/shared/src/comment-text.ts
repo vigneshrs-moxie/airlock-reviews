@@ -1,5 +1,5 @@
 // No dependency on zod, so code that must stay dependency-free can import this module by path.
-import { BLANK_LETTERS } from './fix-prompt.js';
+import { dropBlankLetters } from './fix-prompt.js';
 import type { Finding } from './review.js';
 import { visibleText } from './visible-text.js';
 import { SEVERITY_WORD } from './words.js';
@@ -9,145 +9,117 @@ export const SUMMARY_MAX = 4000;
 export const POST_MAX_ITEMS = 30;
 export const REVIEW_BODY_MAX = 60000;
 
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const FENCE_LINE = /^\s*(`{3}|~{3})/m;
-// An `@` that starts the text or follows something that is not a letter, digit, `_`, `/` or `@`, then a login or `org/team`.
-const NAME = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
-const MENTION = new RegExp(`(?<![\\p{L}\\p{N}_/@])@${NAME}(?:/${NAME})?`, 'gu');
+// A name: `@` then letters, digits and `- _ . /`; trailing punctuation is left outside it.
+const NAME_CHARS = '[\\p{L}\\p{N}._/-]*';
+// The `@` may follow anything but an ASCII letter or digit (after `_` it can still notify: `_x_@bob` is `<em>x</em>@bob`).
+const MENTION_ANYWHERE = new RegExp(`(?<![A-Za-z0-9])@(?=[\\p{L}\\p{N}])${NAME_CHARS}`, 'gu');
+const TRAILING = /[._/-]+$/;
+// Every numeric character reference, decimal or hexadecimal, with or without its `;`, and `&commat;`.
+const CHARACTER_REFERENCE = /&#(?:x([0-9a-f]+)|([0-9]+));?|&commat;?/gi;
 
-interface Segment { code: boolean; text: string }
-
-/** Splits text into the parts GitHub shows as code (fenced blocks and backtick spans) and the rest. */
-function segments(text: string): Segment[] {
-  const out: Segment[] = [];
-  let plain = '';
-  const flush = (): void => {
-    if (plain !== '') out.push(...spans(plain));
-    plain = '';
-  };
-  let fence: { char: string; length: number } | null = null;
-  let block = '';
-  for (const line of text.split(/(?<=\n)/)) {
-    const bare = line.replace(/\n$/, '');
-    if (fence !== null) {
-      block += line;
-      const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(bare);
-      if (close?.[1] !== undefined && close[1][0] === fence.char && close[1].length >= fence.length) {
-        out.push({ code: true, text: block });
-        block = '';
-        fence = null;
-      }
-      continue;
-    }
-    const open = FENCE_OPEN.exec(bare);
-    const marks = open?.[1];
-    if (open !== null && marks !== undefined && !(marks[0] === '`' && (open[2] ?? '').includes('`'))) {
-      flush();
-      fence = { char: marks[0] ?? '`', length: marks.length };
-      block = line;
-    } else {
-      plain += line;
-    }
-  }
-  if (fence !== null) out.push({ code: true, text: block });
-  flush();
-  return out;
+/** The text as a browser would read its character references; one that names no character is left as it was. */
+function decodeReferences(text: string): string {
+  return text.replace(CHARACTER_REFERENCE, (whole, hex: string | undefined, decimal: string | undefined) => {
+    if (hex === undefined && decimal === undefined) return '@';
+    const code = hex === undefined ? Number.parseInt(decimal as string, 10) : Number.parseInt(hex, 16);
+    if (code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return whole;
+    return String.fromCodePoint(code);
+  });
 }
 
-/** The backtick spans of a run of ordinary lines: a run of N backticks to the next run of exactly N. */
-function spans(text: string): Segment[] {
-  const out: Segment[] = [];
-  const runs = [...text.matchAll(/`+/g)];
-  let from = 0;
-  for (let i = 0; i < runs.length; i += 1) {
-    const open = runs[i];
-    if (open === undefined || open.index < from) continue;
-    const close = runs.slice(i + 1).find((run) => run[0].length === open[0].length);
-    if (close === undefined) continue;
-    if (open.index > from) out.push({ code: false, text: text.slice(from, open.index) });
-    const end = close.index + close[0].length;
-    out.push({ code: true, text: text.slice(open.index, end) });
-    from = end;
-  }
-  if (from < text.length) out.push({ code: false, text: text.slice(from) });
-  return out;
-}
-
-/** Every `@name` (`@login` or `@org/team`) outside code spans and fenced blocks, once each, in order. */
+/**
+ * Every `@name` (`@login` or `@org/team`) in text the person typed or changed, once each, in order, with the `@`,
+ * wherever it stands: inside backticks, fences or HTML too, and with the `@` or the name written as character references
+ * (`&#64;`, `&#x40;`, `&commat;`, `&#98;`). It does not read Markdown, so it over-reports on purpose (a name inside code
+ * is reported although GitHub would not notify). Text Airlock drafts needs no such warning: see `commentBody`.
+ */
 export function mentionsIn(text: string): string[] {
   const found: string[] = [];
-  for (const part of segments(text)) {
-    if (part.code) continue;
-    for (const match of part.text.matchAll(MENTION)) if (!found.includes(match[0])) found.push(match[0]);
+  for (const match of decodeReferences(text).matchAll(MENTION_ANYWHERE)) {
+    const name = match[0].replace(TRAILING, '');
+    if (!found.includes(name)) found.push(name);
   }
   return found;
 }
 
-/** One pass: every `@name` found in the text as it stands is put in backticks. */
-function quietOnce(text: string): string {
-  const parts = segments(text);
-  // A delimiter no stray backtick run has (a stray one would pair with ours and bend a span), so ours pairs only with itself.
-  const stray = new Set<number>();
-  for (const part of parts) if (!part.code) for (const run of part.text.match(/`+/g) ?? []) stray.add(run.length);
-  let size = 1;
-  while (stray.has(size)) size += 1;
-  const tick = '`'.repeat(size);
-  return parts.map((part) => {
-    if (part.code) return part.text;
-    return part.text.replace(MENTION, (name, offset: number, whole: string) => {
-      // A space keeps the delimiter from joining a stray backtick next to it.
-      const before = offset > 0 && whole[offset - 1] === '`' ? ' ' : '';
-      const after = whole[offset + name.length] === '`' ? ' ' : '';
-      return `${before}${tick}${name}${tick}${after}`;
-    });
-  }).join('');
-}
-
 /**
- * The text with every `@name` outside code put in backticks, so GitHub notifies no one. A name next to another (`@a@b`)
- * only shows once the first is wrapped, so it goes again until none is left; text with none left comes back unchanged.
+ * The names the preview warns about. An item's list is empty when its body is Airlock's own, and every name in it
+ * otherwise. The review body's list is empty only when the summary and every comment placed in the summary are
+ * Airlock's own text; once the person typed or changed any of them, it is every name in the whole review body, since
+ * what they typed can change how the drafted text around it reads.
  */
-export function quietMentions(text: string): string {
-  let current = text;
-  for (let pass = 0; pass < 8 && mentionsIn(current).length > 0; pass += 1) current = quietOnce(current);
-  return current;
+export function postMentions(
+  items: { body: string; isDefault: boolean; inSummary: boolean }[],
+  summary: { text: string; isDefault: boolean },
+  reviewBody: string,
+): { items: string[][]; reviewBody: string[] } {
+  const allDefault = summary.isDefault && items.every((item) => !item.inSummary || item.isDefault);
+  return {
+    items: items.map((item) => (item.isDefault ? [] : mentionsIn(item.body))),
+    reviewBody: allDefault ? [] : mentionsIn(reviewBody),
+  };
 }
 
 /** Hidden characters and blank letters dropped, every kind of line break a line feed. */
 function seen(value: string): string {
   const { text } = visibleText(value.replace(/\r\n|[\r\u0085\u2028\u2029]/g, '\n'));
-  return text.replace(BLANK_LETTERS, '');
+  return dropBlankLetters(text).text;
 }
 
-function oneLine(value: string): string {
-  return quietMentions(seen(value).replace(/[\s\u0085]+/g, ' ').trim());
+// An `@` directly followed by a letter or digit, in any script.
+const AT_BEFORE_NAME = /@(?=[\p{L}\p{N}])/gu;
+
+/**
+ * Text taken from a pull request, as prose that cannot notify anyone whatever stands around it: hidden characters out,
+ * `&` and `<` as entities (no tag, comment or entity is live), every backslash doubled (none escapes what follows),
+ * every `~` and `$` escaped and every line's leading white space dropped (no line can open a fence, a code block or
+ * math), every backtick an apostrophe (no code span), and then a space after every `@` that is directly followed by a
+ * letter or digit (`@alice` becomes `@ alice`), so no `@` stands directly before a name.
+ */
+export function plainProse(value: string): string {
+  return seen(value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/\\/g, '\\\\')
+    .replace(/~/g, '\\~')
+    .replace(/\$/g, '\\$')
+    .replace(/^[ \t]+/gm, '')
+    .replace(/`/g, "'")
+    .replace(AT_BEFORE_NAME, '@ ')
+    .trim();
 }
 
-/** Several lines, blank lines out; a part with a code fence in it is fenced again, longer, so it stays text. */
-function manyLines(value: string): string {
-  const text = seen(value).split('\n').filter((line) => line.trim() !== '').join('\n');
-  if (!FENCE_LINE.test(text)) return quietMentions(text);
+const oneLine = (value: string): string => plainProse(seen(value).replace(/\s+/g, ' '));
+
+/** Code (a quote, a multi-line change) in a fenced block: fences on their own lines, longer than any backtick run inside. */
+function fencedBlock(value: string): string {
+  const text = seen(value).trim();
   const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
   const fence = '`'.repeat(Math.max(3, longest + 1));
   return `${fence}\n${text}\n${fence}`;
 }
 
-/** Text in a code span, whatever backticks it holds. */
-function codeSpan(value: string): string {
-  const text = seen(value).replace(/\s+/g, ' ').trim();
-  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
-  const tick = '`'.repeat(longest + 1);
-  const pad = text.startsWith('`') || text.endsWith('`') ? ' ' : '';
-  return `${tick}${pad}${text}${pad}${tick}`;
+/**
+ * A path (it comes from the pull request) in a code span, its own backticks turned into apostrophes and its line breaks
+ * into spaces, so the span is one backtick, some text and one backtick. A path with nothing left is the plain words
+ * `(no path)`, never an empty span (two backticks in a row).
+ */
+function place(path: string, line: number | null): string {
+  const text = seen(path).replace(/\s+/g, ' ').replace(/`/g, "'").trim();
+  if (text === '') return '(no path)';
+  return `\`${line === null ? text : `${text}:${line}`}\``;
 }
 
-const place = (path: string, line: number | null): string => codeSpan(line === null ? path : `${path}:${line}`);
-
-/** The comment drafted from a finding. Text taken from the pull request cannot notify anyone: every `@name` is in backticks. */
+/**
+ * The comment drafted from a finding. It is built from prose parts (through `plainProse`), paths in code spans and
+ * fenced code parts only, joined by blank lines. Prose holds no backtick, so the only backticks are those spans and
+ * fences, each written whole here; and no `@` in prose stands directly before a letter or digit. So text taken from
+ * the pull request cannot notify anyone (proven against a Markdown renderer in the tests).
+ */
 export function commentBody(f: Finding): string {
-  const parts = [`**${SEVERITY_WORD[f.severity]}: ${oneLine(f.title)}**`, manyLines(f.happens), manyLines(f.why)];
-  const change = manyLines(f.suggestedChange);
-  if (change !== '') parts.push(`Suggested change: ${change}`);
+  const parts = [`**${SEVERITY_WORD[f.severity]}: ${oneLine(f.title)}**`, plainProse(f.happens), plainProse(f.why)];
+  const change = seen(f.suggestedChange).trim();
+  if (change.includes('\n')) parts.push(`Suggested change:\n${fencedBlock(change)}`);
+  else if (change !== '') parts.push(`Suggested change: ${plainProse(change)}`);
   if (f.connected.length > 0) {
     parts.push(`Connected: ${f.connected.map((c) => `${place(c.path, c.line)} (${oneLine(c.role)})`).join(', ')}`);
   }
@@ -156,11 +128,10 @@ export function commentBody(f: Finding): string {
 
 /**
  * The review's own text: the summary, then the comments that could not go on a changed line, each under its place.
- * `inlineCount` is how many comments go inline; it does not change the text.
+ * With the default summary and untouched `commentBody` bodies it notifies no one. Once the person typed the summary or
+ * changed a body, it is their text, and the preview lists every name in it (`postMentions`).
  */
-export function summaryBody(
-  _inlineCount: number, inSummary: { path: string; line: number | null; body: string }[], summary: string,
-): string {
+export function summaryBody(inSummary: { path: string; line: number | null; body: string }[], summary: string): string {
   const parts = [summary.trim()];
   if (inSummary.length > 0) {
     parts.push('Not on a changed line:', ...inSummary.map((item) => `${place(item.path, item.line)}\n${item.body}`));
@@ -173,6 +144,8 @@ export function checkCommentText(text: string, max: number = COMMENT_MAX): strin
   if (text.trim() === '') return 'The text is empty.';
   const over = [...text].length - max;
   if (over > 0) return `The text is ${over} character${over === 1 ? '' : 's'} longer than the ${max} allowed.`;
-  if (visibleText(text).removed > 0) return 'The text has a hidden character; remove it.';
+  if (visibleText(text).removed > 0 || dropBlankLetters(text).removed > 0 || /\p{Cs}/u.test(text)) {
+    return 'The text has a hidden character; remove it.';
+  }
   return null;
 }

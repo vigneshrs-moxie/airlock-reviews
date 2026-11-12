@@ -204,6 +204,6 @@ export const ReviewDocumentSchema = z.object({
   /** Earlier findings a re-review found fixed. Never part of the verdict or the finding lists. */
   fixed: z.array(FindingSchema).optional(),
   /** The review this one continues. */
-  previous: z.object({ reviewId: z.string(), headSha: z.string() }).optional(),
+  previous: z.object({ reviewId: z.string().regex(/^r_[0-9a-f]{10}$/), headSha: z.string().regex(/^[0-9a-f]{7,64}$/) }).optional(),
 });
 export type ReviewDocument = z.infer<typeof ReviewDocumentSchema>;

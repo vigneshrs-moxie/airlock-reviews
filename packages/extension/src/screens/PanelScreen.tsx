@@ -12,6 +12,7 @@ import type { Jump, PageReport } from '../state/jump';
 import type { Depth, Finding, PackRef, PrSummary, ServiceStatus } from '@airlock/shared';
 import { DismissSheet, focusAfterClose, newDraft, type SheetDraft, type SheetView } from './DismissSheet';
 import { Packs } from './Packs';
+import { focusAfterPost, newPostDraft, nextTicket, PostSheet, type PostDraft, type PostSheetView } from './PostSheet';
 import { PanelVisible } from './visible';
 
 export interface PanelScreenProps {
@@ -68,15 +69,18 @@ function knownOf(state: PanelState): { pr: PrSummary | null; packs: readonly Pac
 /** Keyed so a different pull request or a new head starts with its own choices. */
 const readyKey = (pr: PrSummary): string => `${pr.repo}#${pr.number}@${pr.headSha}`;
 
-type BodyProps = Pick<PanelScreenProps, 'state' | 'dispatch' | 'timers' | 'onJump' | 'defaultDepth'> & { onDismiss: (finding: Finding) => void };
+type BodyProps = Pick<PanelScreenProps, 'state' | 'dispatch' | 'timers' | 'onJump' | 'defaultDepth'> & {
+  onDismiss: (finding: Finding) => void;
+  onPost: (findings: Finding[]) => void;
+};
 
 /**
  * The screen for the state. A review, or Ready, kept while the service is away is drawn by the same keyed element as
  * when it is live, so its own state (the open finding, the ticks, the depth and pack choices) survives the flip.
  */
-function screenFor({ state, dispatch, timers, onJump, onDismiss, defaultDepth }: BodyProps) {
+function screenFor({ state, dispatch, timers, onJump, onDismiss, onPost, defaultDepth }: BodyProps) {
   const t = timers ? { timers } : {};
-  const review = { ...(onJump ? { onJump } : {}), onDismiss };
+  const review = { ...(onJump ? { onJump } : {}), onDismiss, onPost };
   switch (state.kind) {
     case 'loading': return <p className="muted">Looking at this pull request…</p>;
     case 'no-pr': return <p className="muted">Open a pull request on GitHub and Airlock will appear here.</p>;
@@ -119,7 +123,7 @@ function FinishedAnnouncer({ kind }: { kind: PanelState['kind'] }) {
   return null;
 }
 
-/** The frame and the screen for one state, with the Packs screen and the dismiss sheet over it. */
+/** The frame and the screen for one state, with the Packs screen and the dismiss and post sheets over it. */
 export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, pageReport = null, fetchStatus = unreachable, defaultDepth = null, onDefaultDepth, depthFailed = false }: PanelScreenProps) {
   const [packsOpen, setPacksOpen] = useState(false);
   // What is in the sheet outlives the sheet being out of sight; only Cancel and Done drop it.
@@ -138,7 +142,31 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, page
   const closing = useRef<Finding | null>(null);
   const closeDismiss = useCallback((): void => { closing.current = draftRef.current?.finding ?? null; setDraft(null); }, []);
   const startDismiss = (finding: Finding): void => { if (state.kind === 'review') setDraft(newDraft(finding, state.latest.document.id)); };
+  // The post sheet's draft, kept here like the dismiss sheet's.
+  const [postDraft, setPostDraft] = useState<PostDraft | null>(null);
+  const postDraftRef = useRef(postDraft);
+  postDraftRef.current = postDraft;
+  const postClosing = useRef<PostDraft | null>(null);
+  const closePost = useCallback((): void => { postClosing.current = postDraftRef.current; setPostDraft(null); }, []);
+  const startPost = (findings: Finding[]): void => {
+    if (state.kind !== 'review' || findings.length === 0) return;
+    const { pr, latest } = state;
+    const fingerprints = findings.map((f) => f.fingerprint);
+    const ticket = nextTicket();
+    setPostDraft(newPostDraft(fingerprints, latest.document.id, findings.length === 1 ? (findings[0] as Finding).id : 'selected', ticket));
+    dispatch({
+      type: 'preview-post', ticket,
+      body: { repo: pr.repo, number: pr.number, reviewId: latest.document.id, items: fingerprints.map((fingerprint) => ({ fingerprint })) },
+    });
+  };
+  useEffect(() => {
+    const closed = postClosing.current;
+    if (postDraft !== null || closed === null) return;
+    postClosing.current = null;
+    (focusAfterPost(closed) ?? document.querySelector<HTMLElement>('main'))?.focus();
+  }, [postDraft]);
   const sheetView = sheetViewOf(state);
+  const postView: PostSheetView | null = sheetView === null ? null : state.kind === 'review' ? { ...sheetView, post: state.post } : sheetView;
   const known = knownOf(state);
   useEffect(() => {
     const finding = closing.current;
@@ -155,9 +183,12 @@ export function PanelScreen({ state, dispatch, onOpenPacks, timers, onJump, page
       {/* Packs opens beside the panel, which stays as it was, out of sight and out of reach. */}
       <div className="kept" hidden={packsOpen} inert={packsOpen}>
         <PanelVisible value={!packsOpen}>
-        <Body state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={startDismiss} defaultDepth={defaultDepth} />
+        <Body state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={startDismiss} onPost={startPost} defaultDepth={defaultDepth} />
         {draft !== null && sheetView !== null && (
           <DismissSheet draft={draft} onDraft={setDraft} view={sheetView} dispatch={dispatch} active={!packsOpen} onClose={closeDismiss} />
+        )}
+        {postDraft !== null && postView !== null && (
+          <PostSheet draft={postDraft} onDraft={setPostDraft} view={postView} dispatch={dispatch} active={!packsOpen} onClose={closePost} />
         )}
         </PanelVisible>
       </div>

@@ -6,12 +6,12 @@ import {
   LearnedReplySchema, PostRecordSchema, PrNumberSchema, PrSummarySchema, RemoveLearnedBodySchema, RemoveLearnedReplySchema, RepoSchema, RestoreBodySchema, RestoreReplySchema, ReviewIdSchema,
   RunIdSchema, ServiceStatusSchema, StartReviewBodySchema, StartReviewReplySchema, suggestedDepth, type DismissBody, type Dismissal,
   type ForgetPostBody, type LatestReply, type PostBody, type PostPreviewBody, type PostRecord, type RestoreBody,
-  type RemoveLearnedBody, type RestoreReply, type LearnedReply, type RemoveLearnedReply, type PrSummary, type PrInfo, type ReviewDocument, type ServiceStatus, type StartReviewBody,
+  type RemoveLearnedBody, type RestoreReply, type LearnedReply, type RemoveLearnedReply, type PrSummary, type PrInfo, type ReviewDocument, type ServiceStatus, type StartReviewBody, PostPreviewReplySchema, type PostPreviewReply,
 } from '@airlock/shared';
 import { z, type ZodType } from 'zod';
 import { dismiss, DismissError, restore } from './dismissals.js';
 import { plainMessage, type Handler, type Req, type Res, type Route } from './http.js';
-import { buildPreview, PREVIEW_BODY_MAX, PreviewReplySchema, Previews, type PreviewReply } from './posts/preview.js';
+import { buildPreview, PREVIEW_BODY_MAX, Previews } from './posts/preview.js';
 import { forget, post, PostError, postsFor, type PostDeps } from './posts/records.js';
 import { listLearned, removeLearnedLine } from './learned.js';
 import { LimitError, realTimers, Runs, type RunStart } from './runs.js';
@@ -248,8 +248,7 @@ export function reviewRoutes(
     {
       method: 'POST', path: '/posts/preview', requiresOrigin: true, maxBodyBytes: PREVIEW_BODY_MAX, body: PostPreviewBodySchema,
       handler: posting(async (req) =>
-        // PreviewReplySchema is the shared one with `reviewBodyMentions`, until the contract branch is merged in.
-        reply<PreviewReply>(PreviewReplySchema, 200, await buildPreview(posts, req.body as PostPreviewBody))),
+        reply<PostPreviewReply>(PostPreviewReplySchema, 200, await buildPreview(posts, req.body as PostPreviewBody))),
     },
     {
       // Strict: the request carries the preview id and nothing else.

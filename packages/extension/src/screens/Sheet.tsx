@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode, type RefObject } from 'react';
 
-const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled)';
+const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href]';
 
 /**
  * A dialog over the panel: it has a role and a label, closes on Escape or a click on the backdrop, takes focus when it

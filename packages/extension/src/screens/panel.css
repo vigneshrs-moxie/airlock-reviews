@@ -61,6 +61,8 @@ p { margin: 4px 0; overflow-wrap: anywhere; }
 .choice { padding: 3px 0; cursor: pointer; }
 .switch { align-items: center; cursor: pointer; }
 .notice { color: var(--danger); font-weight: 600; }
+.mark { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.mark a, .sheet-body a { color: var(--accent); }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .masked { -webkit-text-security: disc; }

@@ -4,8 +4,14 @@ import { SEVERITY_WORD } from './words.js';
 const LINE_BREAK = /\r\n|[\n\r\u0085\u2028\u2029]/;
 const INDENT = '   ';
 const LINE_BREAK_ALL = /\r\n|[\r\u0085\u2028\u2029]/g;
-/** Letters that show as nothing: the Hangul fillers, the braille blank and the combining grapheme joiner. */
-export const BLANK_LETTERS = /[\u115F\u1160\u3164\uFFA0\u2800\u034F]/g;
+const BLANK_LETTERS = /[\u115F\u1160\u3164\uFFA0\u2800\u034F]/g;
+
+/** The text without the letters that show as nothing (the Hangul fillers, the braille blank, the combining grapheme joiner), and how many were dropped. */
+export function dropBlankLetters(text: string): { text: string; removed: number } {
+  let removed = 0;
+  const kept = text.replace(BLANK_LETTERS, () => { removed += 1; return ''; });
+  return { text: kept, removed };
+}
 
 /**
  * Every string taken from the review document passes through `one`, `many` or `fenced`, which first drop the characters
@@ -17,8 +23,7 @@ class Writer {
   private seen(value: string): string {
     // Every kind of line break is first a line feed, which is kept and not counted.
     const { text, removed } = visibleText(value.replace(LINE_BREAK_ALL, '\n'));
-    let blank = 0;
-    const kept = text.replace(BLANK_LETTERS, () => { blank += 1; return ''; });
+    const { text: kept, removed: blank } = dropBlankLetters(text);
     this.removed += removed + blank;
     return kept;
   }

@@ -1,10 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { reviewById } from '@airlock/engine';
 import {
-  checkCommentText, commentBody, mentionsIn, PostPreviewReplySchema, REVIEW_BODY_MAX, summaryBody, SUMMARY_MAX, type Dismissal,
-  type Finding, type Placement, type PostPreviewBody, type PostPreviewItem,
+  checkCommentText, commentBody, postMentions, REVIEW_BODY_MAX, summaryBody, SUMMARY_MAX, type Dismissal,
+  type Finding, type Placement, type PostPreviewBody, type PostPreviewItem, type PostPreviewReply,
 } from '@airlock/shared';
-import { z } from 'zod';
 import type { ReviewComment, ReviewPayload } from './github.js';
 import { blockingRecord, fit, keysOf, PostError, recordsOf, shown } from './records.js';
 
@@ -79,25 +78,9 @@ export interface PreviewDeps {
   dismissals: (repo: string, number: number) => Promise<Dismissal[]>;
 }
 
-// LOCAL COPY until the contract branch is merged into this lane: the shared package gains `postMentions` (comment-text.ts)
-// and `reviewBodyMentions` on PostPreviewReplySchema. At the merge, delete this block and use the shared ones.
-/** Which names each comment and the review body would notify: none for Airlock's own text, mentionsIn otherwise. */
-export function postMentions(
-  items: { body: string; isDefault: boolean; inSummary: boolean }[], summary: { text: string; isDefault: boolean }, reviewBody: string,
-): { items: string[][]; reviewBody: string[] } {
-  const allDefault = summary.isDefault && items.every((item) => !item.inSummary || item.isDefault);
-  return {
-    items: items.map((item) => (item.isDefault ? [] : mentionsIn(item.body))),
-    reviewBody: allDefault ? [] : mentionsIn(reviewBody),
-  };
-}
-export const PreviewReplySchema = PostPreviewReplySchema.extend({ reviewBodyMentions: z.array(z.string()).default([]) });
-export type PreviewReply = z.infer<typeof PreviewReplySchema>;
-// END OF LOCAL COPY.
 
-// `summaryBody`'s first argument is unused and is being removed; only this line changes when it goes.
 const reviewText = (inSummary: { path: string; line: number | null; body: string }[], summary: string): string =>
-  summaryBody(0, inSummary, summary);
+  summaryBody(inSummary, summary);
 
 const shares = (keys: readonly string[], f: Finding): boolean => keysOf(f.fingerprint, f.aliases ?? []).some((k) => keys.includes(k));
 
@@ -107,7 +90,7 @@ const shares = (keys: readonly string[], f: Finding): boolean => keysOf(f.finger
  * one chosen twice (400); one dismissed, posted, or of a post whose outcome is not known (409); text the person gave that
  * `checkCommentText` refuses (400); and a review text over REVIEW_BODY_MAX (400).
  */
-export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Promise<PreviewReply> {
+export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Promise<PostPreviewReply> {
   const doc = await reviewById(body.repo, body.number, body.reviewId);
   if (doc === null || doc.pr.repo.toLowerCase() !== body.repo.toLowerCase() || doc.pr.number !== body.number) {
     throw new PostError(404, NO_REVIEW);

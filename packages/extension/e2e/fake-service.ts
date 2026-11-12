@@ -1,10 +1,13 @@
 import {
-  ApiErrorSchema, DismissalSchema, DismissBodySchema, HelloSchema, LatestReplySchema, PairReplySchema, PrSummarySchema,
+  ApiErrorSchema, checkCommentText, commentBody, DismissalSchema, DismissBodySchema, ForgetPostBodySchema, HelloSchema, LatestReplySchema,
+  mentionsIn, PairReplySchema, PostBodySchema, PostPreviewBodySchema, PostPreviewReplySchema, PostRecordSchema, PrSummarySchema,
   RestoreBodySchema, RestoreReplySchema, RunIdSchema, ServiceEventSchema, ServiceStatusSchema, StartReviewBodySchema,
-  StartReviewReplySchema,
-  type Dismissal, type LatestReply, type PrSummary, type ReviewDocument, type ServiceEvent,
+  StartReviewReplySchema, summaryBody, SUMMARY_MAX,
+  type Dismissal, type Finding, type LatestReply, type Placement, type PostPreviewItem, type PostPreviewReply, type PostRecord,
+  type PrSummary, type ReviewDocument, type ServiceEvent,
 } from '@airlock/shared';
 import { createHmac, randomBytes } from 'node:crypto';
+import { z } from 'zod';
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { E2E_PORT } from './port';
 
@@ -27,7 +30,12 @@ const ROUTES: Array<{ method: string; path: RegExp }> = [
   { method: 'GET', path: /^\/reviews\/[^/]+\/events$/ },
   { method: 'POST', path: /^\/dismissals$/ },
   { method: 'POST', path: /^\/dismissals\/restore$/ },
+  { method: 'POST', path: /^\/posts\/preview$/ },
+  { method: 'POST', path: /^\/posts$/ },
+  { method: 'POST', path: /^\/posts\/forget$/ },
 ];
+/** The routes that can lead to a GitHub write: the real service refuses them without an Origin, before the token. */
+const NEEDS_ORIGIN = new Set(['/posts/preview', '/posts', '/posts/forget']);
 const NOT_HERE = 'Airlock only answers on this Mac.';
 const NOT_THIS_PAGE = 'Airlock does not accept requests from this page.';
 const NEEDS_TOKEN = 'Airlock needs its pairing token.';
@@ -39,6 +47,30 @@ const NOT_FOUND = 'Airlock cannot find that finding in the stored review.';
 const PAIRED_ELSEWHERE =
   'Airlock is already paired with another copy of the extension. In the airlock-reviews folder, run: npm run service -- unpair, then pair again.';
 const KIT_PACK = 'raj-standard';
+// The post sentences of packages/service/src/posts/{preview,records}.ts.
+const NO_REVIEW_HERE = 'Airlock cannot find that review of this pull request.';
+const NOT_ON_DIFF = 'The line is not part of the diff GitHub shows.';
+const CHOSEN = 'You chose the summary.';
+const EXPIRED = 'This preview has expired. Open the preview again.';
+const MOVED = 'The pull request has new commits since this review. Review the push, then post.';
+const CLOSED = 'The pull request is closed. Nothing was posted.';
+const MERGED = 'The pull request has been merged. Nothing was posted.';
+const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
+const KEPT = 'This review was posted, so Airlock keeps its record.';
+const PREVIEW_MS = 10 * 60_000;
+const ForgetReplySchema = z.object({ forgotten: z.boolean() });
+
+/** What the fake's GitHub does with the next post: takes it (the default), refuses it with a message, or never answers clearly. */
+export type GithubAnswer = { accept: true } | { refuse: string } | { unknown: true };
+
+/** One review the fake would have sent to GitHub, exactly as the stored preview held it. */
+export interface SentReview {
+  repo: string;
+  number: number;
+  event: 'COMMENT';
+  body: string;
+  comments: Array<{ path: string; line: number; startLine: number | null; body: string }>;
+}
 
 export interface RecordedRequest {
   method: string;
@@ -107,6 +139,14 @@ export interface FakeService {
   runs: FakeRun[];
   /** The dismissals stored for a pull request; they survive `stop` and `start`, as the real service's file does. */
   dismissals(repo: string, number: number): Dismissal[];
+  /** The post records of a pull request. */
+  posts(repo: string, number: number): PostRecord[];
+  /** Every preview the fake answered with, in order. */
+  previews: PostPreviewReply[];
+  /** Every review sent to the fake's GitHub, one per post that reached it, in order. */
+  sent: SentReview[];
+  /** What GitHub does with the next post; after it, posts are taken again. */
+  answerNextPost(answer: GithubAnswer): void;
   /** Stops listening and cuts every open connection; what it holds is kept. */
   stop(): Promise<void>;
   /** Listens again on the same port, with everything it held. */
@@ -115,7 +155,11 @@ export interface FakeService {
   close(): Promise<void>;
 }
 
-type Pull = { pr: PrSummary; document: ReviewDocument | null; dismissals: Dismissal[]; script: RunStep[] | null };
+type Pull = { pr: PrSummary; document: ReviewDocument | null; dismissals: Dismissal[]; posts: PostRecord[]; script: RunStep[] | null };
+type StoredPreview = {
+  previewId: string; repo: string; number: number; reviewId: string; headSha: string; expiresAt: number; review: SentReview;
+  items: PostRecord['items'];
+};
 type Stream = { res: ServerResponse; send: (item: ServiceEvent | { comment: string }) => void };
 type LiveRun = FakeRun & { streams: Set<Stream> };
 
@@ -140,8 +184,9 @@ const today = (now: Date): string =>
  * A stand-in for the Airlock service that speaks its contract: the Host, Origin and token checks, `GET /hello` (with
  * the proof that it holds the token, for a nonce),
  * `POST /pair`, `GET /status`, `GET /pr`, `POST /reviews`, `GET /reviews/running`, `GET /reviews/<runId>/events` (a real
- * event stream, written step by step from the pull request's script), `GET /reviews/latest`, `POST /dismissals` and
- * `POST /dismissals/restore`. Request bodies and query values are checked with the shared schemas, and every reply is
+ * event stream, written step by step from the pull request's script), `GET /reviews/latest`, `POST /dismissals`,
+ * `POST /dismissals/restore`, and the post routes `POST /posts/preview`, `POST /posts` and `POST /posts/forget` (which
+ * require an Origin, and whose GitHub is in memory: it records what it is sent and answers as `answerNextPost` says). Request bodies and query values are checked with the shared schemas, and every reply is
  * checked against its schema before it is sent; a reply that does not match is answered with a 500 and recorded in
  * `problems`. It remembers every request, and can be stopped and started again on the same port.
  */
@@ -154,8 +199,14 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     pr: PrSummarySchema.parse(p.pr),
     document: p.latest === undefined ? null : LatestReplySchema.parse(p.latest).document,
     dismissals: p.latest?.dismissals ?? [],
+    posts: p.latest?.posts ?? [],
     script: p.script ?? null,
   }));
+  const previews: PostPreviewReply[] = [];
+  const stored = new Map<string, StoredPreview>();
+  const sent: SentReview[] = [];
+  const answers: GithubAnswer[] = [];
+  let githubIds = 9000;
   let pairedOrigin: string | null = token !== undefined && !unpaired ? EXTENSION_ORIGIN : null;
   let closed = false;
   const releases = new Set<() => void>();
@@ -267,6 +318,122 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     reply(res, RestoreReplySchema, 200, { restored: had, note: null });
   }
 
+  const keysOf = (f: Pick<Finding, 'fingerprint' | 'aliases'>): string[] => [f.fingerprint, ...(f.aliases ?? [])];
+  const blocking = (pull: Pull, keys: readonly string[]): PostRecord | undefined =>
+    pull.posts.find((r) => r.items.some((item) => [item.fingerprint, ...item.aliases].some((k) => keys.includes(k))));
+  const blockedBy = (record: PostRecord, title: string): string => record.outcome === 'posted'
+    ? `This finding is already posted on this pull request: ${title}.`
+    : `Airlock does not know whether this finding was posted: ${title}. Look at the pull request first.`;
+
+  /** As the service's buildPreview: the exact review a post would send, stored for ten minutes. */
+  function preview(res: ServerResponse, body: unknown): void {
+    const asked = bodyOf(PostPreviewBodySchema, body);
+    const pull = pullOf(asked.repo, asked.number);
+    const doc = pull?.document;
+    if (pull === undefined || doc === null || doc === undefined || doc.id !== asked.reviewId) throw new Refusal(404, NO_REVIEW_HERE);
+    const chosen: Finding[] = [];
+    for (const item of asked.items) {
+      const finding = doc.findings.find((f) => keysOf(f).includes(item.fingerprint));
+      if (finding === undefined) throw new Refusal(404, NOT_FOUND);
+      if (chosen.includes(finding)) throw new Refusal(400, `This finding is chosen twice: ${finding.title}.`);
+      const keys = keysOf(finding);
+      if (pull.dismissals.some((d) => keys.includes(d.fingerprint))) {
+        throw new Refusal(409, `This finding is dismissed; restore it before posting it: ${finding.title}.`);
+      }
+      const earlier = blocking(pull, keys);
+      if (earlier !== undefined) throw new Refusal(409, blockedBy(earlier, finding.title));
+      chosen.push(finding);
+    }
+    const items: PostPreviewItem[] = [];
+    const comments: SentReview['comments'] = [];
+    const inSummary: { path: string; line: number | null; body: string }[] = [];
+    const placements: Placement[] = [];
+    for (const [i, item] of asked.items.entries()) {
+      const finding = chosen[i] as Finding;
+      const text = item.body ?? commentBody(finding);
+      const problem = checkCommentText(text);
+      if (problem !== null) throw new Refusal(400, problem);
+      const place = finding.anchor.comment ?? null;
+      if (place !== null && item.placement !== 'summary') {
+        const startLine = place.startLine !== null && place.startLine < place.line ? place.startLine : null;
+        comments.push({ path: finding.path, line: place.line, startLine, body: text });
+        items.push({ fingerprint: item.fingerprint, title: finding.title, path: finding.path, line: place.line, startLine, placement: 'inline', whySummary: null, body: text, mentions: mentionsIn(text) });
+        placements.push('inline');
+      } else {
+        const line = place?.line ?? finding.anchor.startLine ?? null;
+        inSummary.push({ path: finding.path, line, body: text });
+        items.push({
+          fingerprint: item.fingerprint, title: finding.title, path: finding.path, line, startLine: null, placement: 'summary',
+          whySummary: item.placement === 'summary' ? CHOSEN : NOT_ON_DIFF, body: text, mentions: mentionsIn(text),
+        });
+        placements.push('summary');
+      }
+    }
+    const count = asked.items.length;
+    const summary = asked.summary ?? `Review notes from Airlock: ${count} comment${count === 1 ? '' : 's'}.`;
+    const summaryProblem = checkCommentText(summary, SUMMARY_MAX);
+    if (summaryProblem !== null) throw new Refusal(400, summaryProblem);
+    const reviewBody = summaryBody(inSummary, summary);
+    const previewId = `pv_${randomBytes(8).toString('hex')}`;
+    const expiresAt = Date.now() + PREVIEW_MS;
+    stored.set(previewId, {
+      previewId, repo: doc.pr.repo, number: doc.pr.number, reviewId: doc.id, headSha: doc.pr.headSha, expiresAt,
+      review: { repo: doc.pr.repo, number: doc.pr.number, event: 'COMMENT', body: reviewBody, comments },
+      items: chosen.map((f, i) => ({ fingerprint: f.fingerprint, aliases: f.aliases ?? [], placement: placements[i] as Placement })),
+    });
+    const answer: PostPreviewReply = {
+      previewId, headSha: doc.pr.headSha, viewer: doc.pr.viewer, items, summary, reviewBody, expiresAt: new Date(expiresAt).toISOString(),
+      reviewBodyMentions: [],
+    };
+    previews.push(answer);
+    reply(res, PostPreviewReplySchema, 200, answer);
+  }
+
+  /** As the service's post: the stored preview, sent once to the fake GitHub, never retried. */
+  function post(res: ServerResponse, body: unknown): void {
+    const asked = bodyOf(PostBodySchema, body);
+    const held = stored.get(asked.previewId);
+    if (held === undefined || Date.now() >= held.expiresAt) throw new Refusal(404, EXPIRED);
+    const pull = pullOf(held.repo, held.number);
+    if (pull === undefined) throw new Refusal(404, NO_REVIEW_HERE);
+    if (pull.pr.state === 'merged') throw new Refusal(409, MERGED);
+    if (pull.pr.state === 'closed') throw new Refusal(409, CLOSED);
+    if (pull.pr.headSha !== held.headSha) throw new Refusal(409, MOVED);
+    const earlier = blocking(pull, held.items.flatMap((item) => [item.fingerprint, ...item.aliases]));
+    if (earlier !== undefined) throw new Refusal(409, blockedBy(earlier, 'a chosen finding'));
+    stored.delete(held.previewId);
+    const answer = answers.shift() ?? { accept: true };
+    sent.push(held.review);
+    const record = {
+      id: `post_${randomBytes(6).toString('hex')}`, repo: held.repo, number: held.number, reviewId: held.reviewId, headSha: held.headSha,
+      postedAt: new Date().toISOString(), items: held.items,
+    };
+    if ('refuse' in answer) {
+      stored.set(held.previewId, { ...held, expiresAt: Date.now() + PREVIEW_MS });
+      throw new Refusal(502, `GitHub refused the comments: ${answer.refuse}. Nothing was posted.`);
+    }
+    if ('unknown' in answer) {
+      pull.posts = [...pull.posts, { ...record, outcome: 'unknown', githubReviewId: null, url: null }];
+      throw new Refusal(504, UNKNOWN);
+    }
+    githubIds += 1;
+    const posted: PostRecord = {
+      ...record, outcome: 'posted', githubReviewId: githubIds, url: `https://github.com/${held.repo}/pull/${held.number}#pullrequestreview-${githubIds}`,
+    };
+    pull.posts = [...pull.posts, posted];
+    reply(res, PostRecordSchema, 200, posted);
+  }
+
+  function forget(res: ServerResponse, body: unknown): void {
+    const asked = bodyOf(ForgetPostBodySchema, body);
+    const pull = pullOf(asked.repo, asked.number);
+    const record = pull?.posts.find((r) => r.id === asked.id);
+    if (pull === undefined || record === undefined) { reply(res, ForgetReplySchema, 200, { forgotten: false }); return; }
+    if (record.outcome === 'posted') throw new Refusal(409, KEPT);
+    pull.posts = pull.posts.filter((r) => r.id !== asked.id);
+    reply(res, ForgetReplySchema, 200, { forgotten: true });
+  }
+
   function start(res: ServerResponse, body: unknown): void {
     const asked = bodyOf(StartReviewBodySchema, body);
     const existing = runs.find((r) => r.repo === asked.repo && r.number === asked.number && !r.finished);
@@ -321,6 +488,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       refuse(res, 403, NOT_THIS_PAGE);
       return;
     }
+    if (NEEDS_ORIGIN.has(url.pathname) && origin === null) { refuse(res, 403, NOT_THIS_PAGE); return; }
     if (token === undefined || req.headers.authorization !== `Bearer ${token}`) { refuse(res, 401, NEEDS_TOKEN); return; }
 
     try {
@@ -343,6 +511,9 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
       if (method === 'POST' && url.pathname === '/reviews') { start(res, body); return; }
       if (method === 'POST' && url.pathname === '/dismissals') { dismiss(res, body); return; }
       if (method === 'POST' && url.pathname === '/dismissals/restore') { restore(res, body); return; }
+      if (method === 'POST' && url.pathname === '/posts/preview') { preview(res, body); return; }
+      if (method === 'POST' && url.pathname === '/posts') { post(res, body); return; }
+      if (method === 'POST' && url.pathname === '/posts/forget') { forget(res, body); return; }
       if (method === 'GET' && ['/pr', '/reviews/running', '/reviews/latest'].includes(url.pathname)) {
         const { repo, number } = queryOf(url);
         const pull = pullOf(repo, number);
@@ -356,7 +527,7 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
         } else if (pull === undefined || pull.document === null) {
           refuse(res, 404, NO_REVIEW);
         } else {
-          reply(res, LatestReplySchema, 200, { document: pull.document, dismissals: pull.dismissals, posts: [] });
+          reply(res, LatestReplySchema, 200, { document: pull.document, dismissals: pull.dismissals, posts: pull.posts });
         }
         return;
       }
@@ -405,6 +576,10 @@ export async function startFakeService(options: FakeServiceOptions = {}): Promis
     problems,
     runs,
     dismissals: (repo, number) => pullOf(repo, number)?.dismissals ?? [],
+    posts: (repo, number) => pullOf(repo, number)?.posts ?? [],
+    previews,
+    sent,
+    answerNextPost: (answer) => { answers.push(answer); },
     stop,
     start: async () => { if (server === null) await listen(); },
     close: async () => {

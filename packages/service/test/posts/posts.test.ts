@@ -61,7 +61,7 @@ describe('POST /posts/preview', () => {
     expect((await s.preview({ items: [{ fingerprint: FP_A }] })).json).toMatchObject({ reviewBodyMentions: [] });
     const edited = await s.preview({ items: [{ fingerprint: FP_B }], summary: 'For @hana.' });
     expect((edited.json as { reviewBodyMentions: string[] }).reviewBodyMentions).toEqual(['@hana']);
-    expect(p.reviewBody).toBe(summaryBody(2, [{ path: FINDING_B.path, line: 40, body: commentBody(FINDING_B) }], p.summary));
+    expect(p.reviewBody).toBe(summaryBody([{ path: FINDING_B.path, line: 40, body: commentBody(FINDING_B) }], p.summary));
 
     const chosen = await previewed(s, { items: [{ fingerprint: FP_A, placement: 'summary' }, { fingerprint: FP_B, placement: 'inline' }] });
     expect(chosen.items.map((i) => [i.placement, i.whySummary])).toEqual([
