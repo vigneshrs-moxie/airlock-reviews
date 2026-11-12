@@ -13,13 +13,13 @@ stageRules:
 
 # No standards are listed here: the tech team's extension review kit is downloaded at review time (gh reads only),
 # cached by commit, and its files are attached to this pack as standards, in this order. calibration.md holds dated
-# entries: the hold-out and the challenger read it entry by entry.
+# entries: the hold-out and the challenger read it entry by entry. The kit's lens-rules.md is left out: it instructs the
+# kit's own agents (their tools, files and reply), which Airlock's lenses do not use.
 kit:
   repo: Moxie-Pest-Control-Phoenix/moxie-ext-review-kit
   files:
     - skills/ext-review/standard.md
     - skills/ext-review/conventions.md
-    - skills/ext-review/lens-rules.md
     - skills/ext-review/calibration.md
     - skills/ext-review/register.md
     - skills/ext-review/fieldroutes.md
@@ -28,29 +28,30 @@ kit:
 
 # Read: the manifest, the background and content scripts, configuration, and whatever sends data out (Apps Script
 # receivers, files that wrap fetch or a Google or CRM call), at the top or one folder down (a feature such as
-# route-monitor/ may carry its own). The read tier wins over trust, so these globs leave out the tests folders.
+# route-monitor/ may carry its own). On top of these, every changed file the manifest loads is read whatever its path,
+# test and fixture folders included (the extension-loaded-files check names them).
 # Skimmed (the default): the popup, options and side panel pages, their scripts and the styles.
-# Trusted: tests and their fixtures, and the words for people (README, CHANGELOG, privacy notes, setup notes).
+# Trusted: the top-level tests/ folder (and the engine's built-in test names) and the words for people (README,
+# CHANGELOG, privacy and setup notes), and the icons.
 tiers:
   read:
     - "manifest.json"
-    - "!(tests|test|__tests__)/manifest.json"
-    - "{background,service-worker,sw}*.js"
-    - "!(tests|test|__tests__)/{background,service-worker,sw}*.js"
-    - "*content*.js"
-    - "!(tests|test|__tests__)/*content*.js"
-    - "{config,settings,destinations}*.js"
-    - "!(tests|test|__tests__)/{config,settings,destinations}*.js"
-    - "*{api,fetch,http,request,network,sync,send,deliver,receiver,bridge,coordination,telemetry,upload,queue}*.js"
-    - "!(tests|test|__tests__)/*{api,fetch,http,request,network,sync,send,deliver,receiver,bridge,coordination,telemetry,upload,queue}*.js"
+    - "!(tests)/manifest.json"
+    - "{background,service-worker,sw}*.{js,mjs,cjs}"
+    - "!(tests)/{background,service-worker,sw}*.{js,mjs,cjs}"
+    - "*content*.{js,mjs,cjs}"
+    - "!(tests)/*content*.{js,mjs,cjs}"
+    - "{config,settings,destinations}*.{js,mjs,cjs}"
+    - "!(tests)/{config,settings,destinations}*.{js,mjs,cjs}"
+    - "*{api,fetch,http,request,network,sync,send,deliver,receiver,bridge,coordination,telemetry,upload,queue}*.{js,mjs,cjs}"
+    - "!(tests)/*{api,fetch,http,request,network,sync,send,deliver,receiver,bridge,coordination,telemetry,upload,queue}*.{js,mjs,cjs}"
     - "**/*.gs"
     - ".github/**"
     - "trufflehog-exclude.txt"
   trust:
-    - "**/tests/**"
-    - "**/test/**"
-    - "**/fixtures/**"
+    - "tests/**"
     - "**/*.md"
+    - "icons/**"
 
 codeChecks:
   - extension-permissions
@@ -59,6 +60,7 @@ codeChecks:
   - extension-remote-code
   - extension-html-injection
   - extension-large-files
+  - extension-loaded-files
 
 lenses:
   - { id: security, title: Security, file: lenses/security.md }

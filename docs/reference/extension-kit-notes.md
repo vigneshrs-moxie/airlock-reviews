@@ -38,9 +38,8 @@ So for the pack's tiers: the manifest, the background script, the content script
 
 - `standard.md` (the bar a pull request must meet)
 - `conventions.md` (the rulebook)
-- `lens-rules.md`
 - `calibration.md` (dated entries from past reviews)
 - `register.md`
 - `fieldroutes.md` (facts about the FieldRoutes API the extensions use)
 
-Not fetched by Airlock: `SKILL.md`, `lenses.md`, `asks.md`, the templates, the agents and the scripts. Airlock's four lens briefs for this pack are its own, as its briefs for the team kit are.
+Not fetched by Airlock: `SKILL.md`, `lenses.md`, `asks.md`, the templates, the agents and the scripts. `lens-rules.md` is left out too: it tells the kit's own agents which tools to use, where to write and how to reply, which contradicts Airlock's own output contract. Airlock's four lens briefs for this pack are its own, as its briefs for the team kit are.

