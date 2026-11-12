@@ -10,14 +10,20 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b && tsc -p tsconfig.tests.json",
+    "typecheck": "tsc -b && tsc -p tsconfig.tests.json && npm run typecheck -w @airlock/extension",
     "test": "vitest run",
     "check": "npm run typecheck && npm run test",
+    "e2e": "npm run build:e2e -w @airlock/extension && playwright test -c packages/extension/e2e",
     "airlock": "node packages/engine/dist/cli.js",
-    "airlock-replay": "node packages/replay/dist/cli.js"
+    "airlock-replay": "node packages/replay/dist/cli.js",
+    "service": "node packages/service/dist/cli.js",
+    "service:install": "node packages/service/dist/cli.js install",
+    "service:uninstall": "node packages/service/dist/cli.js uninstall"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "^26.6.6",
+    "markdown-it": "^15.0.3",
     "typescript": "^6.0.3",
     "vitest": "^5.1.0"
   }

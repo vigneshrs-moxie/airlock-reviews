@@ -4,6 +4,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "target": "ES2023",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "declaration": true,
     "sourceMap": true,
     "skipLibCheck": true,

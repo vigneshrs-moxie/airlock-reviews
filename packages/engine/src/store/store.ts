@@ -79,3 +79,23 @@ export async function latestReview(repo: string, number: number, headSha?: strin
     return null;
   }
 }
+
+/**
+ * The stored review of the pull request whose file name ends in `-<id>.json`, whatever its head. The id must be `r_` and
+ * 10 hex characters, checked before the disk is touched. Returns null when there is no such file or it does not parse
+ * against the schema; never throws.
+ */
+export async function reviewById(repo: string, number: number, id: string): Promise<ReviewDocument | null> {
+  if (!ID_RE.test(id)) return null;
+  try {
+    const folder = reviewFolder(repo, number);
+    const names = (await readdir(folder)).filter((n) => !n.startsWith('.') && n.endsWith(`-${id}.json`)).sort();
+    for (const name of names) {
+      const stored = await readStored(join(folder, name));
+      if (stored !== null && stored.doc.id === id) return stored.doc;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}

@@ -9,6 +9,7 @@ import { parseArgs, usage } from './cli-args.js';
 import { parsePrRef } from './intake/pr.js';
 import { runReview, type EngineDeps, type ReviewRequest } from './pipeline/review.js';
 import { cleanForTerminal, renderReview } from './render/terminal.js';
+import { latestReview } from './store/store.js';
 import { realExec } from './util/exec.js';
 import { abortOnExitSignals } from './util/stop.js';
 
@@ -117,6 +118,14 @@ async function run(argv: string[], io: CliIo, overrides: CliOverrides = {}): Pro
   if (Object.keys(models).length > 0) request.models = models;
   if (args.combine !== undefined) request.combine = args.combine;
   if (args.base !== undefined && args.head !== undefined) request.explicit = { baseSha: args.base, headSha: args.head };
+  if (args.since !== undefined) {
+    const reviewId = args.since === 'last' ? (await latestReview(target.repo, target.number))?.id : args.since;
+    if (reviewId === undefined) {
+      io.err('Airlock could not review this pull request: There is no stored review of this pull request to review the push against.\n');
+      return 1;
+    }
+    request.since = { reviewId };
+  }
 
   const review = overrides.review ?? runReview;
   const deps = overrides.deps ?? defaultDeps();

@@ -16,12 +16,18 @@ export interface LinkRule {
   id: string; from: string; capture: string; transform: 'none' | 'camel' | 'pascal';
   searchIn: string[]; detail: string;
 }
-export interface LearnedEntry { date: string; repo: string; kind: 'wrong' | 'intended'; text: string }
+/**
+ * `repo` is empty or `-` for a line written by hand for no repository. `where` (`<file>:<line>`) is set when the entry
+ * was read from a file.
+ */
+export interface LearnedEntry { date: string; repo: string; kind: 'wrong' | 'intended'; text: string; where?: string }
 export interface Pack {
   id: string; title: string; version: string; dir: string; repos: string[]; appRoot: string | null;
   stageRules: StageRule[]; tiers: { read: string[]; trust: string[]; ignore: string[] };
   siblings: { id: string; glob: string }[]; linkRules: LinkRule[]; checks: CheckDef[];
   standards: { name: string; text: string; dated: boolean }[]; lenses: LensDef[]; rules: Rule[];
   learned: LearnedEntry[];
+  /** One `<pack id>/learned/<file>:<line>` for each learned line that could not be read and was left out; none when absent. */
+  learnedProblems?: string[];
 }
 export interface Holdout { pr: number; reviewedAt: string }

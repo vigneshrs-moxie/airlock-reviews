@@ -12,3 +12,7 @@ coverage/
 replay-work/
 .superpowers/
 *.tsbuildinfo
+.output-e2e/
+.playwright/
+playwright-report/
+test-results/

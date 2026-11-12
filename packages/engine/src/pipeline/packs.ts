@@ -1,13 +1,13 @@
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Question, Source, StageError } from '@airlock/shared';
+import { isRepo, type Question, type Source, type StageError } from '@airlock/shared';
 import type { StageRule } from '../intake/pr.js';
 import { missingHelpers, namedHelpers } from '../packs/helpers-check.js';
 import { applyHoldout } from '../packs/holdout.js';
 import { attachKit, syncKit, type SyncedKit } from '../packs/kit-sync.js';
 import { loadPack } from '../packs/load.js';
-import { loadRepoRules } from '../packs/repo-rules.js';
-import { selectPacks } from '../packs/select.js';
+import { loadRepoRules, loadRepoRulesAt, type RepoRules } from '../packs/repo-rules.js';
+import { appliesToEveryRepo, selectPacks } from '../packs/select.js';
 import type { Holdout, Pack } from '../packs/types.js';
 import type { Exec } from '../util/exec.js';
 import { messageOf } from './stages.js';
@@ -20,12 +20,35 @@ export const ENGINE_SOURCE: Source = { pack: 'airlock', lens: null, ruleId: null
 const packsError = (message: string): StageError => ({ stage: 'packs', cohortId: null, message });
 const question = (text: string): Question => ({ text, cohortId: null, source: ENGINE_SOURCE });
 
+/** A learned line written by hand for no repository: its repository field is empty or `-`. */
+const forNoRepo = (field: string): boolean => field.trim() === '' || field.trim() === '-';
+
+/**
+ * A pack selected for every repository keeps only the learned lines saved on this repository (letter case ignored) and
+ * the lines with no repository recorded (written by hand, the field empty or `-`); a line saved on another repository is
+ * not given to this review. A line whose field is none of these is given to no review and reported. A named pack's
+ * lines apply to every repository the pack is selected for, so they are left alone.
+ */
+function learnedFor(pack: Pack, repo: string, errors: StageError[]): Pack {
+  if (!appliesToEveryRepo(pack)) return pack;
+  const here = repo.toLowerCase();
+  const learned = pack.learned.filter((e) => {
+    if (forNoRepo(e.repo)) return true;
+    if (isRepo(e.repo)) return e.repo.toLowerCase() === here;
+    errors.push(packsError(
+      `${e.where ?? pack.dir}: the repository "${e.repo}" is not a repository name, "-" or empty, so this line is left out of every review.`));
+    return false;
+  });
+  return { ...pack, learned };
+}
+
 /**
  * Loads every folder directly under `packsDir` that has a `pack.yaml` and selects the packs for the repository (or the
- * ones named in `packIds`). A pack that does not load, or a selection that fails, is a stage error; the rest carry on.
- * Makes no model call and no network call.
+ * ones named in `packIds`), each with only the learned lines that apply to the repository. A pack that does not load, or
+ * a selection that fails, is a stage error; the rest carry on. A learned line that cannot be read is left out and named
+ * in `notes` (one sentence each), not an error. Makes no model call and no network call.
  */
-export async function choosePacks(packsDir: string, repo: string, packIds?: string[]): Promise<{ packs: Pack[]; errors: StageError[] }> {
+export async function choosePacks(packsDir: string, repo: string, packIds?: string[]): Promise<{ packs: Pack[]; errors: StageError[]; notes: string[] }> {
   const errors: StageError[] = [];
   const all: Pack[] = [];
   let names: string[] = [];
@@ -44,10 +67,12 @@ export async function choosePacks(packsDir: string, repo: string, packIds?: stri
     }
   }
   try {
-    return { packs: selectPacks(all, repo, packIds), errors };
+    const packs = selectPacks(all, repo, packIds).map((p) => learnedFor(p, repo, errors));
+    const notes = packs.flatMap((p) => p.learnedProblems ?? []).map((where) => `A learned line could not be read and was left out: ${where}.`);
+    return { packs, errors, notes };
   } catch (err) {
     errors.push(packsError(messageOf(err)));
-    return { packs: [], errors };
+    return { packs: [], errors, notes: [] };
   }
 }
 
@@ -63,7 +88,20 @@ export interface PackOptions {
   holdout?: Holdout;
   baseDir: string;
   changedPaths: string[];
+  /** The base worktree is a merge git made by itself, so a rule file there may hold conflict markers. */
+  baseIsMerge?: boolean;
+  /**
+   * On a re-review of a push, whose base worktree is the pull request's own earlier code: read the rule files from the
+   * pull request's real base commit in the git folder instead, or, when `commit` is null, show none and say so.
+   */
+  rulesAt?: { gitDir: string; commit: string | null };
 }
+
+/** The limit sentence when a re-review has no base commit of the pull request to read the rule files from. */
+export const NO_BASE_RULES = 'The repository\'s rule files were not shown: Airlock could not find the base of this pull request.';
+
+/** A conflict as git leaves it in a file: a `<<<<<<<` line and, later, a `>>>>>>>` line. */
+const CONFLICT_MARKERS = /^<{7}(?: |$)[\s\S]*^>{7}(?: |$)/m;
 
 export interface PreparedPacks {
   packs: Pack[];
@@ -82,7 +120,8 @@ async function getKit(exec: Exec, kitDir: string | undefined, kitSha: string | u
 
 /**
  * Makes the selected packs ready for the review: attaches the team's kit to its pack, applies the hold-out to every pack,
- * finds the helpers the kit names that the base no longer has, and reads the repository's rule files from the base.
+ * finds the helpers the kit names that the base no longer has, and reads the repository's rule files from the base (on a
+ * re-review of a push, from the pull request's base commit: see `rulesAt`).
  * A kit that cannot be had drops its pack with a stage error; a stale kit adds a question. After this, only the returned
  * packs are used: nothing is read from the packs folder again.
  */
@@ -120,10 +159,21 @@ export async function preparePacks(selected: Pack[], opts: PackOptions): Promise
 
   let repoRules: PreparedPacks['repoRules'] = [];
   const limits: string[] = [];
+  // From the base worktree; on a re-review of a push, from the pull request's base commit, or none when it is not known.
+  const readRules = async (): Promise<RepoRules | null> => {
+    if (opts.rulesAt === undefined) return loadRepoRules(opts.baseDir, opts.changedPaths, opts.exec);
+    const { gitDir, commit } = opts.rulesAt;
+    return commit === null ? null : loadRepoRulesAt(opts.exec, gitDir, commit, opts.changedPaths);
+  };
   try {
-    const loaded = await loadRepoRules(opts.baseDir, opts.changedPaths, opts.exec);
-    repoRules = loaded.rules;
-    limits.push(...loaded.leftOut.map((l) => `repository rule file ${l.path} was not shown: ${l.reason}`));
+    const loaded = await readRules();
+    if (loaded === null) limits.push(NO_BASE_RULES);
+    // Both sides of a conflict are not rules anyone wrote: such a file is left out and named.
+    const fromMerge = opts.baseIsMerge === true && opts.rulesAt === undefined;
+    const conflicted = loaded !== null && fromMerge ? loaded.rules.filter((r) => CONFLICT_MARKERS.test(r.text)) : [];
+    repoRules = (loaded?.rules ?? []).filter((r) => !conflicted.includes(r));
+    limits.push(...conflicted.map((r) => `${r.path} has merge conflict markers on the base side and was not used as rules.`));
+    limits.push(...(loaded?.leftOut ?? []).map((l) => `repository rule file ${l.path} was not shown: ${l.reason}`));
   } catch (err) {
     errors.push(packsError(`The repository's rule files could not be read: ${messageOf(err)}`));
   }

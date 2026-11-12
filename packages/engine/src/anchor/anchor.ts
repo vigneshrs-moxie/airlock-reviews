@@ -1,5 +1,6 @@
 import type { Anchor, Candidate, Dropped, FileDiff, Place } from '@airlock/shared';
 import { lineInDiff } from '../diff/parse.js';
+import { commentLine } from './comment-line.js';
 
 const MIN_FALLBACK_CHARS = 12;
 const NOT_FOUND: Anchor = { status: 'not-found', startLine: null, endLine: null };
@@ -34,8 +35,14 @@ export function findQuote(text: string | null, quote: string): { startLine: numb
  * Turn a quotation into line numbers in the head file. Whitespace is ignored. Prefers a match inside the
  * diff, then the one nearest `lineHint`. With `file` undefined any match is `outside-diff`. When the whole quote is
  * not found, the longest line of 12 or more characters is tried alone.
+ *
+ * On a push re-review `whole` holds the file's entry in the pull request's whole diff (undefined when the whole diff does
+ * not show it). A match in the push's diff is still preferred (that is what the lens was looking at), then one in the whole
+ * diff, then the nearest; and the status says whether the chosen line is in the whole diff, since that is what GitHub shows.
  */
-export function anchorQuote(headText: string | null, quote: string, lineHint: number | null, file: FileDiff | undefined): Anchor {
+export function anchorQuote(
+  headText: string | null, quote: string, lineHint: number | null, file: FileDiff | undefined, whole?: { file: FileDiff | undefined },
+): Anchor {
   if (headText === null) return NOT_FOUND;
   const quoteLines = quoteLinesOf(quote);
   if (quoteLines.length === 0) return NOT_FOUND;
@@ -52,12 +59,15 @@ export function anchorQuote(headText: string | null, quote: string, lineHint: nu
   if (starts.length === 0) return NOT_FOUND;
 
   const inDiff = file ? starts.filter((s) => lineInDiff(file, s)) : [];
-  const pool = inDiff.length > 0 ? inDiff : starts;
+  const wholeFile = whole?.file;
+  const inWhole = wholeFile ? starts.filter((s) => lineInDiff(wholeFile, s)) : [];
+  const pool = inDiff.length > 0 ? inDiff : inWhole.length > 0 ? inWhole : starts;
   let best = pool[0] ?? 0;
   if (lineHint !== null) {
     for (const s of pool) if (Math.abs(s - lineHint) < Math.abs(best - lineHint)) best = s;
   }
-  return { status: inDiff.length > 0 ? 'in-diff' : 'outside-diff', startLine: best, endLine: best + span - 1 };
+  const shown = whole === undefined ? inDiff.length > 0 : wholeFile !== undefined && lineInDiff(wholeFile, best);
+  return { status: shown ? 'in-diff' : 'outside-diff', startLine: best, endLine: best + span - 1 };
 }
 
 /** The file's own lines from `startLine` to `endLine` (1-based), as they are written. */
@@ -69,14 +79,19 @@ const NOT_IN_FILE = 'not found in the file';
  * Anchor every candidate to the head commit and drop the ones whose quoted code does not exist there, or whose file
  * cannot be read. A kept candidate's quote becomes the file's own lines at the anchored range, so a finding never shows
  * code that is not in the file. A connected place is quoted the same way when found; when its quote or file is not
- * found it keeps its path, role and quote, gets no line, and its role says it was not found.
+ * found it keeps its path, role and quote, gets no line, and its role says it was not found. On a push re-review `whole`
+ * is the pull request's whole diff: it decides the status and the comment line (see anchorQuote), while `files`, the push's
+ * diff, is still preferred when a quote matches several places.
  */
-export async function anchorCandidates(
-  cands: Candidate[],
+export async function anchorCandidates<C extends Candidate>(
+  cands: C[],
   files: FileDiff[],
   readHead: (p: string) => Promise<string | null>,
-): Promise<{ anchored: (Candidate & { anchor: Anchor })[]; dropped: Dropped[] }> {
+  whole?: FileDiff[],
+): Promise<{ anchored: (C & { anchor: Anchor })[]; dropped: Dropped[] }> {
   const byPath = new Map(files.map((f) => [f.path, f]));
+  const byWhole = whole === undefined ? undefined : new Map(whole.map((f) => [f.path, f]));
+  const judge = (path: string): { file: FileDiff | undefined } | undefined => (byWhole === undefined ? undefined : { file: byWhole.get(path) });
   const cache = new Map<string, Promise<string | null>>();
   const read = (path: string): Promise<string | null> => {
     let hit = cache.get(path);
@@ -87,14 +102,14 @@ export async function anchorCandidates(
     return hit;
   };
 
-  const anchored: (Candidate & { anchor: Anchor })[] = [];
+  const anchored: (C & { anchor: Anchor })[] = [];
   const dropped: Dropped[] = [];
   const drop = (c: Candidate, reason: string): void => { dropped.push({ candidate: c, stage: 'anchor', reason, refutation: null }); };
   for (const c of cands) {
     const deleted = byPath.get(c.path)?.status === 'deleted';
     const text = await read(c.path);
     if (text === null && !deleted) { drop(c, `the file ${c.path} could not be read`); continue; }
-    const anchor = anchorQuote(text, c.quote, c.lineHint, byPath.get(c.path));
+    const anchor = anchorQuote(text, c.quote, c.lineHint, byPath.get(c.path), judge(c.path));
     if (text === null || anchor.status === 'not-found' || anchor.startLine === null || anchor.endLine === null) {
       drop(c, `quoted code is not in ${c.path} at the head commit`);
       continue;
@@ -103,14 +118,15 @@ export async function anchorCandidates(
     for (const p of c.connected) {
       if (p.quote.trim() === '') { connected.push({ ...p, line: null }); continue; }
       const placeText = await read(p.path);
-      const found = anchorQuote(placeText, p.quote, p.line, byPath.get(p.path));
+      const found = anchorQuote(placeText, p.quote, p.line, byPath.get(p.path), judge(p.path));
       if (placeText === null || found.startLine === null || found.endLine === null) {
         connected.push({ ...p, line: null, role: p.role.trim() === '' ? NOT_IN_FILE : `${p.role} (${NOT_IN_FILE})` });
       } else {
         connected.push({ ...p, line: found.startLine, quote: linesAt(placeText, found.startLine, found.endLine) });
       }
     }
-    anchored.push({ ...c, quote: linesAt(text, anchor.startLine, anchor.endLine), connected, anchor });
+    const comment = commentLine(byWhole === undefined ? byPath.get(c.path) : byWhole.get(c.path), anchor.startLine, anchor.endLine);
+    anchored.push({ ...c, quote: linesAt(text, anchor.startLine, anchor.endLine), connected, anchor: { ...anchor, comment } });
   }
   return { anchored, dropped };
 }

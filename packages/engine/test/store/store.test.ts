@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { minimalDocument, type ReviewDocument } from '@airlock/shared';
-import { latestReview, saveReview } from '../../src/store/store.js';
+import { latestReview, reviewById, saveReview } from '../../src/store/store.js';
+import * as engine from '../../src/index.js';
 
 let home: string;
 let saved: string | undefined;
@@ -93,5 +94,39 @@ describe('latestReview', () => {
     expect((await latestReview('acme/widgets', 1))?.id).toBe('r_000000000a');
     await writeFile(join(folder(), `${HEAD}-r_000000000a.json`), 'broken now');
     expect(await latestReview('acme/widgets', 1)).toBeNull();
+  });
+});
+
+describe('reviewById', () => {
+  it('finds the stored review with that id for that pull request, whatever its head', async () => {
+    await saveReview(doc('r_000000000a', '2026-11-10T09:00:00.000Z'));
+    const other = await saveReview(doc('r_000000000b', '2026-11-10T10:00:00.000Z', OTHER_HEAD));
+    expect(other).toContain(OTHER_HEAD);
+    expect((await reviewById('acme/widgets', 1, 'r_000000000b'))?.pr.headSha).toBe(OTHER_HEAD);
+    expect((await reviewById('acme/widgets', 1, 'r_000000000a'))?.id).toBe('r_000000000a');
+  });
+
+  it('returns null for another pull request, another repository, an unknown id and a file that does not parse', async () => {
+    await saveReview(doc('r_000000000a', '2026-11-10T09:00:00.000Z'));
+    await writeFile(join(folder(), `${HEAD}-r_00000000ff.json`), '{ not json');
+    expect(await reviewById('acme/widgets', 2, 'r_000000000a')).toBeNull();
+    expect(await reviewById('acme/other', 1, 'r_000000000a')).toBeNull();
+    expect(await reviewById('acme/widgets', 1, 'r_000000000c')).toBeNull();
+    expect(await reviewById('acme/widgets', 1, 'r_00000000ff')).toBeNull();
+  });
+
+  it('checks the id before touching the disk and never throws', async () => {
+    await saveReview(doc('r_000000000a', '2026-11-10T09:00:00.000Z'));
+    for (const bad of ['', '*', '../r_000000000a', 'r_000000000a.json', 'r_0123', 'r_000000000A\n', '.json'])
+      expect(await reviewById('acme/widgets', 1, bad)).toBeNull();
+    expect(await reviewById('..', 1, 'r_000000000a')).toBeNull();
+    expect(await reviewById('acme/widgets', -1, 'r_000000000a')).toBeNull();
+  });
+
+  it('is exported from the engine index with the learned-line helpers and the folder-name function', () => {
+    expect(engine.reviewById).toBe(reviewById);
+    expect(typeof engine.appendLearned).toBe('function');
+    expect(typeof engine.removeLearned).toBe('function');
+    expect(engine.repoSlug('acme/widgets')).toBe('acme__widgets');
   });
 });

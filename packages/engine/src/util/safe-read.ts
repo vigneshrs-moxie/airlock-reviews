@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { open, realpath } from 'node:fs/promises';
+import { lstat, open, realpath } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 
 /** The largest file read on behalf of a model's claim. */
@@ -11,6 +11,15 @@ const isRepoPath = (path: string): boolean => {
   return path !== '' && !path.startsWith('/') && !/[\\%:\0]/.test(path)
     && segments.every((s) => s !== '' && s !== '..' && s !== '.') && segments[0]!.toLowerCase() !== '.git';
 };
+
+/**
+ * True when something (a file, a folder, a link) is at the repository-relative `relPath` under `rootDir`, whether or not
+ * safeRead would read it. Never throws.
+ */
+export async function presentAt(rootDir: string, relPath: string): Promise<boolean> {
+  if (typeof relPath !== 'string' || !isRepoPath(relPath)) return false;
+  return lstat(join(rootDir, relPath)).then(() => true, () => false);
+}
 
 /**
  * Reads `relPath` under `rootDir`, or returns null. Every file read on behalf of a model's claim goes through here. The

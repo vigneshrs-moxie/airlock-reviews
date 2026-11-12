@@ -1,0 +1,27 @@
+{
+  "name": "@airlock/extension",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wxt build",
+    "build:e2e": "AIRLOCK_E2E=1 wxt build",
+    "dev": "wxt",
+    "typecheck": "wxt prepare && tsc --noEmit"
+  },
+  "dependencies": {
+    "@airlock/shared": "*",
+    "react": "19.2.9",
+    "react-dom": "19.2.9",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@testing-library/react": "16.3.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@wxt-dev/module-react": "1.2.2",
+    "happy-dom": "21.0.4",
+    "wxt": "0.21.5"
+  }
+}

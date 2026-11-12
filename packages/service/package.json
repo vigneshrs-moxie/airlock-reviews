@@ -1,0 +1,20 @@
+{
+  "name": "@airlock/service",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "airlock-service": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@airlock/engine": "^0.0.0",
+    "@airlock/shared": "^0.0.0",
+    "zod": "^4.6.7"
+  }
+}

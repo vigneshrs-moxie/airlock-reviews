@@ -1,4 +1,10 @@
-import type { Stage, VerdictLabel } from './review.js';
+import type { Finding, Severity, Stage, VerdictLabel } from './review.js';
+
+/** A severity as the reader sees it. */
+export const SEVERITY_WORD: Record<Severity, string> = { block: 'Block', fix: 'Fix', ask: 'Ask', note: 'Note' };
+
+/** A re-review finding's status as the reader sees it. */
+export const STATUS_WORD: Record<NonNullable<Finding['status']>, string> = { new: 'New', 'still-open': 'Still open', moved: 'Moved', fixed: 'Fixed' };
 
 const VERDICT_WORDS: Record<VerdictLabel, string> = {
   'not-ready': 'Not ready',

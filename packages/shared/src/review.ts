@@ -117,6 +117,8 @@ export type Candidate = z.infer<typeof CandidateSchema>;
 export const AnchorSchema = z.object({
   status: z.enum(['in-diff', 'outside-diff', 'not-found']),
   startLine: z.number().int().nullable(), endLine: z.number().int().nullable(),
+  /** Where GitHub can hang a comment on this finding (the diff line, and the first line of a range), when there is such a place. */
+  comment: z.object({ line: z.number().int(), startLine: z.number().int().nullable() }).nullable().optional(),
 });
 export type Anchor = z.infer<typeof AnchorSchema>;
 
@@ -199,5 +201,37 @@ export const ReviewDocumentSchema = z.object({
   notes: z.array(z.string()).optional(),
   /** When the review started (ISO time). `createdAt` is when the document was assembled, at the end of the review. */
   startedAt: z.string().optional(),
+  /** Earlier findings a re-review found fixed. Never part of the verdict or the finding lists. */
+  fixed: z.array(FindingSchema).optional(),
+  /** The review this one continues. */
+  previous: z.object({
+    reviewId: z.string().regex(/^r_[0-9a-f]{10}$/), headSha: z.string().regex(/^[0-9a-f]{7,64}$/),
+    /**
+     * What this re-review covered: `push` (only what was pushed since the earlier review), `merge` (the push was one
+     * merge of the base branch, and what was changed by hand in it), or `everything` (the whole pull request again; a
+     * note says why). Readers decide their words from this, never from the notes or the range's kind.
+     */
+    covered: z.enum(['push', 'merge', 'everything']).optional(),
+  }).optional(),
+  /**
+   * Set whenever the range is a merge (`range.kind` is `sync-merge`): `by-hand` when what was changed by hand in the merge
+   * was reviewed, `nothing-by-hand` when git merged it without conflicts and nothing was changed, `not-reviewed` when it is
+   * a merge Airlock could not review (the stage error says why). Readers must not say a merge was reviewed without it.
+   */
+  mergeReview: z.enum(['by-hand', 'nothing-by-hand', 'not-reviewed']).optional(),
 });
 export type ReviewDocument = z.infer<typeof ReviewDocumentSchema>;
+export type RereviewCovered = NonNullable<NonNullable<ReviewDocument['previous']>['covered']>;
+
+/**
+ * What a re-review covered (`previous.covered`); null for a first review. A document stored before the field is judged by
+ * its range, as readers did then: a merge range is `merge`, a range that starts at the earlier head is `push`, and any
+ * other is `everything`. Never by the notes' wording.
+ */
+export function rereviewCovered(doc: Pick<ReviewDocument, 'range'> & { previous?: ReviewDocument['previous'] }): RereviewCovered | null {
+  const { previous, range } = doc;
+  if (previous === undefined) return null;
+  if (previous.covered !== undefined) return previous.covered;
+  if (range.kind === 'sync-merge') return 'merge';
+  return range.kind === 'rereview' || range.baseSha === previous.headSha ? 'push' : 'everything';
+}

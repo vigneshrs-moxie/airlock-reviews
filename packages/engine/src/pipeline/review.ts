@@ -4,7 +4,7 @@ import { performance } from 'node:perf_hooks';
 import { ReviewDocumentSchema } from '@airlock/shared';
 import type {
   Brief, Candidate, ChangeMap, Depth, Dropped, Fact, FileDiff, FileFact, Finding, Link, ModelConfig, Neighbour, PrInfo,
-  Question, ReviewDocument, ReviewEvent, ReviewRange, StageError,
+  Question, RereviewCovered, ReviewDocument, ReviewEvent, ReviewRange, StageError,
 } from '@airlock/shared';
 import { UNKNOWN_USAGE } from '../agent/runner.js';
 import type { AgentRequest, AgentResult, AgentRunner } from '../agent/runner.js';
@@ -16,6 +16,7 @@ import type { ReadFile } from '../challenge/proof.js';
 import { linkFacts, loadDiff, recheckBinary } from '../diff/parse.js';
 import { runChecks } from '../facts/checks.js';
 import { binarySourcePaths, binarySourceSentence, classifyFiles } from '../facts/classify.js';
+import { inMirror } from '../intake/git-ids.js';
 import { fetchPr } from '../intake/pr.js';
 import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
 import { runCohortLenses } from '../lenses/cohort-lens.js';
@@ -29,13 +30,16 @@ import { fallbackMap, buildChangeMap } from '../map/mapper.js';
 import { findNeighbours } from '../map/neighbours.js';
 import { mergeSameProblems, withMergedCount, type AnchoredCandidate } from '../merge/merge.js';
 import type { Holdout, Pack } from '../packs/types.js';
+import { carryOver, claimVanished, mergeIntoCarried, unaccounted } from '../rereview/carry.js';
+import { confirmFixed, fixedByCode, leftOpen, needsCheck, type ChangedSince, type FixedCheckResult } from '../rereview/fixed.js';
+import { baseMergeNote, CARRIED_QUESTIONS_NOTE, everythingNote } from '../rereview/notes.js';
 import { runSweep } from '../rules/sweep.js';
-import { decideVerdict, sameTextOnce, select, selfReviewText, type SelectResult } from '../select/select.js';
-import { isSyncMerge } from '../shape/detect.js';
-import { saveReview } from '../store/store.js';
+import { decideVerdict, sameTextOnce, select, selfReviewText, type RereviewText, type SelectResult } from '../select/select.js';
+import { mergeNote, mergeNoteBlock, settledSentence, type MergeScope } from '../shape/merge-range.js';
+import { reviewById, saveReview } from '../store/store.js';
 import type { Exec } from '../util/exec.js';
 import { limiter } from '../util/limit.js';
-import { safeRead } from '../util/safe-read.js';
+import { presentAt, safeRead } from '../util/safe-read.js';
 import { deepPass } from './deep.js';
 import { choosePacks, ENGINE_SOURCE, preparePacks, stageRulesOf, type PreparedPacks } from './packs.js';
 import { createStageLog, messageOf, type StageLog, type StageName } from './stages.js';
@@ -62,6 +66,11 @@ export interface ReviewRequest {
   kitDir?: string;
   /** The kit's version when `kitDir` is given; `pinned` otherwise. */
   kitSha?: string;
+  /**
+   * Review again after the stored review `reviewId` of this pull request: only what was pushed since, when it can be
+   * reviewed alone, and what became of each earlier finding. Not with `explicit`.
+   */
+  since?: { reviewId: string };
 }
 
 export interface EngineDeps {
@@ -122,6 +131,12 @@ const SYNC_MERGE_BRIEF: Brief = {
 const EMPTY_SYNC_MERGE_BRIEF: Brief = {
   whatItDoes: ['This branch only merges its target branch into itself and changes no files.'], claims: [],
 };
+/** The brief of a merge git made without conflicts and nothing changed by hand; a given range names no branch. */
+function cleanMergeBrief(scope: MergeScope, base: string): Brief {
+  const what = scope === 'given range' ? 'This range is only a merge.'
+    : `${scope === 'push' ? 'This push' : 'This pull request'} only merges ${base} into the branch.`;
+  return { whatItDoes: [`${what} Git merged it without conflicts and nothing was changed by hand.`], claims: [] };
+}
 const EMPTY_BRIEF: Brief = { whatItDoes: [], claims: [] };
 const EMPTY_MAP: ChangeMap = { cohorts: [], standalone: [], links: [] };
 const NO_PACKS: PreparedPacks = { packs: [], missingHelpers: [], repoRules: [], questions: [], errors: [], limits: [] };
@@ -141,19 +156,49 @@ export function withUniqueIds(candidates: Candidate[], used: Set<string>): Candi
   });
 }
 
+/** What a re-review fails with when the pull request's head is the earlier review's head. */
+export const NOTHING_PUSHED = 'Nothing was pushed since the last review.';
+
+/**
+ * The stored review a re-review continues: one of this repository and number, or the review fails before any model call.
+ * Its head is taken in lower case, as the document writes commit ids.
+ */
+async function earlierReview(req: ReviewRequest, reviewId: string): Promise<ReviewDocument> {
+  if (req.explicit !== undefined) throw new Error('A re-review covers what was pushed since the last review, so it cannot be given a range.');
+  const doc = await reviewById(req.repo, req.number, reviewId);
+  if (doc === null || doc.pr.repo !== req.repo || doc.pr.number !== req.number) {
+    throw new Error(`There is no stored review ${reviewId} of this pull request.`);
+  }
+  return { ...doc, pr: { ...doc.pr, headSha: doc.pr.headSha.toLowerCase() } };
+}
+
 /** Prepares the workspace; a clone or fetch refused for lack of credentials says how to fix it. */
-async function openWorkspace(exec: Exec, req: ReviewRequest, pr: PrInfo, reviewId: string): Promise<Workspace> {
+async function openWorkspace(exec: Exec, req: ReviewRequest, pr: PrInfo, reviewId: string, previous: ReviewDocument | null): Promise<Workspace> {
   try {
     return await prepareWorkspace(exec, {
       repo: req.repo, remoteUrl: req.remoteUrl ?? `https://github.com/${req.repo}.git`, reviewId,
       ...(req.explicit ? { explicit: req.explicit } : {
         pr: { number: req.number, baseRef: pr.baseRef, headSha: pr.headSha, baseSha: pr.baseSha, ...(pr.merged === undefined ? {} : { merged: pr.merged }) },
+        ...(previous === null ? {} : { rereview: { previous, pr } }),
       }),
     });
   } catch (err) {
     if (!CREDENTIAL_TROUBLE.test(messageOf(err))) throw err;
     throw new Error(`${messageOf(err).trim()}\nGit may not be signed in to GitHub. Run "gh auth setup-git" so git uses your GitHub CLI sign-in, then try again.`);
   }
+}
+
+/**
+ * Wraps the runner for a review of what was changed by hand in a merge: every request is told so once, as the fixed
+ * mergeNote of its scope after its own instructions (after the boundary, so the cached part is unchanged), with the two
+ * branch names as material; a given range names none, since the pull request's branches may not be the ones merged.
+ */
+function withMergeNote(inner: AgentRunner, scope: MergeScope, pr: PrInfo): AgentRunner {
+  const note = mergeNote(scope);
+  const names = scope === 'given range' ? '' : `\n\n${mergeNoteBlock(pr.baseRef, pr.headRef)}`;
+  return {
+    run: <T>(req: AgentRequest<T>) => inner.run({ ...req, instructions: `${req.instructions}\n\n${note}`, material: `${req.material}${names}` }),
+  };
 }
 
 /** Runs a lens-like stage and records its usage and errors. */
@@ -173,7 +218,7 @@ function lensStage(log: StageLog, stage: StageName, fn: () => Promise<LensStageR
 function fallbackSelection(
   pr: PrInfo, depth: Depth, packs: Pack[], kept: KeptCandidate[], questions: Question[], log: StageLog,
 ): SelectResult {
-  const findings: Finding[] = kept.map((k) => ({ ...k, fingerprint: fingerprint(k), bucket: 'also', rank: null, status: null }));
+  const findings: Finding[] = kept.map((k) => ({ ...k, fingerprint: fingerprint(k), bucket: 'also', rank: null, status: k.status ?? null }));
   const left = sameTextOnce(questions);
   const verdict = decideVerdict(pr, findings, log.errors, false, left.length);
   return {
@@ -188,10 +233,11 @@ const unreviewedMerge = (changed: number): string =>
 
 /**
  * For a live pull request (no explicit range): when the diff has no files but GitHub lists changed files, the sentence for
- * a stage error, since nothing was reviewed; otherwise null.
+ * a stage error, since nothing was reviewed; otherwise null. A given range (explicit, or a re-review's push) is not the
+ * range GitHub counts files over, so the check does not apply to it.
  */
-function emptyDiff(files: FileDiff[], pr: PrInfo, explicit: boolean): string | null {
-  if (explicit || files.length > 0 || pr.changedFiles <= 0) return null;
+function emptyDiff(files: FileDiff[], pr: PrInfo, givenRange: boolean): string | null {
+  if (givenRange || files.length > 0 || pr.changedFiles <= 0) return null;
   const listed = pr.changedFiles === 1 ? '1 changed file' : `${pr.changedFiles} changed files`;
   return `GitHub lists ${listed} for this pull request, but the diff Airlock computed is empty. Nothing was reviewed.`;
 }
@@ -214,26 +260,73 @@ function notReviewed(files: FileDiff[], tiers: FileFact[]): string | null {
  * When every changed file is in the trust or ignored tier, so no lens request is made, the note saying nothing was read
  * closely; otherwise null. An empty diff, and one where every file is ignored, have their own words (a stage error).
  */
-function nothingReadNote(files: FileDiff[], tiers: FileFact[]): string | null {
+function nothingReadNote(files: FileDiff[], tiers: FileFact[], what: 'pull request' | 'push'): string | null {
   if (files.length === 0 || notReviewed(files, tiers) !== null) return null;
   const tier = tierOf(tiers);
   if (!files.every((f) => tier(f.path) === 'trust' || tier(f.path) === 'ignored')) return null;
-  return `Nothing in this pull request was read closely: all ${files.length} changed files are of kinds Airlock trusts (tests, documents, generated files).`;
+  return `Nothing in this ${what} was read closely: all ${files.length} changed files are of kinds Airlock trusts (tests, documents, generated files).`;
 }
+
+const NO_WHOLE_DIFF_NOTE = 'Airlock could not work out the pull request\'s whole diff, so which lines GitHub shows was judged from the push alone.';
+const EMPTY_PUSH_NOTE = 'The push changed no files.';
+/** A push of only files Airlock ignores is not an unreviewed pull request: the earlier findings carry the verdict. */
+const IGNORED_PUSH_NOTE = 'The push changed only files Airlock does not review.';
+
+/** What became of the earlier review's findings: still open or moved (by code or by the fixed check), and fixed. */
+interface Carried { open: Finding[]; fixed: Finding[] }
 
 interface Settings { depth: Depth; models: ModelConfig; parallel: number; combine: 'never' | 'no-read-tier' }
 
 interface Reviewed {
   range: ReviewRange; packs: Pack[]; tiers: FileFact[]; facts: Fact[]; map: ChangeMap; brief: Brief; questions: Question[];
   candidates: Candidate[]; dropped: Dropped[]; selection: SelectResult; limits: string[]; notes: string[];
+  whoseCall: string[]; checksAfterMerge: string[];
+  /** On a re-review, the findings fixed since the earlier review. */
+  fixed: Finding[];
+  /** Whenever the range is a merge: whether what was changed by hand in it was reviewed (see ReviewDocument). */
+  mergeReview?: ReviewDocument['mergeReview'];
+  /** On a re-review, what it covered (see ReviewDocument's `previous.covered`). */
+  covered?: RereviewCovered;
+}
+
+/**
+ * What changed since the earlier review (head `earlier`), for the fixed check. On a push re-review whose range starts at
+ * the earlier head, that is the review's own diff `files`; on any other re-review (everything again, or a range starting
+ * at a merge git made by itself) it is computed from the earlier head to the head. When the earlier head is not in the
+ * mirror (the branch was rewritten and that commit is gone), the review's own diff, the whole pull request's, stands in.
+ */
+async function changedSince(exec: Exec, ws: Workspace, earlier: string, files: FileDiff[]): Promise<ChangedSince> {
+  if (ws.range.baseSha === earlier && ws.merge?.kind !== 'nothing-by-hand') return { files, rewritten: false };
+  if (!(await inMirror(exec, ws.gitDir, `${earlier}^{commit}`))) return { files, rewritten: true };
+  return { files: await loadDiff(exec, ws.gitDir, { baseSha: earlier, headSha: ws.range.headSha, kind: 'rereview' }), rewritten: false };
+}
+
+/** A carried finding as an item for selection: its status kept, its list place and fingerprint made again there. */
+function asKept(f: Finding): KeptCandidate {
+  const { fingerprint: _f, bucket: _b, rank: _r, ...item } = f;
+  return item;
 }
 
 /** Every stage from packs to select, inside the workspace. */
 async function reviewInWorkspace(
   req: ReviewRequest, deps: EngineDeps & { gate: UsageGate }, log: StageLog, settings: Settings, pr: PrInfo, ws: Workspace,
-  files: FileDiff[], diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; ms: number },
+  files: FileDiff[], diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; notes: string[]; ms: number },
+  again: { previous: ReviewDocument | null; push: LensContext['push']; changed?: ChangedSince },
 ): Promise<Reviewed> {
-  const { exec, runner } = deps;
+  const { previous, push, changed } = again;
+  // What decides a line's place in the diff GitHub shows: the whole diff on a push re-review (the push's when it could not
+  // be worked out); otherwise the review's own diff.
+  const whole = push === undefined ? undefined : (push.whole ?? undefined);
+  // A merge whose hand-made changes are reviewed is reviewed as any change, and every request is told what it is.
+  const { merge } = ws;
+  const { exec } = deps;
+  // A merge pushed since the last review is the push's; a pull request reviewed again in full is the pull request's.
+  const scope: MergeScope = push !== undefined ? 'push' : req.explicit !== undefined ? 'given range' : 'pull request';
+  const runner = merge?.kind === 'by-hand' ? withMergeNote(deps.runner, scope, pr) : deps.runner;
+  // A re-review's push is a range Airlock chose, as an explicit one is: GitHub's file count is about the whole pull request.
+  // So is a merge with nothing changed by hand, whose diff is left empty on purpose.
+  const pushed = ws.range.kind === 'rereview';
+  const givenRange = req.explicit !== undefined || pushed || merge?.kind === 'nothing-by-hand';
   /** After the usage limit, a stage that needs a model records once why it did not run, and is skipped. */
   const limitedOut = async (stage: StageName): Promise<boolean> => {
     const why = deps.gate.stoppedBy();
@@ -245,6 +338,12 @@ async function reviewInWorkspace(
   const run = limiter(settings.parallel);
   const capped: AgentRunner = { run: <T>(r: AgentRequest<T>) => run(() => runner.run(r)) };
   const readHead = (path: string): Promise<string | null> => safeRead(ws.headDir, path);
+  // For an earlier finding: null when its file is gone, a throw when it is there but cannot be read (never "gone").
+  const readEarlier = async (path: string): Promise<string | null> => {
+    const text = await safeRead(ws.headDir, path);
+    if (text === null && await presentAt(ws.headDir, path)) throw new Error(`${path} cannot be read`);
+    return text;
+  };
   const readBoth: ReadFile = (where, path) => safeRead(where === 'head' ? ws.headDir : ws.baseDir, path);
   // The stages' questions go through selection, which merges repeats; the engine's own are added after it, unmerged.
   const questions: Question[] = [];
@@ -256,6 +355,10 @@ async function reviewInWorkspace(
     rec.error(...chosen.errors);
     const p = await preparePacks(chosen.packs, {
       exec, kitDir: req.kitDir, kitSha: req.kitSha, holdout: req.holdout, baseDir: ws.baseDir, changedPaths: files.map((f) => f.path),
+      baseIsMerge: merge?.kind === 'by-hand',
+      // A push re-review's base worktree is the pull request's own earlier code (or a merge git made of it), whose rule
+      // files are the author's: the rules are read from the pull request's base commit, as a first review reads them.
+      ...(push === undefined ? {} : { rulesAt: { gitDir: ws.gitDir, commit: ws.whole?.baseSha ?? null } }),
     });
     rec.error(...p.errors);
     return p;
@@ -264,17 +367,28 @@ async function reviewInWorkspace(
   engineQuestions.push(...prepared.questions);
   limits.push(...prepared.limits);
 
-  const sync = (await log.run('shape', async (rec) => {
-    const merged = await isSyncMerge(exec, ws.headDir, ws.range, null);
+  // A merge with nothing changed by hand, or one Airlock cannot review, runs no model stage: `sync`.
+  const sync = merge !== undefined && merge.kind !== 'by-hand';
+  await log.run('shape', async (rec) => {
+    if (ws.shapeError !== undefined) throw new Error(ws.shapeError);
     // A merge that changes no files leaves nothing unreviewed.
-    if (merged && files.length > 0) rec.error({ stage: 'shape', cohortId: null, message: unreviewedMerge(files.length) });
-    return merged;
-  })) ?? false;
-  const range: ReviewRange = sync ? { ...ws.range, kind: 'sync-merge' } : ws.range;
+    // Conflicts git settled without markers are never left unsaid, even when the diff is empty.
+    if (merge?.kind === 'unsupported' && (files.length > 0 || merge.conflicted !== undefined)) {
+      const message = files.length > 0 ? `${unreviewedMerge(files.length)} ${merge.reason}` : merge.reason;
+      rec.error({ stage: 'shape', cohortId: null, message });
+    }
+    // What was decided for those conflicts is not in the diff of a merge reviewed by hand either: named, so it is incomplete.
+    if (merge?.kind === 'by-hand' && merge.unshown.length > 0) {
+      rec.error({ stage: 'shape', cohortId: null, message: settledSentence(merge.unshown) });
+    }
+  });
+  // A merge, a re-review's pushed merge too, is a sync-merge range; `previous` says whether it is a re-review.
+  const range: ReviewRange = merge !== undefined ? { ...ws.range, kind: 'sync-merge' } : ws.range;
 
   const gathered = (await log.run('facts', async (rec) => {
     const tiers = await rec.attempt(() => classifyFiles(files, packs), [] as FileFact[]);
-    const unreviewed = notReviewed(files, tiers) ?? emptyDiff(files, pr, req.explicit !== undefined);
+    // A push of only ignored files leaves nothing of the pull request unreviewed that the earlier review did not see.
+    const unreviewed = (pushed ? null : notReviewed(files, tiers)) ?? emptyDiff(files, pr, givenRange);
     if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
     for (const path of binarySourcePaths(files, packs)) rec.error({ stage: 'facts', cohortId: null, message: binarySourceSentence(path) });
     const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead), [] as Fact[])];
@@ -298,8 +412,9 @@ async function reviewInWorkspace(
     log.emit({ type: 'map', map }); // empty, so a listener waiting for the map is not left hanging
     log.skip('brief', skipWhy);
     // A merge with no files is one that changes nothing only when GitHub agrees (or the range was given explicitly).
-    const nothingChanged = files.length === 0 && emptyDiff(files, pr, req.explicit !== undefined) === null;
-    brief = nothingChanged ? EMPTY_SYNC_MERGE_BRIEF : files.length === 0 ? EMPTY_BRIEF : SYNC_MERGE_BRIEF;
+    const nothingChanged = files.length === 0 && emptyDiff(files, pr, givenRange) === null;
+    brief = merge?.kind === 'nothing-by-hand' ? cleanMergeBrief(scope, pr.baseRef)
+      : nothingChanged ? EMPTY_SYNC_MERGE_BRIEF : files.length === 0 ? EMPTY_BRIEF : SYNC_MERGE_BRIEF;
   } else {
     map = ((await limitedOut('map')) ? undefined : await log.run('map', async (rec) => {
       const r = await buildChangeMap(capped, {
@@ -324,7 +439,7 @@ async function reviewInWorkspace(
 
   const ctx: LensContext = {
     pr, map, files, tiers, facts, brief, packs, repoRules: prepared.repoRules, missingHelpers: prepared.missingHelpers,
-    headDir: ws.headDir, baseDir: ws.baseDir, models, run,
+    headDir: ws.headDir, baseDir: ws.baseDir, models, run, ...(push === undefined ? {} : { push }),
   };
   const quick = depth === 'quick';
   // Quick depth is one combined lens request per group; the other depths combine only when the request says so.
@@ -354,18 +469,49 @@ async function reviewInWorkspace(
   }
   limits.push(...lensR.limits, ...sweepR.limits, ...seamsR.limits);
   questions.push(...lensR.questions, ...sweepR.questions, ...seamsR.questions);
-  const usedIds = new Set<string>();
+  // A carried finding keeps its id, so a new candidate never takes one of them.
+  const usedIds = new Set<string>(previous?.findings.map((f) => f.id) ?? []);
   const candidates = withUniqueIds([...lensR.candidates, ...sweepR.candidates, ...seamsR.candidates], usedIds);
   const schemaDropped = [...lensR.dropped, ...sweepR.dropped, ...seamsR.dropped];
 
+  // On a re-review every earlier finding is looked for at the head by code, in the anchor stage, even on a sync merge.
+  // When that cannot be done, each stays open with no place (never fixed), and the stage error makes the review incomplete.
+  const unplaced = (): { open: Finding[]; vanished: Finding[] } =>
+    ({ open: (previous?.findings ?? []).map((f) => leftOpen({ ...f, cohortId: null })), vanished: [] });
+  let earlier = { open: [] as Finding[], vanished: [] as Finding[] };
   let anchored: AnchoredCandidate[] = [];
   const anchorDropped: Dropped[] = [];
-  if (sync) log.skip('anchor', skipWhy);
+  if (sync && previous === null) log.skip('anchor', skipWhy);
   else {
-    const r = await log.run('anchor', () => anchorCandidates(candidates, files, readHead));
+    const r = await log.run('anchor', async (rec) => {
+      const a = sync ? { anchored: [], dropped: [] } : await anchorCandidates(candidates, files, readHead, whole);
+      const judge = push === undefined ? files : whole;
+      const c = previous === null ? earlier : await rec.attempt(async () => {
+        const out = await carryOver(previous, files, readEarlier, judge);
+        rec.error(...out.errors);
+        return out;
+      }, unplaced());
+      return { ...a, carried: c };
+    });
     anchored = r?.anchored ?? [];
     anchorDropped.push(...(r?.dropped ?? []));
+    earlier = r?.carried ?? (previous === null ? earlier : unplaced());
   }
+
+  // A finding raised again is the earlier one: merged into it before the merge stage, so it is neither asked about nor
+  // challenged again, and once more after it, for a keeper that took the carried fingerprint as an alias there.
+  const carryDropped: Dropped[] = [];
+  // A vanished earlier finding raised again elsewhere (by its fingerprint or an alias) is that finding, moved there: it is
+  // carried, not checked for a fix, and the new item is merged into it.
+  const intoCarried = (): void => {
+    if (previous === null) return;
+    const claimed = claimVanished(anchored, earlier.vanished);
+    const r = mergeIntoCarried(anchored, [...earlier.open, ...claimed.moved]);
+    anchored = r.items;
+    earlier = { open: r.carried, vanished: claimed.vanished };
+    carryDropped.push(...r.dropped);
+  };
+  intoCarried();
 
   // Code proposes clusters at the same place and the model says which are the same problem; only then are they merged,
   // before the challenge, so each problem is challenged once.
@@ -385,49 +531,163 @@ async function reviewInWorkspace(
       mergeNotes.push(...r.notes);
     }
   }
+  intoCarried();
 
+  // The challenge stage also holds a re-review's fixed check, which runs at every depth: a vanished Block or Fix finding
+  // gets one request; a vanished Ask or Note is fixed by code. When the check cannot run, nothing is marked fixed by it.
+  const { vanished } = earlier;
+  const notChecked = (): FixedCheckResult => ({
+    fixed: vanished.filter((f) => !needsCheck(f)).map(fixedByCode), open: vanished.filter(needsCheck).map(leftOpen),
+    errors: [], usage: [], limits: [],
+  });
+  const skipChallenge = sync || quick;
   let kept: KeptCandidate[];
+  let checkedEarlier: FixedCheckResult;
   const challengeDropped: Dropped[] = [];
-  if (sync || quick) {
+  /** An earlier finding the fixed check placed is carried too, so the same finding raised again is merged into it. */
+  const intoPlaced = <T extends AnchoredCandidate>(items: T[], placed: FixedCheckResult): { items: T[]; checked: FixedCheckResult } => {
+    const r = mergeIntoCarried(items, placed.open);
+    carryDropped.push(...r.dropped);
+    return { items: r.items, checked: { ...placed, open: r.carried } };
+  };
+  if (skipChallenge && !vanished.some(needsCheck)) {
     log.skip('challenge', skipWhy);
     kept = anchored.map((c) => ({ ...c, checked: QUICK_CHECKED }));
+    checkedEarlier = notChecked();
   } else if (await limitedOut('challenge')) {
-    kept = anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED }));
+    const placed = intoPlaced(anchored.map((c) => ({ ...c, checked: skipChallenge ? QUICK_CHECKED : CHALLENGE_FAILED })), notChecked());
+    kept = placed.items;
+    checkedEarlier = placed.checked;
   } else {
+    // In order: the fixed check, then the new items compared with what it placed, then the challenge of what is left. Each
+    // part that fails is a stage error of its own and keeps what the other finished.
     const r = await log.run('challenge', async (rec) => {
-      const out = await challenge(runner, ctx, anchored, readBoth);
-      rec.usage(out.usage);
-      rec.error(...out.errors);
-      limits.push(...out.limits);
-      return out;
+      let fixedOut: FixedCheckResult;
+      try {
+        fixedOut = await confirmFixed(runner, ctx, vanished, changed);
+      } catch (err) {
+        rec.error({ stage: 'challenge', cohortId: null, message: messageOf(err) });
+        fixedOut = notChecked();
+      }
+      rec.usage(fixedOut.usage);
+      rec.error(...fixedOut.errors);
+      limits.push(...fixedOut.limits);
+      const placed = intoPlaced(anchored, fixedOut);
+      anchored = placed.items;
+      let out: Awaited<ReturnType<typeof challenge>> | null = null;
+      if (!skipChallenge) {
+        try {
+          out = await challenge(runner, ctx, anchored, readBoth);
+          rec.usage(out.usage);
+          rec.error(...out.errors);
+          limits.push(...out.limits);
+        } catch (err) {
+          rec.error({ stage: 'challenge', cohortId: null, message: messageOf(err) });
+        }
+      }
+      return { out, fixedOut: placed.checked };
     });
-    kept = r?.kept ?? anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED }));
-    challengeDropped.push(...withMergedCount(r?.dropped ?? [], mergeDropped));
+    kept = skipChallenge ? anchored.map((c) => ({ ...c, checked: QUICK_CHECKED }))
+      : (r?.out?.kept ?? anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED })));
+    challengeDropped.push(...withMergedCount(r?.out?.dropped ?? [], mergeDropped));
+    checkedEarlier = r?.fixedOut ?? notChecked();
   }
+  const carried: Carried = { open: [...earlier.open, ...checkedEarlier.open], fixed: checkedEarlier.fixed };
 
   if (depth === 'deep' && !sync && !(await limitedOut('lenses-deep'))) {
-    const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped].map((d) => d.candidate)];
+    const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...carryDropped, ...mergeDropped, ...challengeDropped].map((d) => d.candidate)];
+    // A deep-pass item that is an earlier finding raised again is merged into it, as in the first pass. A vanished one
+    // raised again (by its fingerprint or an alias) is that finding moved there, as in the first pass: taken back, as the
+    // earlier review had it, from the fixed list or from those left open with no place, and carried to the item's place.
+    const vanishedById = new Map(vanished.map((f) => [f.id, f]));
+    const sameAsEarlier = previous === null ? undefined : (items: AnchoredCandidate[]): AnchoredCandidate[] => {
+      const unplaced = carried.open.filter((f) => f.anchor.status === 'not-found');
+      const claimable = [...carried.fixed, ...unplaced].flatMap((f) => vanishedById.get(f.id) ?? []);
+      const claimed = claimVanished(items, claimable);
+      const moved = new Set(claimed.moved.map((f) => f.id));
+      carried.fixed = carried.fixed.filter((f) => !moved.has(f.id));
+      carried.open = [...carried.open.filter((f) => !moved.has(f.id)), ...claimed.moved];
+      const r = mergeIntoCarried(items, carried.open);
+      carried.open = r.carried;
+      carryDropped.push(...r.dropped);
+      return r.items;
+    };
     await log.run('lenses-deep', (rec) => deepPass(rec, {
       runner, ctx, seen: new Set(known.map(fingerprint)), uniqueIds: (c) => withUniqueIds(c, usedIds), readHead, readBoth,
+      ...(sameAsEarlier === undefined ? {} : { sameAsEarlier }),
     }, { candidates, questions, schemaDropped, anchorDropped, challengeDropped, kept, limits }));
   }
 
+  // On a re-review the earlier findings still open join the new ones before selection, so the top five and the verdict
+  // are over everything still open; the fixed ones are in neither.
+  const items: KeptCandidate[] = previous === null ? kept
+    : [...carried.open.map(asKept), ...kept.map((k) => ({ ...k, status: 'new' as const }))];
+
   // Select always runs, so the document has a verdict; it is told every error so far. On a sync merge it asks no model,
   // and after the usage limit it is replaced by the fallback, which asks none either.
-  const selection = ((await limitedOut('select')) ? undefined : await log.run('select', async (rec) => {
-    const r = await select(runner, ctx, kept, questions, [...log.errors], depth, sync);
+  const selected = ((await limitedOut('select')) ? undefined : await log.run('select', async (rec) => {
+    const r = await select(runner, ctx, items, questions, [...log.errors], depth, sync);
     rec.usage(r.usage);
     rec.error(...r.errors);
-    return r;
-  })) ?? fallbackSelection(pr, depth, packs, kept, questions, log);
+    // Every earlier finding must say what became of it: shown, fixed, or merged into one that is shown.
+    const dropped = [...schemaDropped, ...anchorDropped, ...carryDropped, ...mergeDropped, ...challengeDropped, ...r.dropped];
+    const lost = previous === null ? [] : unaccounted(previous, r.findings, carried.fixed, dropped);
+    if (lost.length === 0) return r;
+    rec.error(...lost.map((f) => ({
+      stage: 'select', cohortId: null,
+      message: `The earlier finding ${f.id} ("${f.title}") is in neither the findings nor the fixed list, and was not merged into one.`,
+    })));
+    return { ...r, verdict: decideVerdict(pr, r.findings, [...log.errors], false, r.questions.length) };
+  })) ?? fallbackSelection(pr, depth, packs, items, questions, log);
+  const selection = previous === null ? selected : {
+    ...selected,
+    selfReviewText: selfReviewText(pr, depth, packs.map((p) => p.title), selected.verdict, rereviewText(previous, selected.findings, carried.fixed)),
+  };
 
   limits.push(...selection.limits);
+  // A push re-review repeats the last review's questions, whose-call lines and checks after merge, before its own: they
+  // still stand, and the panel shows this document. A review of everything again asks its own.
+  const repeated = previous !== null && push !== undefined;
+  const earlierQuestions = repeated ? previous.questions.map((q) => ({ ...q, cohortId: null })) : [];
+  const earlierWhoseCall = repeated ? previous.whoseCall : [];
+  const earlierChecks = repeated ? previous.checksAfterMerge : [];
+  const asked = new Set(earlierQuestions.map((q) => q.text));
+  const questionsShown = [...earlierQuestions, ...[...selection.questions, ...engineQuestions].filter((q) => !asked.has(q.text))];
+  const earlierFirst = (earlierOnes: string[], own: string[]): string[] => [...earlierOnes, ...own.filter((t) => !earlierOnes.includes(t))];
+  const anyRepeated = earlierQuestions.length + earlierWhoseCall.length + earlierChecks.length > 0;
+
+  const mergeReview = merge === undefined ? undefined : merge.kind === 'unsupported' ? 'not-reviewed' as const : merge.kind;
+  // Only a push (or a pushed merge) is reviewed alone; every other plan reviews the whole pull request again.
+  const pushPlan = ws.plan?.kind === 'push' || ws.plan?.kind === 'base-merge';
+  const covered: RereviewCovered | undefined = previous === null ? undefined
+    : !pushPlan ? 'everything' : mergeReview !== undefined ? 'merge' : 'push';
+  const baseMerge = ws.plan?.kind === 'base-merge' && mergeReview !== undefined ? baseMergeNote(pr, mergeReview) : null;
+  const rereviewNotes = previous === null ? []
+    : ws.plan?.kind === 'everything' ? [everythingNote(ws.plan.reason, previous, pr)]
+      : [
+        ...(baseMerge === null ? [] : [baseMerge]),
+        ...(push?.whole === null ? [NO_WHOLE_DIFF_NOTE] : []),
+        ...(files.length === 0 && merge?.kind !== 'nothing-by-hand' ? [EMPTY_PUSH_NOTE] : []),
+        ...(pushed && notReviewed(files, tiers) !== null ? [IGNORED_PUSH_NOTE] : []),
+        ...(anyRepeated ? [CARRIED_QUESTIONS_NOTE] : []),
+      ];
   return {
-    range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
-    dropped: [...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
-    notes: [...(sync ? [] : [nothingReadNote(files, tiers)].filter((n) => n !== null)), ...mergeNotes, ...selection.notes],
+    range, packs, tiers, facts, map, brief, questions: questionsShown, candidates, selection,
+    whoseCall: earlierFirst(earlierWhoseCall, selection.whoseCall), checksAfterMerge: earlierFirst(earlierChecks, selection.checksAfterMerge),
+    dropped: [...schemaDropped, ...anchorDropped, ...carryDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
+    notes: [
+      ...chosen.notes, ...rereviewNotes, ...(sync ? [] : [nothingReadNote(files, tiers, pushed ? 'push' : 'pull request')].filter((n) => n !== null)),
+      ...mergeNotes, ...selection.notes,
+    ],
+    fixed: carried.fixed,
+    ...(mergeReview === undefined ? {} : { mergeReview }),
+    ...(covered === undefined ? {} : { covered }),
   };
 }
+
+/** The self-review text's re-review part: the earlier head, the findings with their status, and the fixed ones. */
+const rereviewText = (previous: ReviewDocument, findings: Finding[], fixed: Finding[]): RereviewText =>
+  ({ earlierHead: previous.pr.headSha, findings, fixed });
 
 /**
  * Reviews one pull request: every stage in order, then the document is checked against the schema, saved and returned.
@@ -469,38 +729,70 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
 
   // Kept outside the stage so a workspace opened just before a stop is still disposed.
   let opened: Workspace | undefined;
-  let intake: { pr: PrInfo; ws: Workspace; files: FileDiff[]; diffFacts: Fact[] };
+  let intake: {
+    pr: PrInfo; ws: Workspace; files: FileDiff[]; diffFacts: Fact[]; previous: ReviewDocument | null; push: LensContext['push'];
+    changed?: ChangedSince;
+  };
   let reviewed: Reviewed;
   try {
     intake = (await log.run('intake', async (rec) => {
+      // A re-review starts from a stored review of this pull request, and only when something was pushed since.
+      const previous = req.since === undefined ? null : await earlierReview(req, req.since.reviewId);
       const live = await fetchPr(exec, req.repo, req.number, stageRulesOf(chosen.packs));
+      if (previous !== null && live.headSha === previous.pr.headSha) throw new Error(NOTHING_PUSHED);
       // The title and description as they were when the pull request was reviewed, when given, replace today's everywhere.
       const fetched = req.prText ? { ...live, title: req.prText.title, body: req.prText.body } : live;
-      const ws = await openWorkspace(exec, req, fetched, id);
+      const ws = await openWorkspace(exec, req, fetched, id, previous);
       opened = ws;
-      const pr = req.explicit ? { ...fetched, baseSha: ws.range.baseSha, headSha: ws.range.headSha } : fetched;
-      const loaded = await rec.attempt(async () => recheckBinary(
+      // A given range's ids, not the commits reviewed: the merge git made by itself is only in the document's range.
+      const pr = req.explicit ? { ...fetched, baseSha: req.explicit.baseSha, headSha: req.explicit.headSha } : fetched;
+      // A merge with nothing changed by hand has nothing to review, whatever its range's diff holds.
+      const noFiles = { files: [] as FileDiff[], facts: [] as Fact[] };
+      const loaded = ws.merge?.kind === 'nothing-by-hand' ? noFiles : await rec.attempt(async () => recheckBinary(
         await loadDiff(exec, ws.gitDir, ws.range),
         (path, bytes) => safeRead(ws.headDir, path, { firstBytes: bytes }),
-      ), { files: [] as FileDiff[], facts: [] as Fact[] });
-      return { pr, ws, files: loaded.files, diffFacts: [...loaded.facts, ...linkFacts(loaded.files)] };
+      ), noFiles);
+      // On a push re-review (a push of one merge of the base too), the pull request's whole diff as well: it decides what
+      // GitHub shows and what the pull request touched. Null when it cannot be worked out; the push's diff then stands in,
+      // and the document says so.
+      const pushed = ws.plan?.kind === 'push' || ws.plan?.kind === 'base-merge';
+      const whole = !pushed ? undefined : ws.whole === undefined ? null : await loadDiff(exec, ws.gitDir, ws.whole)
+        .then((d) => recheckBinary(d, (path, bytes) => safeRead(ws.headDir, path, { firstBytes: bytes })))
+        .then((d) => d.files, () => null);
+      // Told to the challenge only when its base worktree is the earlier head, not a merge git made by itself.
+      const push = whole === undefined ? undefined : { whole, baseIsEarlierHead: ws.merge?.kind !== 'by-hand' };
+      // On a re-review, what changed since the earlier review, which a fix's proof must be in. When git cannot work it out
+      // the stage error says so, and with nothing to judge against no proof is accepted.
+      const changed = previous === null ? undefined
+        : await rec.attempt(() => changedSince(exec, ws, previous.pr.headSha, loaded.files), { files: [], rewritten: false });
+      return {
+        pr, ws, files: loaded.files, diffFacts: [...loaded.facts, ...linkFacts(loaded.files)], previous, push,
+        ...(changed === undefined ? {} : { changed }),
+      };
     }, { rethrow: true }))!;
     reviewed = await reviewInWorkspace(
       req, deps, log, settings, intake.pr, intake.ws, intake.files, intake.diffFacts, { ...chosen, ms: choiceMs },
+      { previous: intake.previous, push: intake.push, ...(intake.changed === undefined ? {} : { changed: intake.changed }) },
     );
   } finally {
     await (opened as Workspace | undefined)?.dispose().catch(() => undefined);
   }
 
   const { selection } = reviewed;
+  const { previous } = intake;
   // `createdAt` is when the document is assembled, at the end; `startedAt` is when the review began.
   const draft = (): ReviewDocument => ({
     schemaVersion: 1, id, createdAt: given.now().toISOString(), startedAt, pr: intake.pr, range: reviewed.range, depth: settings.depth,
     packs: reviewed.packs.map((p) => ({ id: p.id, version: p.version, title: p.title })), models: settings.models,
     files: reviewed.tiers, facts: reviewed.facts, map: reviewed.map, brief: reviewed.brief, verdict: selection.verdict,
     findings: selection.findings, questions: reviewed.questions, dropped: reviewed.dropped, candidates: reviewed.candidates,
-    whoseCall: selection.whoseCall, checksAfterMerge: selection.checksAfterMerge, selfReviewText: selection.selfReviewText,
+    whoseCall: reviewed.whoseCall, checksAfterMerge: reviewed.checksAfterMerge, selfReviewText: selection.selfReviewText,
     stageErrors: [...log.errors], timings: log.timings(), limits: reviewed.limits, notes: reviewed.notes,
+    ...(previous === null ? {} : {
+      previous: { reviewId: previous.id, headSha: previous.pr.headSha, ...(reviewed.covered === undefined ? {} : { covered: reviewed.covered }) },
+      fixed: reviewed.fixed,
+    }),
+    ...(reviewed.mergeReview === undefined ? {} : { mergeReview: reviewed.mergeReview }),
   });
   // A draft that fails the schema is the engine's own fault, so it rejects rather than becoming a stage error.
   const engineFault: { error: Error | null } = { error: null };
@@ -527,7 +819,8 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
     // Not saved: the review is returned, but never as a complete one, and its self-review text says so.
     const doc = draft();
     const verdict = decideVerdict(doc.pr, doc.findings, doc.stageErrors, false, selection.questions.length);
-    const text = selfReviewText(doc.pr, doc.depth, reviewed.packs.map((p) => p.title), verdict);
+    const again = previous === null ? undefined : rereviewText(previous, doc.findings, reviewed.fixed);
+    const text = selfReviewText(doc.pr, doc.depth, reviewed.packs.map((p) => p.title), verdict, again);
     document = checked({ ...doc, verdict, selfReviewText: text });
   }
   log.emit({ type: 'done', document });

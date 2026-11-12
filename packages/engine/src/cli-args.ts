@@ -4,11 +4,15 @@ export type CliArgs =
   | {
     command: 'review'; ref: string; depth: Depth; packs?: string[]; model?: string; sweepModel?: string;
     effort?: (typeof EFFORTS)[number]; combine?: 'never' | 'no-read-tier'; json?: string; base?: string; head?: string;
+    /** Review what was pushed since the latest stored review (`last`) or the stored review with this id. */
+    since?: string;
   }
   | { command: 'help' };
 
 const TAIL = 'Run "airlock help" for usage.';
-const VALUE_FLAGS = ['--depth', '--packs', '--model', '--sweep-model', '--effort', '--combine', '--json', '--base', '--head'] as const;
+const VALUE_FLAGS = ['--depth', '--packs', '--model', '--sweep-model', '--effort', '--combine', '--json', '--base', '--head', '--since'] as const;
+/** A stored review's id: `r_` and 10 hexadecimal characters. */
+const REVIEW_ID = /^r_[0-9a-fA-F]{10}$/;
 const COMBINE = ['never', 'no-read-tier'] as const;
 const EFFORTS = ['low', 'medium', 'high'] as const;
 type ValueFlag = (typeof VALUE_FLAGS)[number];
@@ -17,7 +21,8 @@ export function usage(): string {
   return [
     'Usage:',
     '  airlock review <owner/name#n | pull URL> [--depth quick|standard|deep] [--packs a,b] [--model <id>] [--sweep-model <id>]',
-    '                 [--effort low|medium|high] [--combine never|no-read-tier] [--base <sha> --head <sha>] [--json <file>]',
+    '                 [--effort low|medium|high] [--combine never|no-read-tier] [--base <sha> --head <sha>] [--since last|<review id>]',
+    '                 [--json <file>]',
     '  airlock help',
     '',
     'Options:',
@@ -29,6 +34,7 @@ export function usage(): string {
     '  --combine never|no-read-tier  at standard and deep depth, one combined lens request for a group with no read-tier file (default never)',
     '  --base <sha>                  review from this commit (7 to 40 hex characters; needs --head)',
     '  --head <sha>                  review up to this commit (7 to 40 hex characters; needs --base)',
+    '  --since last|<review id>      review only what was pushed since the latest stored review, or since the one with this id',
     '  --json <file>                 also write the review document to this file',
   ].join('\n');
 }
@@ -41,9 +47,10 @@ function isValueFlag(name: string): name is ValueFlag {
   return (VALUE_FLAGS as readonly string[]).includes(name);
 }
 
+/** A commit id as given, in lower case: git and the review document write ids in lower case. */
 function checkSha(flag: string, value: string): string {
   if (!/^[0-9a-fA-F]{7,40}$/.test(value)) fail(`${flag} must be 7 to 40 hexadecimal characters, got "${value}".`);
-  return value;
+  return value.toLowerCase();
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -111,6 +118,12 @@ export function parseArgs(argv: string[]): CliArgs {
   if (base !== undefined && head !== undefined) {
     result.base = checkSha('--base', base);
     result.head = checkSha('--head', head);
+  }
+  const since = values['--since'];
+  if (since !== undefined) {
+    if (since !== 'last' && !REVIEW_ID.test(since)) fail(`--since must be last or a review id (r_ and 10 hexadecimal characters), got "${since}".`);
+    if (result.base !== undefined) fail('--since cannot be used with --base and --head.');
+    result.since = since;
   }
   return result;
 }

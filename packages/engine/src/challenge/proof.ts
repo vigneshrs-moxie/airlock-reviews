@@ -33,6 +33,11 @@ export interface Evidence {
   /** Every diff entry by path key (normalised, letter case ignored); two entries share a key when their paths differ only in case. */
   files: Map<string, FileDiff[]>;
   records: DecisionRecord[];
+  /**
+   * False when what the pull request touched is not known (a push re-review whose whole diff could not be worked out):
+   * then nothing is proved pre-existing, since code the pull request added before the last review would pass for it.
+   */
+  preExistingProvable: boolean;
 }
 
 type Item = Candidate & { anchor: Anchor };
@@ -70,11 +75,14 @@ function decisionRecords(packs: Pack[]): DecisionRecord[] {
   return [...entries, ...learned];
 }
 
-/** The evidence for one run: `read` is called at most once per side and path, and the diff is grouped by path key. */
-export function createEvidence(read: ReadFile, files: FileDiff[], packs: Pack[]): Evidence {
+/**
+ * The evidence for one run: `read` is called at most once per side and path, and the diff is grouped by path key. With
+ * `preExistingProvable` false, no refutation proves the ground `pre-existing`.
+ */
+export function createEvidence(read: ReadFile, files: FileDiff[], packs: Pack[], preExistingProvable = true): Evidence {
   const byKey = new Map<string, FileDiff[]>();
   for (const f of files) byKey.set(pathKey(f.path), [...(byKey.get(pathKey(f.path)) ?? []), f]);
-  return { read: readOnce(read), files: byKey, records: decisionRecords(packs) };
+  return { read: readOnce(read), files: byKey, records: decisionRecords(packs), preExistingProvable };
 }
 
 /** A leading list marker such as `- `, `* ` or `1. `; the challenger may copy it with a learned entry. */
@@ -95,7 +103,7 @@ function isWholeRecord(quote: string, record: string): boolean {
  * A repository-relative path safe to read: no backslash, `%`, `:` or NUL, not starting with `/`, and no empty or `..`
  * segment. Encoded and Windows-style paths are refused rather than decoded.
  */
-const isSafePath = (path: string): boolean =>
+export const isSafePath = (path: string): boolean =>
   path.trim() !== '' && !path.startsWith('/') && !/[\\%:\0]/.test(path)
   && path.split('/').every((s) => s !== '' && s !== '..');
 
@@ -104,7 +112,7 @@ const isSafePath = (path: string): boolean =>
  * a letter or digit: a comment beside a trivial line carries no proof.
  */
 const MIN_PROOF_CHARS = 12;
-const hasSubstance = (quote: string): boolean =>
+export const hasSubstance = (quote: string): boolean =>
   quote.split('\n').filter((l) => !COMMENT_LINE.test(l.trim())).map((l) => l.replace(/\s+/g, ''))
     .some((l) => l.length >= MIN_PROOF_CHARS && /[\p{L}\p{N}]/u.test(l));
 
@@ -128,7 +136,7 @@ const samePath = (a: string, b: string): boolean => pathKey(a) === pathKey(b);
 // A line that is only a comment: one starting with //, #, --, /*, * (which covers the closing */ too) or a JSX {/* comment.
 const COMMENT_LINE = /^(?:\/\/|#|--|\/\*|\*|\{\s*\/\*)/;
 /** True when every non-blank line of the quote is a comment: a comment states a claim, it does not enforce one. */
-const onlyComments = (quote: string): boolean => {
+export const onlyComments = (quote: string): boolean => {
   const lines = quote.split('\n').map((l) => l.trim()).filter((l) => l !== '');
   return lines.length > 0 && lines.every((l) => COMMENT_LINE.test(l));
 };
@@ -216,7 +224,7 @@ export async function proveDrop(item: Item, ground: Ground, refutation: Refutati
     case 'guarded-elsewhere':
       return proveOnHead(item, refutation, evidence);
     case 'pre-existing':
-      return provePreExisting(item, refutation, evidence);
+      return evidence.preExistingProvable ? provePreExisting(item, refutation, evidence) : NO_PROOF;
     case 'documented-intent':
       return proveIntent(refutation, evidence);
     default:

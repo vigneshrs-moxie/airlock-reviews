@@ -1,4 +1,4 @@
-import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,8 +44,8 @@ describe('loadPack', () => {
     expect(pack.checks[0]!.id).toBe('no-console');
     expect(pack.linkRules[0]!.transform).toBe('pascal');
     expect(pack.learned).toEqual([
-      { date: '2026-10-19', repo: 'acme/web', kind: 'wrong', text: 'Flagged a thing that was fine' },
-      { date: '2026-10-29', repo: 'acme/web', kind: 'intended', text: 'Refunds are manual' },
+      { date: '2026-10-19', repo: 'acme/web', kind: 'wrong', text: 'Flagged a thing that was fine', where: `${join(sampleDir, 'learned', 'wrong.md')}:3` },
+      { date: '2026-10-29', repo: 'acme/web', kind: 'intended', text: 'Refunds are manual', where: `${join(sampleDir, 'learned', 'product-knowledge.md')}:1` },
     ]);
   });
 
@@ -85,11 +85,46 @@ describe('loadPack', () => {
     await expect(loadPack(dir)).rejects.toThrow(/a-rule\.md.*copy\.md|copy\.md.*a-rule\.md/);
   });
 
-  it('fails with file and line number on a bad learned line', async () => {
+  it('keeps the pack when a learned line is not readable, and names the line by pack and place only', async () => {
     const dir = await tmp();
     await cp(sampleDir, dir, { recursive: true });
-    await writeFile(join(dir, 'learned', 'wrong.md'), '# h\n\nnot an entry\n');
-    await expect(loadPack(dir)).rejects.toThrow(/wrong\.md.*3|3.*wrong\.md/);
+    await writeFile(join(dir, 'learned', 'wrong.md'),
+      '# h\n\n2026-10-19 · acme/web · kept one\nnot an entry SECRET-TEXT\n2026-10-20 · acme/web · kept two\n');
+    const pack = await loadPack(dir);
+    expect(pack.learned.filter((l) => l.kind === 'wrong').map((l) => l.text)).toEqual(['kept one', 'kept two']);
+    expect(pack.learned.some((l) => l.kind === 'intended')).toBe(true);
+    expect(pack.rules.length).toBeGreaterThan(0);
+    expect(pack.lenses.length).toBeGreaterThan(0);
+    expect(pack.learnedProblems).toEqual([`${pack.id}/learned/wrong.md:4`]);
+    expect(JSON.stringify(pack.learnedProblems)).not.toContain('SECRET-TEXT');
+    expect(JSON.stringify(pack.learnedProblems)).not.toContain(dir);
+  });
+
+  it('has no learned problems when every line reads', async () => {
+    const pack = await loadPack(sampleDir);
+    expect(pack.learnedProblems).toEqual([]);
+  });
+
+  it('still fails the pack for a broken manifest or a missing lens file', async () => {
+    const broken = await tmp();
+    await writeFile(join(broken, 'pack.yaml'), 'id: [unclosed\n');
+    await expect(loadPack(broken)).rejects.toThrow(/invalid YAML/);
+    const dir = await tmp();
+    await cp(sampleDir, dir, { recursive: true });
+    await rm(join(dir, 'lenses'), { recursive: true, force: true });
+    await expect(loadPack(dir)).rejects.toThrow(/file not found/);
+  });
+
+  it('appends to and removes from a learned file holding an unreadable line, leaving that line byte for byte', async () => {
+    const dir = await tmp();
+    await mkdir(join(dir, 'learned'));
+    const file = join(dir, 'learned', 'wrong.md');
+    const bad = 'half a line \u00b7 typed by hand';
+    await writeFile(file, `2026-01-01 \u00b7 r/r \u00b7 a\n${bad}\n2026-01-02 \u00b7 r/r \u00b7 b\n`);
+    await appendLearned(dir, { date: '2026-01-03', repo: 'r/r', kind: 'wrong', text: 'c' });
+    expect(await readFile(file, 'utf8')).toBe(`2026-01-01 \u00b7 r/r \u00b7 a\n${bad}\n2026-01-02 \u00b7 r/r \u00b7 b\n2026-01-03 \u00b7 r/r \u00b7 c\n`);
+    expect(await removeLearned(dir, { date: '2026-01-02', repo: 'r/r', kind: 'wrong', text: 'b' })).toBe(true);
+    expect(await readFile(file, 'utf8')).toBe(`2026-01-01 \u00b7 r/r \u00b7 a\n${bad}\n2026-01-03 \u00b7 r/r \u00b7 c\n`);
   });
 });
 
@@ -156,6 +191,11 @@ describe('selectPacks', () => {
   it('selects packs by repository and always adds generic last', () => {
     expect(selectPacks(all, 'acme/web').map((p) => p.id)).toEqual(['a', 'b', 'generic']);
     expect(selectPacks(all, 'nobody/none').map((p) => p.id)).toEqual(['generic']);
+  });
+
+  it('matches a repository without regard to letter case', () => {
+    expect(selectPacks(all, 'ACME/Web').map((p) => p.id)).toEqual(['a', 'b', 'generic']);
+    expect(selectPacks([stub('generic', []), stub('m', ['Moxie-Org/Portal'])], 'moxie-org/portal').map((p) => p.id)).toEqual(['m', 'generic']);
   });
 
   it('does not add generic twice', () => {
