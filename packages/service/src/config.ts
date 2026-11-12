@@ -87,6 +87,29 @@ export async function readOrCreateToken(home: string): Promise<string> {
   return token;
 }
 
+/**
+ * The token in the token file, or null when there is none, the file holds anything else, or the path is a symbolic
+ * link. It never makes a token: the running service uses it to pick up a replaced one.
+ */
+export async function readToken(home: string): Promise<string | null> {
+  const file = join(serviceDir(home), 'token');
+  const isLink = await lstat(file).then((st) => st.isSymbolicLink(), () => false);
+  if (isLink) return null;
+  const text = (await readText(file))?.trim();
+  return text !== undefined && TOKEN_PATTERN.test(text) ? text : null;
+}
+
+/**
+ * Makes a new pairing token and writes it whole in place of the old one (a temporary file in the same folder, mode
+ * 0600, then a rename). The paired origin is left as it is. A running service picks the new token up by itself.
+ */
+export async function replaceToken(home: string): Promise<string> {
+  const dir = await ensureDir(home);
+  const token = randomBytes(32).toString('hex');
+  await writeAtomic(dir, 'token', `${token}\n`);
+  return token;
+}
+
 /** The recorded extension origin, or null when none is recorded or the file holds anything else. */
 export async function pairedOrigin(home: string): Promise<string | null> {
   const text = (await readText(join(serviceDir(home), 'paired-origin')))?.trim();

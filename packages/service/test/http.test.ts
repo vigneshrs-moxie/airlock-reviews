@@ -9,6 +9,7 @@ import type { EngineDeps } from '@airlock/engine';
 import { MESSAGE_MAX } from '@airlock/shared';
 import { pair, pairedOrigin, readOrCreateToken } from '../src/config.js';
 import { createRouter, type Auth, type Handler } from '../src/http.js';
+import { keepToken } from '../src/proof.js';
 import { createServer } from '../src/server.js';
 
 const ORIGIN = `chrome-extension://${'a'.repeat(32)}`;
@@ -51,7 +52,7 @@ interface Rig { port: number; log: string[]; paired: { value: string | null } }
 async function routerRig(extra: { pairedOrigin?: string | null } = {}): Promise<Rig> {
   const log: string[] = [];
   const paired = { value: extra.pairedOrigin ?? null };
-  const auth: Auth = { token: TOKEN, port: 0, pairedOrigin: async () => paired.value };
+  const auth: Auth = { tokens: keepToken(TOKEN, async () => null, Date.now), port: 0, pairedOrigin: async () => paired.value };
   const ok: Handler = async (req) => ({ status: 200, json: { path: req.path, params: req.params, body: req.body ?? null, origin: req.origin, q: req.query.get('q') } });
   const listener = createRouter([
     { method: 'GET', path: '/hello', open: true, handler: async () => ({ status: 200, json: { hi: true } }) },
@@ -368,7 +369,7 @@ describe('streams', () => {
     const log: string[] = [];
     let aborted!: () => void;
     const seen = new Promise<void>((r) => { aborted = r; });
-    const auth: Auth = { token: TOKEN, port: 0, pairedOrigin: async () => null };
+    const auth: Auth = { tokens: keepToken(TOKEN, async () => null, Date.now), port: 0, pairedOrigin: async () => null };
     const server = http.createServer(createRouter([{
       method: 'GET', path: '/wait',
       handler: async () => ({ status: 200 as const, stream: (emit, closed) => new Promise<void>((resolve) => {

@@ -1,8 +1,8 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import { MESSAGE_MAX } from '@airlock/shared';
 import type { ZodType } from 'zod';
 import { isExtensionOrigin } from './config.js';
+import type { TokenKeeper } from './proof.js';
 
 export interface Req {
   method: string;
@@ -47,8 +47,11 @@ export interface Route {
   handler: Handler;
 }
 
-/** `port` is read on every request, so the server can set it once it knows the port it really listens on. */
-export interface Auth { token: string; port: number; pairedOrigin: () => Promise<string | null> }
+/**
+ * `port` is read on every request, so the server can set it once it knows the port it really listens on. `tokens`
+ * holds the pairing token and picks up a replaced one.
+ */
+export interface Auth { tokens: TokenKeeper; port: number; pairedOrigin: () => Promise<string | null> }
 
 export const MAX_BODY_BYTES = 64 * 1024;
 const METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -58,12 +61,11 @@ const NOT_HERE = 'Airlock only answers on this Mac.';
 const NOT_THIS_PAGE = 'Airlock does not accept requests from this page.';
 const NEEDS_TOKEN = 'Airlock needs its pairing token.';
 
-const sha256 = (text: string): Buffer => createHash('sha256').update(text).digest();
-
-function tokenMatches(header: string | undefined, token: string): boolean {
+/** Whether the Authorization header carries the token; the comparison is the keeper's, in constant time. */
+async function tokenMatches(header: string | undefined, tokens: TokenKeeper): Promise<boolean> {
   const match = /^Bearer (.+)$/.exec(header ?? '');
   if (match === null) return false;
-  return timingSafeEqual(sha256(match[1] as string), sha256(token));
+  return tokens.matches(match[1] as string);
 }
 
 function firstProblem(error: { issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }> }): string {
@@ -265,7 +267,7 @@ export function createRouter(
     }
 
     // Check 3: the pairing token, compared in constant time.
-    if (route.open !== true && !tokenMatches(req.headers.authorization, auth.token)) {
+    if (route.open !== true && !(await tokenMatches(req.headers.authorization, auth.tokens))) {
       writeJson(res, 401, { error: NEEDS_TOKEN });
       return;
     }

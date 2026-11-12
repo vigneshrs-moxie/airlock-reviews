@@ -5,9 +5,11 @@ import {
   createSdkRunner, realExec, withRetry, type AgentRequest, type AgentResult, type AgentRunner, type EngineDeps, type runReview,
 } from '@airlock/engine';
 import type { Dismissal, Hello, PairReply } from '@airlock/shared';
-import { pair, pairedOrigin, readOrCreateToken, type ServiceConfig } from './config.js';
+import { z } from 'zod';
+import { pair, pairedOrigin, readOrCreateToken, readToken, type ServiceConfig } from './config.js';
 import { dismissalsFor } from './dismissals.js';
 import { createRouter, type Auth, type Route } from './http.js';
+import { helloProof, keepToken, NONCE_PATTERN, type TokenKeeper } from './proof.js';
 import { reviewRoutes } from './routes.js';
 import type { Timers } from './runs.js';
 
@@ -45,13 +47,20 @@ export const LISTEN_HOST = '127.0.0.1';
 const PAIRED_ELSEWHERE =
   'Airlock is already paired with another copy of the extension. In the airlock-reviews folder, run: npm run service -- unpair, then pair again.';
 
-function frontRoutes(deps: ServiceDeps): Route[] {
+/** `?nonce=<32 lower-case hex>`, or nothing; anything else in the query is ignored, as before. */
+const HelloQuerySchema = z.object({ nonce: z.string().regex(NONCE_PATTERN, 'not a nonce').optional() });
+
+/** `tokens` gives the token keeper, which exists once the service listens. */
+function frontRoutes(deps: ServiceDeps, tokens: () => TokenKeeper): Route[] {
   const { home, version } = deps.config;
   return [
     {
-      method: 'GET', path: '/hello', open: true,
-      handler: async () => {
+      // With a nonce, the reply proves the service holds the pairing token, without sending it.
+      method: 'GET', path: '/hello', open: true, query: HelloQuerySchema,
+      handler: async (req) => {
+        const nonce = req.query.get('nonce');
         const hello: Hello = { airlock: true, version, paired: (await pairedOrigin(home)) !== null };
+        if (nonce !== null) hello.proof = helloProof(await tokens().forProof(), nonce);
         return { status: 200, json: hello };
       },
     },
@@ -84,13 +93,20 @@ export function createServer(deps: ServiceDeps): Service {
   const hidePaths = [deps.config.home, homedir()];
   const reviews = reviewRoutes(
     { ...deps, dismissals: deps.dismissals ?? ((repo, number) => dismissalsFor(deps.config.home, repo, number)) }, hidePaths);
-  const routes = [...frontRoutes(deps), ...reviews.routes];
+  let keeper: TokenKeeper | undefined;
+  const tokens = (): TokenKeeper => {
+    if (keeper === undefined) throw new Error('The service is not listening yet.');
+    return keeper;
+  };
+  const routes = [...frontRoutes(deps, tokens), ...reviews.routes];
   let server: http.Server | undefined;
   return {
     routes,
     async listen() {
       const token = await readOrCreateToken(deps.config.home);
-      const auth: Auth = { token, port: deps.config.port, pairedOrigin: () => pairedOrigin(deps.config.home) };
+      // A token replaced with `token --new` is picked up after a failed comparison, without a restart.
+      keeper = keepToken(token, () => readToken(deps.config.home), () => deps.now().getTime());
+      const auth: Auth = { tokens: keeper, port: deps.config.port, pairedOrigin: () => pairedOrigin(deps.config.home) };
       const created = http.createServer({ connectionsCheckingInterval: 5_000 }, createRouter(routes, auth, deps.log, { hidePaths }));
       created.requestTimeout = deps.limits?.requestTimeoutMs ?? 30_000;
       created.headersTimeout = deps.limits?.headersTimeoutMs ?? 15_000;

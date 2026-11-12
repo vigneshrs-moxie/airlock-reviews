@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
@@ -17,6 +18,7 @@ vi.mock('@airlock/engine', async (original) => ({
 const engine = await import('@airlock/engine');
 
 const TOKEN = 'ab'.repeat(32);
+const NEW_TOKEN = 'ef'.repeat(32);
 const PORT = 45611;
 const ENGINE_DEPS = { exec: vi.fn(), runner: { run: vi.fn() }, now: () => new Date(0) } as unknown as EngineDeps;
 const tidy = mkdtempSync(join(tmpdir(), 'airlock-cli-test-'));
@@ -77,12 +79,14 @@ function harness(options: { exists?: boolean; env?: Record<string, string>; boot
   };
   const chmodCalls: Array<{ path: string; mode: number }> = [];
   const createToken = vi.fn(async () => TOKEN);
+  const replaceToken = vi.fn(async () => NEW_TOKEN);
   const exits: number[] = [];
   const overrides: Required<CliOverrides> = {
     createServer: (deps) => { created.push(deps); return server; },
     engineDeps: () => ENGINE_DEPS,
     loadConfig: () => config,
     readOrCreateToken: createToken,
+    replaceToken,
     readToken: async () => TOKEN,
     unpair: vi.fn(async () => undefined),
     fetch: (async () => { throw new TypeError('fetch failed'); }) as typeof fetch,
@@ -109,7 +113,7 @@ function harness(options: { exists?: boolean; env?: Record<string, string>; boot
   };
   const io = { out: (t: string) => out.push(t), err: (t: string) => err.push(t) };
   const plist = join(fakeHome, 'Library', 'LaunchAgents', 'com.airlock.service.plist');
-  return { root, airlockHome, fakeHome, repoRoot, cliPath, binDirs, out, err, calls, handlers, server, created, overrides, io, plist, config, createToken, chmodCalls, exits };
+  return { root, airlockHome, fakeHome, repoRoot, cliPath, binDirs, out, err, calls, handlers, server, created, overrides, io, plist, config, createToken, replaceToken, chmodCalls, exits };
 }
 
 const all = (h: { out: string[]; err: string[] }): string => [...h.out, ...h.err].join('');
@@ -117,6 +121,14 @@ const waitFor = async (check: () => boolean): Promise<void> => {
   for (let i = 0; i < 400 && !check(); i++) await new Promise((r) => setTimeout(r, 5));
   expect(check()).toBe(true);
 };
+
+/** A hello as the real service gives it to `status`: with the proof, for the nonce in the address, made with `token`. */
+function provedHello(url: string, hello: Record<string, unknown>, token = TOKEN): Response {
+  const nonce = new URL(url).searchParams.get('nonce');
+  const proof = nonce === null ? {} : { proof: createHmac('sha256', token).update(`airlock-hello:${nonce}`).digest('hex') };
+  return new Response(JSON.stringify({ ...hello, ...proof }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
+const isHello = (url: string): boolean => new URL(url).pathname === '/hello';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -452,6 +464,27 @@ describe('token', () => {
     expect(await main(['token'], h.io, h.overrides)).toBe(0);
     expect(h.out).toEqual([`${TOKEN}\n`]);
     expect(h.err).toEqual([]);
+    expect(h.replaceToken).not.toHaveBeenCalled();
+  });
+
+  it('token --new replaces the token and prints the new one once, as its last line', async () => {
+    const h = harness();
+    expect(await main(['token', '--new'], h.io, h.overrides)).toBe(0);
+    expect(h.replaceToken).toHaveBeenCalledWith(h.airlockHome);
+    expect(h.createToken).not.toHaveBeenCalled();
+    const text = h.out.join('');
+    expect(text.endsWith(`\n${NEW_TOKEN}\n`)).toBe(true);
+    expect(text.split(NEW_TOKEN)).toHaveLength(2);
+    expect(text).not.toContain(TOKEN);
+    expect(h.err).toEqual([]);
+  });
+
+  it('refuses any other argument to token', async () => {
+    for (const argv of [['token', '--old'], ['token', '--new', '--new'], ['token', 'new']]) {
+      const h = harness();
+      expect(await main(argv, h.io, h.overrides), argv.join(' ')).toBe(2);
+      expect(h.replaceToken).not.toHaveBeenCalled();
+    }
   });
 });
 
@@ -464,11 +497,14 @@ describe('status', () => {
     h.overrides.fetch = (async (url: string, init?: RequestInit) => {
       const auth = new Headers(init?.headers).get('authorization');
       seen.push({ url, auth });
-      if (url.endsWith('/hello')) return json({ airlock: true, version: '9.9.9', paired: true });
+      if (isHello(url)) return provedHello(url, { airlock: true, version: '9.9.9', paired: true });
       return json({ version: '9.9.9', claude: true, gh: false, packsDir: '/p', running: [{ runId: 'run_0123456789ab', repo: 'o/r', number: 7 }] });
     }) as typeof fetch;
     expect(await main(['status'], h.io, h.overrides)).toBe(0);
-    expect(seen).toEqual([{ url: `http://127.0.0.1:${PORT}/hello`, auth: null }, { url: `http://127.0.0.1:${PORT}/status`, auth: `Bearer ${TOKEN}` }]);
+    expect(seen).toEqual([
+      { url: expect.stringMatching(new RegExp(`^http://127\\.0\\.0\\.1:${PORT}/hello\\?nonce=[0-9a-f]{32}$`)), auth: null },
+      { url: `http://127.0.0.1:${PORT}/status`, auth: `Bearer ${TOKEN}` },
+    ]);
     const text = h.out.join('');
     expect(text).toContain('Airlock service is running (version 9.9.9).');
     expect(text).toContain('An extension is paired.');
@@ -481,8 +517,8 @@ describe('status', () => {
 
   it('says when nothing is paired and nothing is running', async () => {
     const h = harness();
-    h.overrides.fetch = (async (url: string) => url.endsWith('/hello')
-      ? json({ airlock: true, version: '1.0.0', paired: false })
+    h.overrides.fetch = (async (url: string) => isHello(url)
+      ? provedHello(url, { airlock: true, version: '1.0.0', paired: false })
       : json({ version: '1.0.0', claude: true, gh: true, packsDir: '/p', running: [] })) as typeof fetch;
     expect(await main(['status'], h.io, h.overrides)).toBe(0);
     expect(h.out.join('')).toContain('No extension is paired.');
@@ -517,8 +553,8 @@ describe('status, honestly and read-only', () => {
 
   it('never calls the token creator', async () => {
     const h = harness();
-    h.overrides.fetch = (async (url: string) => url.endsWith('/hello')
-      ? json(hello)
+    h.overrides.fetch = (async (url: string) => isHello(url)
+      ? provedHello(url, hello)
       : json({ version: '1.0.0', claude: true, gh: true, packsDir: '/p', running: [] })) as typeof fetch;
     expect(await main(['status'], h.io, h.overrides)).toBe(0);
     expect(h.createToken).not.toHaveBeenCalled();
@@ -527,13 +563,48 @@ describe('status, honestly and read-only', () => {
   it('a 401 or 403 from /status says the token on disk is not the one in use, and returns 1', async () => {
     for (const code of [401, 403]) {
       const h = harness();
-      h.overrides.fetch = (async (url: string) => url.endsWith('/hello') ? json(hello) : json({ error: 'no' }, code)) as typeof fetch;
+      h.overrides.fetch = (async (url: string) => isHello(url) ? provedHello(url, hello) : json({ error: 'no' }, code)) as typeof fetch;
       expect(await main(['status'], h.io, h.overrides)).toBe(1);
       expect(h.err.join('')).toBe(
         "Airlock's service is running, but the pairing token on disk is not the one it is using. Stop it and start it again: npm run service\n");
       expect(all(h)).not.toContain(TOKEN);
       expect(h.createToken).not.toHaveBeenCalled();
     }
+  });
+
+  it('status does not send the token to a port that cannot prove it', async () => {
+    const answers: Array<[string, (url: string) => Response]> = [
+      ['no proof', () => json(hello)],
+      ['a proof made with another token', (url) => provedHello(url, hello, 'cd'.repeat(32))],
+      ['a proof for another nonce', () => provedHello(`http://127.0.0.1/hello?nonce=${'0'.repeat(32)}`, hello)],
+    ];
+    for (const [what, answer] of answers) {
+      const h = harness();
+      const sent: Array<string | null> = [];
+      h.overrides.fetch = (async (url: string, init?: RequestInit) => {
+        sent.push(new Headers(init?.headers).get('authorization'));
+        return isHello(url) ? answer(url) : json({ version: '1.0.0', claude: true, gh: true, packsDir: '/p', running: [] });
+      }) as typeof fetch;
+      expect(await main(['status'], h.io, h.overrides), what).toBe(1);
+      expect(sent, what).toEqual([null]);
+      expect(h.err.join(''), what).toBe(
+        "Something else is answering on Airlock's port. The token was not sent. If Airlock is running from another AIRLOCK_HOME, stop it and start it again: npm run service\n");
+      expect(all(h), what).not.toContain(TOKEN);
+    }
+  });
+
+  it('asks with a new nonce each time', async () => {
+    const nonces: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const h = harness();
+      h.overrides.fetch = (async (url: string) => {
+        if (isHello(url)) nonces.push(new URL(url).searchParams.get('nonce') ?? '');
+        return isHello(url) ? provedHello(url, hello) : json({ version: '1.0.0', claude: true, gh: true, packsDir: '/p', running: [] });
+      }) as typeof fetch;
+      expect(await main(['status'], h.io, h.overrides)).toBe(0);
+    }
+    expect(nonces.every((n) => /^[0-9a-f]{32}$/.test(n))).toBe(true);
+    expect(new Set(nonces).size).toBe(3);
   });
 
   it('with no token file it says none has been made, makes none, and returns 1', async () => {
