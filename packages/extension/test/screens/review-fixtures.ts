@@ -1,4 +1,4 @@
-import { minimalDocument, type Dismissal, type Finding, type PrSummary, type ReviewDocument } from '@airlock/shared';
+import { minimalDocument, type Dismissal, type Finding, type PostRecord, type PrSummary, type ReviewDocument } from '@airlock/shared';
 import type { PanelState } from '../../src/state/reduce';
 import { prSummary } from './fixtures';
 
@@ -27,6 +27,7 @@ export function dismissal(f: Finding, over: Partial<Dismissal> = {}): Dismissal 
 
 export interface ReviewOptions {
   dismissals?: Dismissal[];
+  posts?: PostRecord[];
   stale?: boolean;
   busy?: boolean;
   notice?: string;
@@ -43,7 +44,7 @@ export function reviewState(findings: Finding[], opts: ReviewOptions = {}): Revi
     findings, ...opts.doc,
   };
   return {
-    kind: 'review', pr, latest: { document, dismissals: opts.dismissals ?? [], posts: [] }, stale: opts.stale ?? false,
+    kind: 'review', pr, latest: { document, dismissals: opts.dismissals ?? [], posts: opts.posts ?? [] }, stale: opts.stale ?? false,
     ...(opts.busy === undefined ? {} : { busy: opts.busy }), ...(opts.notice === undefined ? {} : { notice: opts.notice }),
   };
 }
