@@ -219,7 +219,7 @@ describe('planRereview', () => {
       .toEqual({ kind: 'push', baseSha: merge, headSha: head });
   });
 
-  it('plans everything, base-missing, when the base commit is not in the mirror, instead of failing', async () => {
+  it('refuses to plan, with a sentence, when the base commit is not in the mirror', async () => {
     const r = await repo();
     await commitFiles(r, { 'a.ts': 'one\n' }, 'base');
     await r.git('checkout', '-b', 'side');
@@ -231,7 +231,7 @@ describe('planRereview', () => {
     const head = await r.git('rev-parse', 'HEAD');
     // The base branch is gone and GitHub's recorded base is a commit this mirror never had.
     const earlierGone: ReviewDocument = { ...previous(earlier), pr: { ...previous(earlier).pr, baseRef: 'gone' } };
-    expect(await planRereview(realExec, mirrorOf(r), earlierGone, prAt(head, 'e'.repeat(40), { baseRef: 'gone' })))
-      .toEqual({ kind: 'everything', reason: 'base-missing' });
+    await expect(planRereview(realExec, mirrorOf(r), earlierGone, prAt(head, 'e'.repeat(40), { baseRef: 'gone' })))
+      .rejects.toThrow(`The base commit of this pull request (${'e'.repeat(40)}) is not in the mirror, so the push cannot be planned.`);
   });
 });

@@ -15,10 +15,9 @@ export type RereviewPlan =
 /**
  * Why everything is reviewed again: the branch was rewritten; a pushed merge brought the base in (with other commits);
  * the earlier review did not finish; the pull request now targets another base branch than the earlier review's
- * (`retargeted`); the earlier review covered a range given by hand, so not the whole pull request (`earlier-partial`);
- * or the base commit is not in the mirror, so a merge of it cannot be ruled out.
+ * (`retargeted`); or the earlier review covered a range given by hand, so not the whole pull request (`earlier-partial`).
  */
-export type EverythingReason = 'rewritten' | 'base-merged-in' | 'earlier-incomplete' | 'retargeted' | 'earlier-partial' | 'base-missing';
+export type EverythingReason = 'rewritten' | 'base-merged-in' | 'earlier-incomplete' | 'retargeted' | 'earlier-partial';
 
 /** A full commit id, so git cannot read it as an option or as an abbreviation of another object. */
 function checkedId(what: string, id: string): string {
@@ -78,9 +77,9 @@ async function leftCommitsOut(exec: Exec, mirror: string, earlier: string, baseT
  * earlier head does not, `base-merge`. When any other pushed merge commit has a parent that the base branch reaches and
  * the earlier head does not, `base-merged-in`. The base branch is the pull request's
  * branch in the mirror, or the base GitHub recorded when the pull request is merged or its branch is gone, as the
- * workspace chooses (the workspace fetches GitHub's recorded base first); when that base is not in the mirror, `base-missing`.
- * The stored earlier head must be a full commit id. Throws, before any git call, when an id or the branch name is not
- * one git can be given safely, and throws when git cannot answer.
+ * workspace chooses (the workspace fetches GitHub's recorded base first, and fails when it cannot be had); when that base
+ * is still not in the mirror, it throws a sentence. The stored earlier head must be a full commit id. Throws, before any
+ * git call, when an id or the branch name is not one git can be given safely, and throws when git cannot answer.
  */
 export async function planRereview(exec: Exec, mirror: string, prev: ReviewDocument, pr: PrInfo): Promise<RereviewPlan> {
   if (!FULL_COMMIT_ID.test(prev.pr.headSha)) {
@@ -97,7 +96,9 @@ export async function planRereview(exec: Exec, mirror: string, prev: ReviewDocum
   if (prev.range.kind === 'explicit') return { kind: 'everything', reason: 'earlier-partial' };
   if (!(await inMirror(exec, mirror, `${earlier}^{commit}`))) return { kind: 'everything', reason: 'rewritten' };
   if (!(await isAncestor(exec, mirror, earlier, head))) return { kind: 'everything', reason: 'rewritten' };
-  if (useRecorded && !(await inMirror(exec, mirror, `${baseTip}^{commit}`))) return { kind: 'everything', reason: 'base-missing' };
+  if (useRecorded && !(await inMirror(exec, mirror, `${baseTip}^{commit}`))) {
+    throw new Error(`The base commit of this pull request (${baseTip}) is not in the mirror, so the push cannot be planned.`);
+  }
   if (prev.range.kind === 'sync-merge' && prev.previous === undefined && await leftCommitsOut(exec, mirror, earlier, baseTip)) {
     return { kind: 'everything', reason: 'earlier-partial' };
   }

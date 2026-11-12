@@ -27,6 +27,8 @@ interface PushScript {
   /** The paths the push changed; the mapper puts them all in the standalone group. */
   paths: string[];
   correctness?: Record<string, unknown>[];
+  /** The correctness lens's questions. */
+  questions?: string[];
   naming?: Record<string, unknown>[];
   fixedCheck?: (req: AgentRequest<unknown>) => unknown;
 }
@@ -35,7 +37,7 @@ interface PushScript {
 function pushScript(p: PushScript) {
   return scenarioScript({
     mapper: () => ({ cohorts: [], standalone: p.paths }),
-    'lens:core/correctness': () => ({ candidates: p.correctness ?? [], questions: [] }),
+    'lens:core/correctness': () => ({ candidates: p.correctness ?? [], questions: p.questions ?? [] }),
     'lens:core/naming': () => ({ candidates: p.naming ?? [], questions: [] }),
     'sweep:': () => none,
     seams: () => none,
@@ -255,6 +257,8 @@ describe('re-review after a push', () => {
     expect(doc.range).toEqual({ baseSha: s.baseSha, headSha: head, kind: 'full' });
     expect(doc.previous).toEqual({ reviewId: againstDevelop.id, headSha: s.headSha });
     expect(doc.notes).toContain('The pull request now targets main; the last review was against develop, so everything was reviewed again.');
+    // Reviewed again in full, the pull request's questions and checks are its own, not repeated from the last review.
+    expect(doc.notes).not.toContain('Questions and checks from the last review are repeated here.');
     expect(Object.fromEntries(statuses(doc))).toEqual({ [GOOD.title as string]: 'still-open', [RULED.title as string]: 'still-open' });
   }, SLOW);
 
@@ -299,6 +303,35 @@ describe('re-review after a push', () => {
     expect(calls.length).toBeGreaterThan(0);
     for (const c of calls) expect(c.material).not.toContain('<material label="repository rule file');
     expect(doc.limits).toContain('The repository\'s rule files were not shown: Airlock could not find the base of this pull request.');
+  }, SLOW);
+
+  it('a push re-review repeats the last review\'s questions, whose-call lines and checks after merge before its own, once each', async () => {
+    const { s, first } = await firstReview();
+    const earlierQuestions = first.questions.map((q) => q.text);
+    expect(earlierQuestions).toEqual(['Is rounding half up intended?', 'Does a refund need a ledger entry?']);
+    const stored: ReviewDocument = { ...first, id: 'r_1111111111', checksAfterMerge: ['Run the backfill for plans created before the migration.'] };
+    await saveReview(stored);
+    const head = await push(s, { 'src/jobs/pause.ts': 'export function pauseJob(): void { audit(); }\n' });
+    const { doc } = await rereview(s, stored.id, head, pushScript({
+      paths: ['src/jobs/pause.ts'], correctness: [NEW_ONE], questions: ['Is the pause audited?', 'Is rounding half up intended?'],
+    }));
+    expect(doc.questions.map((q) => q.text)).toEqual([...earlierQuestions, 'Is the pause audited?']);
+    // The earlier ones name no group: groups belong to the earlier review's change map.
+    expect(doc.questions.slice(0, 2).map((q) => q.cohortId)).toEqual([null, null]);
+    // The push's selection says the same whose-call line again: it is listed once.
+    expect(doc.whoseCall).toEqual(['Whether refunds may be negative is a product call.']);
+    expect(doc.checksAfterMerge).toEqual(['Run the backfill for plans created before the migration.']);
+    expect(doc.notes).toContain('Questions and checks from the last review are repeated here.');
+  }, SLOW);
+
+  it('continues a stored review whose head was written in upper case, and writes its head in lower case', async () => {
+    const { s, first } = await firstReview();
+    const upper: ReviewDocument = { ...first, id: 'r_2222222222', pr: { ...first.pr, headSha: first.pr.headSha.toUpperCase() } };
+    await saveReview(upper);
+    const head = await push(s, { 'src/jobs/pause.ts': 'export function pauseJob(): void { audit(); }\n' });
+    const { doc } = await rereview(s, upper.id, head, pushScript({ paths: ['src/jobs/pause.ts'] }));
+    expect(doc.previous).toEqual({ reviewId: upper.id, headSha: s.headSha });
+    expect(doc.range).toEqual({ baseSha: s.headSha, headSha: head, kind: 'rereview' });
   }, SLOW);
 
   it('a push that changes no files carries the earlier findings and says so, without an empty-diff error', async () => {

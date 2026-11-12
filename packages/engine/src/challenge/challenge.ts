@@ -167,7 +167,8 @@ export async function challenge(
   const told = ctx.push?.baseIsEarlierHead === true ? `${template.trim()}\n\n${PUSH_BASE_SIDE}` : template;
   const instructions = instructionsFor(told, ctx.packs, ctx.missingHelpers);
   // What the pull request touched is judged by its whole diff on a push re-review, whose base side is the earlier head.
-  const evidence = createEvidence(read, ctx.push?.whole ?? ctx.files, ctx.packs);
+  // When that diff could not be worked out, nothing is dropped as pre-existing: the push's diff cannot tell.
+  const evidence = createEvidence(read, ctx.push?.whole ?? ctx.files, ctx.packs, ctx.push?.whole !== null);
   const tier = tierOf(ctx.tiers);
   type ItemResult = Outcome & { usage?: AgentUsage; error?: StageError; limit?: string };
   const failed = (item: Item, message: string, usage: AgentUsage | undefined, kind?: StageErrorKind): ItemResult => ({

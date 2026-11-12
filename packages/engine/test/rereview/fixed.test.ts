@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { Finding } from '@airlock/shared';
+import type { FileDiff, Finding } from '@airlock/shared';
 import { splitInstructions } from '../../src/agent/prompt.js';
 import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
@@ -17,13 +17,15 @@ const HEAD_PAY = [
   '}',
 ].join('\n');
 const HEAD_LOG = ['export function audit(card: string) {', '  logger.info(card);', '}'].join('\n');
+/** A guard that was already at the head before the push, in a file the push did not touch. */
+const HEAD_GUARD = 'export const guarded = (card: string) => isValid(card) && notExpired(card);\n';
 
 let head = '';
 let base = '';
 beforeEach(async () => {
   head = await mkdtemp(join(tmpdir(), 'airlock-fixed-head-'));
   base = await mkdtemp(join(tmpdir(), 'airlock-fixed-base-'));
-  for (const [path, text] of Object.entries({ 'src/pay.ts': HEAD_PAY, 'src/audit.ts': HEAD_LOG })) {
+  for (const [path, text] of Object.entries({ 'src/pay.ts': HEAD_PAY, 'src/audit.ts': HEAD_LOG, 'src/guard.ts': HEAD_GUARD })) {
     await mkdir(dirname(join(head, path)), { recursive: true });
     await writeFile(join(head, path), text);
   }
@@ -33,7 +35,16 @@ afterEach(async () => {
   await rm(base, { recursive: true, force: true });
 });
 
-const files = [diff('src/pay.ts', 0, { hunks: [] }), diff('src/audit.ts', 3)];
+/** The push added the card check, line 2 of pay.ts; its other lines were already there. */
+const PAY_DIFF: FileDiff = diff('src/pay.ts', 1, {
+  hunks: [{
+    oldStart: 1, oldLines: 3, newStart: 1, newLines: 4, header: '@@ -1,3 +1,4 @@',
+    lines: HEAD_PAY.split('\n').map((text, i) => (i === 1
+      ? { kind: 'add' as const, oldNo: null, newNo: 2, text }
+      : { kind: 'ctx' as const, oldNo: i === 0 ? 1 : i, newNo: i + 1, text })),
+  }],
+});
+const files = [PAY_DIFF, diff('src/audit.ts', 3)];
 const checkCtx = (over = {}) => ctx({ headDir: head, baseDir: base, files, ...over });
 
 const vanishedFix = (over: Partial<Finding> = {}): Finding => earlierFinding({
@@ -60,6 +71,8 @@ describe('confirmFixed', () => {
       { path: 'src/pay.ts', quote: '// the card is checked by the caller now' }, // a comment proves nothing
       { path: 'src/pay.ts', quote: '}' }, // too short to prove anything
       { path: '../outside/pay.ts', quote: 'if (!isValid(card)) throw new Error("invalid card");' },
+      { path: 'src/pay.ts', quote: 'export function pay(card: string) {' }, // already there: a line the push did not add
+      { path: 'src/guard.ts', quote: 'export const guarded = (card: string) => isValid(card) && notExpired(card);' }, // a file the push did not touch
     ]) {
       const runner = createFakeRunner(() => answer({ evidence }));
       const no = await confirmFixed(runner, checkCtx(), [vanishedFix()]);

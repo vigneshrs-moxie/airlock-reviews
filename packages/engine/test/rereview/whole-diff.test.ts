@@ -164,6 +164,25 @@ describe('a push re-review judges its findings against the whole pull request\'s
     expect(ruled.anchor).toEqual({ status: 'outside-diff', startLine: 10, endLine: 10, comment: null });
   }, SLOW);
 
+  it('without the whole diff, no finding is dropped as pre-existing: the refutation is refused and the finding kept', async () => {
+    const { s, first, head } = await firstThenPush();
+    const gh = fakeGh({ baseSha: s.baseSha, headSha: head });
+    const exec: Exec = async (cmd, args, opts) => (cmd === 'git' && args.includes('merge-base') && !args.includes('--is-ancestor')
+      ? { stdout: '', stderr: 'fatal: no merge base', code: 1 }
+      : gh(cmd, args, opts));
+    // The refund lines were added by the pull request before the last review; the push only put two lines above them.
+    const { doc } = await review({ s, req: { since: { reviewId: first.id } }, exec, script: pushScript([ON_REFUND, ON_EXPIRE]) });
+    expect(doc.notes).toContain(
+      'Airlock could not work out the pull request\'s whole diff, so which lines GitHub shows was judged from the push alone.',
+    );
+    for (const title of [ON_REFUND.title, ON_EXPIRE.title]) {
+      const kept = doc.findings.find((f) => f.title === title)!;
+      expect(kept).toMatchObject({ status: 'new' });
+      expect(kept.checked).toMatch(/could not be confirmed in the code/);
+    }
+    expect(doc.dropped.filter((d) => d.stage === 'challenge')).toEqual([]);
+  }, SLOW);
+
   it('a first review is unchanged: no base-side sentence, and findings judged by its own diff', async () => {
     const s = await scenario(BASE_FILES, HEAD_FILES);
     const { doc, calls } = await review({ s });
