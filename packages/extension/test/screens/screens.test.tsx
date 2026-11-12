@@ -301,6 +301,7 @@ describe('problem and review', () => {
   it('Review again is disabled while busy', () => {
     const pr = prSummary();
     show({ kind: 'review', pr, latest: latestFor(pr), stale: false, busy: true });
+    fireEvent.click(screen.getByRole('tab', { name: 'More' }));
     expect((screen.getByRole('button', { name: 'Review again' }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

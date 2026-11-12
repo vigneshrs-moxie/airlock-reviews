@@ -1,35 +1,29 @@
-import { STATUS_WORD, type Finding, type PostRecord } from '@airlock/shared';
+import type { Finding, PostRecord } from '@airlock/shared';
 import type { ReactNode } from 'react';
-import { PostedMark } from './PostedMark';
-import { locationText, severityWord } from './words';
+import { FindingCard } from './FindingCard';
 
-/** The findings that held up but did not make the top list, one line each. */
-export function AlsoFound({ findings, onOpen, register, postOf = () => undefined, after = () => null }: {
+/** The findings that held up but did not make the top list, one row each, as the top list's rows. */
+export function AlsoFound({ findings, showStatus, selecting, selected, onToggle, onOpen, register, postOf = () => undefined, after = () => null }: {
   findings: readonly Finding[];
+  showStatus: boolean;
+  selecting: boolean;
+  selected: ReadonlySet<string>;
+  onToggle: (finding: Finding) => void;
   /** A finding's post record, when it is posted or its post's outcome is not known. */
   postOf?: (finding: Finding) => PostRecord | undefined;
-  /** What goes under a line's button, outside it (a mark with its own controls). */
+  /** What goes under a row's button, outside it (a mark with its own controls). */
   after?: (finding: Finding) => ReactNode;
   onOpen: (finding: Finding) => void;
   register: (id: string, node: HTMLButtonElement | null) => void;
 }) {
   return (
-    <ul className="plain">
-      {findings.map((f) => {
-        const posted = postOf(f);
-        return (
-          <li key={f.id}>
-            <button type="button" className="line" onClick={() => onOpen(f)} ref={(node) => register(f.id, node)}>
-              <span className="sev">{severityWord(f.severity)}</span>
-              {f.status !== null && <span className="status" data-testid="status">{STATUS_WORD[f.status]}</span>}
-              <span className="title">{f.title}</span>
-              <code className="path">{locationText(f)}</code>
-              {posted !== undefined && posted.outcome === 'posted' && <PostedMark record={posted} link={false} />}
-            </button>
-            {after(f)}
-          </li>
-        );
-      })}
+    <ul className="plain ap-list">
+      {findings.map((f) => (
+        <FindingCard
+          key={f.id} finding={f} showStatus={showStatus} selecting={selecting} selected={selected.has(f.id)} onToggle={() => onToggle(f)}
+          onOpen={() => onOpen(f)} register={register} posted={postOf(f)} after={after(f)}
+        />
+      ))}
     </ul>
   );
 }

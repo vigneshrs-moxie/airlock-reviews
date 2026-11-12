@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gistOf, shortTitle } from '../../src/screens/summary';
+import { cutAtWord, gistOf, shortTitle } from '../../src/screens/summary';
 
 describe('shortTitle', () => {
   it('is the summary stage\'s short title when there is one', () => {
@@ -81,5 +81,61 @@ describe('gistOf', () => {
 
   it('is empty for an empty happens', () => {
     expect(gistOf({ happens: '' })).toBe('');
+  });
+});
+
+// The review screen's cases (its rows use shortTitle; The change tab and the finding use gistOf).
+describe('shortTitle on a review row', () => {
+  it('is the short title when the review has one, trimmed', () => {
+    expect(shortTitle({ title: 'A long technical title about the totals module', short: 'Totals can drift' })).toBe('Totals can drift');
+    expect(shortTitle({ title: 'A long technical title about the totals module', short: ' Totals can drift ' })).toBe('Totals can drift');
+  });
+  it('is the whole title when there is no short one and it fits', () => {
+    expect(shortTitle({ title: 'Totals can drift' })).toBe('Totals can drift');
+    expect(shortTitle({ title: 'Totals can drift', short: '   ' })).toBe('Totals can drift');
+  });
+  it('cuts a 141-character title at a word, to at most 60 characters with an ellipsis', () => {
+    const title = 'The totals module rounds each line before adding them, so an order of many small items can be a cent or more off the amount the customer pays';
+    expect([...title]).toHaveLength(141);
+    const cut = shortTitle({ title });
+    expect(cut).toBe('The totals module rounds each line before adding them, so…');
+    expect([...cut].length).toBeLessThanOrEqual(60);
+    expect(title.startsWith(cut.slice(0, -1))).toBe(true);
+    expect(title[cut.length - 1]).toMatch(/[\s,]/);
+  });
+  it('counts an emoji as one character, as the review document does', () => {
+    const title = `${'😀'.repeat(60)}`;
+    expect(shortTitle({ title })).toBe(title);
+    expect(shortTitle({ title: `${title}a` })).toBe(`${'😀'.repeat(59)}…`);
+  });
+  it('drops a full stop left at the cut', () => {
+    const title = `${'word '.repeat(11)}abc. And then more words past the limit`;
+    expect([...title][58]).toBe('.');
+    expect(shortTitle({ title })).toBe(`${'word '.repeat(11)}abc…`);
+  });
+});
+
+describe('gistOf on The change tab', () => {
+  it('is the gist when the review has one', () => {
+    expect(gistOf({ gist: 'The tests never run the script.', happens: 'It reads the file. Then it checks strings.' })).toBe('The tests never run the script.');
+  });
+  it('is the first sentence of what happens when there is no gist', () => {
+    expect(gistOf({ happens: 'It reads content.js as text. It never runs it.' })).toBe('It reads content.js as text.');
+    expect(gistOf({ happens: 'No full stop at all' })).toBe('No full stop at all');
+  });
+  it('makes a line break inside the first sentence a space', () => {
+    expect(gistOf({ happens: 'It reads\ncontent.js   as text. It never runs it.' })).toBe('It reads content.js as text.');
+  });
+  it('is at most 200 characters, cut at a word', () => {
+    const happens = `${'word '.repeat(60)}end.`;
+    const gist = gistOf({ happens });
+    expect([...gist].length).toBeLessThanOrEqual(200);
+    expect(gist.endsWith('word…')).toBe(true);
+  });
+});
+
+describe('cutAtWord', () => {
+  it('leaves text that fits, with its white space made single', () => {
+    expect(cutAtWord('  a  b\nc ', 10)).toBe('a b c');
   });
 });

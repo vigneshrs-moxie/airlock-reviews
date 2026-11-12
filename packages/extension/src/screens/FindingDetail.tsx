@@ -63,7 +63,7 @@ export interface FindingDetailProps {
   packs: PrSummary['packs'];
   previous: Finding | null;
   next: Finding | null;
-  /** Where the finding is in the list: `index` counts from 1. Shown as "n of m" when given. */
+  /** Where the finding is among the open findings in list order: `index` counts from 1 (1 is the first). Shown as "n of m". */
   position?: { index: number; total: number } | undefined;
   /** Dismiss needs the service; false when the review is shown read-only. */
   canDismiss: boolean;
