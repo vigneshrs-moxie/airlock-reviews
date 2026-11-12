@@ -29,6 +29,8 @@ export interface StoredPreview {
   number: number;
   reviewId: string;
   headSha: string;
+  /** The account the sheet said the review is posted as: the stored review's viewer. A post as another is refused. */
+  viewer: string;
   payload: ReviewPayload;
   items: Array<{ fingerprint: string; aliases: string[]; placement: Placement; title: string }>;
   /** Milliseconds since the epoch, on the service's clock. */
@@ -171,7 +173,7 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
   const now = deps.now().getTime();
   const previewId = `pv_${randomBytes(8).toString('hex')}`;
   const stored: StoredPreview = {
-    previewId, repo, number, reviewId: doc.id, headSha: doc.pr.headSha,
+    previewId, repo, number, reviewId: doc.id, headSha: doc.pr.headSha, viewer: doc.pr.viewer,
     payload: { commit_id: doc.pr.headSha, event: 'COMMENT', body: reviewBody, comments },
     items: chosen.map((f, i) => ({
       fingerprint: f.fingerprint, aliases: (f.aliases ?? []).filter((a) => FINGERPRINT.test(a)).slice(0, ALIASES_KEPT), placement: (items[i] as PostPreviewItem).placement, title: f.title,

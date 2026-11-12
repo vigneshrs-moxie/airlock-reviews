@@ -1,4 +1,5 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
+import { sep } from 'node:path';
 import { MESSAGE_MAX } from '@airlock/shared';
 import type { ZodType } from 'zod';
 import { isExtensionOrigin } from './config.js';
@@ -182,6 +183,17 @@ export function hidePathsIn(text: string, hidePaths: readonly string[]): string 
     hidden = hidden.replace(new RegExp(`${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\s'"\`]*`, 'g'), '<path>');
   }
   return hidden;
+}
+
+/**
+ * Text for the log: every absolute path under a folder of `relativeTo` written from that folder (a pack's
+ * `<pack>/learned/wrong.md`, a record's `posts/<slug>/<n>.json`; the first folder that holds it wins, so list the deeper
+ * one first), and any other path under a folder of `hidePaths` replaced by `<path>`.
+ */
+export function pathsForLog(text: string, relativeTo: readonly string[], hidePaths: readonly string[]): string {
+  let shown = text;
+  for (const folder of relativeTo) if (folder !== '') shown = shown.split(`${folder}${sep}`).join('');
+  return hidePathsIn(shown, hidePaths);
 }
 
 /**

@@ -12,7 +12,7 @@ import { z, type ZodType } from 'zod';
 import { dismiss, DismissError, restore } from './dismissals.js';
 import { plainMessage, type Handler, type Req, type Res, type Route } from './http.js';
 import { buildPreview, PREVIEW_BODY_MAX, Previews } from './posts/preview.js';
-import { forget, post, PostError, postsFor, type PostDeps } from './posts/records.js';
+import { forget, FOUND_ON_GITHUB, post, PostError, postsFor, type PostDeps } from './posts/records.js';
 import { listLearned, removeLearnedLine } from './learned.js';
 import { LimitError, realTimers, Runs, type RunStart } from './runs.js';
 import type { ServiceDeps } from './server.js';
@@ -52,6 +52,8 @@ function reply<T>(schema: ZodType<T>, status: number, value: T): Res {
 const refuse = (status: number, error: string): Res => reply(ApiErrorSchema, status, { error });
 
 const ForgetReplySchema = z.object({ forgotten: z.boolean() });
+/** `POST /posts/forget` when GitHub has the review: the sentence and the record, now posted. */
+const FoundReplySchema = ApiErrorSchema.extend({ record: PostRecordSchema });
 
 /** A posting handler: its PostError is the refusal it answers with. */
 const posting = (handler: Handler): Handler => async (req) => {
@@ -257,7 +259,12 @@ export function reviewRoutes(
     },
     {
       method: 'POST', path: '/posts/forget', requiresOrigin: true, body: ForgetPostBodySchema,
-      handler: posting(async (req) => reply(ForgetReplySchema, 200, await forget(posts, req.body as ForgetPostBody))),
+      handler: posting(async (req) => {
+        const result = await forget(posts, req.body as ForgetPostBody);
+        return 'found' in result
+          ? reply(FoundReplySchema, 409, { error: FOUND_ON_GITHUB, record: result.found })
+          : reply(ForgetReplySchema, 200, result);
+      }),
     },
     {
       method: 'POST', path: '/learned/remove', requiresOrigin: true, body: RemoveLearnedBodySchema,
