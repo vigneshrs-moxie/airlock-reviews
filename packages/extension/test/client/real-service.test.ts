@@ -1,7 +1,7 @@
 // The panel's real client against the service's real server. It lives with the extension's tests, which are typed with
 // bundler resolution and so can import the service's source by path: a test-only import, so neither package depends on
 // the other when it runs. It runs in Node, as the service does, with a fetch that adds the Origin Chrome adds.
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -20,7 +20,7 @@ const OTHER_EXTENSION = `chrome-extension://${'b'.repeat(32)}`;
 
 const pull = JSON.stringify({
   title: 'Add totals', body: 'Adds totals.', additions: 40, deletions: 10, changed_files: 3,
-  html_url: `https://github.com/${REPO}/pull/7`, user: { login: 'alice' },
+  html_url: `https://github.com/${REPO}/pull/7`, user: { login: 'alice' }, state: 'open', merged: false,
   base: { ref: 'main', sha: 'a'.repeat(40), repo: { full_name: REPO } },
   head: { ref: 'feature/totals', sha: 'b'.repeat(40), repo: { full_name: REPO } },
 });
@@ -32,6 +32,36 @@ const finding: Finding = {
 function reviewOf(number: number): ReviewDocument {
   const base = minimalDocument();
   return { ...base, id: 'r_0123456789', pr: { ...base.pr, repo: REPO, number }, findings: [finding] };
+}
+
+/** The one GitHub write, as the service's `sendReview` makes it, for pull request 7. */
+const POST_LINE = `gh api --method POST repos/${REPO}/pulls/7/reviews --input -`;
+const POSTED = JSON.stringify({ id: 555, html_url: `https://github.com/${REPO}/pull/7#pullrequestreview-555`, state: 'COMMENTED' });
+
+/** A review of pull request 7 at the pull request's head: one finding on a line of the diff, one on no line GitHub shows. */
+function postable(): ReviewDocument {
+  const base = minimalDocument();
+  const inline: Finding = {
+    ...finding, id: 'c_aaaaaaaa', fingerprint: '1111111111111111', title: 'Total is not rounded',
+    anchor: { status: 'in-diff', startLine: 12, endLine: 12, comment: { line: 12, startLine: null } },
+  };
+  const outside: Finding = {
+    ...finding, id: 'c_bbbbbbbb', fingerprint: '2222222222222222', title: 'The cache is never cleared', path: 'src/cache.ts',
+    anchor: { status: 'outside-diff', startLine: 40, endLine: 41, comment: null },
+  };
+  return { ...base, id: 'r_0123456789', pr: { ...base.pr, repo: REPO, number: 7, headSha: 'b'.repeat(40) }, findings: [inline, outside] };
+}
+
+/** One pack chosen for the repository, with two learned lines in its wrong.md. */
+async function writePack(packsDir: string): Promise<string> {
+  const dir = join(packsDir, 'acme');
+  await mkdir(join(dir, 'lenses'), { recursive: true });
+  await mkdir(join(dir, 'learned'), { recursive: true });
+  await writeFile(join(dir, 'lenses', 'look.md'), 'Look closely.\n');
+  await writeFile(join(dir, 'pack.yaml'), `id: acme\ntitle: Acme pack\nrepos: [${REPO}]\nlenses:\n  - { id: look, title: Look, file: lenses/look.md }\n`);
+  const file = join(dir, 'learned', 'wrong.md');
+  await writeFile(file, `2026-11-01 · ${REPO} · Rounding is done by the caller.\n2026-11-05 · ${REPO} · The cache is cleared on deploy.\n`);
+  return file;
 }
 
 interface Launched { emit: (e: ReviewEvent) => void; finish: (doc: ReviewDocument) => Promise<void> }
@@ -66,7 +96,11 @@ function recorded(inner: typeof fetch): { fetch: typeof fetch; seen: Array<{ url
 
 async function startService(
   now: () => Date = () => new Date(), monotonic: () => number = () => performance.now(),
-): Promise<{ service: Service; base: string; token: string; home: string; launched: Launched[] }> {
+): Promise<{
+  service: Service; base: string; token: string; home: string; launched: Launched[];
+  /** Every command the fake `gh` was asked to run, with what it was given on standard input. */
+  gh: Array<{ line: string; input: string | undefined }>;
+}> {
   const home = await mkdtemp(join(tmpdir(), 'airlock-panel-client-'));
   const saved = process.env['AIRLOCK_HOME'];
   process.env['AIRLOCK_HOME'] = home;
@@ -80,10 +114,14 @@ async function startService(
     [`gh api repos/${REPO}/pulls/7`, { stdout: pull, stderr: '', code: 0 }],
     [`gh api repos/${REPO}/pulls/8`, { stdout: pull.replaceAll('/pull/7', '/pull/8'), stderr: '', code: 0 }],
     ['gh api user --jq .login', { stdout: 'bob\n', stderr: '', code: 0 }],
+    [POST_LINE, { stdout: POSTED, stderr: '', code: 0 }],
   ]);
+  const gh: Array<{ line: string; input: string | undefined }> = [];
   const engine: EngineDeps = {
-    exec: async (cmd, args) => {
-      const answer = answers.get([cmd, ...args].join(' '));
+    exec: async (cmd, args, opts) => {
+      const line = [cmd, ...args].join(' ');
+      gh.push({ line, input: opts?.input });
+      const answer = answers.get(line);
       if (answer === undefined) return { stdout: '', stderr: 'gh: Not Found (HTTP 404)', code: 1 };
       return answer;
     },
@@ -100,7 +138,7 @@ async function startService(
     else process.env['AIRLOCK_HOME'] = saved;
     await rm(home, { recursive: true, force: true });
   });
-  return { service, base: `http://127.0.0.1:${port}`, token: await readOrCreateToken(home), home, launched };
+  return { service, base: `http://127.0.0.1:${port}`, token: await readOrCreateToken(home), home, launched, gh };
 }
 
 async function until(check: () => boolean, what: string): Promise<void> {
@@ -245,5 +283,100 @@ describe('the panel\'s client and the real service', () => {
     await s.service.close();
     expect(await client.hello()).toBe('offline');
     expect((await refusal(client.pr(REPO, 7))).kind).toBe('offline');
+  });
+
+  it('previews, posts once through the Origin rule and the proof gate, names the people an edited summary would notify, and forgets only an unknown record', async () => {
+    const s = await startService();
+    await saveReview(postable());
+    const pairing = new ServiceClient(s.base, async () => null, chromeFetch(ORIGIN));
+    expect(await pairing.pair(s.token)).toEqual({ paired: true, extension: 'new' });
+    const asked = recorded(chromeFetch(ORIGIN));
+    const client = new ServiceClient(s.base, async () => s.token, asked.fetch);
+    const items = [{ fingerprint: '1111111111111111' }, { fingerprint: '2222222222222222' }];
+
+    // The preview: one comment on its line, one in the summary because GitHub shows no line for it. Airlock's own text
+    // names no one.
+    const preview = await client.previewPost({ repo: REPO, number: 7, reviewId: 'r_0123456789', items });
+    expect(preview.items.map((i) => [i.placement, i.line, i.whySummary, i.mentions])).toEqual([
+      ['inline', 12, null, []], ['summary', 40, 'The line is not part of the diff GitHub shows.', []],
+    ]);
+    expect(preview.reviewBodyMentions).toEqual([]);
+    // The token went only after the real service proved it holds it, and nothing has reached GitHub's write yet.
+    expect(asked.seen.map((r) => [new URL(r.url).pathname, r.auth])).toEqual([
+      ['/hello', null], ['/posts/preview', `Bearer ${s.token}`],
+    ]);
+    expect(s.gh.filter((c) => c.line === POST_LINE)).toEqual([]);
+
+    // The same request without the extension's Origin, token and all, is refused before anything is read.
+    const bare = await fetch(`${s.base}/posts/preview`, {
+      method: 'POST', headers: { Authorization: `Bearer ${s.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: REPO, number: 7, reviewId: 'r_0123456789', items }),
+    });
+    expect(bare.status).toBe(403);
+    expect(await bare.json()).toEqual({ error: 'Airlock does not accept requests from this page.' });
+
+    // A summary the person typed: the names it would notify come back, so the panel can warn before the post.
+    const edited = await client.previewPost({
+      repo: REPO, number: 7, reviewId: 'r_0123456789', items, summary: 'Two notes, @alice. Ask @bob about the cache.',
+    });
+    expect(edited.summary).toBe('Two notes, @alice. Ask @bob about the cache.');
+    expect(edited.reviewBodyMentions).toEqual(['@alice', '@bob']);
+
+    // The post: the stored preview is sent once, exactly as previewed, as a COMMENT review, and its record comes back.
+    const outcome = await client.post({ previewId: preview.previewId });
+    expect(outcome).toEqual({ outcome: 'posted', record: expect.objectContaining({
+      repo: REPO, number: 7, reviewId: 'r_0123456789', outcome: 'posted', githubReviewId: 555,
+      url: `https://github.com/${REPO}/pull/7#pullrequestreview-555`,
+    }) });
+    const writes = s.gh.filter((c) => c.line === POST_LINE);
+    expect(writes).toHaveLength(1);
+    const sent = JSON.parse(writes[0]!.input ?? '') as { event: string; commit_id: string; body: string; comments: unknown[] };
+    expect(sent).toMatchObject({ event: 'COMMENT', commit_id: 'b'.repeat(40), body: preview.reviewBody });
+    expect(sent.comments).toEqual([{ path: 'src/total.ts', line: 12, side: 'RIGHT', body: preview.items[0]!.body }]);
+    if (outcome.outcome !== 'posted') throw new Error('not posted');
+    expect((await client.latest(REPO, 7))?.posts).toEqual([outcome.record]);
+
+    // Posting twice: the spent preview is gone, and a new preview of the same findings is refused.
+    expect(await client.post({ previewId: preview.previewId })).toEqual({
+      outcome: 'refused', message: 'This preview has expired. Open the preview again.',
+    });
+    expect(await refusal(client.previewPost({ repo: REPO, number: 7, reviewId: 'r_0123456789', items }))).toEqual({
+      kind: 'problem', message: 'This finding is already posted on this pull request: Total is not rounded.',
+    });
+    expect(s.gh.filter((c) => c.line === POST_LINE)).toHaveLength(1);
+
+    // Forget: a record the service does not have is not forgotten; a posted one is kept.
+    expect(await client.forgetPost({ repo: REPO, number: 7, id: 'post_000000000000' })).toEqual({ forgotten: false });
+    expect(await refusal(client.forgetPost({ repo: REPO, number: 7, id: outcome.record.id }))).toEqual({
+      kind: 'problem', message: 'This review was posted, so Airlock keeps its record.',
+    });
+    // Every request that carried the token came after a hello the real service proved.
+    expect(asked.seen.filter((r) => r.auth !== null).every((r) => r.auth === `Bearer ${s.token}`)).toBe(true);
+    expect(asked.seen[0]).toEqual({ url: expect.stringContaining('/hello?nonce='), auth: null });
+  });
+
+  it('lists the learned lines of the packs chosen for the repository, newest first, and removes one', async () => {
+    const s = await startService();
+    const file = await writePack(join(s.home, 'packs'));
+    const client = new ServiceClient(s.base, async () => s.token, chromeFetch(ORIGIN));
+    expect(await client.pair(s.token)).toEqual({ paired: true, extension: 'new' });
+
+    const listed = await client.learned(REPO);
+    expect(listed.cap).toBe(300);
+    expect(listed.lines.map((l) => [l.pack, l.packTitle, l.kind, l.date, l.repo, l.text, l.appliesHere, l.removable])).toEqual([
+      ['acme', 'Acme pack', 'wrong', '2026-11-05', REPO, 'The cache is cleared on deploy.', true, true],
+      ['acme', 'Acme pack', 'wrong', '2026-11-01', REPO, 'Rounding is done by the caller.', true, true],
+    ]);
+    const newest = listed.lines[0]!;
+
+    expect(await client.removeLearned({ repo: REPO, pack: newest.pack, kind: newest.kind, key: newest.key })).toEqual({
+      removed: true, note: null,
+    });
+    expect(await readFile(file, 'utf8')).toBe(`2026-11-01 · ${REPO} · Rounding is done by the caller.\n`);
+    expect((await client.learned(REPO)).lines.map((l) => l.text)).toEqual(['Rounding is done by the caller.']);
+    // Asked again, the line is no longer there: nothing is removed, and the note says so.
+    expect(await client.removeLearned({ repo: REPO, pack: newest.pack, kind: newest.kind, key: newest.key })).toEqual({
+      removed: false, note: "That line was no longer in Acme pack's wrong.md; nothing was removed.",
+    });
   });
 });
