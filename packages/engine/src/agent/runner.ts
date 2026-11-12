@@ -16,6 +16,8 @@ export interface AgentRequest<T> {
   timeoutMs?: number;
   /** Sent once by withRetry even when the answer is unusable (the mapper's own retry is already one). */
   noRetry?: boolean;
+  /** The request needs no files: the runner offers it none of its reading tools. */
+  noTools?: boolean;
   signal?: AbortSignal;
 }
 
