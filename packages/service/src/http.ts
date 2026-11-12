@@ -1,4 +1,5 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
+import { sep } from 'node:path';
 import { MESSAGE_MAX } from '@airlock/shared';
 import type { ZodType } from 'zod';
 import { isExtensionOrigin } from './config.js';
@@ -36,8 +37,11 @@ export interface Route {
   /** The pairing route: the Origin header is required and must be a chrome-extension origin; the handler decides the rest. */
   pairing?: boolean;
   /**
-   * The Origin header must be present and equal the paired origin (not merely checked when present): the routes that can
-   * lead to a GitHub write, so a local command without the extension's Origin cannot reach them.
+   * The Origin header must be present and equal the paired origin (not merely checked when present): the routes that
+   * write learned lines (which later reviews are given as instructions) or can lead to the GitHub write. A browser sets
+   * the Origin of every POST itself, so this stops a web page, and another extension, even one that somehow had the
+   * token. It does not stop a program on this Mac that holds the token: such a program sets any Origin it likes, and the
+   * paired origin is no secret. The token is what stops it.
    */
   requiresOrigin?: boolean;
   /** The most bytes this route's body may have, in place of MAX_BODY_BYTES; checked while the body is read. */
@@ -54,6 +58,13 @@ export interface Route {
 export interface Auth { tokens: TokenKeeper; port: number; pairedOrigin: () => Promise<string | null> }
 
 export const MAX_BODY_BYTES = 64 * 1024;
+/**
+ * How much more than a route's limit the service reads and throws away before it answers 413. Answering while the
+ * client is still sending, then closing, makes the client's next write fail (a broken pipe or a reset) and it may never
+ * read the 413; so a body that ends within this bound is read to its end first. Past it, the service stops reading and
+ * closes. Only a holder of the token gets this far: the token is checked before the body is read.
+ */
+export const MAX_DRAINED_BYTES = 2 * 1024 * 1024;
 const METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const MAX_LOGGED_PATH = 200;
 
@@ -103,9 +114,13 @@ function matchRoute(route: Route, segments: string[]): Record<string, string> | 
   return params;
 }
 
-type BodyResult = { ok: true; text: string } | { ok: false; status: 413 };
+/** The body; or too large, read to its end (`drained`) or not, in which case the caller closes the connection. */
+type BodyResult = { ok: true; text: string } | { ok: false; status: 413; drained: boolean };
 
-/** Reads at most `limit` bytes. Past that it stops reading and reports 413; the caller answers and closes the connection. */
+/**
+ * Keeps at most `limit` bytes. Past that it keeps reading and throws the rest away, up to `limit + MAX_DRAINED_BYTES` in
+ * all, and reports 413 at the end of the body (drained); past that bound it stops reading and reports 413 at once.
+ */
 function readBody(req: IncomingMessage, limit: number): Promise<BodyResult> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -118,14 +133,16 @@ function readBody(req: IncomingMessage, limit: number): Promise<BodyResult> {
     };
     const onData = (chunk: Buffer): void => {
       size += chunk.length;
-      if (size > limit) {
+      if (size > limit + MAX_DRAINED_BYTES) {
         req.pause();
-        done({ ok: false, status: 413 });
+        done({ ok: false, status: 413, drained: false });
         return;
       }
-      chunks.push(chunk);
+      if (size <= limit) chunks.push(chunk);
     };
-    const onEnd = (): void => done({ ok: true, text: Buffer.concat(chunks).toString('utf8') });
+    const onEnd = (): void => done(size > limit
+      ? { ok: false, status: 413, drained: true }
+      : { ok: true, text: Buffer.concat(chunks).toString('utf8') });
     const onError = (e: Error): void => {
       req.off('data', onData);
       req.off('end', onEnd);
@@ -182,6 +199,17 @@ export function hidePathsIn(text: string, hidePaths: readonly string[]): string 
     hidden = hidden.replace(new RegExp(`${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\s'"\`]*`, 'g'), '<path>');
   }
   return hidden;
+}
+
+/**
+ * Text for the log: every absolute path under a folder of `relativeTo` written from that folder (a pack's
+ * `<pack>/learned/wrong.md`, a record's `posts/<slug>/<n>.json`; the first folder that holds it wins, so list the deeper
+ * one first), and any other path under a folder of `hidePaths` replaced by `<path>`.
+ */
+export function pathsForLog(text: string, relativeTo: readonly string[], hidePaths: readonly string[]): string {
+  let shown = text;
+  for (const folder of relativeTo) if (folder !== '') shown = shown.split(`${folder}${sep}`).join('');
+  return hidePathsIn(shown, hidePaths);
 }
 
 /**
@@ -303,13 +331,14 @@ export function createRouter(
           return;
         }
         const limit = route.maxBodyBytes ?? MAX_BODY_BYTES;
-        if (length !== undefined && Number(length) > limit) {
+        // Announced past the bound of what is read and thrown away: answered at once, nothing read.
+        if (length !== undefined && Number(length) > limit + MAX_DRAINED_BYTES) {
           writeJson(res, 413, { error: 'The request body is too large.' }, { Connection: 'close' });
           return;
         }
         const read = await readBody(req, limit);
         if (!read.ok) {
-          res.once('finish', () => req.destroy());
+          if (!read.drained) res.once('finish', () => req.destroy());
           writeJson(res, 413, { error: 'The request body is too large.' }, { Connection: 'close' });
           return;
         }

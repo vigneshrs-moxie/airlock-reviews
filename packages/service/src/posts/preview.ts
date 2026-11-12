@@ -1,11 +1,11 @@
 import { randomBytes } from 'node:crypto';
-import { reviewById } from '@airlock/engine';
+import { reviewById, type Exec } from '@airlock/engine';
 import {
   checkCommentText, commentBody, postMentions, REVIEW_BODY_MAX, summaryBody, SUMMARY_MAX, type Dismissal,
   type Finding, type Placement, type PostPreviewBody, type PostPreviewItem, type PostPreviewReply,
 } from '@airlock/shared';
-import type { ReviewComment, ReviewPayload } from './github.js';
-import { blockingRecord, fit, keysOf, PostError, recordsOf, shown } from './records.js';
+import { readLogin, type ReviewComment, type ReviewPayload } from './github.js';
+import { blockingRecord, fit, keysOf, NO_GH, PostError, recordsOf, shown } from './records.js';
 
 /** How long a preview can be posted, from when it was made (or, after GitHub refused it, from the refusal). */
 export const PREVIEW_MS = 10 * 60_000;
@@ -29,6 +29,8 @@ export interface StoredPreview {
   number: number;
   reviewId: string;
   headSha: string;
+  /** The account the sheet said the review is posted as: gh's signed-in account when the preview was made. A post as another is refused. */
+  viewer: string;
   payload: ReviewPayload;
   items: Array<{ fingerprint: string; aliases: string[]; placement: Placement; title: string }>;
   /** Milliseconds since the epoch, on the service's clock. */
@@ -76,6 +78,8 @@ export interface PreviewDeps {
   previews: Previews;
   /** The dismissals recorded for a pull request. */
   dismissals: (repo: string, number: number) => Promise<Dismissal[]>;
+  /** Runs commands: here only the read of the signed-in account. */
+  exec: Exec;
 }
 
 
@@ -88,7 +92,9 @@ const shares = (keys: readonly string[], f: Finding): boolean => keysOf(f.finger
  * Builds the exact review `POST /posts` would send for chosen findings of a stored review, and stores it for PREVIEW_MS.
  * Refuses (PostError) a review that is not this pull request's (404); a finding it does not have or that is fixed (404);
  * one chosen twice (400); one dismissed, posted, or of a post whose outcome is not known (409); text the person gave that
- * `checkCommentText` refuses (400); and a review text over REVIEW_BODY_MAX (400).
+ * `checkCommentText` refuses (400); and a review text over REVIEW_BODY_MAX (400). Last, the account gh is signed in as
+ * now is read (`readLogin`, within ten seconds): it is the account the preview names and the post must be made as. When
+ * it cannot be read the preview is refused (502) and nothing is stored.
  */
 export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Promise<PostPreviewReply> {
   const doc = await reviewById(body.repo, body.number, body.reviewId);
@@ -132,8 +138,9 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
     // Airlock's own text when it is exactly the drafted comment; the names are filled once the review body is known.
     const isDefault = text === drafted;
     const mentions: string[] = [];
+    // The drafted text always fits (`commentBody` cuts it); a refusal of the person's text names its finding.
     const problem = checkCommentText(text);
-    if (problem !== null) throw new PostError(400, problem);
+    if (problem !== null) throw new PostError(400, fit(`${problem.replace(/\.$/, '')}: ${shown(finding.title)}.`));
     const place = finding.anchor.comment ?? null;
     if (place !== null && item.placement !== 'summary') {
       const startLine = place.startLine !== null && place.startLine < place.line ? place.startLine : null;
@@ -167,10 +174,14 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
     throw new PostError(400, `The review's text is longer than the ${REVIEW_BODY_MAX} characters GitHub accepts; put fewer comments in the summary.`);
   }
 
+  // The account the review would be posted as now, not the one the stored review was made as.
+  const viewer = await readLogin(deps.exec);
+  if (viewer === null) throw new PostError(502, NO_GH);
+
   const now = deps.now().getTime();
   const previewId = `pv_${randomBytes(8).toString('hex')}`;
   const stored: StoredPreview = {
-    previewId, repo, number, reviewId: doc.id, headSha: doc.pr.headSha,
+    previewId, repo, number, reviewId: doc.id, headSha: doc.pr.headSha, viewer,
     payload: { commit_id: doc.pr.headSha, event: 'COMMENT', body: reviewBody, comments },
     items: chosen.map((f, i) => ({
       fingerprint: f.fingerprint, aliases: (f.aliases ?? []).filter((a) => FINGERPRINT.test(a)).slice(0, ALIASES_KEPT), placement: (items[i] as PostPreviewItem).placement, title: f.title,
@@ -181,6 +192,6 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
   const named = postMentions(texts, { isDefault: summary === generated }, reviewBody);
   for (const [i, item] of items.entries()) item.mentions = named.items[i] ?? [];
   return {
-    previewId, headSha: doc.pr.headSha, viewer: doc.pr.viewer, items, summary, reviewBody, reviewBodyMentions: named.reviewBody, expiresAt: new Date(stored.expiresAt).toISOString(),
+    previewId, headSha: doc.pr.headSha, viewer, items, summary, reviewBody, reviewBodyMentions: named.reviewBody, expiresAt: new Date(stored.expiresAt).toISOString(),
   };
 }

@@ -2,13 +2,15 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 
 /**
  * The proof that whatever answers `/hello` holds the pairing token, so the panel and `status` can check it before they
- * send the token: the HMAC-SHA256, in lower-case hex, of `airlock-hello:<nonce>` keyed with the token's characters.
+ * send the token: the HMAC-SHA256, in lower-case hex, of `airlock-hello:<port>:<nonce>` keyed with the token's
+ * characters. The service puts in the port it really listens on; the panel and `status` put in the port they connect
+ * to, so a proof the real service gave on another port (asked for by whatever holds Airlock's port) does not match.
  * The nonce is 16 random bytes as 32 lower-case hex characters, new for every ask.
  */
 export const NONCE_PATTERN = /^[0-9a-f]{32}$/;
 
-export const helloProof = (token: string, nonce: string): string =>
-  createHmac('sha256', token).update(`airlock-hello:${nonce}`).digest('hex');
+export const helloProof = (token: string, port: number, nonce: string): string =>
+  createHmac('sha256', token).update(`airlock-hello:${port}:${nonce}`).digest('hex');
 
 export const newNonce = (): string => randomBytes(16).toString('hex');
 

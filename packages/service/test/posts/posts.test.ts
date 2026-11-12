@@ -1,15 +1,20 @@
-import { chmod } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { createHash } from 'node:crypto';
+import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { saveReview } from '@airlock/engine';
+import { saveReview, type Exec } from '@airlock/engine';
 import {
-  COMMENT_MAX, commentBody, LatestReplySchema, MESSAGE_MAX, PostPreviewReplySchema, PostRecordSchema, REVIEW_BODY_MAX, summaryBody,
+  COMMENT_MAX, commentBody, CUT_NOTE, LatestReplySchema, MESSAGE_MAX, PostPreviewReplySchema, PostRecordSchema, REVIEW_BODY_MAX, summaryBody,
   type PostPreviewReply, type PostRecord,
 } from '@airlock/shared';
 import { readOrCreateToken } from '../../src/config.js';
+import { writeList } from '../../src/dismissals.js';
+import { buildPreview, Previews, type StoredPreview } from '../../src/posts/preview.js';
+import { post, type PostDeps } from '../../src/posts/records.js';
 import {
   cleanUp, EXPIRED, FINDING_A, FINDING_B, FINDING_C, FP_A, FP_B, FP_C, FP_C_ALIAS, FP_D, HEAD, NUMBER, POST_ARGS, POSTED, pull, PULL_LINE,
-  POST_LINE, REPO, REVIEW, review, startService, type ExecResult, type Rig,
+  POST_LINE, REPO, REVIEW, REVIEWS_LINE, review, startService, USER_LINE, type ExecResult, type Rig,
 } from './rig.js';
 import { until } from '../helpers.js';
 
@@ -17,6 +22,12 @@ afterEach(cleanUp);
 
 const MOVED = 'The pull request has new commits since this review. Review the push, then post.';
 const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
+const NO_GH = 'Airlock could not run gh, or gh is not signed in. Nothing was posted.';
+const FOUND = 'GitHub has this review: it was posted. Nothing was forgotten.';
+const NOT_ASKED = 'Airlock could not ask GitHub whether this review exists, so the record was kept.';
+const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
+/** The commands run besides the read of the signed-in account that every preview makes. */
+const beyondAccount = (s: Rig): string[] => s.calls.map((c) => c.line).filter((line) => line !== USER_LINE);
 const TIMED_OUT: ExecResult = { stdout: '', stderr: 'timed out after 60 s', code: 124 };
 const REFUSED: ExecResult = {
   stdout: JSON.stringify({ message: 'Validation failed', errors: ['pull_request_review_thread.line must be part of the diff'], status: '422' }),
@@ -80,11 +91,12 @@ describe('POST /posts/preview', () => {
     expect((await s.preview({ items: [{ fingerprint: FP_A, body: 'x'.repeat(4000) }] })).status).toBe(200);
     expect((await s.preview({ items: [{ fingerprint: FP_A }], summary: 'y'.repeat(4000) })).status).toBe(200);
 
+    // A refusal about a comment's text names the finding it belongs to.
     const refused: Array<[Record<string, unknown>, string]> = [
-      [{ items: [{ fingerprint: FP_A, body: 'Hidden​ here.' }] }, 'The text has a hidden character; remove it.'],
-      [{ items: [{ fingerprint: FP_A, body: '' }] }, 'The text is empty.'],
-      [{ items: [{ fingerprint: FP_A, body: '  \n ' }] }, 'The text is empty.'],
-      [{ items: [{ fingerprint: FP_A, body: 'x'.repeat(4001) }] }, 'The text is 1 character longer than the 4000 allowed.'],
+      [{ items: [{ fingerprint: FP_A, body: 'Hidden​ here.' }] }, 'The text has a hidden character; remove it: Total is not rounded.'],
+      [{ items: [{ fingerprint: FP_A, body: '' }] }, 'The text is empty: Total is not rounded.'],
+      [{ items: [{ fingerprint: FP_A }, { fingerprint: FP_B, body: '  \n ' }] }, 'The text is empty: The cache is never cleared.'],
+      [{ items: [{ fingerprint: FP_A, body: 'x'.repeat(4001) }] }, 'The text is 1 character longer than the 4000 allowed: Total is not rounded.'],
       [{ items: [{ fingerprint: FP_A }], summary: 'Sum‮mary' }, 'The text has a hidden character; remove it.'],
       [{ items: [{ fingerprint: FP_A }], summary: '' }, 'The text is empty.'],
       [{ items: [{ fingerprint: FP_A }], summary: 'y'.repeat(4001) }, 'The text is 1 character longer than the 4000 allowed.'],
@@ -129,7 +141,19 @@ describe('POST /posts/preview', () => {
     const unknownOutcome = await s.preview({ items: [{ fingerprint: FP_A }] });
     expect(unknownOutcome.status).toBe(409);
     expect((unknownOutcome.json as { error: string }).error).toContain(FINDING_A.title);
-    expect(s.calls).toEqual([]);
+    expect(beyondAccount(s)).toEqual([]);
+  });
+
+  it('a finding whose drafted comment is over 4,000 characters is previewed cut to fit, saying so', async () => {
+    const s = await startService();
+    const change = Array.from({ length: 600 }, (_, i) => `const row${i} = total(${i});`).join('\n');
+    const long = { ...FINDING_A, suggestedChange: change };
+    await saveReview({ ...review(), id: 'r_3333333333', findings: [long, FINDING_B] });
+    expect([...commentBody(long)].length).toBeLessThanOrEqual(COMMENT_MAX);
+    const p = await previewed(s, { reviewId: 'r_3333333333', items: [{ fingerprint: FP_A }, { fingerprint: FP_B }] });
+    expect(p.items[0]?.body).toBe(commentBody(long));
+    expect(p.items[0]?.body.endsWith(`\n\n${CUT_NOTE}`)).toBe(true);
+    expect(p.items[0]?.mentions).toEqual([]);
   });
 
   it('refuses a review text longer than REVIEW_BODY_MAX', async () => {
@@ -153,7 +177,9 @@ describe('POST /posts', () => {
       const refused = await s.call('POST', '/posts', { previewId: p.previewId, ...extra });
       expect(refused.status, JSON.stringify(extra)).toBe(400);
     }
-    expect(s.calls).toEqual([]);
+    // The preview read only the account it names.
+    expect(s.calls.map((c) => [c.line, c.timeoutMs])).toEqual([[USER_LINE, 10_000]]);
+    s.calls.splice(0);
     const r = await s.post(p.previewId);
     expect(r.status, JSON.stringify(r.json)).toBe(200);
     const posted = PostRecordSchema.parse(r.json);
@@ -166,9 +192,10 @@ describe('POST /posts', () => {
         { fingerprint: FP_C, aliases: [FP_C_ALIAS], placement: 'inline' },
       ],
     });
-    // Only the pull request is read first, within ten seconds, then the one write.
-    expect(s.calls.map((c) => c.line)).toEqual([PULL_LINE, POST_LINE]);
-    expect(s.calls[0]?.timeoutMs).toBe(10_000);
+    // The pull request and the signed-in account are read first, each within ten seconds, then the one write.
+    expect(s.calls.map((c) => [c.line, c.timeoutMs])).toEqual([[PULL_LINE, 10_000], [USER_LINE, 10_000], [POST_LINE, 45_000]]);
+    // The record keeps the account it was posted as and the hash of the review's text, not the text.
+    expect(posted).toMatchObject({ postedAs: 'bob', bodyHash: sha256(p.reviewBody) });
     const [write] = s.writes();
     expect(write?.args).toEqual(POST_ARGS);
     expect(write?.input).toBe(JSON.stringify({
@@ -229,6 +256,112 @@ describe('POST /posts', () => {
     expect((await s.post(p.previewId)).status).toBe(200);
   });
 
+  it('the account is read beside the pull request, and a post as another account than the preview named is refused', async () => {
+    const s = await startService();
+    const p = await previewed(s);
+    expect(p.viewer).toBe('bob');
+    // Both reads are under way at once: the pull request answers only once the account was asked for.
+    s.answers.set(PULL_LINE, async () => {
+      await until(() => s.calls.some((c) => c.line === USER_LINE), 'the account read');
+      return { stdout: pull(), stderr: '', code: 0 };
+    });
+    s.answers.set(USER_LINE, { stdout: 'alice\n', stderr: '', code: 0 });
+    const r = await s.post(p.previewId);
+    expect([r.status, r.json]).toEqual([409, { error: 'gh is now signed in as alice, but this preview was made to post as bob. Open the preview again.' }]);
+    expect(s.writes()).toEqual([]);
+    expect(await latestPosts(s)).toEqual([]);
+    expect(await s.readRecords().catch(() => 'no file')).toBe('no file');
+
+    // The same account in another letter case is the same account: posted, and the record says as whom.
+    s.answers.set(USER_LINE, { stdout: 'Bob\n', stderr: '', code: 0 });
+    const ok = await s.post(p.previewId);
+    expect(ok.status).toBe(200);
+    expect(PostRecordSchema.parse(ok.json).postedAs).toBe('Bob');
+    expect(s.writes()).toHaveLength(1);
+  });
+
+  it('a post is refused with the could-not-run-gh sentence when the signed-in account cannot be read', async () => {
+    const s = await startService();
+    const p = await previewed(s);
+    const answers: Array<ExecResult | (() => Promise<ExecResult>)> = [
+      { stdout: '', stderr: 'To get started with GitHub CLI, please run:  gh auth login', code: 4 },
+      { stdout: '{"message":"Bad credentials"}', stderr: 'gh: Bad credentials (HTTP 401)', code: 1 },
+      { stdout: '', stderr: 'timed out after 10 s', code: 124 },
+      { stdout: '\n', stderr: '', code: 0 },
+      { stdout: 'bob smith\n', stderr: '', code: 0 },
+      async () => { throw Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }); },
+    ];
+    for (const answer of answers) {
+      s.answers.set(USER_LINE, answer);
+      const r = await s.post(p.previewId);
+      expect([r.status, r.json]).toEqual([502, { error: NO_GH }]);
+    }
+    expect(s.writes()).toEqual([]);
+    expect(await latestPosts(s)).toEqual([]);
+  });
+
+  it('the preview names the account gh is signed in as now, read within ten seconds, and its post goes out as that account', async () => {
+    const s = await startService();
+    // The stored review was made as bob; gh is now signed in as carol.
+    s.answers.set(USER_LINE, { stdout: 'carol\n', stderr: '', code: 0 });
+    const p = await previewed(s);
+    expect(p.viewer).toBe('carol');
+    expect(s.calls.map((c) => [c.line, c.timeoutMs])).toEqual([[USER_LINE, 10_000]]);
+    const r = await s.post(p.previewId);
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect(PostRecordSchema.parse(r.json).postedAs).toBe('carol');
+    expect(s.writes()).toHaveLength(1);
+  });
+
+  it('after a switch of account, a preview made before it is refused at post, and a new preview names and posts as the new account', async () => {
+    const s = await startService();
+    const before = await previewed(s);
+    expect(before.viewer).toBe('bob');
+    s.answers.set(USER_LINE, { stdout: 'alice\n', stderr: '', code: 0 });
+    const refused = await s.post(before.previewId);
+    expect([refused.status, refused.json]).toEqual([409, { error: 'gh is now signed in as alice, but this preview was made to post as bob. Open the preview again.' }]);
+    expect(s.writes()).toEqual([]);
+    const after = await previewed(s);
+    expect(after.viewer).toBe('alice');
+    const posted = await s.post(after.previewId);
+    expect(posted.status, JSON.stringify(posted.json)).toBe(200);
+    expect(PostRecordSchema.parse(posted.json).postedAs).toBe('alice');
+    expect(s.writes()).toHaveLength(1);
+  });
+
+  it('a preview is refused with the could-not-run-gh sentence when the account cannot be read, and nothing is stored', async () => {
+    const s = await startService();
+    class Counting extends Previews {
+      added = 0;
+      override add(preview: StoredPreview): void { this.added += 1; super.add(preview); }
+    }
+    const answers: Array<ExecResult | (() => Promise<ExecResult>)> = [
+      { stdout: '', stderr: 'To get started with GitHub CLI, please run:  gh auth login', code: 4 },
+      { stdout: '', stderr: 'timed out after 10 s', code: 124 },
+      { stdout: 'bob smith\n', stderr: '', code: 0 },
+      async () => { throw Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }); },
+    ];
+    for (const answer of answers) {
+      s.answers.set(USER_LINE, answer);
+      const r = await s.preview();
+      expect([r.status, r.json]).toEqual([502, { error: NO_GH }]);
+      // Called directly, nothing is added to the previews.
+      const previews = new Counting();
+      const exec: Exec = async (cmd, args) => {
+        const line = [cmd, ...args].join(' ');
+        const found = s.answers.get(line);
+        if (found === undefined) throw new Error(`no fake answer for ${line}`);
+        return typeof found === 'function' ? found() : found;
+      };
+      await expect(buildPreview(
+        { home: s.home, now: s.clock.date, previews, dismissals: async () => [], exec },
+        { repo: REPO, number: NUMBER, reviewId: REVIEW, items: [{ fingerprint: FP_A }] },
+      )).rejects.toThrow(NO_GH);
+      expect(previews.added).toBe(0);
+    }
+    expect(s.writes()).toEqual([]);
+  });
+
   it('a finding dismissed since the preview is refused, and nothing is sent', async () => {
     const s = await startService();
     const p = await previewed(s, { items: [{ fingerprint: FP_A }, { fingerprint: FP_C }] });
@@ -259,6 +392,9 @@ describe('POST /posts', () => {
     expect((await latestPosts(s)).map((x) => x.outcome)).toEqual(['unknown']);
     expect((await s.post(p.previewId)).json).toEqual({ error: EXPIRED });
     expect(s.writes()).toHaveLength(1);
+    // The log names the posts file by its place in the Airlock home, never by an absolute path.
+    expect(s.log.join('\n')).not.toContain(s.home);
+    expect(s.log.some((l) => l.includes('could not be removed') && l.includes('posts/acme__widgets/'))).toBe(true);
   });
 
   it('two posts of one preview at once send one review', async () => {
@@ -419,6 +555,73 @@ describe('POST /posts', () => {
     expect((await s.call('POST', '/posts/forget', { repo: REPO, number: 8, id: posted.id })).json).toEqual({ forgotten: false });
   });
 
+  it('"It was not posted" asks GitHub first: a review by the account, at the commit, with the same text, makes the record posted', async () => {
+    const s = await startService();
+    const p = await previewed(s);
+    s.answers.set(POST_LINE, TIMED_OUT);
+    await s.post(p.previewId);
+    const [unknown] = await latestPosts(s);
+    expect(unknown).toMatchObject({ outcome: 'unknown', postedAs: 'bob', bodyHash: sha256(p.reviewBody) });
+    const theirs = (id: number, over: Record<string, unknown> = {}) =>
+      ({ id, user: { login: 'bob' }, commit_id: HEAD, body: p.reviewBody, state: 'COMMENTED', ...over });
+    // Two pages, as gh prints them; only the last review is this post.
+    s.answers.set(REVIEWS_LINE, {
+      stdout: `${JSON.stringify([theirs(11, { user: { login: 'alice' } }), theirs(12, { commit_id: 'c'.repeat(40) }), theirs(13, { body: 'Another text.' }), theirs(14, { user: null })])}${JSON.stringify([theirs(901, { user: { login: 'BOB' } })])}`,
+      stderr: '', code: 0,
+    });
+    const r = await s.call('POST', '/posts/forget', { repo: REPO, number: NUMBER, id: unknown!.id });
+    expect(r.status).toBe(409);
+    const reply = r.json as { error: string; record: PostRecord };
+    expect(reply.error).toBe(FOUND);
+    const posted = { ...unknown!, outcome: 'posted', githubReviewId: 901, url: `https://github.com/${REPO}/pull/${NUMBER}#pullrequestreview-901` };
+    expect(PostRecordSchema.parse(reply.record)).toEqual(posted);
+    expect(await latestPosts(s)).toEqual([posted]);
+    expect(s.calls.filter((c) => c.line === REVIEWS_LINE).map((c) => c.timeoutMs)).toEqual([30_000]);
+    // Nothing more was sent, and the findings are now refused as posted.
+    expect(s.writes()).toHaveLength(1);
+    const again = await s.preview();
+    expect(again.status).toBe(409);
+    expect((again.json as { error: string }).error).toContain('already posted');
+    // A posted record is kept, and GitHub is not asked again.
+    expect((await s.call('POST', '/posts/forget', { repo: REPO, number: NUMBER, id: unknown!.id })).status).toBe(409);
+    expect(s.calls.filter((c) => c.line === REVIEWS_LINE)).toHaveLength(1);
+  });
+
+  it('"It was not posted" forgets the record when GitHub has no such review, and keeps it when GitHub cannot be asked', async () => {
+    const s = await startService();
+    const p = await previewed(s);
+    s.answers.set(POST_LINE, TIMED_OUT);
+    await s.post(p.previewId);
+    const [unknown] = await latestPosts(s);
+    const forget = () => s.call('POST', '/posts/forget', { repo: REPO, number: NUMBER, id: unknown!.id });
+    const unreadable: Array<ExecResult | (() => Promise<ExecResult>)> = [
+      { stdout: '{"message":"Server Error"}', stderr: 'gh: Server Error (HTTP 500)', code: 1 },
+      { stdout: '', stderr: 'timed out after 30 s', code: 124 },
+      { stdout: 'not json', stderr: '', code: 0 },
+      async () => { throw Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }); },
+    ];
+    for (const answer of unreadable) {
+      s.answers.set(REVIEWS_LINE, answer);
+      const r = await forget();
+      expect([r.status, r.json]).toEqual([502, { error: NOT_ASKED }]);
+      expect(await latestPosts(s)).toEqual([unknown]);
+    }
+    s.answers.set(REVIEWS_LINE, {
+      stdout: JSON.stringify([{ id: 5, user: { login: 'bob' }, commit_id: HEAD, body: `${p.reviewBody} `, state: 'COMMENTED' }]), stderr: '', code: 0,
+    });
+    expect((await forget()).json).toEqual({ forgotten: true });
+    expect(await latestPosts(s)).toEqual([]);
+    expect(s.writes()).toHaveLength(1);
+  });
+
+  it('a record kept before the hash and account were (no bodyHash) is forgotten as before, without asking GitHub', async () => {
+    const s = await startService();
+    await s.writeRecords([record({ outcome: 'unknown', githubReviewId: null, url: null })]);
+    const r = await s.call('POST', '/posts/forget', { repo: REPO, number: NUMBER, id: 'post_0123456789ab' });
+    expect(r.json).toEqual({ forgotten: true });
+    expect(s.calls).toEqual([]);
+  });
+
   it('an expired preview and an unknown preview id are refused', async () => {
     const s = await startService();
     const p = await previewed(s);
@@ -430,7 +633,7 @@ describe('POST /posts', () => {
     const first = await previewed(s);
     for (let i = 0; i < 20; i += 1) await previewed(s);
     expect((await s.post(first.previewId)).json).toEqual({ error: EXPIRED });
-    expect(s.calls).toEqual([]);
+    expect(beyondAccount(s)).toEqual([]);
   });
 
   it('a broken record file stops a preview and a post rather than being read as empty', async () => {
@@ -453,6 +656,24 @@ describe('POST /posts', () => {
     expect(lines.some((l) => l.includes(`${NUMBER}.json`) && /\b2\b/.test(l))).toBe(true);
     expect(s.log.join('\n')).not.toContain('maybe');
     expect(s.log.join('\n')).not.toContain('not a record');
+    // By its place in the Airlock home, never an absolute path.
+    expect(lines.every((l) => l.includes(`posts/acme__widgets/${NUMBER}.json`))).toBe(true);
+    expect(s.log.join('\n')).not.toContain(s.home);
+
+    // The panel reads the latest review on every check: the same lines are not logged again, and a change is logged once.
+    const said = (): string[] => s.log.filter((l) => l.includes('posts file'));
+    const first = said();
+    for (let i = 0; i < 3; i += 1) expect(await latestPosts(s)).toEqual([good]);
+    expect(said()).toEqual(first);
+    await s.writeRecords([good, { not: 'a record' }]);
+    for (let i = 0; i < 3; i += 1) await latestPosts(s);
+    expect(said().slice(first.length)).toEqual([`the posts file posts/acme__widgets/${NUMBER}.json: record 1 does not match the contract and was left out`]);
+    // Once the file is good again, a later problem is logged again.
+    await s.writeRecords([good]);
+    await latestPosts(s);
+    await s.writeRecords([good, 'x']);
+    await latestPosts(s);
+    expect(said()).toHaveLength(first.length + 2);
   });
 
   it('the preview route takes a full-size body; other routes keep the 64 KB limit', async () => {
@@ -488,7 +709,7 @@ describe('POST /posts', () => {
       const r = await s.call('POST', path, body, bare);
       expect([r.status, r.json], path).toEqual([403, { error: 'Airlock does not accept requests from this page.' }]);
     }
-    expect(s.calls).toEqual([]);
+    expect(beyondAccount(s)).toEqual([]);
     // The other routes still answer a local command without an Origin.
     expect((await s.call('GET', `/reviews/latest?repo=${REPO}&number=${NUMBER}`, undefined, bare)).status).toBe(200);
   });
@@ -511,5 +732,88 @@ describe('POST /posts', () => {
     ]);
     expect(s.log.join('\n')).not.toContain('Marker');
     expect(s.log.join('\n')).not.toContain('pull_request_review_thread');
+  });
+});
+
+describe('post, called directly', () => {
+  const NOW = Date.parse('2026-11-11T09:00:00.000Z');
+  const homes: string[] = [];
+  afterEach(async () => { for (const home of homes.splice(0)) await rm(home, { recursive: true, force: true }); });
+
+  const stored = (comments: number): StoredPreview => ({
+    previewId: 'pv_0123456789abcdef', repo: REPO, number: NUMBER, reviewId: REVIEW, headSha: HEAD, viewer: 'bob',
+    payload: {
+      commit_id: HEAD, event: 'COMMENT', body: 'Review notes from Airlock.',
+      comments: Array.from({ length: comments }, (_, i) => ({ path: 'src/a.ts', line: i + 1, side: 'RIGHT' as const, body: `Comment ${i}.` })),
+    },
+    items: [{ fingerprint: FP_A, aliases: [], placement: 'inline', title: FINDING_A.title }],
+    expiresAt: NOW + 60_000,
+  });
+
+  async function rig(write?: PostDeps['write']) {
+    const home = await mkdtemp(join(tmpdir(), 'airlock-post-direct-'));
+    homes.push(home);
+    const calls: string[] = [];
+    const log: string[] = [];
+    const answers = new Map<string, ExecResult>([
+      [PULL_LINE, { stdout: pull(), stderr: '', code: 0 }], [USER_LINE, { stdout: 'bob\n', stderr: '', code: 0 }], [POST_LINE, POSTED],
+    ]);
+    const exec: Exec = async (cmd, args) => {
+      const line = [cmd, ...args].join(' ');
+      calls.push(line);
+      const answer = answers.get(line);
+      if (answer === undefined) throw new Error(`no fake answer for ${line}`);
+      return answer;
+    };
+    const previews = new Previews();
+    const deps: PostDeps = {
+      home, now: () => new Date(NOW), previews, dismissals: async () => [], exec, log: (l) => log.push(l), ...(write === undefined ? {} : { write }),
+    };
+    const file = join(home, 'posts', 'acme__widgets', `${NUMBER}.json`);
+    return { home, calls, log, previews, deps, file };
+  }
+
+  it("a payload that fails sendReview's checks is refused before the record is written, so it leaves no record and nothing runs", async () => {
+    const r = await rig();
+    r.previews.add(stored(31));
+    await expect(post(r.deps, 'pv_0123456789abcdef')).rejects.toThrow('A post holds at most 30 comments.');
+    expect(r.calls).toEqual([PULL_LINE, USER_LINE]);
+    await expect(readFile(r.file, 'utf8')).rejects.toThrow();
+    // Nothing was sent, so the preview still stands.
+    expect(r.previews.get('pv_0123456789abcdef', new Date(NOW))).not.toBeNull();
+  });
+
+  it('when GitHub accepted the post, writing the posted record is tried three times and the answer is still the posted record', async () => {
+    let writes = 0;
+    const failOn = new Set<number>();
+    const write: NonNullable<PostDeps['write']> = async (path, list) => {
+      writes += 1;
+      if (failOn.has(writes)) throw new Error(`EACCES: permission denied, open '${path}.tmp'`);
+      await writeList(path, list);
+    };
+    // The first try fails, the second is written.
+    let r = await rig(write);
+    failOn.clear(); [2].forEach((n) => failOn.add(n));
+    r.previews.add(stored(1));
+    const once = await post(r.deps, 'pv_0123456789abcdef');
+    expect(once).toMatchObject({ outcome: 'posted', githubReviewId: 555 });
+    expect(writes).toBe(3);
+    expect(JSON.parse(await readFile(r.file, 'utf8'))).toEqual([once]);
+    expect(r.log.filter((l) => l.includes('could not'))).toEqual([]);
+
+    // Every try fails: three tries, the reply is still the posted record, the record on disk stays unknown and the log says so.
+    writes = 0;
+    r = await rig(write);
+    failOn.clear(); [2, 3, 4, 5].forEach((n) => failOn.add(n));
+    r.previews.add(stored(1));
+    const never = await post(r.deps, 'pv_0123456789abcdef');
+    expect(never).toMatchObject({ outcome: 'posted', githubReviewId: 555 });
+    expect(writes).toBe(4);
+    expect(JSON.parse(await readFile(r.file, 'utf8'))).toMatchObject([{ outcome: 'unknown' }]);
+    expect(r.calls.filter((c) => c === POST_LINE)).toHaveLength(1);
+    const said = r.log.filter((l) => l.includes('could not be updated'));
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain('three tries');
+    expect(said[0]).not.toContain(r.home);
   });
 });

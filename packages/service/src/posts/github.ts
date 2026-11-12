@@ -35,10 +35,25 @@ export const REFUSAL_MAX = 300;
 
 /** Only the id is read from GitHub's reply; the review's address is built by code from it. */
 const CreatedSchema = z.object({ id: z.number().refine((n) => Number.isSafeInteger(n) && n > 0) });
+/**
+ * A refusal's body. For a validation failure GitHub adds an `errors` list whose entries are strings or objects
+ * (`resource`, `field`, `code`, sometimes `message`); see docs/reference/github-post-notes.md.
+ */
 const RefusalSchema = z.object({
   message: z.string().optional(),
-  errors: z.array(z.union([z.string(), z.object({ message: z.string().optional() })])).optional(),
+  errors: z.array(z.union([
+    z.string(),
+    z.object({ message: z.string().optional(), field: z.string().optional(), code: z.string().optional() }),
+  ])).optional(),
 });
+type RefusalEntry = NonNullable<z.infer<typeof RefusalSchema>['errors']>[number];
+
+/** An entry of the errors list in words: a string as it is; an object as its message, else `<field>: <code>`. */
+function entryText(e: RefusalEntry): string {
+  if (typeof e === 'string') return e;
+  if (e.message !== undefined && e.message.trim() !== '') return e.message;
+  return [e.field, e.code].filter((part) => part !== undefined && part.trim() !== '').join(': ');
+}
 /** `gh` ends the first line of standard error with `(HTTP <status>)` when GitHub answered with an error status. */
 const STATUS = /\(HTTP (\d{3})\)\s*$/;
 
@@ -55,9 +70,7 @@ function reason(stdout: string, firstErrorLine: string): string {
     const parsed = RefusalSchema.safeParse(JSON.parse(stdout));
     if (parsed.success) body = parsed.data;
   } catch { /* not JSON */ }
-  const details = (body?.errors ?? [])
-    .map((e) => (typeof e === 'string' ? e : e.message ?? ''))
-    .filter((e) => e.trim() !== '');
+  const details = (body?.errors ?? []).map(entryText).filter((e) => e.trim() !== '');
   const head = body?.message ?? '';
   const joined = head.trim() === '' ? details.join('; ') : details.length === 0 ? head : `${head}: ${details.join('; ')}`;
   const fallback = firstErrorLine.replace(STATUS, '').replace(/^gh:\s*/, '');
@@ -65,16 +78,15 @@ function reason(stdout: string, firstErrorLine: string): string {
 }
 
 /**
- * The one write Airlock makes to GitHub: `gh api --method POST repos/<repo>/pulls/<number>/reviews --input -`, the
- * payload as JSON on standard input, never in the arguments. The payload is rebuilt field by field, so the event is
- * always COMMENT and nothing but these fields can be sent. It runs once: a refusal (GitHub answered with a 4xx status)
- * and an outcome that cannot be known (a 5xx, a timeout, a cut connection, no status, a reply without a usable id) are
- * reported, never retried. The address of a posted review is built from the repository, the number and the id. Throws, before running anything, for a repository name or number that is not one.
+ * Every check `sendReview` makes before it runs anything, and the payload as it will be sent: rebuilt field by field, so
+ * the event is always COMMENT and nothing but these fields can be sent. Throws for a repository name or number that is
+ * not one, and for more than POST_MAX_ITEMS comments. The caller runs it before it writes its record of the post, so a
+ * check that fails leaves no record.
  */
-export async function sendReview(exec: Exec, repo: string, number: number, payload: ReviewPayload): Promise<SendResult> {
+export function reviewToSend(repo: string, number: number, payload: ReviewPayload): ReviewPayload {
   if (!isRepo(repo) || !PrNumberSchema.safeParse(number).success) throw new Error('Airlock will not post to that address.');
   if (payload.comments.length > POST_MAX_ITEMS) throw new Error(`A post holds at most ${POST_MAX_ITEMS} comments.`);
-  const sent: ReviewPayload = {
+  return {
     commit_id: payload.commit_id,
     event: 'COMMENT',
     body: payload.body,
@@ -84,6 +96,18 @@ export async function sendReview(exec: Exec, repo: string, number: number, paylo
       body: c.body,
     })),
   };
+}
+
+/**
+ * The one write Airlock makes to GitHub: `gh api --method POST repos/<repo>/pulls/<number>/reviews --input -`, the
+ * payload as JSON on standard input, never in the arguments. The payload goes through `reviewToSend`, so the event is
+ * always COMMENT and nothing but its fields can be sent. It runs once: a refusal (GitHub answered with a 4xx status)
+ * and an outcome that cannot be known (a 5xx, a timeout, a cut connection, no status, a reply without a usable id) are
+ * reported, never retried. The address of a posted review is built from the repository, the number and the id. Throws,
+ * before running anything, where `reviewToSend` throws.
+ */
+export async function sendReview(exec: Exec, repo: string, number: number, payload: ReviewPayload): Promise<SendResult> {
+  const sent = reviewToSend(repo, number, payload);
   let result: { stdout: string; stderr: string; code: number };
   try {
     result = await exec('gh', ['api', '--method', 'POST', `repos/${repo}/pulls/${number}/reviews`, '--input', '-'], {
@@ -161,4 +185,90 @@ export async function readPull(exec: Exec, repo: string, number: number): Promis
   if (status === '404') return { kind: 'missing' };
   if (status.startsWith('5')) return { kind: 'server-error', status: Number(status) };
   return { kind: 'refused', status: Number(status), message: reason(result.stdout, firstErrorLine) };
+}
+
+/** A GitHub login as `gh api user --jq .login` prints it: letters, digits, `-` and `_` (an enterprise login), at most 100. */
+const LOGIN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
+
+/**
+ * The account `gh` is signed in as now: `gh api user --jq .login`, a read, within READ_TIMEOUT_MS. Null when it cannot be
+ * read: gh missing or not signed in, an error, no answer in time, or an answer that is not a login.
+ */
+export async function readLogin(exec: Exec): Promise<string | null> {
+  try {
+    const result = await exec('gh', ['api', 'user', '--jq', '.login'], { timeoutMs: READ_TIMEOUT_MS });
+    const login = result.stdout.trim();
+    return result.code === 0 && LOGIN.test(login) ? login : null;
+  } catch {
+    return null;
+  }
+}
+
+/** How long the list of a pull request's reviews may take: every page of it. */
+export const LIST_TIMEOUT_MS = 30_000;
+
+const GitHubReviewSchema = z.object({
+  id: z.number().refine((n) => Number.isSafeInteger(n) && n > 0),
+  user: z.object({ login: z.string() }).nullable().optional(),
+  commit_id: z.string().nullable().optional(),
+  body: z.string().nullable().optional(),
+});
+
+/** A review GitHub holds on a pull request: who wrote it (null for a deleted account), at which commit, and its text. */
+export interface GitHubReview { id: number; login: string | null; commitId: string | null; body: string }
+
+/**
+ * The JSON values printed one after another, as `gh api --paginate` prints one array per page; null unless the whole
+ * text is such values. Strings are read as strings, so a bracket inside a review's text is not a page's end.
+ */
+function jsonValues(text: string): unknown[] | null {
+  const values: unknown[] = [];
+  let depth = 0;
+  let start = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text.charAt(i);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+    } else if (c === '"') {
+      if (depth === 0) return null;
+      inString = true;
+    } else if (c === '[' || c === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (c === ']' || c === '}') {
+      depth -= 1;
+      if (depth < 0) return null;
+      if (depth === 0) {
+        try { values.push(JSON.parse(text.slice(start, i + 1))); } catch { return null; }
+      }
+    } else if (depth === 0 && !/\s/.test(c)) {
+      return null;
+    }
+  }
+  return depth === 0 && !inString ? values : null;
+}
+
+/**
+ * Every review of a pull request: `gh api repos/<repo>/pulls/<number>/reviews --paginate`, a read, within
+ * LIST_TIMEOUT_MS. Null unless every page was read whole and every entry is a review. Throws, before running anything,
+ * for a repository name or number that is not one.
+ */
+export async function listReviews(exec: Exec, repo: string, number: number): Promise<GitHubReview[] | null> {
+  if (!isRepo(repo) || !PrNumberSchema.safeParse(number).success) throw new Error('Airlock will not read that address.');
+  let result: { stdout: string; stderr: string; code: number };
+  try {
+    result = await exec('gh', ['api', `repos/${repo}/pulls/${number}/reviews`, '--paginate'], { timeoutMs: LIST_TIMEOUT_MS });
+  } catch {
+    return null;
+  }
+  if (result.code !== 0) return null;
+  const pages = jsonValues(result.stdout);
+  if (pages === null || pages.length === 0 || !pages.every((page) => Array.isArray(page))) return null;
+  const parsed = z.array(GitHubReviewSchema).safeParse(pages.flat());
+  if (!parsed.success) return null;
+  return parsed.data.map((r) => ({ id: r.id, login: r.user?.login ?? null, commitId: r.commit_id ?? null, body: r.body ?? '' }));
 }

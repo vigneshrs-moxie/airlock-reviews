@@ -42,18 +42,28 @@ async function startService(): Promise<{ port: number; home: string; clock: Fake
   return { port, home, clock, log };
 }
 
-const expected = (token: string, nonce: string): string =>
-  createHmac('sha256', token).update(`airlock-hello:${nonce}`).digest('hex');
+const expected = (token: string, port: number, nonce: string): string =>
+  createHmac('sha256', token).update(`airlock-hello:${port}:${nonce}`).digest('hex');
 
 /** A route behind the token that answers 404 once the token is accepted, and 401 before. */
 const behindToken = (port: number, token: string) =>
   send(port, 'GET', '/reviews/running?repo=acme/widgets&number=1', { headers: { Authorization: `Bearer ${token}` } });
 
 describe('the proof that the service holds the token', () => {
-  it('is the HMAC-SHA256 of "airlock-hello:<nonce>" keyed with the token, in lower-case hex', () => {
+  it('is the HMAC-SHA256 of "airlock-hello:<port>:<nonce>" keyed with the token, in lower-case hex', () => {
     const token = 'ab'.repeat(32);
-    expect(helloProof(token, NONCE)).toBe(expected(token, NONCE));
-    expect(helloProof(token, NONCE)).toMatch(/^[0-9a-f]{64}$/);
+    expect(helloProof(token, 4611, NONCE)).toBe(expected(token, 4611, NONCE));
+    expect(helloProof(token, 4611, NONCE)).toMatch(/^[0-9a-f]{64}$/);
+    // Made for another port, it is another proof.
+    expect(helloProof(token, 4612, NONCE)).not.toBe(helloProof(token, 4611, NONCE));
+  });
+
+  it('names the port the service really listens on, so a proof asked for through another port does not match', async () => {
+    const s = await startService();
+    const token = await readOrCreateToken(s.home);
+    const proved = (await send(s.port, 'GET', `/hello?nonce=${NONCE}`)).json as { proof: string };
+    expect(proved.proof).toBe(expected(token, s.port, NONCE));
+    expect(proved.proof).not.toBe(expected(token, 4611, NONCE));
   });
 
   it('hello with a nonce returns the proof for the token and without one returns none', async () => {
@@ -61,7 +71,7 @@ describe('the proof that the service holds the token', () => {
     const token = await readOrCreateToken(s.home);
     const proved = await send(s.port, 'GET', `/hello?nonce=${NONCE}`);
     expect(proved.status).toBe(200);
-    expect(proved.json).toEqual({ airlock: true, version: '9.9.9', paired: false, proof: expected(token, NONCE) });
+    expect(proved.json).toEqual({ airlock: true, version: '9.9.9', paired: false, proof: expected(token, s.port, NONCE) });
     const plain = await send(s.port, 'GET', '/hello');
     expect(plain.json).toEqual({ airlock: true, version: '9.9.9', paired: false });
     // Still open: any Origin, no token, and no Access-Control header.
@@ -116,7 +126,7 @@ describe('replacing the token', () => {
     expect((await behindToken(s.port, old)).status).toBe(401);
     expect((await behindToken(s.port, fresh)).status).toBe(404);
     // The proof is now made with the new token.
-    expect((await send(s.port, 'GET', `/hello?nonce=${NONCE}`)).json).toMatchObject({ paired: true, proof: expected(fresh, NONCE) });
+    expect((await send(s.port, 'GET', `/hello?nonce=${NONCE}`)).json).toMatchObject({ paired: true, proof: expected(fresh, s.port, NONCE) });
   });
 
   it('only the old token, after a replacement: refused from the first request a second later, with nothing else sent', async () => {
@@ -138,9 +148,9 @@ describe('replacing the token', () => {
     const old = await readOrCreateToken(s.home);
     const fresh = await replaceToken(s.home);
     // Within the second after the last look the service still proves the token it holds.
-    expect((await send(s.port, 'GET', `/hello?nonce=${NONCE}`)).json).toMatchObject({ proof: expected(old, NONCE) });
+    expect((await send(s.port, 'GET', `/hello?nonce=${NONCE}`)).json).toMatchObject({ proof: expected(old, s.port, NONCE) });
     s.clock.advance(1_000);
-    expect((await send(s.port, 'GET', `/hello?nonce=${NONCE}`)).json).toMatchObject({ proof: expected(fresh, NONCE) });
+    expect((await send(s.port, 'GET', `/hello?nonce=${NONCE}`)).json).toMatchObject({ proof: expected(fresh, s.port, NONCE) });
   });
 
   it('a token file made readable by others is set back to 0600 and said in the log; the token is still taken', async () => {

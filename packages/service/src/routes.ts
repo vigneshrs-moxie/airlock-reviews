@@ -12,8 +12,8 @@ import { z, type ZodType } from 'zod';
 import { dismiss, DismissError, restore } from './dismissals.js';
 import { plainMessage, type Handler, type Req, type Res, type Route } from './http.js';
 import { buildPreview, PREVIEW_BODY_MAX, Previews } from './posts/preview.js';
-import { forget, post, PostError, postsFor, type PostDeps } from './posts/records.js';
-import { listLearned, removeLearnedLine } from './learned.js';
+import { forget, FOUND_ON_GITHUB, post, PostError, postsFor, type PostDeps } from './posts/records.js';
+import { listLearned, packMessagesForLog, removeLearnedLine } from './learned.js';
 import { LimitError, realTimers, Runs, type RunStart } from './runs.js';
 import type { ServiceDeps } from './server.js';
 import { RUN_GONE, runStream } from './sse.js';
@@ -52,6 +52,8 @@ function reply<T>(schema: ZodType<T>, status: number, value: T): Res {
 const refuse = (status: number, error: string): Res => reply(ApiErrorSchema, status, { error });
 
 const ForgetReplySchema = z.object({ forgotten: z.boolean() });
+/** `POST /posts/forget` when GitHub has the review: the sentence and the record, now posted. */
+const FoundReplySchema = ApiErrorSchema.extend({ record: PostRecordSchema });
 
 /** A posting handler: its PostError is the refusal it answers with. */
 const posting = (handler: Handler): Handler => async (req) => {
@@ -107,6 +109,25 @@ export function reviewRoutes(
     discard: discardStored,
   });
 
+  // The lines `/pr` (pack messages) and `/reviews/latest` (post records left out) last logged, by what they are about: the
+  // panel asks both on every check, so each is logged once per change, not on every ask.
+  const lastLogged = new Map<string, string>();
+  const logOncePerChange = (about: string, lines: readonly string[]): void => {
+    const now = lines.join('\n');
+    if (now === (lastLogged.get(about) ?? '')) return;
+    for (const line of lines) deps.log(line);
+    if (lines.length === 0) lastLogged.delete(about);
+    else lastLogged.set(about, now);
+  };
+  const logPackMessages = (repo: string, messages: string[]): void =>
+    logOncePerChange(`packs ${repo.toLowerCase()}`, messages.map((m) => `packs for ${repo}: ${m}`));
+  const postsOf = async (repo: string, number: number): Promise<PostRecord[]> => {
+    const lines: string[] = [];
+    const records = await postsFor(config.home, repo, number, (line) => lines.push(line));
+    logOncePerChange(`posts ${repo.toLowerCase()}#${number}`, lines);
+    return records;
+  };
+
   let tools: { at: number; claude: boolean; gh: boolean } | null = null;
   const toolsFound = async (): Promise<{ claude: boolean; gh: boolean }> => {
     const now = deps.now().getTime();
@@ -160,7 +181,7 @@ export function reviewRoutes(
       handler: async (req) => {
         const { repo, number } = prOf(req);
         const chosen = await choosePacks(config.packsDir, repo);
-        for (const e of chosen.errors) deps.log(`packs for ${repo}: ${e.message}`);
+        logPackMessages(repo, packMessagesForLog(chosen, config));
         const read = await readPr(repo, number, chosen.packs);
         if ('refusal' in read) return read.refusal;
         const { pr } = read;
@@ -205,7 +226,7 @@ export function reviewRoutes(
         const document = await latestReview(repo, number);
         if (document === null) return refuse(404, NO_REVIEW);
         return reply<LatestReply>(LatestReplySchema, 200, {
-          document, dismissals: await dismissals(repo, number), posts: await postsFor(config.home, repo, number, deps.log),
+          document, dismissals: await dismissals(repo, number), posts: await postsOf(repo, number),
         });
       },
     },
@@ -218,8 +239,10 @@ export function reviewRoutes(
         return runStream(() => runs.events(runId), timers);
       },
     },
+    // The routes that write learned lines, which later reviews are given as instructions, require the paired extension's
+    // Origin, not only the token (see Route.requiresOrigin for what that stops and what it does not).
     {
-      method: 'POST', path: '/dismissals', body: DismissBodySchema,
+      method: 'POST', path: '/dismissals', requiresOrigin: true, body: DismissBodySchema,
       handler: async (req) => {
         try {
           return reply<Dismissal>(DismissalSchema, 200, await dismiss(deps, req.body as DismissBody));
@@ -230,7 +253,7 @@ export function reviewRoutes(
       },
     },
     {
-      method: 'POST', path: '/dismissals/restore', body: RestoreBodySchema,
+      method: 'POST', path: '/dismissals/restore', requiresOrigin: true, body: RestoreBodySchema,
       handler: async (req) => {
         try {
           return reply<RestoreReply>(RestoreReplySchema, 200, await restore(deps, req.body as RestoreBody));
@@ -244,7 +267,7 @@ export function reviewRoutes(
       method: 'GET', path: '/learned', query: z.object({ repo: RepoSchema }),
       handler: async (req) => reply<LearnedReply>(LearnedReplySchema, 200, await listLearned(deps, req.query.get('repo') as string)),
     },
-    // The routes that can lead to the one GitHub write require the paired extension's Origin, not only the token.
+    // So do the routes that can lead to the one GitHub write, and the removal of a learned line.
     {
       method: 'POST', path: '/posts/preview', requiresOrigin: true, maxBodyBytes: PREVIEW_BODY_MAX, body: PostPreviewBodySchema,
       handler: posting(async (req) =>
@@ -257,7 +280,12 @@ export function reviewRoutes(
     },
     {
       method: 'POST', path: '/posts/forget', requiresOrigin: true, body: ForgetPostBodySchema,
-      handler: posting(async (req) => reply(ForgetReplySchema, 200, await forget(posts, req.body as ForgetPostBody))),
+      handler: posting(async (req) => {
+        const result = await forget(posts, req.body as ForgetPostBody);
+        return 'found' in result
+          ? reply(FoundReplySchema, 409, { error: FOUND_ON_GITHUB, record: result.found })
+          : reply(ForgetReplySchema, 200, result);
+      }),
     },
     {
       method: 'POST', path: '/learned/remove', requiresOrigin: true, body: RemoveLearnedBodySchema,

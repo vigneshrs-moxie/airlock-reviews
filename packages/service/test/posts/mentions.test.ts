@@ -29,7 +29,11 @@ async function preview(
   home = await mkdtemp(join(tmpdir(), 'airlock-service-mentions-'));
   process.env['AIRLOCK_HOME'] = home;
   await saveReview({ ...review(), findings: [FINDING_A, FENCED_B, FINDING_C] });
-  const deps = { home, now: () => new Date('2026-11-11T09:00:00.000Z'), previews: new Previews(), dismissals: async () => [] };
+  const deps = {
+    home, now: () => new Date('2026-11-11T09:00:00.000Z'), previews: new Previews(), dismissals: async () => [],
+    // The one command a preview runs: the read of the signed-in account.
+    exec: async () => ({ stdout: 'bob\n', stderr: '', code: 0 }),
+  };
   return buildPreview(deps, { repo: REPO, number: NUMBER, reviewId: REVIEW, items, ...(summary === undefined ? {} : { summary }) });
 }
 
