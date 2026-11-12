@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import MarkdownIt from 'markdown-it';
 import { describe, expect, it } from 'vitest';
 import {
-  COMMENT_MAX, POST_MAX_ITEMS, REVIEW_BODY_MAX, SUMMARY_MAX, candidate, checkCommentText, commentBody, mentionsIn,
+  COMMENT_MAX, CUT_NOTE, POST_MAX_ITEMS, REVIEW_BODY_MAX, SUMMARY_MAX, candidate, checkCommentText, commentBody, mentionsIn,
   plainProse, postMentions, summaryBody, type Finding,
 } from '@airlock/shared';
 
@@ -34,7 +34,7 @@ describe('limits', () => {
 describe('plainProse', () => {
   it('drops hidden characters and blank letters, and neutralises & < \\ ~ $ and backticks', () => {
     expect(plainProse('Za\u200Bp\u2800 a&b <i> c\\d `e`')).toBe("Zap a&amp;b &lt;i> c\\\\d 'e'");
-    expect(plainProse('&#64;ann &commat;bob')).toBe('&amp;#64;ann &amp;commat;bob');
+    expect(plainProse('&#64;ann &commat;bob')).toBe('&amp;# 64;ann &amp;commat;bob');
     expect(plainProse('~~~ and ~x~')).toBe('\\~\\~\\~ and \\~x\\~');
     expect(plainProse('a\n    b\n\t c\n  ~~~')).toBe('a\nb\nc\n\\~\\~\\~');
     expect(plainProse('$x$ and\n$$\ny\n$$ \\$')).toBe('\\$x\\$ and\n\\$\\$\ny\n\\$\\$ \\\\\\$');
@@ -45,6 +45,11 @@ describe('plainProse', () => {
     expect(plainProse('mail me @ home, @-x, @_y, @')).toBe('mail me @ home, @-x, @_y, @');
     expect(plainProse('$@alice$')).toBe('\\$@ alice\\$');
     expect(plainProse('@a\u200B@b')).toBe('@ a@ b');
+  });
+  it('breaks every # directly before a digit with a space, so no reference to an issue or pull request is made', () => {
+    expect(plainProse('see #12, acme/widgets#3, # 4, #x, ##5, x#6 and &#64;')).toBe(
+      'see # 12, acme/widgets# 3, # 4, #x, ## 5, x# 6 and &amp;# 64;');
+    expect(plainProse('#7 at the start')).toBe('# 7 at the start');
   });
 });
 
@@ -89,6 +94,61 @@ describe('commentBody', () => {
     const body = commentBody(finding({ title: 'Za\u200Bp', happens: 'Look\u2800 here', suggestedChange: 'a\u200B\nb' }));
     expect(body).toContain('**Fix: Zap**');
     expect(body).not.toMatch(/[\u200B\u2800]/);
+  });
+});
+
+describe('commentBody of a finding too long to post as drafted', () => {
+  const tail = `\n\n${CUT_NOTE}`;
+  const chars = (text: string): number => [...text].length;
+  it('says how it was cut', () => {
+    expect(CUT_NOTE).toBe('(Cut to fit; the full finding is in Airlock.)');
+  });
+  it('leaves a body of 4,000 characters or fewer as it is', () => {
+    const f = finding({ suggestedChange: '', connected: [] });
+    const head = commentBody(f);
+    const exact = finding({ ...f, why: 'w'.repeat(COMMENT_MAX - chars(head) + chars(f.why)) });
+    expect(chars(commentBody(exact))).toBe(COMMENT_MAX);
+    expect(commentBody(exact)).not.toContain(CUT_NOTE);
+    const over = commentBody(finding({ ...f, why: `${exact.why}w` }));
+    expect(chars(over)).toBeLessThanOrEqual(COMMENT_MAX);
+    expect(over.endsWith(tail)).toBe(true);
+  });
+  it('cuts a long multi-line suggested change inside its fence, which stays closed', () => {
+    const change = Array.from({ length: 400 }, (_, i) => `line ${i} @bob \`x\``).join('\n');
+    const body = commentBody(finding({ suggestedChange: change, connected: [{ path: 'a.ts', line: 1, role: 'caller', quote: 'q' }] }));
+    expect(chars(body)).toBeLessThanOrEqual(COMMENT_MAX);
+    expect(body.startsWith('**Fix: Total is not rounded**\n\n')).toBe(true);
+    expect(body).toContain('\n\nSuggested change:\n```\nline 0 @bob `x`\n');
+    expect(body.endsWith(`\n\`\`\`${tail}`)).toBe(true);
+    expect(body).not.toContain('Connected:');
+    expect(checkCommentText(body)).toBeNull();
+    expect(liveNames(body)).toEqual([]);
+    expect(lastParagraph(body)).toBe(CUT_NOTE);
+  });
+  it('cuts a long title, a long one-line change and long prose, and keeps every part that fits whole', () => {
+    const title = commentBody(finding({ title: `Ask @carol about #12 ${'and more '.repeat(600)}` }));
+    expect(chars(title)).toBeLessThanOrEqual(COMMENT_MAX);
+    expect(title.startsWith('**Fix: Ask @ carol about # 12 and more')).toBe(true);
+    expect(title).toMatch(/[a-z]\*\*\n\n\(Cut to fit; the full finding is in Airlock\.\)$/);
+
+    const oneLine = commentBody(finding({ suggestedChange: `Round it ${'please '.repeat(700)}`, connected: [] }));
+    expect(oneLine).toMatch(/\n\nSuggested change: Round it [a-z ]*[a-z]\n\n\(Cut to fit; the full finding is in Airlock\.\)$/);
+    expect(oneLine).toContain('Customers see a total like 0.30000000000000004.');
+
+    const connected = Array.from({ length: 200 }, (_, i) => ({ path: `src/file-${i}.ts`, line: i + 1, role: 'caller', quote: 'q' }));
+    const many = commentBody(finding({ connected }));
+    expect(chars(many)).toBeLessThanOrEqual(COMMENT_MAX);
+    expect(many).toMatch(/\n\nConnected: `src\/file-0\.ts:1` \(caller\)(, `src\/file-\d+\.ts:\d+` \(caller\))*\n\n\(Cut/);
+    expect(many.endsWith(tail)).toBe(true);
+  });
+  it('never ends a cut part in a backslash or white space, and counts characters, not UTF-16 units', () => {
+    const slashes = commentBody(finding({ happens: 'a\\'.repeat(3000) }));
+    expect(slashes).toMatch(/[^\\]\n\n\(Cut/);
+    expect(slashes.endsWith(tail)).toBe(true);
+    const astral = commentBody(finding({ why: '\u{1F600}'.repeat(5000) }));
+    expect(chars(astral)).toBeLessThanOrEqual(COMMENT_MAX);
+    expect(astral.length).toBeGreaterThan(COMMENT_MAX);
+    expect(checkCommentText(astral)).toBeNull();
   });
 });
 
@@ -256,6 +316,27 @@ function liveNames(text: string): string[] {
   return [...new Set(found)];
 }
 
+/** What the renderers would show as text, outside code, with a `#` directly followed by a digit: a reference GitHub would link. */
+function liveReferences(text: string): string[] {
+  const found: string[] = [];
+  const visit = (tokens: ReturnType<(typeof renderers)[number]['parse']>): void => {
+    for (const token of tokens) {
+      if (token.type === 'code_inline' || token.type === 'fence' || token.type === 'code_block') continue;
+      if (token.children !== null) visit(token.children);
+      else if (token.content !== '') for (const m of token.content.matchAll(/#[0-9]+/g)) found.push(m[0]);
+    }
+  };
+  for (const md of renderers) visit(md.parse(text, {}));
+  return [...new Set(found)];
+}
+
+/** The text of the last block when it is a paragraph at the top level, else null: what follows a cut part is not swallowed by it. */
+function lastParagraph(text: string): string | null {
+  const tokens = (renderers[0] as (typeof renderers)[number]).parse(text, {});
+  const open = tokens[tokens.length - 3];
+  return open?.type === 'paragraph_open' && open.level === 0 ? (tokens[tokens.length - 2]?.content ?? null) : null;
+}
+
 /** A small seeded generator, so every run tries the same cases. */
 function generator(start: number) {
   let seed = start;
@@ -264,6 +345,7 @@ function generator(start: number) {
     '@name', '@org/team', '@a', '@a@b@c', '\u00E9@\u00E9t\u00E9', '`', '``', '```', '````', '~~~', '\\', '<div>', '</div>', '<!--',
     '-->', '<script>', '&#64;', '&commat;', '    ', '\t', '>', '- ', '1. ', '|', '*', '_', '[x](y)', '[x]', '[x]: y', '\n', '\n\n',
     ' ', 'x', 'Ab', '/', '@', '$', '\n$$\n', 'www.example.com/@bob', 'https://example.com/@bob', '===', '---', '#', "'",
+    '#1', '#12', 'acme/widgets#3', '7', '&#35;4', 'GH#5',
   ];
   const paths = ['', ' \t ', '\u200B', '`', '\n', 'src/a.ts'];
   const text = (): string => {
@@ -277,7 +359,13 @@ function generator(start: number) {
     title: text(), happens: text(), why: text(), suggestedChange: i % 2 === 0 ? text() : `${text()}\n${text()}`, quote: text(), path: path(),
     connected: [{ path: path(), line: line(), role: text(), quote: text() }, { path: path(), line: line(), role: text(), quote: text() }],
   });
-  return { next, path, line, oneFinding };
+  /** A finding whose every field may be thousands of characters long, so its drafted comment has to be cut. */
+  const long = (): string => Array.from({ length: 1 + (next() % 300) }, () => text()).join('');
+  const longFinding = (i: number): Finding => finding({
+    title: long(), happens: long(), why: long(), suggestedChange: i % 2 === 0 ? long() : `${long()}\n${long()}`, path: path(),
+    connected: Array.from({ length: next() % 40 }, () => ({ path: next() % 3 === 0 ? long() : path(), line: line(), role: text(), quote: 'q' })),
+  });
+  return { next, path, line, oneFinding, longFinding };
 }
 
 const SEEDS = [987654321, 1, 2, 3, 42, 4242, 65537, 99991, 123456789, 2147483647];
@@ -313,6 +401,10 @@ describe('commentBody against a Markdown renderer', () => {
     expect(liveNames(summaryBody([{ path: '\u200B', line: null, body }], ''))).toEqual([]);
     expect(liveNames(summaryBody([{ path: '\u200B', line: null, body }], defaultSummary(1)))).toEqual([]);
   });
+  it('sees a live reference in text that is not safe, and none in code', () => {
+    expect(liveReferences('see #12 and acme/widgets#3')).toEqual(['#12', '#3']);
+    expect(liveReferences('`#12`\n\n```\n#3\n```')).toEqual([]);
+  });
   it('sees a live name in text that is not safe (the check can fail)', () => {
     expect(liveNames('hello @bob')).toEqual(['@bob']);
     expect(liveNames('<div>\n@bob\n</div>')).toEqual(['@bob']);
@@ -325,7 +417,28 @@ describe('commentBody against a Markdown renderer', () => {
       for (let i = 0; i < 500; i += 1) {
         const f = oneFinding(i);
         expect(liveNames(commentBody(f)), JSON.stringify(f)).toEqual([]);
+        expect(liveReferences(commentBody(f)), JSON.stringify(f)).toEqual([]);
       }
+    }, 120_000);
+  }
+  for (const seed of SEEDS) {
+    it(`cuts 60 generated long findings to fit, closed, with no live @name or reference, seed ${seed}`, () => {
+      const { longFinding } = generator(seed);
+      let cut = 0;
+      for (let i = 0; i < 60; i += 1) {
+        const f = longFinding(i);
+        const body = commentBody(f);
+        const what = JSON.stringify(f).slice(0, 300);
+        expect([...body].length, what).toBeLessThanOrEqual(COMMENT_MAX);
+        expect(checkCommentText(body), what).toBeNull();
+        expect(liveNames(body), what).toEqual([]);
+        expect(liveReferences(body), what).toEqual([]);
+        if (body.endsWith(`\n\n${CUT_NOTE}`)) {
+          cut += 1;
+          expect(lastParagraph(body), what).toBe(CUT_NOTE);
+        }
+      }
+      expect(cut).toBeGreaterThan(10);
     }, 120_000);
   }
 });
@@ -338,6 +451,7 @@ describe('summaryBody of default bodies against a Markdown renderer', () => {
         const inSummary = Array.from({ length: 2 + (next() % 3) }, (_, k) => ({ path: path(), line: line(), body: commentBody(oneFinding(i + k)) }));
         const body = summaryBody(inSummary, defaultSummary(inSummary.length + (next() % 3)));
         expect(liveNames(body), JSON.stringify(inSummary)).toEqual([]);
+        expect(liveReferences(body), JSON.stringify(inSummary)).toEqual([]);
       }
     }, 120_000);
   }

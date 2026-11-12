@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { saveReview } from '@airlock/engine';
 import {
-  COMMENT_MAX, commentBody, LatestReplySchema, MESSAGE_MAX, PostPreviewReplySchema, PostRecordSchema, REVIEW_BODY_MAX, summaryBody,
+  COMMENT_MAX, commentBody, CUT_NOTE, LatestReplySchema, MESSAGE_MAX, PostPreviewReplySchema, PostRecordSchema, REVIEW_BODY_MAX, summaryBody,
   type PostPreviewReply, type PostRecord,
 } from '@airlock/shared';
 import { readOrCreateToken } from '../../src/config.js';
@@ -80,11 +80,12 @@ describe('POST /posts/preview', () => {
     expect((await s.preview({ items: [{ fingerprint: FP_A, body: 'x'.repeat(4000) }] })).status).toBe(200);
     expect((await s.preview({ items: [{ fingerprint: FP_A }], summary: 'y'.repeat(4000) })).status).toBe(200);
 
+    // A refusal about a comment's text names the finding it belongs to.
     const refused: Array<[Record<string, unknown>, string]> = [
-      [{ items: [{ fingerprint: FP_A, body: 'Hidden​ here.' }] }, 'The text has a hidden character; remove it.'],
-      [{ items: [{ fingerprint: FP_A, body: '' }] }, 'The text is empty.'],
-      [{ items: [{ fingerprint: FP_A, body: '  \n ' }] }, 'The text is empty.'],
-      [{ items: [{ fingerprint: FP_A, body: 'x'.repeat(4001) }] }, 'The text is 1 character longer than the 4000 allowed.'],
+      [{ items: [{ fingerprint: FP_A, body: 'Hidden​ here.' }] }, 'The text has a hidden character; remove it: Total is not rounded.'],
+      [{ items: [{ fingerprint: FP_A, body: '' }] }, 'The text is empty: Total is not rounded.'],
+      [{ items: [{ fingerprint: FP_A }, { fingerprint: FP_B, body: '  \n ' }] }, 'The text is empty: The cache is never cleared.'],
+      [{ items: [{ fingerprint: FP_A, body: 'x'.repeat(4001) }] }, 'The text is 1 character longer than the 4000 allowed: Total is not rounded.'],
       [{ items: [{ fingerprint: FP_A }], summary: 'Sum‮mary' }, 'The text has a hidden character; remove it.'],
       [{ items: [{ fingerprint: FP_A }], summary: '' }, 'The text is empty.'],
       [{ items: [{ fingerprint: FP_A }], summary: 'y'.repeat(4001) }, 'The text is 1 character longer than the 4000 allowed.'],
@@ -130,6 +131,18 @@ describe('POST /posts/preview', () => {
     expect(unknownOutcome.status).toBe(409);
     expect((unknownOutcome.json as { error: string }).error).toContain(FINDING_A.title);
     expect(s.calls).toEqual([]);
+  });
+
+  it('a finding whose drafted comment is over 4,000 characters is previewed cut to fit, saying so', async () => {
+    const s = await startService();
+    const change = Array.from({ length: 600 }, (_, i) => `const row${i} = total(${i});`).join('\n');
+    const long = { ...FINDING_A, suggestedChange: change };
+    await saveReview({ ...review(), id: 'r_3333333333', findings: [long, FINDING_B] });
+    expect([...commentBody(long)].length).toBeLessThanOrEqual(COMMENT_MAX);
+    const p = await previewed(s, { reviewId: 'r_3333333333', items: [{ fingerprint: FP_A }, { fingerprint: FP_B }] });
+    expect(p.items[0]?.body).toBe(commentBody(long));
+    expect(p.items[0]?.body.endsWith(`\n\n${CUT_NOTE}`)).toBe(true);
+    expect(p.items[0]?.mentions).toEqual([]);
   });
 
   it('refuses a review text longer than REVIEW_BODY_MAX', async () => {

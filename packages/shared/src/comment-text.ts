@@ -92,13 +92,16 @@ function seen(value: string): string {
 
 // An `@` directly followed by a letter or digit, in any script.
 const AT_BEFORE_NAME = /@(?=[\p{L}\p{N}])/gu;
+// A `#` directly followed by a digit: GitHub links `#12` and `owner/repo#12` to that issue or pull request.
+const HASH_BEFORE_NUMBER = /#(?=[0-9])/g;
 
 /**
  * Text taken from a pull request, as prose that cannot notify anyone whatever stands around it: hidden characters out,
  * `&` and `<` as entities (no tag, comment or entity is live), every backslash doubled (none escapes what follows),
  * every `~` and `$` escaped and every line's leading white space dropped (no line can open a fence, a code block or
  * math), every backtick an apostrophe (no code span), and then a space after every `@` that is directly followed by a
- * letter or digit (`@alice` becomes `@ alice`), so no `@` stands directly before a name.
+ * letter or digit (`@alice` becomes `@ alice`), so no `@` stands directly before a name, and after every `#` that is
+ * directly followed by a digit (`#12` becomes `# 12`), so the text makes no reference to another issue or pull request.
  */
 export function plainProse(value: string): string {
   return seen(value)
@@ -109,6 +112,7 @@ export function plainProse(value: string): string {
     .replace(/^[ \t]+/gm, '')
     .replace(/`/g, "'")
     .replace(AT_BEFORE_NAME, '@ ')
+    .replace(HASH_BEFORE_NUMBER, '# ')
     .trim();
 }
 
@@ -133,21 +137,110 @@ function place(path: string, line: number | null): string {
   return `\`${line === null ? text : `${text}:${line}`}\``;
 }
 
+/** The last line of a drafted comment that had to be cut to fit in COMMENT_MAX characters. */
+export const CUT_NOTE = '(Cut to fit; the full finding is in Airlock.)';
+
+/** Length in characters (code points), as COMMENT_MAX counts them. */
+const chars = (text: string): number => [...text].length;
+const firstChars = (text: string, n: number): string => (n <= 0 ? '' : [...text].slice(0, n).join(''));
+
+/**
+ * Rendered prose cut to at most `room` characters. It never ends in white space or a backslash, so it cannot escape or
+ * join what follows it; everything else in prose is safe at any cut (it holds no backtick, no live `<` or `&`, and no
+ * `@` or `#` directly before a name or a number, and cutting adds no character).
+ */
+const cutProse = (prose: string, room: number): string => firstChars(prose, room).replace(/[\s\\]+$/u, '');
+
+/** One part of a drafted comment, and how to cut it to fit in `room` characters ('' when nothing of it fits). */
+interface Part { text: string; cut: (room: number) => string }
+
+const prosePart = (lead: string, prose: string): Part => ({
+  text: `${lead}${prose}`,
+  cut: (room) => {
+    const kept = cutProse(prose, room - chars(lead));
+    return kept === '' ? '' : `${lead}${kept}`;
+  },
+});
+
+/** The parts of the comment drafted from a finding, in order, empty ones left out. */
+function draftedParts(f: Finding): Part[] {
+  const titleLead = `**${SEVERITY_WORD[f.severity]}: `;
+  const title = oneLine(f.title);
+  const parts: Part[] = [
+    {
+      text: `${titleLead}${title}**`,
+      cut: (room) => {
+        const kept = cutProse(title, room - chars(titleLead) - 2);
+        return kept === '' ? '' : `${titleLead}${kept}**`;
+      },
+    },
+    prosePart('', plainProse(f.happens)),
+    prosePart('', plainProse(f.why)),
+  ];
+  const change = seen(f.suggestedChange).trim();
+  if (change.includes('\n')) {
+    const lead = 'Suggested change:\n';
+    const whole = fencedBlock(change);
+    // The fence of the whole change is at least as long as the fence of any piece of it.
+    const fence = whole.indexOf('\n');
+    parts.push({
+      text: `${lead}${whole}`,
+      cut: (room) => {
+        const kept = firstChars(change, room - chars(lead) - 2 * fence - 2).trim();
+        return kept === '' ? '' : `${lead}${fencedBlock(kept)}`;
+      },
+    });
+  } else if (change !== '') {
+    parts.push(prosePart('Suggested change: ', plainProse(change)));
+  }
+  if (f.connected.length > 0) {
+    const lead = 'Connected: ';
+    const places = f.connected.map((c) => `${place(c.path, c.line)} (${oneLine(c.role)})`);
+    parts.push({
+      text: `${lead}${places.join(', ')}`,
+      // Whole places only: a code span is never cut.
+      cut: (room) => {
+        let kept = '';
+        for (const p of places) {
+          const next = kept === '' ? `${lead}${p}` : `${kept}, ${p}`;
+          if (chars(next) > room) break;
+          kept = next;
+        }
+        return kept;
+      },
+    });
+  }
+  return parts.filter((part) => part.text !== '');
+}
+
 /**
  * The comment drafted from a finding. It is built from prose parts (through `plainProse`), paths in code spans and
  * fenced code parts only, joined by blank lines. Prose holds no backtick, so the only backticks are those spans and
- * fences, each written whole here; and no `@` in prose stands directly before a letter or digit. So text taken from
- * the pull request cannot notify anyone (proven against a Markdown renderer in the tests).
+ * fences, each written whole here; and no `@` in prose stands directly before a letter or digit, nor `#` before a digit.
+ * So text taken from the pull request cannot notify anyone or reference another issue (proven against a Markdown
+ * renderer in the tests). A comment that would be longer than COMMENT_MAX is cut to fit: the parts that fit are kept
+ * whole, the first that does not is cut (prose at a character, a fenced change inside its fence, the connected places
+ * at a whole place), the rest are left out, and the last line is CUT_NOTE. So every drafted comment can be posted.
  */
 export function commentBody(f: Finding): string {
-  const parts = [`**${SEVERITY_WORD[f.severity]}: ${oneLine(f.title)}**`, plainProse(f.happens), plainProse(f.why)];
-  const change = seen(f.suggestedChange).trim();
-  if (change.includes('\n')) parts.push(`Suggested change:\n${fencedBlock(change)}`);
-  else if (change !== '') parts.push(`Suggested change: ${plainProse(change)}`);
-  if (f.connected.length > 0) {
-    parts.push(`Connected: ${f.connected.map((c) => `${place(c.path, c.line)} (${oneLine(c.role)})`).join(', ')}`);
+  const parts = draftedParts(f);
+  const whole = parts.map((part) => part.text).join('\n\n');
+  if (chars(whole) <= COMMENT_MAX) return whole;
+  const budget = COMMENT_MAX - chars(`\n\n${CUT_NOTE}`);
+  const kept: string[] = [];
+  let used = 0;
+  for (const part of parts) {
+    const gap = kept.length === 0 ? 0 : 2;
+    const room = budget - used - gap;
+    const fits = chars(part.text) <= room;
+    const piece = fits ? part.text : part.cut(room);
+    if (piece !== '') {
+      kept.push(piece);
+      used += gap + chars(piece);
+    }
+    if (!fits) break;
   }
-  return parts.filter((part) => part !== '').join('\n\n');
+  return [...kept, CUT_NOTE].join('\n\n');
 }
 
 /**

@@ -132,8 +132,9 @@ export async function buildPreview(deps: PreviewDeps, body: PostPreviewBody): Pr
     // Airlock's own text when it is exactly the drafted comment; the names are filled once the review body is known.
     const isDefault = text === drafted;
     const mentions: string[] = [];
+    // The drafted text always fits (`commentBody` cuts it); a refusal of the person's text names its finding.
     const problem = checkCommentText(text);
-    if (problem !== null) throw new PostError(400, problem);
+    if (problem !== null) throw new PostError(400, fit(`${problem.replace(/\.$/, '')}: ${shown(finding.title)}.`));
     const place = finding.anchor.comment ?? null;
     if (place !== null && item.placement !== 'summary') {
       const startLine = place.startLine !== null && place.startLine < place.line ? place.startLine : null;
