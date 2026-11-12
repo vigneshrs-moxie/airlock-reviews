@@ -178,6 +178,12 @@ describe('jumpTo away from the Files changed page', () => {
     expect(f.log).toEqual(['send', ...navigated(`${PAUSE}R11`)]);
   });
 
+  it('navigates from one commit\'s diff in the newer view to the full Files changed view', async () => {
+    const f = fakeChrome([{ ok: false, reason: 'not-files-page', view: null, missing: [] }, line], { url: `https://github.com/acme/widgets/pull/1/changes/${'a'.repeat(40)}` });
+    expect(await sentenceOf(f.chrome, TAB, PR, place())).toBe('Showing src/pause.ts:11.');
+    expect(f.log).toEqual(['send', ...navigated(`${PAUSE}R11`)]);
+  });
+
   it('navigates without the line for a line outside the changed lines', async () => {
     const f = fakeChrome([NO_RECEIVER, { ok: true, how: 'file', view: 'classic', missing: [] }]);
     expect(await sentenceOf(f.chrome, TAB, PR, place({ kind: 'outside' }))).toBe('Showing src/pause.ts; that line is outside the changed lines.');

@@ -17,7 +17,8 @@ function pageOf(rest: string[]): PrPage {
   const [first, ...more] = rest;
   if (first === undefined) return 'conversation';
   if (first === 'files') return more.length === 0 ? 'files' : 'other';
-  if (first === 'changes') return 'files';
+  // The newer view's whole pull request; `/changes/<sha>` is one commit's diff, as `/files/<sha>` is in the classic view.
+  if (first === 'changes') return more.length === 0 ? 'files' : 'other';
   if (first === 'commits') return more.length <= 1 ? 'commits' : 'other';
   if (first === 'checks') return more.length === 0 ? 'checks' : 'other';
   return 'other';

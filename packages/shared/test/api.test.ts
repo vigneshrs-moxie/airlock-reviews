@@ -26,7 +26,7 @@ describe('prRefFromUrl', () => {
     expect(prRefFromUrl(`${base}/`)).toEqual(ref('conversation'));
     expect(prRefFromUrl(`${base}/files`)).toEqual(ref('files'));
     expect(prRefFromUrl(`${base}/changes`)).toEqual(ref('files'));
-    expect(prRefFromUrl(`${base}/changes/abc123`)).toEqual(ref('files'));
+    expect(prRefFromUrl(`${base}/changes/abc123`)).toEqual(ref('other'));
     expect(prRefFromUrl(`${base}/commits`)).toEqual(ref('commits'));
     expect(prRefFromUrl(`${base}/commits/abc123`)).toEqual(ref('commits'));
     expect(prRefFromUrl(`${base}/checks`)).toEqual(ref('checks'));
