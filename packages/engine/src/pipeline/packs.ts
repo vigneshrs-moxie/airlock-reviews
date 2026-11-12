@@ -45,9 +45,10 @@ function learnedFor(pack: Pack, repo: string, errors: StageError[]): Pack {
 /**
  * Loads every folder directly under `packsDir` that has a `pack.yaml` and selects the packs for the repository (or the
  * ones named in `packIds`), each with only the learned lines that apply to the repository. A pack that does not load, or
- * a selection that fails, is a stage error; the rest carry on. Makes no model call and no network call.
+ * a selection that fails, is a stage error; the rest carry on. A learned line that cannot be read is left out and named
+ * in `notes` (one sentence each), not an error. Makes no model call and no network call.
  */
-export async function choosePacks(packsDir: string, repo: string, packIds?: string[]): Promise<{ packs: Pack[]; errors: StageError[] }> {
+export async function choosePacks(packsDir: string, repo: string, packIds?: string[]): Promise<{ packs: Pack[]; errors: StageError[]; notes: string[] }> {
   const errors: StageError[] = [];
   const all: Pack[] = [];
   let names: string[] = [];
@@ -66,10 +67,12 @@ export async function choosePacks(packsDir: string, repo: string, packIds?: stri
     }
   }
   try {
-    return { packs: selectPacks(all, repo, packIds).map((p) => learnedFor(p, repo, errors)), errors };
+    const packs = selectPacks(all, repo, packIds).map((p) => learnedFor(p, repo, errors));
+    const notes = packs.flatMap((p) => p.learnedProblems ?? []).map((where) => `A learned line could not be read and was left out: ${where}.`);
+    return { packs, errors, notes };
   } catch (err) {
     errors.push(packsError(messageOf(err)));
-    return { packs: [], errors };
+    return { packs: [], errors, notes: [] };
   }
 }
 

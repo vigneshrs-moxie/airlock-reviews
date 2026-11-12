@@ -104,3 +104,23 @@ describe('a learned line whose repository field is malformed (second round)', ()
     }
   });
 });
+
+describe('a learned line that cannot be read', () => {
+  it('is left out and named in notes (one sentence, relative place), with no stage error; the pack stays', async () => {
+    const dir = await packsFolder();
+    await writeFile(join(dir, 'mine', 'learned', 'wrong.md'), `2026-11-03 · acme/repo-a · ${NAMED}\nhand typed SECRET-WORDS\n`);
+    const chosen = await choosePacks(dir, 'acme/repo-a');
+    // The fixture's generic pack has its own malformed-repository errors; none is about the unreadable line.
+    expect(chosen.errors.filter((e) => e.message.includes('mine'))).toEqual([]);
+    expect(chosen.notes).toEqual(['A learned line could not be read and was left out: mine/learned/wrong.md:2.']);
+    expect(JSON.stringify(chosen.notes)).not.toMatch(/SECRET-WORDS|\/tmp|\/var\//);
+    expect(seenBy(chosen.packs).lenses).toContain(NAMED);
+  });
+
+  it('has no notes when every line reads, and none for a pack that was not selected', async () => {
+    const dir = await packsFolder();
+    expect((await choosePacks(dir, 'acme/repo-a')).notes).toEqual([]);
+    await writeFile(join(dir, 'mine', 'learned', 'wrong.md'), 'junk\n');
+    expect((await choosePacks(dir, 'acme/repo-b')).notes).toEqual([]);
+  });
+});

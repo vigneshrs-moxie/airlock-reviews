@@ -27,5 +27,7 @@ export interface Pack {
   siblings: { id: string; glob: string }[]; linkRules: LinkRule[]; checks: CheckDef[];
   standards: { name: string; text: string; dated: boolean }[]; lenses: LensDef[]; rules: Rule[];
   learned: LearnedEntry[];
+  /** One `<pack id>/learned/<file>:<line>` for each learned line that could not be read and was left out; none when absent. */
+  learnedProblems?: string[];
 }
 export interface Holdout { pr: number; reviewedAt: string }

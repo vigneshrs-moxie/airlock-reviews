@@ -4,7 +4,7 @@ import { SeveritySchema, StageSchema } from '@airlock/shared';
 import { parse } from 'yaml';
 import { z } from 'zod';
 import type { StageRule } from '../intake/pr.js';
-import { learnedFileName, parseLearned } from './learned.js';
+import { learnedFileName, readLearned } from './learned.js';
 import type { CheckDef, LearnedEntry, LensDef, LinkRule, Pack, Rule } from './types.js';
 
 type Obj = Record<string, unknown>;
@@ -159,6 +159,7 @@ export async function loadPack(dir: string): Promise<Pack> {
   rules.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   const learned: LearnedEntry[] = [];
+  const learnedProblems: string[] = [];
   for (const kind of ['wrong', 'intended'] as const) {
     const path = join(root, 'learned', learnedFileName(kind));
     let text: string;
@@ -166,7 +167,10 @@ export async function loadPack(dir: string): Promise<Pack> {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw err;
     }
-    learned.push(...parseLearned(text, kind, path));
+    const read = readLearned(text, kind, path);
+    learned.push(...read.entries);
+    // Relative to the pack, never the line's text: the note that carries it is shown to people and models.
+    learnedProblems.push(...read.badLines.map((n) => `${id}/learned/${learnedFileName(kind)}:${n}`));
   }
 
   const appRoot = doc.appRoot ?? null;
@@ -182,6 +186,6 @@ export async function loadPack(dir: string): Promise<Pack> {
     siblings: section(doc, 'siblings', z.array(SiblingSchema), yamlPath, []),
     linkRules: section(doc, 'linkRules', z.array(LinkRuleSchema), yamlPath, []) as LinkRule[],
     checks: section(doc, 'checks', z.array(CheckSchema), yamlPath, []) as CheckDef[],
-    standards, lenses, rules, learned,
+    standards, lenses, rules, learned, learnedProblems,
   };
 }

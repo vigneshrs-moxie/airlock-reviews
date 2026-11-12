@@ -303,7 +303,7 @@ function asKept(f: Finding): KeptCandidate {
 /** Every stage from packs to select, inside the workspace. */
 async function reviewInWorkspace(
   req: ReviewRequest, deps: EngineDeps & { gate: UsageGate }, log: StageLog, settings: Settings, pr: PrInfo, ws: Workspace,
-  files: FileDiff[], diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; ms: number },
+  files: FileDiff[], diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; notes: string[]; ms: number },
   again: { previous: ReviewDocument | null; push: LensContext['push'] },
 ): Promise<Reviewed> {
   const { previous, push } = again;
@@ -626,7 +626,7 @@ async function reviewInWorkspace(
     range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
     dropped: [...schemaDropped, ...anchorDropped, ...carryDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
     notes: [
-      ...rereviewNotes, ...(sync ? [] : [nothingReadNote(files, tiers, pushed ? 'push' : 'pull request')].filter((n) => n !== null)),
+      ...chosen.notes, ...rereviewNotes, ...(sync ? [] : [nothingReadNote(files, tiers, pushed ? 'push' : 'pull request')].filter((n) => n !== null)),
       ...mergeNotes, ...selection.notes,
     ],
     fixed: carried.fixed,
