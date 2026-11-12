@@ -297,6 +297,9 @@ describe('posting contract', () => {
     expect(() => HelloSchema.parse({ airlock: true, version: '1', paired: true, proof: 'xyz' })).toThrow();
   });
   it('a post record is checked as a whole', () => {
+    for (const id of [0, -7, 1.5, 2 ** 53]) {
+      expect(() => PostRecordSchema.parse({ ...record, githubReviewId: id, url: `https://github.com/acme/widgets/pull/12#pullrequestreview-${id}` }), String(id)).toThrow();
+    }
     expect(() => PostRecordSchema.parse({ ...record, url: null })).toThrow();
     expect(() => PostRecordSchema.parse({ ...record, githubReviewId: null })).toThrow();
     expect(() => PostRecordSchema.parse({ ...record, outcome: 'unknown' })).toThrow();

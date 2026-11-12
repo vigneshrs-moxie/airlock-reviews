@@ -168,8 +168,9 @@ describe('the post sheet', () => {
 
   it('a mention shows the notice with the names', () => {
     previewed();
+    // mentionsIn reads no Markdown, so a name in backticks is listed too.
     type('Comment 1', 'Ask @alice and @acme/reviewers, not `@bob`.');
-    expect(dialog().getByText('Mentions @alice, @acme/reviewers: they will be notified.')).toBeTruthy();
+    expect(dialog().getByText('Mentions @alice, @acme/reviewers, @bob: they will be notified.')).toBeTruthy();
     type('Summary', 'Thanks @carol.');
     expect(dialog().getByText('Mentions @carol: they will be notified.')).toBeTruthy();
   });

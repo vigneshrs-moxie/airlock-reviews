@@ -14,90 +14,21 @@ const NAME_CHARS = '[\\p{L}\\p{N}._/-]*';
 const MENTION_IN_PROSE = new RegExp(`@(?=[\\p{L}\\p{N}])${NAME_CHARS}`, 'gu');
 // For text the person typed: the `@` may follow anything but an ASCII letter, digit or `_`.
 const MENTION_ANYWHERE = new RegExp(`(?<![A-Za-z0-9_])@(?=[\\p{L}\\p{N}])${NAME_CHARS}`, 'gu');
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const TRAILING = /[._/-]+$/;
 
-interface Segment { code: boolean; text: string }
-
-/** The backtick runs of a run of ordinary lines that can open or close a span: those not escaped by a backslash. */
-function runsOf(text: string): { index: number; length: number }[] {
-  const runs: { index: number; length: number }[] = [];
-  for (const match of text.matchAll(/`+/g)) {
-    let slashes = 0;
-    while (text[match.index - 1 - slashes] === '\\') slashes += 1;
-    if (slashes % 2 === 0) runs.push({ index: match.index, length: match[0].length });
-  }
-  return runs;
-}
-
-/** The backtick spans of a run of ordinary lines: a run of N backticks to the next run of exactly N. An unclosed one protects nothing. */
-function spans(text: string): Segment[] {
-  const out: Segment[] = [];
-  const runs = runsOf(text);
-  let from = 0;
-  for (let i = 0; i < runs.length; i += 1) {
-    const open = runs[i];
-    if (open === undefined || open.index < from) continue;
-    const close = runs.slice(i + 1).find((run) => run.length === open.length);
-    if (close === undefined) continue;
-    if (open.index > from) out.push({ code: false, text: text.slice(from, open.index) });
-    const end = close.index + close.length;
-    out.push({ code: true, text: text.slice(open.index, end) });
-    from = end;
-  }
-  if (from < text.length) out.push({ code: false, text: text.slice(from) });
-  return out;
-}
-
-/** Splits text into closed fenced blocks and backtick spans (code) and everything else. An unclosed fence protects nothing. */
-function segments(text: string): Segment[] {
-  const out: Segment[] = [];
-  let plain = '';
-  const flush = (): void => {
-    if (plain !== '') out.push(...spans(plain));
-    plain = '';
-  };
-  let fence: { char: string; length: number } | null = null;
-  let block = '';
-  for (const line of text.split(/(?<=\n)/)) {
-    const bare = line.replace(/\n$/, '');
-    if (fence !== null) {
-      block += line;
-      const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(bare);
-      if (close?.[1] !== undefined && close[1][0] === fence.char && close[1].length >= fence.length) {
-        flush();
-        out.push({ code: true, text: block });
-        block = '';
-        fence = null;
-      }
-      continue;
-    }
-    const open = FENCE_OPEN.exec(bare);
-    const marks = open?.[1];
-    if (open !== null && marks !== undefined && !(marks[0] === '`' && (open[2] ?? '').includes('`'))) {
-      fence = { char: marks[0] ?? '`', length: marks.length };
-      block = line;
-    } else {
-      plain += line;
-    }
-  }
-  if (fence !== null) plain += block; // never closed: what follows is not protected
-  flush();
-  return out;
-}
+const AT_FORMS = /&(?:#0*64(?!\d)|#x0*40(?![0-9a-f])|commat);?/gi;
 
 /**
- * Every `@name` (`@login` or `@org/team`) in text the person typed or kept, outside closed code spans and fenced blocks,
- * once each, in order. It errs towards reporting: names in HTML and after a backslash-escaped backtick are reported.
+ * Every `@name` (`@login` or `@org/team`) in text the person typed or changed, once each, in order, with the `@`,
+ * wherever it stands: inside backticks, fences or HTML too, and written as `&#64;`, `&#x40;` or `&commat;`. It does not
+ * try to read Markdown, so it over-reports (a name inside code is reported although GitHub would not notify). It is not
+ * for `commentBody`'s output, which is safe by construction.
  */
 export function mentionsIn(text: string): string[] {
   const found: string[] = [];
-  for (const part of segments(text)) {
-    if (part.code) continue;
-    for (const match of part.text.matchAll(MENTION_ANYWHERE)) {
-      const name = match[0].replace(TRAILING, '');
-      if (!found.includes(name)) found.push(name);
-    }
+  for (const match of text.replace(AT_FORMS, '@').matchAll(MENTION_ANYWHERE)) {
+    const name = match[0].replace(TRAILING, '');
+    if (!found.includes(name)) found.push(name);
   }
   return found;
 }
@@ -110,13 +41,15 @@ function seen(value: string): string {
 
 /**
  * Text taken from a pull request, as prose that cannot notify anyone: hidden characters out, `&` and `<` as entities
- * (no tag, comment or entity is live), every backslash doubled (none escapes what follows), every backtick an
- * apostrophe, and then every `@name` in backticks, so the only backticks left are the pairs that hold a name.
+ * (no tag, comment or entity is live), every backslash doubled (none escapes what follows), every `~` escaped and
+ * every line's leading white space dropped (no line can open a fence or a code block), every backtick an apostrophe, and then every `@name` in backticks, so the only backticks left are the pairs that hold a name.
  */
 export function plainProse(value: string): string {
   return seen(value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/\\/g, '\\\\')
+    .replace(/~/g, '\\~')
+    .replace(/^[ \t]+/gm, '')
     .replace(/`/g, "'")
     .replace(MENTION_IN_PROSE, (match) => {
       const name = match.replace(TRAILING, '');
