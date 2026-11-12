@@ -209,6 +209,39 @@ describe('renderReview', () => {
     expect(out).toContain('Also found\n\n');
   });
 
+  describe('a re-review', () => {
+    const rereviewed = (kind: 'rereview' | 'full'): ReviewDocument => {
+      const doc = fullDocument();
+      doc.range = { baseSha: 'c'.repeat(40), headSha: 'b'.repeat(40), kind };
+      doc.previous = { reviewId: 'r_0123456789', headSha: 'c'.repeat(40) };
+      doc.findings = [
+        finding({ severity: 'block', title: 'Total is not rounded', status: 'still-open' }),
+        finding({ id: 'c2', severity: 'fix', title: 'Missing test', bucket: 'also', rank: null, status: 'moved', anchor: { status: 'in-diff', startLine: 3, endLine: 3 } }),
+      ];
+      doc.fixed = [finding({
+        id: 'c3', severity: 'fix', title: 'Cart is not saved', path: 'src/cart.ts', status: 'fixed', bucket: 'also', rank: null,
+        anchor: { status: 'not-found', startLine: null, endLine: null, comment: null }, checked: 'It is saved now. Proof: src/cart.ts:9 on the head.',
+      })];
+      return doc;
+    };
+
+    it('says under the header what it covered: the push, or everything again', () => {
+      expect(renderReview(rereviewed('rereview')).split('\n')[2]).toBe('Review of the push ccccccc to bbbbbbb');
+      expect(renderReview(rereviewed('full')).split('\n')[2]).toBe('Reviewed again in full since ccccccc');
+      expect(renderReview(fullDocument()).split('\n')[2]).toBe('');
+    });
+
+    it('shows each finding\'s status, also under also found, and the fixed ones after also found with their reason', () => {
+      const out = renderReview(rereviewed('rereview'));
+      expect(out).toContain('1. [Block] Total is not rounded (Still open)');
+      expect(out).toContain('- [Fix] Missing test (Moved)  (src/total.ts:3)');
+      expect(out).toContain('Fixed since the last review (1)\n\n- [Fix] Cart is not saved  (src/cart.ts)\n  It is saved now. Proof: src/cart.ts:9 on the head.');
+      expect(out.indexOf('\nAlso found\n')).toBeLessThan(out.indexOf('\nFixed since the last review (1)\n'));
+      expect(out.indexOf('\nFixed since the last review (1)\n')).toBeLessThan(out.indexOf('\nQuestions\n'));
+      expect(renderReview(fullDocument())).not.toContain('Fixed since the last review');
+    });
+  });
+
   it('prints every ignored file under Not reviewed with its reason', () => {
     const doc = fullDocument();
     doc.files = [

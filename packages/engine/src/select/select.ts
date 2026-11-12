@@ -1,3 +1,4 @@
+import { SEVERITY_WORD } from '@airlock/shared';
 import type {
   Depth, Dropped, Finding, PrInfo, Question, StageError, Verdict, VerdictLabel,
 } from '@airlock/shared';
@@ -318,8 +319,9 @@ function rank(items: KeptCandidate[], answer: SelectOutput | null): { top: KeptC
   return { top: top.map((i) => items[i]!), also: also.map((i) => items[i]!) };
 }
 
+/** A finding keeps the status it was given (on a re-review); on a first review every status is null. */
 const toFinding = (item: KeptCandidate, bucket: Finding['bucket'], rank: number | null): Finding =>
-  ({ ...item, fingerprint: fingerprint(item), bucket, rank, status: null });
+  ({ ...item, fingerprint: fingerprint(item), bucket, rank, status: item.status ?? null });
 
 /** Trimmed, without empty lines, at most MAX_LINES. */
 const cleanLines = (lines: string[]): string[] => lines.map((l) => l.trim()).filter((l) => l !== '').slice(0, MAX_LINES);
@@ -418,7 +420,26 @@ export function decideVerdict(
 /** The self-review text's sentence, in place of "No findings.", for a review that did not finish. */
 export const INCOMPLETE_TEXT = 'Airlock could not finish reviewing this pull request.';
 
-export function selfReviewText(pr: PrInfo, depth: Depth, packTitles: string[], verdict: Verdict): string {
+/** What a re-review adds to the self-review text: the earlier review's head, the findings with their status, and the fixed ones. */
+export interface RereviewText { earlierHead: string; findings: Finding[]; fixed: Finding[] }
+
+const STATUS_WORD: Record<NonNullable<Finding['status']>, string> = { new: 'New', 'still-open': 'Still open', moved: 'Moved', fixed: 'Fixed' };
+
+/** One line per finding with its status, then the findings fixed since the last review. */
+function rereviewLines({ findings, fixed }: RereviewText): string[] {
+  const place = (f: Finding): string => `${f.path}${f.anchor.startLine === null ? '' : `:${f.anchor.startLine}`}`;
+  return [
+    ...findings.map((f) => `- ${STATUS_WORD[f.status ?? 'new']}: ${SEVERITY_WORD[f.severity]} · ${oneLine(f.title)} (${place(f)})`),
+    ...(fixed.length === 0 ? [] : ['Fixed since the last review:', ...fixed.map((f) => `- ${SEVERITY_WORD[f.severity]} · ${oneLine(f.title)} (${f.path})`)]),
+  ];
+}
+
+/**
+ * The short text the author can paste: the head, the depth and packs, and the counts. On a re-review (`rereview` given) it
+ * also counts what became of the earlier findings, then lists each finding with its status and the findings fixed since
+ * the last review, one per line.
+ */
+export function selfReviewText(pr: PrInfo, depth: Depth, packTitles: string[], verdict: Verdict, rereview?: RereviewText): string {
   const { counts } = verdict;
   const total = counts.block + counts.fix + counts.ask + counts.note;
   const words: [number, string, string][] = [
@@ -432,7 +453,10 @@ export function selfReviewText(pr: PrInfo, depth: Depth, packTitles: string[], v
   else parts.push(incomplete ? INCOMPLETE_TEXT : 'No findings.');
   if (pr.stage === 'pr1') parts.push('No checks ran at PR #1.');
   if (incomplete && total > 0) parts.push('The review did not finish.');
-  return parts.join(' ');
+  if (rereview === undefined) return parts.join(' ');
+  const n = (status: Finding['status']): number => rereview.findings.filter((f) => f.status === status).length;
+  parts.push(`Since the last review (${rereview.earlierHead.slice(0, 7)}): ${n('new')} new, ${n('still-open')} still open, ${n('moved')} moved, ${rereview.fixed.length} fixed.`);
+  return [parts.join(' '), ...rereviewLines(rereview)].join('\n');
 }
 
 // ---- The stage ----

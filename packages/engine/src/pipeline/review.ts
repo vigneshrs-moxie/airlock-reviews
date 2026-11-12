@@ -29,10 +29,13 @@ import { fallbackMap, buildChangeMap } from '../map/mapper.js';
 import { findNeighbours } from '../map/neighbours.js';
 import { mergeSameProblems, withMergedCount, type AnchoredCandidate } from '../merge/merge.js';
 import type { Holdout, Pack } from '../packs/types.js';
+import { carryOver, mergeIntoCarried } from '../rereview/carry.js';
+import { confirmFixed, fixedByCode, leftOpen, needsCheck, type FixedCheckResult } from '../rereview/fixed.js';
+import type { RereviewPlan } from '../rereview/range.js';
 import { runSweep } from '../rules/sweep.js';
-import { decideVerdict, sameTextOnce, select, selfReviewText, type SelectResult } from '../select/select.js';
+import { decideVerdict, sameTextOnce, select, selfReviewText, type RereviewText, type SelectResult } from '../select/select.js';
 import { isSyncMerge } from '../shape/detect.js';
-import { saveReview } from '../store/store.js';
+import { reviewById, saveReview } from '../store/store.js';
 import type { Exec } from '../util/exec.js';
 import { limiter } from '../util/limit.js';
 import { safeRead } from '../util/safe-read.js';
@@ -62,7 +65,10 @@ export interface ReviewRequest {
   kitDir?: string;
   /** The kit's version when `kitDir` is given; `pinned` otherwise. */
   kitSha?: string;
-  /** Review again after an earlier review of this pull request; not used until Task 4. */
+  /**
+   * Review again after the stored review `reviewId` of this pull request: only what was pushed since, when it can be
+   * reviewed alone, and what became of each earlier finding. Not with `explicit`.
+   */
   since?: { reviewId: string };
 }
 
@@ -143,13 +149,27 @@ export function withUniqueIds(candidates: Candidate[], used: Set<string>): Candi
   });
 }
 
+/** What a re-review fails with when the pull request's head is the earlier review's head. */
+export const NOTHING_PUSHED = 'Nothing was pushed since the last review.';
+
+/** The stored review a re-review continues: one of this repository and number, or the review fails before any model call. */
+async function earlierReview(req: ReviewRequest, reviewId: string): Promise<ReviewDocument> {
+  if (req.explicit !== undefined) throw new Error('A re-review covers what was pushed since the last review, so it cannot be given a range.');
+  const doc = await reviewById(req.repo, req.number, reviewId);
+  if (doc === null || doc.pr.repo !== req.repo || doc.pr.number !== req.number) {
+    throw new Error(`There is no stored review ${reviewId} of this pull request.`);
+  }
+  return doc;
+}
+
 /** Prepares the workspace; a clone or fetch refused for lack of credentials says how to fix it. */
-async function openWorkspace(exec: Exec, req: ReviewRequest, pr: PrInfo, reviewId: string): Promise<Workspace> {
+async function openWorkspace(exec: Exec, req: ReviewRequest, pr: PrInfo, reviewId: string, previous: ReviewDocument | null): Promise<Workspace> {
   try {
     return await prepareWorkspace(exec, {
       repo: req.repo, remoteUrl: req.remoteUrl ?? `https://github.com/${req.repo}.git`, reviewId,
       ...(req.explicit ? { explicit: req.explicit } : {
         pr: { number: req.number, baseRef: pr.baseRef, headSha: pr.headSha, baseSha: pr.baseSha, ...(pr.merged === undefined ? {} : { merged: pr.merged }) },
+        ...(previous === null ? {} : { rereview: { previous, pr } }),
       }),
     });
   } catch (err) {
@@ -175,7 +195,7 @@ function lensStage(log: StageLog, stage: StageName, fn: () => Promise<LensStageR
 function fallbackSelection(
   pr: PrInfo, depth: Depth, packs: Pack[], kept: KeptCandidate[], questions: Question[], log: StageLog,
 ): SelectResult {
-  const findings: Finding[] = kept.map((k) => ({ ...k, fingerprint: fingerprint(k), bucket: 'also', rank: null, status: null }));
+  const findings: Finding[] = kept.map((k) => ({ ...k, fingerprint: fingerprint(k), bucket: 'also', rank: null, status: k.status ?? null }));
   const left = sameTextOnce(questions);
   const verdict = decideVerdict(pr, findings, log.errors, false, left.length);
   return {
@@ -190,10 +210,11 @@ const unreviewedMerge = (changed: number): string =>
 
 /**
  * For a live pull request (no explicit range): when the diff has no files but GitHub lists changed files, the sentence for
- * a stage error, since nothing was reviewed; otherwise null.
+ * a stage error, since nothing was reviewed; otherwise null. A given range (explicit, or a re-review's push) is not the
+ * range GitHub counts files over, so the check does not apply to it.
  */
-function emptyDiff(files: FileDiff[], pr: PrInfo, explicit: boolean): string | null {
-  if (explicit || files.length > 0 || pr.changedFiles <= 0) return null;
+function emptyDiff(files: FileDiff[], pr: PrInfo, givenRange: boolean): string | null {
+  if (givenRange || files.length > 0 || pr.changedFiles <= 0) return null;
   const listed = pr.changedFiles === 1 ? '1 changed file' : `${pr.changedFiles} changed files`;
   return `GitHub lists ${listed} for this pull request, but the diff Airlock computed is empty. Nothing was reviewed.`;
 }
@@ -223,19 +244,40 @@ function nothingReadNote(files: FileDiff[], tiers: FileFact[]): string | null {
   return `Nothing in this pull request was read closely: all ${files.length} changed files are of kinds Airlock trusts (tests, documents, generated files).`;
 }
 
+/** A re-review's note when the whole pull request was reviewed again, saying which and why. */
+function everythingNote(plan: Extract<RereviewPlan, { kind: 'everything' }>, previous: ReviewDocument, pr: PrInfo): string {
+  return plan.reason === 'rewritten'
+    ? `The branch was rewritten since the last review (its earlier head ${previous.pr.headSha.slice(0, 7)} is no longer part of it), so the whole pull request was reviewed again.`
+    : `A commit pushed since the last review merges the base branch ${pr.baseRef} in, so the whole pull request was reviewed again.`;
+}
+const EMPTY_PUSH_NOTE = 'The push since the last review changed no files Airlock reviews, so the earlier findings are carried as they were.';
+
+/** What became of the earlier review's findings: still open or moved (by code or by the fixed check), and fixed. */
+interface Carried { open: Finding[]; fixed: Finding[] }
+
 interface Settings { depth: Depth; models: ModelConfig; parallel: number; combine: 'never' | 'no-read-tier' }
 
 interface Reviewed {
   range: ReviewRange; packs: Pack[]; tiers: FileFact[]; facts: Fact[]; map: ChangeMap; brief: Brief; questions: Question[];
   candidates: Candidate[]; dropped: Dropped[]; selection: SelectResult; limits: string[]; notes: string[];
+  /** On a re-review, the findings fixed since the earlier review. */
+  fixed: Finding[];
+}
+
+/** A carried finding as an item for selection: its status kept, its list place and fingerprint made again there. */
+function asKept(f: Finding): KeptCandidate {
+  const { fingerprint: _f, bucket: _b, rank: _r, ...item } = f;
+  return item;
 }
 
 /** Every stage from packs to select, inside the workspace. */
 async function reviewInWorkspace(
   req: ReviewRequest, deps: EngineDeps & { gate: UsageGate }, log: StageLog, settings: Settings, pr: PrInfo, ws: Workspace,
-  files: FileDiff[], diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; ms: number },
+  files: FileDiff[], diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; ms: number }, previous: ReviewDocument | null,
 ): Promise<Reviewed> {
   const { exec, runner } = deps;
+  // A re-review's push is a range Airlock chose, as an explicit one is: GitHub's file count is about the whole pull request.
+  const givenRange = req.explicit !== undefined || ws.range.kind === 'rereview';
   /** After the usage limit, a stage that needs a model records once why it did not run, and is skipped. */
   const limitedOut = async (stage: StageName): Promise<boolean> => {
     const why = deps.gate.stoppedBy();
@@ -276,7 +318,7 @@ async function reviewInWorkspace(
 
   const gathered = (await log.run('facts', async (rec) => {
     const tiers = await rec.attempt(() => classifyFiles(files, packs), [] as FileFact[]);
-    const unreviewed = notReviewed(files, tiers) ?? emptyDiff(files, pr, req.explicit !== undefined);
+    const unreviewed = notReviewed(files, tiers) ?? emptyDiff(files, pr, givenRange);
     if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
     for (const path of binarySourcePaths(files, packs)) rec.error({ stage: 'facts', cohortId: null, message: binarySourceSentence(path) });
     const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead), [] as Fact[])];
@@ -300,7 +342,7 @@ async function reviewInWorkspace(
     log.emit({ type: 'map', map }); // empty, so a listener waiting for the map is not left hanging
     log.skip('brief', skipWhy);
     // A merge with no files is one that changes nothing only when GitHub agrees (or the range was given explicitly).
-    const nothingChanged = files.length === 0 && emptyDiff(files, pr, req.explicit !== undefined) === null;
+    const nothingChanged = files.length === 0 && emptyDiff(files, pr, givenRange) === null;
     brief = nothingChanged ? EMPTY_SYNC_MERGE_BRIEF : files.length === 0 ? EMPTY_BRIEF : SYNC_MERGE_BRIEF;
   } else {
     map = ((await limitedOut('map')) ? undefined : await log.run('map', async (rec) => {
@@ -356,18 +398,41 @@ async function reviewInWorkspace(
   }
   limits.push(...lensR.limits, ...sweepR.limits, ...seamsR.limits);
   questions.push(...lensR.questions, ...sweepR.questions, ...seamsR.questions);
-  const usedIds = new Set<string>();
+  // A carried finding keeps its id, so a new candidate never takes one of them.
+  const usedIds = new Set<string>(previous?.findings.map((f) => f.id) ?? []);
   const candidates = withUniqueIds([...lensR.candidates, ...sweepR.candidates, ...seamsR.candidates], usedIds);
   const schemaDropped = [...lensR.dropped, ...sweepR.dropped, ...seamsR.dropped];
 
+  // On a re-review every earlier finding is looked for at the head by code, in the anchor stage, even on a sync merge.
+  // When that cannot be done, each stays open with no place (never fixed), and the stage error makes the review incomplete.
+  const unplaced = (): { open: Finding[]; vanished: Finding[] } =>
+    ({ open: (previous?.findings ?? []).map((f) => leftOpen({ ...f, cohortId: null })), vanished: [] });
+  let earlier = { open: [] as Finding[], vanished: [] as Finding[] };
   let anchored: AnchoredCandidate[] = [];
   const anchorDropped: Dropped[] = [];
-  if (sync) log.skip('anchor', skipWhy);
+  if (sync && previous === null) log.skip('anchor', skipWhy);
   else {
-    const r = await log.run('anchor', () => anchorCandidates(candidates, files, readHead));
+    const r = await log.run('anchor', async (rec) => {
+      const a = sync ? { anchored: [], dropped: [] } : await anchorCandidates(candidates, files, readHead);
+      const c = previous === null ? earlier : await rec.attempt(() => carryOver(previous, files, readHead), unplaced());
+      return { ...a, carried: c };
+    });
     anchored = r?.anchored ?? [];
     anchorDropped.push(...(r?.dropped ?? []));
+    earlier = r?.carried ?? (previous === null ? earlier : unplaced());
   }
+
+  // A finding raised again is the earlier one: merged into it before the merge stage, so it is neither asked about nor
+  // challenged again, and once more after it, for a keeper that took the carried fingerprint as an alias there.
+  const carryDropped: Dropped[] = [];
+  const intoCarried = (): void => {
+    if (previous === null) return;
+    const r = mergeIntoCarried(anchored, earlier.open);
+    anchored = r.items;
+    earlier = { ...earlier, open: r.carried };
+    carryDropped.push(...r.dropped);
+  };
+  intoCarried();
 
   // Code proposes clusters at the same place and the model says which are the same problem; only then are they merged,
   // before the challenge, so each problem is challenged once.
@@ -387,49 +452,90 @@ async function reviewInWorkspace(
       mergeNotes.push(...r.notes);
     }
   }
+  intoCarried();
 
+  // The challenge stage also holds a re-review's fixed check, which runs at every depth: a vanished Block or Fix finding
+  // gets one request; a vanished Ask or Note is fixed by code. When the check cannot run, nothing is marked fixed by it.
+  const { vanished } = earlier;
+  const notChecked = (): FixedCheckResult => ({
+    fixed: vanished.filter((f) => !needsCheck(f)).map(fixedByCode), open: vanished.filter(needsCheck).map(leftOpen),
+    errors: [], usage: [], limits: [],
+  });
+  const skipChallenge = sync || quick;
   let kept: KeptCandidate[];
+  let checkedEarlier: FixedCheckResult;
   const challengeDropped: Dropped[] = [];
-  if (sync || quick) {
+  if (skipChallenge && !vanished.some(needsCheck)) {
     log.skip('challenge', skipWhy);
     kept = anchored.map((c) => ({ ...c, checked: QUICK_CHECKED }));
+    checkedEarlier = notChecked();
   } else if (await limitedOut('challenge')) {
-    kept = anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED }));
+    kept = anchored.map((c) => ({ ...c, checked: skipChallenge ? QUICK_CHECKED : CHALLENGE_FAILED }));
+    checkedEarlier = notChecked();
   } else {
     const r = await log.run('challenge', async (rec) => {
-      const out = await challenge(runner, ctx, anchored, readBoth);
-      rec.usage(out.usage);
-      rec.error(...out.errors);
-      limits.push(...out.limits);
-      return out;
+      const [out, fixedOut] = await Promise.all([
+        skipChallenge ? null : challenge(runner, ctx, anchored, readBoth),
+        confirmFixed(runner, ctx, vanished),
+      ]);
+      for (const done of [out, fixedOut]) {
+        if (done === null) continue;
+        rec.usage(done.usage);
+        rec.error(...done.errors);
+        limits.push(...done.limits);
+      }
+      return { out, fixedOut };
     });
-    kept = r?.kept ?? anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED }));
-    challengeDropped.push(...withMergedCount(r?.dropped ?? [], mergeDropped));
+    kept = skipChallenge ? anchored.map((c) => ({ ...c, checked: QUICK_CHECKED }))
+      : (r?.out?.kept ?? anchored.map((c) => ({ ...c, checked: CHALLENGE_FAILED })));
+    challengeDropped.push(...withMergedCount(r?.out?.dropped ?? [], mergeDropped));
+    checkedEarlier = r?.fixedOut ?? notChecked();
   }
+  const carried: Carried = { open: [...earlier.open, ...checkedEarlier.open], fixed: checkedEarlier.fixed };
 
   if (depth === 'deep' && !sync && !(await limitedOut('lenses-deep'))) {
-    const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped].map((d) => d.candidate)];
+    const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...carryDropped, ...mergeDropped, ...challengeDropped].map((d) => d.candidate)];
+    const carriedPrints = carried.open.flatMap((f) => [f.fingerprint, ...(f.aliases ?? [])]);
     await log.run('lenses-deep', (rec) => deepPass(rec, {
-      runner, ctx, seen: new Set(known.map(fingerprint)), uniqueIds: (c) => withUniqueIds(c, usedIds), readHead, readBoth,
+      runner, ctx, seen: new Set([...known.map(fingerprint), ...carriedPrints]), uniqueIds: (c) => withUniqueIds(c, usedIds), readHead, readBoth,
     }, { candidates, questions, schemaDropped, anchorDropped, challengeDropped, kept, limits }));
   }
 
+  // On a re-review the earlier findings still open join the new ones before selection, so the top five and the verdict
+  // are over everything still open; the fixed ones are in neither.
+  const items: KeptCandidate[] = previous === null ? kept
+    : [...carried.open.map(asKept), ...kept.map((k) => ({ ...k, status: 'new' as const }))];
+
   // Select always runs, so the document has a verdict; it is told every error so far. On a sync merge it asks no model,
   // and after the usage limit it is replaced by the fallback, which asks none either.
-  const selection = ((await limitedOut('select')) ? undefined : await log.run('select', async (rec) => {
-    const r = await select(runner, ctx, kept, questions, [...log.errors], depth, sync);
+  const selected = ((await limitedOut('select')) ? undefined : await log.run('select', async (rec) => {
+    const r = await select(runner, ctx, items, questions, [...log.errors], depth, sync);
     rec.usage(r.usage);
     rec.error(...r.errors);
     return r;
-  })) ?? fallbackSelection(pr, depth, packs, kept, questions, log);
+  })) ?? fallbackSelection(pr, depth, packs, items, questions, log);
+  const selection = previous === null ? selected : {
+    ...selected,
+    selfReviewText: selfReviewText(pr, depth, packs.map((p) => p.title), selected.verdict, rereviewText(previous, selected.findings, carried.fixed)),
+  };
 
   limits.push(...selection.limits);
+  const rereviewNotes = previous === null ? []
+    : ws.plan?.kind === 'everything' ? [everythingNote(ws.plan, previous, pr)]
+      : files.length === 0 ? [EMPTY_PUSH_NOTE] : [];
   return {
     range, packs, tiers, facts, map, brief, questions: [...selection.questions, ...engineQuestions], candidates, selection,
-    dropped: [...schemaDropped, ...anchorDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
-    notes: [...(sync ? [] : [nothingReadNote(files, tiers)].filter((n) => n !== null)), ...mergeNotes, ...selection.notes],
+    dropped: [...schemaDropped, ...anchorDropped, ...carryDropped, ...mergeDropped, ...challengeDropped, ...selection.dropped], limits,
+    notes: [
+      ...rereviewNotes, ...(sync ? [] : [nothingReadNote(files, tiers)].filter((n) => n !== null)), ...mergeNotes, ...selection.notes,
+    ],
+    fixed: carried.fixed,
   };
 }
+
+/** The self-review text's re-review part: the earlier head, the findings with their status, and the fixed ones. */
+const rereviewText = (previous: ReviewDocument, findings: Finding[], fixed: Finding[]): RereviewText =>
+  ({ earlierHead: previous.pr.headSha, findings, fixed });
 
 /**
  * Reviews one pull request: every stage in order, then the document is checked against the schema, saved and returned.
@@ -471,30 +577,34 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
 
   // Kept outside the stage so a workspace opened just before a stop is still disposed.
   let opened: Workspace | undefined;
-  let intake: { pr: PrInfo; ws: Workspace; files: FileDiff[]; diffFacts: Fact[] };
+  let intake: { pr: PrInfo; ws: Workspace; files: FileDiff[]; diffFacts: Fact[]; previous: ReviewDocument | null };
   let reviewed: Reviewed;
   try {
     intake = (await log.run('intake', async (rec) => {
+      // A re-review starts from a stored review of this pull request, and only when something was pushed since.
+      const previous = req.since === undefined ? null : await earlierReview(req, req.since.reviewId);
       const live = await fetchPr(exec, req.repo, req.number, stageRulesOf(chosen.packs));
+      if (previous !== null && live.headSha === previous.pr.headSha) throw new Error(NOTHING_PUSHED);
       // The title and description as they were when the pull request was reviewed, when given, replace today's everywhere.
       const fetched = req.prText ? { ...live, title: req.prText.title, body: req.prText.body } : live;
-      const ws = await openWorkspace(exec, req, fetched, id);
+      const ws = await openWorkspace(exec, req, fetched, id, previous);
       opened = ws;
       const pr = req.explicit ? { ...fetched, baseSha: ws.range.baseSha, headSha: ws.range.headSha } : fetched;
       const loaded = await rec.attempt(async () => recheckBinary(
         await loadDiff(exec, ws.gitDir, ws.range),
         (path, bytes) => safeRead(ws.headDir, path, { firstBytes: bytes }),
       ), { files: [] as FileDiff[], facts: [] as Fact[] });
-      return { pr, ws, files: loaded.files, diffFacts: [...loaded.facts, ...linkFacts(loaded.files)] };
+      return { pr, ws, files: loaded.files, diffFacts: [...loaded.facts, ...linkFacts(loaded.files)], previous };
     }, { rethrow: true }))!;
     reviewed = await reviewInWorkspace(
-      req, deps, log, settings, intake.pr, intake.ws, intake.files, intake.diffFacts, { ...chosen, ms: choiceMs },
+      req, deps, log, settings, intake.pr, intake.ws, intake.files, intake.diffFacts, { ...chosen, ms: choiceMs }, intake.previous,
     );
   } finally {
     await (opened as Workspace | undefined)?.dispose().catch(() => undefined);
   }
 
   const { selection } = reviewed;
+  const { previous } = intake;
   // `createdAt` is when the document is assembled, at the end; `startedAt` is when the review began.
   const draft = (): ReviewDocument => ({
     schemaVersion: 1, id, createdAt: given.now().toISOString(), startedAt, pr: intake.pr, range: reviewed.range, depth: settings.depth,
@@ -503,6 +613,7 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
     findings: selection.findings, questions: reviewed.questions, dropped: reviewed.dropped, candidates: reviewed.candidates,
     whoseCall: selection.whoseCall, checksAfterMerge: selection.checksAfterMerge, selfReviewText: selection.selfReviewText,
     stageErrors: [...log.errors], timings: log.timings(), limits: reviewed.limits, notes: reviewed.notes,
+    ...(previous === null ? {} : { previous: { reviewId: previous.id, headSha: previous.pr.headSha }, fixed: reviewed.fixed }),
   });
   // A draft that fails the schema is the engine's own fault, so it rejects rather than becoming a stage error.
   const engineFault: { error: Error | null } = { error: null };
@@ -529,7 +640,8 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
     // Not saved: the review is returned, but never as a complete one, and its self-review text says so.
     const doc = draft();
     const verdict = decideVerdict(doc.pr, doc.findings, doc.stageErrors, false, selection.questions.length);
-    const text = selfReviewText(doc.pr, doc.depth, reviewed.packs.map((p) => p.title), verdict);
+    const again = previous === null ? undefined : rereviewText(previous, doc.findings, reviewed.fixed);
+    const text = selfReviewText(doc.pr, doc.depth, reviewed.packs.map((p) => p.title), verdict, again);
     document = checked({ ...doc, verdict, selfReviewText: text });
   }
   log.emit({ type: 'done', document });

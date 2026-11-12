@@ -44,6 +44,14 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['review', 'a/b#1', '--packs', ' , '])).toThrow(/--packs/);
     expect(() => parseArgs(['review', 'a/b#1', '--packs='])).toThrow(/--packs/);
   });
+  it('reads --since last or a review id, and refuses anything else or --since with --base and --head', () => {
+    expect(parseArgs(['review', 'a/b#1', '--since', 'last'])).toMatchObject({ since: 'last' });
+    expect(parseArgs(['review', 'a/b#1', '--since=r_0123456789'])).toMatchObject({ since: 'r_0123456789' });
+    for (const bad of ['latest', 'r_123', '../r_0123456789', '']) {
+      expect(() => parseArgs(['review', 'a/b#1', `--since=${bad}`])).toThrow(/--since must be last or a review id/);
+    }
+    expect(() => parseArgs(['review', 'a/b#1', '--since', 'last', '--base', 'abcdef1', '--head', 'abcdef2'])).toThrow(/--since cannot be used with --base and --head/);
+  });
   it('reads --json', () => {
     expect(parseArgs(['review', 'a/b#1', '--json', 'out.json'])).toMatchObject({ json: 'out.json' });
   });
@@ -88,9 +96,10 @@ describe('usage', () => {
     const text = usage();
     expect(text).toContain(
       'airlock review <owner/name#n | pull URL> [--depth quick|standard|deep] [--packs a,b] [--model <id>] [--sweep-model <id>]\n'
-        + '                 [--effort low|medium|high] [--combine never|no-read-tier] [--base <sha> --head <sha>] [--json <file>]',
+        + '                 [--effort low|medium|high] [--combine never|no-read-tier] [--base <sha> --head <sha>] [--since last|<review id>]\n'
+        + '                 [--json <file>]',
     );
-    for (const flag of ['--depth', '--packs', '--model', '--sweep-model', '--effort', '--combine', '--base', '--head', '--json']) {
+    for (const flag of ['--depth', '--packs', '--model', '--sweep-model', '--effort', '--combine', '--base', '--head', '--since', '--json']) {
       expect(text.split('\n').filter((l) => l.trimStart().startsWith(flag))).toHaveLength(1);
     }
   });

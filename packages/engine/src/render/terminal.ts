@@ -124,6 +124,15 @@ function droppedItem(d: ReviewDocument['dropped'][number]): string[] {
   return [head, ...wrap(`proof: ${place} "${r.quote}"`, '  ', '    ')];
 }
 
+/** For a re-review, what it covered: only the push since the earlier head, or the whole pull request again. */
+function rereviewLine(doc: ReviewDocument): string[] {
+  if (doc.previous === undefined) return [];
+  const earlier = doc.previous.headSha.slice(0, 7);
+  return [doc.range.kind === 'rereview'
+    ? `Review of the push ${earlier} to ${doc.range.headSha.slice(0, 7)}`
+    : `Reviewed again in full since ${earlier}`];
+}
+
 function countsLine(doc: ReviewDocument): string {
   const c = doc.verdict.counts;
   return (['block', 'fix', 'ask', 'note'] as const)
@@ -186,6 +195,7 @@ export function renderReview(input: ReviewDocument, opts: { color?: boolean } = 
   const header = [
     `${pr.repo} #${pr.number}  ${pr.title}`,
     [...(stage === '' ? [] : [stage]), doc.depth, `reviewed ${pr.headSha.slice(0, 7)}`, `packs: ${packs}`].join(' · '),
+    ...rereviewLine(doc),
   ];
   const verdictBlock = [
     paint(color, VERDICT_COLORS[verdict.label], verdictWords(verdict.label, pr.stage)),
@@ -206,10 +216,15 @@ export function renderReview(input: ReviewDocument, opts: { color?: boolean } = 
     section('Findings', top.flatMap((f, i) => [...(i > 0 ? [''] : []), ...renderFinding(f, i + 1, color, packTitle)])),
     section('Also found', also.flatMap((f) => {
       const line = f.anchor.startLine ?? f.lineHint;
-      const head = `- [${paint(color, SEVERITY_COLORS[f.severity], SEVERITY_WORDS[f.severity])}] ${f.title}  (${f.path}${line === null ? '' : `:${line}`})`;
+      const status = f.status === null ? '' : ` (${STATUS_WORDS[f.status]})`;
+      const head = `- [${paint(color, SEVERITY_COLORS[f.severity], SEVERITY_WORDS[f.severity])}] ${f.title}${status}  (${f.path}${line === null ? '' : `:${line}`})`;
       const others = alsoRaisedBy(f, packTitle);
       return others === null ? [head] : [head, ...wrap(others, '  ')];
     })),
+    section(`Fixed since the last review (${(doc.fixed ?? []).length})`, (doc.fixed ?? []).flatMap((f) => [
+      `- [${paint(color, SEVERITY_COLORS[f.severity], SEVERITY_WORDS[f.severity])}] ${f.title}  (${f.path})`,
+      ...wrap(f.checked, '  '),
+    ])),
     section('Questions', bullets(doc.questions.map((q) => q.text))),
     section('Whose call', bullets(doc.whoseCall)),
     section('Check after merge', doc.checksAfterMerge.flatMap((t, i) => wrap(t, `${i + 1}. `))),
