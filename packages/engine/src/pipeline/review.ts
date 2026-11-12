@@ -14,7 +14,7 @@ import { challenge, type KeptCandidate } from '../challenge/challenge.js';
 import type { ReadFile } from '../challenge/proof.js';
 import { linkFacts, loadDiff, recheckBinary } from '../diff/parse.js';
 import { runChecks } from '../facts/checks.js';
-import { classifyFiles } from '../facts/classify.js';
+import { binarySourcePaths, binarySourceSentence, classifyFiles } from '../facts/classify.js';
 import { fetchPr } from '../intake/pr.js';
 import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
 import { runCohortLenses } from '../lenses/cohort-lens.js';
@@ -264,6 +264,7 @@ async function reviewInWorkspace(
     const tiers = await rec.attempt(() => classifyFiles(files, packs), [] as FileFact[]);
     const unreviewed = notReviewed(files, tiers) ?? emptyDiff(files, pr, req.explicit !== undefined);
     if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
+    for (const path of binarySourcePaths(files, packs)) rec.error({ stage: 'facts', cohortId: null, message: binarySourceSentence(path) });
     const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead), [] as Fact[])];
     const found = await rec.attempt(
       () => findLinks(exec, ws.headDir, files, packs), { links: [] as Link[], skippedNames: 0, limits: [] as string[] },

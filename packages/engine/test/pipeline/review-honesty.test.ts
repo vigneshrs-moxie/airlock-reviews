@@ -74,6 +74,32 @@ describe('a pull request cannot hide its own files', () => {
   }, SLOW);
 });
 
+describe('a file git calls binary', () => {
+  const STOPPED = 'src/auth.ts looks like source code but is a binary file to git, so it was not reviewed.';
+
+  it('makes the review incomplete when its path looks like source code', async () => {
+    const s = await scenario(
+      { 'src/auth.ts': AUTH_BASE, 'src/pay.ts': 'export const fee = 1;\n' },
+      { 'src/auth.ts': `// build \u0000 note\n${AUTH_HEAD}`, 'src/pay.ts': 'export const fee = 2;\n' },
+    );
+    const { doc } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha, changedFiles: 2 }), script: attributesScript() });
+    expect(doc.stageErrors).toContainEqual({ stage: 'facts', cohortId: null, message: STOPPED });
+    expect(doc.verdict.label).toBe('incomplete');
+    expect(doc.files).toContainEqual({ path: 'src/auth.ts', tier: 'ignored', reason: 'binary file' });
+  }, SLOW);
+
+  it('does not for an image under a skimmed folder', async () => {
+    const s = await scenario(
+      { 'src/pay.ts': 'export const fee = 1;\n' },
+      { 'src/assets/logo.png': 'PNG\u0000\u0001\u0002 not text', 'src/pay.ts': 'export const fee = 2;\n' },
+    );
+    const { doc } = await review({ s, exec: fakeGh({ baseSha: s.baseSha, headSha: s.headSha, changedFiles: 2 }), script: attributesScript() });
+    expect(doc.stageErrors).toEqual([]);
+    expect(doc.verdict.label).not.toBe('incomplete');
+    expect(renderReview(doc)).toContain('\nNot reviewed\n\n- src/assets/logo.png: binary file\n');
+  }, SLOW);
+});
+
 /** fakeGh, with the pull request's description replaced by `body`. */
 function withBody(inner: Exec, body: string): Exec {
   return async (cmd, args, opts) => {

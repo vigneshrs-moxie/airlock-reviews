@@ -1,6 +1,6 @@
 import type { FileDiff } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
-import { classifyFiles } from '../../src/facts/classify.js';
+import { binarySourcePaths, classifyFiles } from '../../src/facts/classify.js';
 import type { Pack } from '../../src/packs/types.js';
 
 const file = (path: string, extra: Partial<FileDiff> = {}): FileDiff => ({
@@ -67,5 +67,24 @@ describe('classifyFiles', () => {
       { path: 'src/a.test.ts', tier: 'trust', reason: 'built-in: **/*.test.*' },
       { path: 'dist/link.js', tier: 'ignored', reason: 'build output (built-in: **/dist/**)' },
     ]);
+  });
+});
+
+describe('binarySourcePaths', () => {
+  const p = pack('web', { read: ['prisma/**'], trust: ['docs/**'], ignore: ['vendor/**'] });
+  const bin = (path: string, extra: Partial<FileDiff> = {}) => file(path, { binary: true, ...extra });
+
+  it('names a binary file whose path would be read or skimmed and whose extension is not a binary kind', () => {
+    const files = [bin('src/auth.ts'), bin('prisma/seed.sql'), bin('bin/run'), bin('src/gone.ts', { status: 'deleted' }), file('src/ok.ts')];
+    expect(binarySourcePaths(files, [p])).toEqual(['src/auth.ts', 'prisma/seed.sql', 'bin/run', 'src/gone.ts']);
+  });
+
+  it('leaves out a binary kind under a skimmed folder, whatever the letter case of its extension', () => {
+    const kinds = ['png', 'JPG', 'woff2', 'ttf', 'zip', 'tar.gz', 'mp4', 'pdf', 'o', 'so', 'dylib', 'exe', 'class', 'wasm'];
+    expect(binarySourcePaths(kinds.map((k) => bin(`src/assets/file.${k}`)), [p])).toEqual([]);
+  });
+
+  it('leaves out a binary file in the trust or ignored tier', () => {
+    expect(binarySourcePaths([bin('src/a.test.ts'), bin('docs/guide.md'), bin('vendor/lib.js'), bin('dist/app.js')], [p])).toEqual([]);
   });
 });

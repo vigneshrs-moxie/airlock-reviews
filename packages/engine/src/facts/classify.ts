@@ -44,3 +44,44 @@ function classify(file: FileDiff, packs: Pack[]): FileFact {
 export function classifyFiles(files: FileDiff[], packs: Pack[]): FileFact[] {
   return files.map((f) => classify(f, packs));
 }
+
+/**
+ * Extensions of files that are binary by nature: images, fonts, archives, media, PDF and compiled objects. A file git
+ * calls binary with one of these is passed over quietly; any other is suspect (see binarySourcePaths).
+ */
+export const BINARY_EXTENSIONS: ReadonlySet<string> = new Set([
+  // images
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'icns', 'tif', 'tiff', 'avif', 'heic', 'heif', 'psd',
+  // fonts
+  'woff', 'woff2', 'ttf', 'otf', 'eot',
+  // archives
+  'zip', 'gz', 'tgz', 'tar', 'bz2', 'xz', '7z', 'rar', 'jar', 'war',
+  // media
+  'mp3', 'mp4', 'm4a', 'm4v', 'wav', 'ogg', 'oga', 'flac', 'aac', 'mov', 'avi', 'webm', 'mkv',
+  // documents
+  'pdf',
+  // compiled objects
+  'o', 'obj', 'a', 'lib', 'so', 'dylib', 'dll', 'exe', 'class', 'pyc', 'wasm', 'node',
+]);
+
+const extensionOf = (path: string): string => {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  const dot = name.lastIndexOf('.');
+  return dot <= 0 ? '' : name.slice(dot + 1).toLowerCase();
+};
+
+/**
+ * The binary files (by git's verdict or the NUL check) that look like source code: their path would put them in the read
+ * or skim tier and their extension is not in BINARY_EXTENSIONS. Such a file is not reviewed, so it must not pass in silence.
+ */
+export function binarySourcePaths(files: FileDiff[], packs: Pack[]): string[] {
+  return files.filter((f) => {
+    if (!f.binary || BINARY_EXTENSIONS.has(extensionOf(f.path))) return false;
+    const { tier } = classify({ ...f, binary: false }, packs);
+    return tier === 'read' || tier === 'skim';
+  }).map((f) => f.path);
+}
+
+/** The stage error for a binary file that looks like source code. */
+export const binarySourceSentence = (path: string): string =>
+  `${path} looks like source code but is a binary file to git, so it was not reviewed.`;
