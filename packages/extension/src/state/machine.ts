@@ -55,8 +55,11 @@ export interface PanelDeps {
   timers?: Timers;
   /** The clock, in milliseconds since 1970; `Date.now` unless a test passes its own. */
   now?: () => number;
-  /** The notes on the tab's page, told which review is on screen with every state. */
-  notes?: Pick<PageNotes, 'review'>;
+  /**
+   * The notes on the tab's page, told which review is on screen with every state, and what is known of the pull
+   * request's head after the tab loads again.
+   */
+  notes?: Pick<PageNotes, 'review' | 'head'>;
 }
 
 type PrRef = { repo: string; number: number };
@@ -276,6 +279,7 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
       const owed = latest !== null && carried !== null && sameRef(carried.ref, target) ? carried.reply : undefined;
       if (owed !== undefined) carried = null;
       apply({ type: 'loaded', pr, latest, ...(lost ? { notice: RUN_STOPPED } : {}), ...(owed === undefined ? {} : { post: owed }) });
+      deps.notes?.head('known');
       watch(g);
     } catch (error) {
       fail(g, error, pr);
@@ -365,6 +369,8 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     const same = latest !== null && latest.document.id === document.id;
     const kept = records !== null && isFor(records, pr) ? records : { posts: [], dismissals: [] };
     apply({ type: 'finished', latest: same && latest !== null ? latest : { document, dismissals: kept.dismissals, posts: kept.posts } });
+    // A review just made is of the head the run read.
+    deps.notes?.head('known');
     watch(g);
   };
 
@@ -618,12 +624,39 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     }
   };
 
+  /**
+   * The tab finished loading again at the same pull request, which may have new commits: with a review on screen, the
+   * pull request is read again quietly (nothing on screen changes but what the answer changes; a sheet, a notice and an
+   * action in flight stay) and `stale` is worked out again from it. The notes wait for that answer, and a read that
+   * fails leaves the head unknown, as does a review kept while the service is away. A load in progress tells the notes
+   * itself; a running review is left alone.
+   */
+  const readHead = (): void => {
+    if (state.kind === 'loading') { deps.notes?.head('reading'); return; }
+    if (state.kind === 'offline' && state.review !== undefined) { deps.notes?.head('unknown'); return; }
+    if (state.kind !== 'review') return;
+    const g = generation;
+    const { repo, number } = state.pr;
+    deps.notes?.head('reading');
+    client.pr(repo, number, live.signal).then(
+      (pr) => {
+        if (!current(g)) return;
+        apply({ type: 'head', pr });
+        deps.notes?.head('known');
+      },
+      () => { if (current(g)) deps.notes?.head('unknown'); },
+    );
+  };
+
   // The screens have a state from the first moment, before the tab's address is known.
   deps.onState(state);
 
-  const unsubscribe = tab.onChange((url) => {
+  const unsubscribe = tab.onChange((url, status) => {
     const next = refOf(url);
-    if (ref !== undefined && sameRef(next, ref)) return;
+    if (ref !== undefined && sameRef(next, ref)) {
+      if (status === 'complete') readHead();
+      return;
+    }
     ref = next;
     begin(false);
   });

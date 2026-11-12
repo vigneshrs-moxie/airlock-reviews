@@ -437,15 +437,23 @@ test('9. the service starts again: the panel returns to the review by itself, th
 
 test('10. notes: Show notes in the diff turned off removes them all and on brings them back; Open in Airlock on a note opens its finding', async () => {
   if (context === undefined) throw new Error('no browser');
+  const stepStart = svc().requests.length;
   await expect(noteRows()).toHaveCount(3);
   await panel.getByRole('button', { name: 'Packs' }).click();
   const toggle = panel.getByRole('switch', { name: 'Show notes in the diff' });
   await expect(toggle).toBeChecked();
+  // The Packs screen's own reads are made before the notes are turned off and on.
+  const since = (from: number) => svc().requests.slice(from).map((r) => `${r.method} ${r.url.split('?')[0]}`);
+  await expect.poll(() => since(stepStart)).toEqual(expect.arrayContaining(['GET /status', 'GET /learned']));
+  const before = svc().requests.length;
   await toggle.click();
   await expect(toggle).not.toBeChecked();
   await expect(noteRows()).toHaveCount(0);
   await toggle.click();
   await expect(noteRows()).toHaveCount(3);
+  // Notes are private: turning them off and on asked the service nothing. The panel's check that the service still
+  // answers (GET /hello, every five seconds) is the only request that may fall in this window.
+  expect(since(before).filter((r) => r !== 'GET /hello')).toEqual([]);
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(verdictLines().getByText('3 shown, 1 waiting for their lines to load')).toBeVisible();
 
@@ -497,8 +505,12 @@ test('10. notes: Show notes in the diff turned off removes them all and on bring
   await panel.reload();
   await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
   expect(await sidePanels([panel])).toEqual([]);
-  // Notes are private: nothing about them reached the service.
-  expect(svc().requests.filter((r) => /note/i.test(r.url))).toEqual([]);
+  // Notes are private: nothing about them reached the service in this whole step, in an address or a body.
+  const sentDuringStep = svc().requests.slice(stepStart).map((r) => `${r.url}\n${JSON.stringify(r.body ?? null)}`);
+  expect(sentDuringStep.length).toBeGreaterThan(0);
+  for (const words of ['airlock:notes', ...document.findings.map((f) => f.title)]) {
+    expect(sentDuringStep.filter((r) => r.includes(words)), words).toEqual([]);
+  }
 });
 
 const POST_ONE_REVIEW = 'Airlock posts these as one review with the Comment action. It never approves or requests changes.';
@@ -742,10 +754,13 @@ test('17. the post routes refuse a request without the extension Origin, and a p
 
 test('18. a push: the banner, Review the push starts with since last, and the re-review shows what is new, still open, moved and fixed', async () => {
   svc().push(REPO, NUMBER, PUSHED_HEAD, rereviewScript);
-  await panel.reload();
+  // The person reloads the GitHub tab, not the panel: the panel reads the pull request again by itself.
+  await github.reload();
   await expect(panel.getByText('New commits since this review.')).toBeVisible();
   await expect(panel.getByRole('button', { name: 'Review everything again' })).toBeVisible();
-  // A review of an older commit: its lines may have moved, so its notes are taken off the page.
+  // A review of an older commit: its lines may have moved, so its notes are not put back on the page, and the panel
+  // says nothing about notes.
+  await expect(verdictLines().getByText(/ shown/)).toHaveCount(0);
   await expect(noteRows()).toHaveCount(0);
   await panel.getByRole('button', { name: 'Review the push' }).click();
   await expect.poll(() => bodiesOf('POST', '/reviews').length).toBe(2);

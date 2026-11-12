@@ -10,7 +10,7 @@ import {
 import type { PanelState, ReviewView } from '../../src/state/reduce';
 import type { SettingsStore } from '../../src/state/settings';
 import type { TabWatcher } from '../../src/state/tab';
-import { BASE, FakeService, TOKEN, json, latestFor, prSummary, prUrl } from '../helpers/fake-service';
+import { BASE, FakeService, TOKEN, held, json, latestFor, prSummary, prUrl } from '../helpers/fake-service';
 import { FakeTimers } from '../helpers/fake-timers';
 import { recordOf } from '../helpers/post-fixtures';
 import { also, dismissal, finding } from '../screens/review-fixtures';
@@ -257,6 +257,8 @@ describe('the notes the panel sends', () => {
     expect(h.sent).toEqual([]);
     h.tab.go(prUrl('acme/widgets', 1, '/commits'));
     h.tab.go(prUrl('acme/widgets', 1, '/files/0123456..89abcde'));
+    // One commit's diff in the newer view: its lines are not the head's.
+    h.tab.go(prUrl('acme/widgets', 1, `/changes/${'a'.repeat(40)}`));
     await settle();
     expect(h.sent).toEqual([]);
     expect(h.lines.filter((l) => l !== null)).toEqual([]);
@@ -445,10 +447,145 @@ describe('the notes the panel sends: follow-ups', () => {
     }
   });
 
+  it('a recheck window starts again when the page loads again and when the address changes', async () => {
+    const h = setup({ latest: review([finding(1)]), otherwise: (m) => (m.type === 'airlock:notes' ? waiting(m) : placedAll(m)) });
+    await until(() => h.timers.delays().length === 1, 'a recheck');
+    // The whole minute passes with the notes still waiting: the rechecks end.
+    for (let i = 0; i < 30 && h.timers.delays().length > 0; i++) {
+      h.clock.now += RECHECK_MS;
+      h.timers.fire();
+      await settle();
+    }
+    expect(h.timers.delays()).toEqual([]);
+    // The person reloads the tab: the same notes, and a new minute of rechecks.
+    h.tab.go(FILES, 'loading');
+    h.tab.go(FILES, 'complete');
+    await until(() => h.timers.delays().length === 1, 'a recheck after the reload');
+    for (let i = 0; i < 30 && h.timers.delays().length > 0; i++) {
+      h.clock.now += RECHECK_MS;
+      h.timers.fire();
+      await settle();
+    }
+    expect(h.timers.delays()).toEqual([]);
+    // Away to the conversation and back: a new minute again.
+    h.tab.go(prUrl('acme/widgets', 1));
+    h.tab.go(FILES);
+    await until(() => h.timers.delays().length === 1, 'a recheck after coming back');
+  });
+
+  it('a page that recognises no view yet is asked again, and the cannot-be-shown sentence waits for the end of the minute', async () => {
+    let rendered = false;
+    const unknown = (m: NotesMessage | ClearNotesMessage): NotesResult => (m.type === 'airlock:notes'
+      ? (rendered ? placedAll(m) : { kind: 'shown', placed: 0, waiting: m.notes.length, view: null, missing: ['classic-file', 'react-file', 'react-toolbar'] })
+      : placedAll(m));
+    const h = setup({ latest: review([finding(1), finding(2)]), otherwise: unknown });
+    await until(() => h.timers.delays().length === 1, 'a recheck');
+    expect(h.lines.at(-1)?.text).toBe('0 shown, 2 waiting for their lines to load');
+    // GitHub renders the files: the next recheck places the notes.
+    rendered = true;
+    h.clock.now += RECHECK_MS;
+    h.timers.fire();
+    await until(() => h.lines.at(-1)?.text === '2 notes shown in the diff', 'the placed line');
+    expect(h.lines.some((l) => l?.text.startsWith('Notes cannot be shown'))).toBe(false);
+
+    // A page that never renders a view: the sentence once the minute is over, and not before.
+    rendered = false;
+    const n = setup({ latest: review([finding(1)]), otherwise: unknown });
+    await until(() => n.timers.delays().length === 1, 'a recheck');
+    for (let i = 0; i < 30 && n.timers.delays().length > 0; i++) {
+      expect(n.lines.at(-1)?.text).toBe('0 shown, 1 waiting for their lines to load');
+      n.clock.now += RECHECK_MS;
+      n.timers.fire();
+      await settle();
+    }
+    expect(n.timers.delays()).toEqual([]);
+    expect(n.lines.at(-1)?.text).toBe("Notes cannot be shown on this version of GitHub's page (classic-file, react-file, react-toolbar). Jump to line still works.");
+  });
+
+  it('gives what the page recognised to the panel\'s state, for the Packs screen, and not a clear message\'s answer', async () => {
+    const h = setup({
+      latest: review([finding(1), finding(2)]),
+      otherwise: (m) => (m.type === 'airlock:notes' ? { kind: 'shown', placed: 0, waiting: 2, view: 'react', missing: ['react-row'] } : placedAll(m)),
+    });
+    await until(() => h.notes.current().page !== undefined, 'the report');
+    expect(h.notes.current().page).toEqual({ view: 'react', missing: ['react-row'] });
+    h.notes.setShown(false);
+    await until(() => h.sent.at(-1)?.message.type === 'airlock:notes-clear', 'the clear message');
+    await settle();
+    expect(h.notes.current().page).toEqual({ view: 'react', missing: ['react-row'] });
+  });
+
   it('a refusal from the page reaches the line', async () => {
     const h = setup({ latest: review([finding(1)]), answers: [{ kind: 'refused', sentence: "The page refused Airlock's notes: a line is not a positive whole number." }] });
     await until(() => h.lines.at(-1)?.text === "The page refused Airlock's notes: a line is not a positive whole number.", 'the refusal');
     expect(h.lines.at(-1)?.reload).toBe(false);
+  });
+});
+
+describe('the notes after the GitHub tab loads again', () => {
+  const MOVED = 'd'.repeat(40);
+
+  it('a push since the review: the pull request is read again, a clear is sent and no notes', async () => {
+    const h = setup({ latest: review([finding(1)]) });
+    await until(() => h.sent.length === 1, 'the notes');
+    const reads = () => h.svc.calls.filter((c) => c === 'GET /pr').length;
+    const before = reads();
+    // The author pushed B; the person reloads the tab, which finishes loading at the same address.
+    h.svc.addPr(prSummary({ headSha: MOVED }));
+    h.tab.go(FILES, 'loading');
+    h.tab.go(FILES, 'complete');
+    await until(() => h.last()?.kind === 'review' && viewOf(h.last()).stale, 'the review known as stale');
+    await until(() => h.sent.length === 2, 'the clear message');
+    await settle();
+    expect(reads()).toBe(before + 1);
+    expect(h.sent.slice(1).map((s) => s.message)).toEqual([{ type: 'airlock:notes-clear' }]);
+    expect(h.lines.at(-1)).toBeNull();
+  });
+
+  it('no push: the notes are sent once, after the read', async () => {
+    const h = setup({ latest: review([finding(1)]) });
+    await until(() => h.sent.length === 1, 'the notes');
+    const read = held();
+    h.svc.on('GET /pr', read.reply);
+    const shown = h.states.length;
+    h.tab.go(FILES, 'loading');
+    h.tab.go(FILES, 'complete');
+    await until(read.asked, 'the read');
+    await settle();
+    expect(h.sent).toHaveLength(1);
+    read.release(json(prSummary()));
+    await until(() => h.sent.length === 2, 'the notes after the read');
+    await settle();
+    expect(h.sent).toHaveLength(2);
+    expect(notesSent(h.sent[1]!).notes).toHaveLength(1);
+    // The same answer: nothing on screen changed.
+    expect(h.states).toHaveLength(shown);
+  });
+
+  it('a read that fails: the notes are not sent and the page is cleared', async () => {
+    const h = setup({ latest: review([finding(1)]) });
+    await until(() => h.sent.length === 1, 'the notes');
+    h.svc.on('GET /pr', () => json({ error: 'GitHub did not answer.' }, 502));
+    h.tab.go(FILES, 'loading');
+    h.tab.go(FILES, 'complete');
+    await until(() => h.sent.length === 2, 'the clear message');
+    await settle();
+    expect(h.sent.slice(1).map((s) => s.message)).toEqual([{ type: 'airlock:notes-clear' }]);
+    // Quiet: the review stays on screen.
+    expect(h.last()?.kind).toBe('review');
+  });
+
+  it('a running review is left alone: no read, and nothing changes on screen', async () => {
+    const h = setup({ latest: review([finding(1)]) });
+    await until(() => h.sent.length === 1, 'the notes');
+    h.panel.dispatch({ type: 'start', depth: 'quick' });
+    await until(() => h.last()?.kind === 'running', 'running');
+    const reads = h.svc.calls.filter((c) => c === 'GET /pr').length;
+    const shown = h.states.length;
+    h.tab.go(FILES, 'complete');
+    await settle();
+    expect(h.svc.calls.filter((c) => c === 'GET /pr').length).toBe(reads);
+    expect(h.states).toHaveLength(shown);
   });
 });
 
@@ -467,6 +604,20 @@ describe('the line under the verdict', () => {
       text: "Notes cannot be shown on this version of GitHub's page (classic-file, react-file, react-toolbar). Jump to line still works.",
       reload: false,
     });
+    // A page still being asked whether it has a view: its notes wait.
+    expect(notesLine(shown(0, 2, null, ['classic-file', 'react-file', 'react-toolbar']), 0, true)).toEqual({
+      text: '0 shown, 2 waiting for their lines to load', reload: false,
+    });
+    // A recognised view whose rows are not found: nothing can be placed, and the selectors are named.
+    expect(notesLine(shown(0, 2, 'react', ['react-row']), 0)).toEqual({
+      text: "Notes cannot be shown on this version of GitHub's page (react-row). Jump to line still works.", reload: false,
+    });
+    expect(notesLine(shown(0, 2, 'react', ['react-files', 'react-row', 'react-line-number']), 0)).toEqual({
+      text: "Notes cannot be shown on this version of GitHub's page (react-row, react-line-number). Jump to line still works.", reload: false,
+    });
+    // Only the files container missing, or a note placed: the counts.
+    expect(notesLine(shown(0, 2, 'react', ['react-files']), 0)).toEqual({ text: '0 shown, 2 waiting for their lines to load', reload: false });
+    expect(notesLine(shown(1, 1, 'react', ['react-row']), 0)).toEqual({ text: '1 shown, 1 waiting for their lines to load', reload: false });
     // No notes to show, or the page was not the Files changed view: no line.
     expect(notesLine(shown(0, 0), 0)).toBeNull();
     expect(notesLine(shown(0, 0, null), 0)).toBeNull();
