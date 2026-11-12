@@ -178,6 +178,8 @@ describe('confirmFixed', () => {
         expect(r.open.map((f) => [f.status, f.anchor.status])).toEqual([['still-open', 'not-found']]);
         expect(r.open[0]!.checked).toMatch(/^Airlock could not confirm this was fixed: /);
       }
+      const r = await confirmFixed(createFakeRunner(() => answer({ evidence: unchanged })), deletedCtx([reformatted]), [logged({ path: 'src/fmt.ts' })]);
+      expect(r.open[0]!.checked).toBe('Airlock could not confirm this was fixed: its quoted code was deleted but is still in src/fmt.ts at the head in another shape.');
     });
 
     it('is not fixed when the proof is not code found at the head, or is the finding\'s own code', async () => {

@@ -44,7 +44,7 @@ export interface ChangedSince {
 export const FIXED_BY_CODE = 'The quoted code is gone; not checked further.';
 
 /** What a fixed finding's `checked` begins with when the proof is that the faulty code was deleted. */
-export const REMOVED = 'The faulty code was removed.';
+const REMOVED = 'The faulty code was removed.';
 
 /** Added to a proof judged against the whole pull request because the earlier head is gone. */
 const JUDGED_WHOLE = ' (the branch was rewritten, so this was judged against the whole pull request)';
@@ -135,13 +135,13 @@ function deletedHere(files: FileDiff[], f: Finding): boolean {
 }
 
 /**
- * True when the finding's own code is still in its file at the head (or the file it was renamed to), white space and line
- * breaks aside: deleting its lines only to write it again in another shape is not removing it.
+ * The finding's file at the head (or the file it was renamed to) when the finding's own code is still in it, white space
+ * and line breaks aside, else null: deleting its lines only to write it again in another shape is not removing it.
  */
-async function stillInFile(files: FileDiff[], f: Finding, read: (path: string) => Promise<string | null>): Promise<boolean> {
-  const renamed = files.find((d) => d.status === 'renamed' && d.oldPath === f.path)?.path;
-  const text = await read(renamed ?? f.path);
-  return text !== null && squash(text).includes(ownLines(f).join(''));
+async function stillInFile(files: FileDiff[], f: Finding, read: (path: string) => Promise<string | null>): Promise<string | null> {
+  const path = files.find((d) => d.status === 'renamed' && d.oldPath === f.path)?.path ?? f.path;
+  const text = await read(path);
+  return text !== null && squash(text).includes(ownLines(f).join('')) ? path : null;
 }
 
 /** True when a line of `quote` with substance is a line of the finding's own earlier quote, white space aside. */
@@ -179,8 +179,9 @@ async function apply(ctx: LensContext, changed: ChangedSince, f: Finding, answer
     const added = found.find((at) => addedHere(changed.files, path, at));
     if (added !== undefined) return { fixed: asFixed(f, proof(added)) };
     if (deletedHere(changed.files, f)) {
-      if (!(await stillInFile(changed.files, f, read))) return { fixed: asFixed(f, `${REMOVED} ${proof(found[0]!)}`) };
-      return refused(`its quoted code was deleted but is still in ${f.path} at the head in another shape${whole}`);
+      const still = await stillInFile(changed.files, f, read);
+      if (still === null) return { fixed: asFixed(f, `${REMOVED} ${proof(found[0]!)}`) };
+      return refused(`its quoted code was deleted but is still in ${still} at the head in another shape${whole}`);
     }
     return refused(`the code the check gave as the fix, in ${evidence.path}, was not changed since the last review, and the faulty code was not removed${whole}`);
   }
