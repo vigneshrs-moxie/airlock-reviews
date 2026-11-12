@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { ReviewDocument } from '@airlock/shared';
+import { failure } from '../../src/agent/fake-runner.js';
 import type { AgentRequest } from '../../src/agent/runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
 import { renderReview } from '../../src/render/terminal.js';
 import { saveReview } from '../../src/store/store.js';
 import type { Exec } from '../../src/util/exec.js';
 import { commitFiles } from '../helpers/change-repo.js';
-import { rawCandidate } from '../helpers/lens-context.js';
+import { block, rawCandidate } from '../helpers/lens-context.js';
 import {
   BASE_FILES, fakeGh, GOOD, HEAD_FILES, RULED, scenarioScript, useReviewHarness, type Scenario,
 } from '../helpers/review-scenario.js';
@@ -182,7 +183,21 @@ describe('re-review after a push', () => {
     expect(doc.stageErrors).toEqual([]);
   }, SLOW);
 
-  it('a failed fixed check leaves the finding open and the review incomplete', async () => {
+  it('a failed fixed-check request leaves the finding open and the review incomplete', async () => {
+    const { s, first } = await firstReview();
+    const head = await push(s, { 'src/money.ts': 'export function formatMoney(n: number): string {\n  return format(n);\n}\n' });
+    const { doc } = await rereview(s, first.id, head, pushScript({
+      paths: ['src/money.ts'], fixedCheck: () => failure('the model timed out', 'timeout'),
+    }));
+    expect(doc.fixed).toEqual([]);
+    const open = doc.findings.find((f) => f.title === GOOD.title)!;
+    expect(open.status).toBe('still-open');
+    expect(open.anchor.status).toBe('not-found');
+    expect(doc.verdict.label).toBe('incomplete');
+    expect(doc.stageErrors.map((e) => [e.stage, e.kind])).toEqual([['challenge', 'timeout']]);
+  }, SLOW);
+
+  it('a fixed-check answer whose proof code refuses leaves the finding open and the review complete, so the next push is reviewed alone', async () => {
     const { s, first } = await firstReview();
     const head = await push(s, { 'src/money.ts': 'export function formatMoney(n: number): string {\n  return format(n);\n}\n' });
     const { doc } = await rereview(s, first.id, head, pushScript({
@@ -190,11 +205,100 @@ describe('re-review after a push', () => {
     }));
     expect(doc.fixed).toEqual([]);
     const open = doc.findings.find((f) => f.title === GOOD.title)!;
-    expect(open.status).toBe('still-open');
-    expect(open.anchor.status).toBe('not-found');
-    expect(doc.verdict.label).toBe('incomplete');
-    expect(doc.stageErrors.map((e) => e.stage)).toEqual(['challenge']);
+    expect(open).toMatchObject({
+      status: 'still-open', anchor: { status: 'not-found' },
+      checked: 'Airlock could not confirm this was fixed: the check said it is fixed but quoted no code at the head.',
+    });
+    expect(doc.stageErrors).toEqual([]);
+    expect(doc.verdict.label).toBe('approve-after-fixes');
+
+    // The review is complete, so the next re-review covers only the next push, not everything again.
+    const next = await push(s, { 'src/jobs/pause.ts': 'export function pauseJob(): void { audit(); }\n' });
+    const again = await rereview(s, doc.id, next, pushScript({ paths: ['src/jobs/pause.ts'] }));
+    expect(again.doc.previous).toEqual({ reviewId: doc.id, headSha: head, covered: 'push' });
+    expect(again.doc.range).toEqual({ baseSha: head, headSha: next, kind: 'rereview' });
   }, SLOW);
+
+  it('a fix made by deleting the faulty line is confirmed with unchanged code at the head as the proof', async () => {
+    const { s, first } = await firstReview();
+    // The push only deletes GOOD's quoted line.
+    const head = await push(s, { 'src/money.ts': 'export function formatMoney(n: number): string {\n  // TODO round half up\n}\n' });
+    const { doc } = await rereview(s, first.id, head, pushScript({
+      paths: ['src/money.ts'],
+      fixedCheck: () => ({
+        outcome: 'fixed', evidence: { path: 'src/money.ts', quote: 'export function formatMoney(n: number): string {' },
+        explanation: 'The line is gone, so nothing is formatted there.', checked: 'Read both sides.',
+      }),
+    }));
+    expect(doc.stageErrors).toEqual([]);
+    expect(doc.fixed!.map((f) => [f.title, f.checked])).toEqual([
+      [GOOD.title, 'The faulty code was removed. The line is gone, so nothing is formatted there. Proof: src/money.ts:1 on the head.'],
+    ]);
+    expect(doc.findings.find((f) => f.title === GOOD.title)).toBeUndefined();
+  }, SLOW);
+
+  describe('reviewed again in full, a fix\'s proof is judged against what changed since the last review', () => {
+    /** The earlier review as stored when the pull request targeted develop: the re-review covers everything again. */
+    async function retargeted(s: Scenario, first: ReviewDocument): Promise<ReviewDocument> {
+      const stored: ReviewDocument = { ...first, id: 'r_3333333333', pr: { ...first.pr, baseRef: 'develop' } };
+      await saveReview(stored);
+      return stored;
+    }
+    const everything = ['CLAUDE.md', 'src/billing.ts', 'src/jobs/pause.ts', 'src/money.ts', 'test/money.test.ts'];
+
+    it('a line the pull request added before the last review is not a proof', async () => {
+      const { s, first } = await firstReview();
+      const stored = await retargeted(s, first);
+      // GOOD's line is reformatted onto two lines, and the check quotes the refund the pull request added in its first commit.
+      const head = await push(s, { 'src/money.ts': 'export function formatMoney(n: number): string {\n  // TODO round half up\n  return n\n    .toFixed(2);\n}\n' });
+      const { doc } = await rereview(s, stored.id, head, pushScript({
+        paths: everything,
+        fixedCheck: () => ({
+          outcome: 'fixed', evidence: { path: 'src/billing.ts', quote: 'export function refund(total: number): string {' },
+          explanation: 'Refunds are handled.', checked: 'Read billing.',
+        }),
+      }));
+      expect(doc.previous?.covered).toBe('everything');
+      expect(doc.fixed).toEqual([]);
+      expect(doc.stageErrors).toEqual([]);
+      expect(doc.findings.find((f) => f.title === GOOD.title)).toMatchObject({
+        status: 'still-open', anchor: { status: 'not-found' }, checked: expect.stringMatching(/^Airlock could not confirm this was fixed: /),
+      });
+    }, SLOW);
+
+    it('a line changed since the last review is a proof', async () => {
+      const { s, first } = await firstReview();
+      const stored = await retargeted(s, first);
+      const fixedLine = 'return Math.round(n * 100 + Number.EPSILON).toFixed(2);';
+      const head = await push(s, { 'src/money.ts': `export function formatMoney(n: number): string {\n  ${fixedLine}\n}\n` });
+      const { doc, calls } = await rereview(s, stored.id, head, pushScript({
+        paths: everything,
+        fixedCheck: () => ({ outcome: 'fixed', evidence: { path: 'src/money.ts', quote: fixedLine }, explanation: 'It now rounds.', checked: '' }),
+      }));
+      expect(doc.fixed!.map((f) => f.checked)).toEqual(['It now rounds. Proof: src/money.ts:2 on the head.']);
+      // The check is shown what changed since the last review: the push's lines, not the pull request's first commit.
+      const shown = block(calls.find((c) => c.role.startsWith('challenge:fixed:'))!.material, 'diff')!;
+      expect(shown).toContain('-   // TODO round half up');
+    }, SLOW);
+
+    it('when the earlier head is gone, the whole pull request is used and the proof says so', async () => {
+      const { s, first } = await firstReview();
+      // An earlier head this mirror never had: the branch was rewritten and that commit is gone.
+      const gone: ReviewDocument = { ...first, id: 'r_4444444444', pr: { ...first.pr, headSha: '1'.repeat(40) } };
+      await saveReview(gone);
+      const fixedLine = 'return Math.round(n * 100 + Number.EPSILON).toFixed(2);';
+      const head = await push(s, { 'src/money.ts': `export function formatMoney(n: number): string {\n  ${fixedLine}\n}\n` });
+      const { doc } = await rereview(s, gone.id, head, pushScript({
+        paths: everything,
+        fixedCheck: () => ({ outcome: 'fixed', evidence: { path: 'src/money.ts', quote: fixedLine }, explanation: 'It now rounds.', checked: '' }),
+      }));
+      expect((doc.notes ?? []).some((n) => n.startsWith('The branch was rewritten since the last review'))).toBe(true);
+      expect(doc.stageErrors).toEqual([]);
+      expect(doc.fixed!.map((f) => f.checked)).toEqual([
+        'It now rounds. Proof: src/money.ts:2 on the head (the branch was rewritten, so this was judged against the whole pull request).',
+      ]);
+    }, SLOW);
+  });
 
   it('reviews everything again when the branch was rewritten, says why, and still recognises the earlier findings', async () => {
     const { s, first } = await firstReview();

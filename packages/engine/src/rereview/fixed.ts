@@ -31,8 +31,23 @@ export interface FixedCheckResult {
   limits: string[];
 }
 
+/**
+ * What changed since the earlier review, which a fix's proof must be in: the diff from the earlier review's head to the
+ * new head. When that head is gone (the branch was rewritten), the whole pull request's diff, with `rewritten` set.
+ */
+export interface ChangedSince {
+  files: FileDiff[];
+  rewritten: boolean;
+}
+
 /** What a vanished Ask or Note finding says in `checked`: it is marked fixed by code alone. */
 export const FIXED_BY_CODE = 'The quoted code is gone; not checked further.';
+
+/** What a fixed finding's `checked` begins with when the proof is that the faulty code was deleted. */
+export const REMOVED = 'The faulty code was removed.';
+
+/** Added to a proof judged against the whole pull request because the earlier head is gone. */
+const JUDGED_WHOLE = ' (the branch was rewritten, so this was judged against the whole pull request)';
 
 const NOWHERE: Anchor = { status: 'not-found', startLine: null, endLine: null, comment: null };
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
@@ -44,6 +59,9 @@ const asFixed = (f: Finding, checked: string): Finding => ({ ...f, status: 'fixe
 
 /** A vanished finding nothing confirmed: still open, with no place at the head. It is never fixed. */
 export const leftOpen = (f: Finding): Finding => ({ ...f, status: 'still-open', anchor: NOWHERE });
+
+/** A vanished finding whose check answered, but whose proof code refused: still open, with no place, saying why. */
+const unconfirmed = (f: Finding, why: string): Finding => ({ ...leftOpen(f), checked: `Airlock could not confirm this was fixed: ${why}.` });
 
 /** A vanished Ask or Note finding: fixed by code alone, saying it was not checked further. */
 export const fixedByCode = (f: Finding): Finding => asFixed(f, FIXED_BY_CODE);
@@ -77,10 +95,13 @@ function findingBlock(f: Finding): string {
   ].join('\n'));
 }
 
-/** The earlier finding, the pull request, then the diff of the finding's file (by either name) and of its connected places' files. */
-function material(ctx: LensContext, f: Finding): { text: string; cut: ReturnType<typeof budgetedDiff>['cut'] } {
+/**
+ * The earlier finding, the pull request, then the diff since the earlier review of the finding's file (by either name) and
+ * of its connected places' files.
+ */
+function material(ctx: LensContext, changed: ChangedSince, f: Finding): { text: string; cut: ReturnType<typeof budgetedDiff>['cut'] } {
   const paths = new Set([f.path, ...f.connected.map((p) => p.path)]);
-  const diffs = ctx.files.filter((d) => paths.has(d.path) || (d.oldPath !== null && paths.has(d.oldPath)));
+  const diffs = changed.files.filter((d) => paths.has(d.path) || (d.oldPath !== null && paths.has(d.oldPath)));
   const diff = diffs.length === 0 ? { text: '(none)', cut: null } : budgetedDiff(diffs, CHALLENGE_DIFF_LINE_BUDGET);
   return { text: [findingBlock(f), prBlock(ctx.pr), asMaterial('diff', diff.text)].join('\n\n'), cut: diff.cut };
 }
@@ -90,12 +111,37 @@ interface Outcome { fixed?: Finding; open?: Finding; error?: StageError; usage?:
 const squash = (text: string): string => text.replace(/\s+/g, '');
 
 /**
- * True when one of the head file's lines `startLine` to `endLine` is a line of substance that the review's diff (the push's,
- * on a push re-review) adds: a line already there before, or in a file the diff does not touch, cannot be what fixed it.
+ * True when one of the head file's lines `startLine` to `endLine` is a line of substance that `files` (what changed since
+ * the earlier review) adds: a line already there before, or in a file nothing changed, cannot be what fixed it.
  */
 function addedHere(files: FileDiff[], path: string, lines: { startLine: number; endLine: number }): boolean {
   return files.filter((d) => d.path === path).some((d) => d.hunks.some((h) => h.lines.some((l) =>
     l.kind === 'add' && l.newNo !== null && l.newNo >= lines.startLine && l.newNo <= lines.endLine && hasSubstance(l.text))));
+}
+
+/** The finding's own earlier quote: its lines of substance, without white space. */
+const ownLines = (f: Finding): string[] => f.quote.split('\n').filter(hasSubstance).map(squash);
+
+/**
+ * True when every line of substance of the finding's own earlier quote is among the lines `files` (what changed since the
+ * earlier review) deletes from the finding's file, under its earlier name or the one it was renamed to.
+ */
+function deletedHere(files: FileDiff[], f: Finding): boolean {
+  const own = ownLines(f);
+  if (own.length === 0) return false;
+  const gone = new Set(files.filter((d) => d.path === f.path || d.oldPath === f.path)
+    .flatMap((d) => d.hunks.flatMap((h) => h.lines.filter((l) => l.kind === 'del').map((l) => squash(l.text)))));
+  return own.every((l) => gone.has(l));
+}
+
+/**
+ * True when the finding's own code is still in its file at the head (or the file it was renamed to), white space and line
+ * breaks aside: deleting its lines only to write it again in another shape is not removing it.
+ */
+async function stillInFile(files: FileDiff[], f: Finding, read: (path: string) => Promise<string | null>): Promise<boolean> {
+  const renamed = files.find((d) => d.status === 'renamed' && d.oldPath === f.path)?.path;
+  const text = await read(renamed ?? f.path);
+  return text !== null && squash(text).includes(ownLines(f).join(''));
 }
 
 /** True when a line of `quote` with substance is a line of the finding's own earlier quote, white space aside. */
@@ -105,46 +151,63 @@ function quotesOwnCode(f: Finding, quote: string): boolean {
 }
 
 /**
- * Applies the answer. `fixed` counts only when its quote is real code at the head (a safe path, at least one line of
- * substance, not only comments), code finds the whole quote in that file, and the place found holds a line of substance
- * the push added or changed (see addedHere); the proof names that place. `still-open` counts only when the anchoring
- * the anchor stage uses finds its quote at the head: the finding is then `moved` there, keeping its old fingerprint as an
- * alias. Anything else leaves it open with no place and is an error.
+ * Applies the answer, judging it against `changed` (what changed since the earlier review). `fixed` counts only when its
+ * quote is real code at the head (a safe path, at least one line of substance, not only comments, not the finding's own
+ * code) that code finds whole in that file, and either the place found holds a line of substance changed since the
+ * earlier review (see addedHere), or every line of substance of the finding's own quote was deleted since then (see
+ * deletedHere) and that code is not still in its file in another shape; `checked` then begins REMOVED. The proof names the
+ * place. `still-open` counts only when the anchoring the anchor stage uses finds its quote at the head: the finding is
+ * then `moved` there, keeping its old fingerprint as an alias. An answer code cannot confirm leaves the finding open with
+ * no place, its `checked` saying why; it is an answer, not a failed stage, so it adds no stage error.
  */
-async function apply(ctx: LensContext, f: Finding, answer: FixedCheckOutput): Promise<Outcome> {
-  const failed = (why: string): Outcome => ({ open: leftOpen(f), error: { stage: 'challenge', cohortId: f.cohortId, message: `${f.id}: ${why}` } });
+async function apply(ctx: LensContext, changed: ChangedSince, f: Finding, answer: FixedCheckOutput): Promise<Outcome> {
+  const refused = (why: string): Outcome => ({ open: unconfirmed(f, why) });
   const evidence = answer.evidence;
-  if (evidence === null) return failed(`the check answered "${answer.outcome}" without saying where; the finding stays open`);
+  const said = answer.outcome === 'fixed' ? 'said it is fixed' : 'said it is still open';
+  if (evidence === null) return refused(`the check ${said} but quoted no code at the head`);
   const read = (path: string): Promise<string | null> => safeRead(ctx.headDir, path);
+  const whole = changed.rewritten ? JUDGED_WHOLE : '';
   // The finding's own earlier code, found in another place, is the faulty code moved, not a fix: it is placed there.
-  if (answer.outcome === 'fixed' && !quotesOwnCode(f, evidence.quote)) {
+  const ownCode = quotesOwnCode(f, evidence.quote);
+  if (answer.outcome === 'fixed' && !ownCode) {
     const proves = isSafePath(evidence.path) && hasSubstance(evidence.quote) && !onlyComments(evidence.quote);
     const found = proves ? findQuote(await read(evidence.path), evidence.quote) : [];
-    if (found.length === 0) return failed(`the check said it is fixed, but its quote was not found as code in ${evidence.path} at the head; the finding stays open`);
+    if (found.length === 0) return refused(`the code the check gave as the fix was not found in ${evidence.path} at the head`);
     const path = posix.normalize(evidence.path);
-    const added = found.find((at) => addedHere(ctx.files, path, at));
-    if (added === undefined) {
-      return failed(`the check said it is fixed, but its quote in ${evidence.path} is not on a line the push added or changed; the finding stays open`);
+    const why = [answer.explanation, answer.checked].map((t) => t.trim()).find((t) => t !== '') ?? 'The check found it fixed';
+    const proof = (at: { startLine: number }): string => `${asSentence(why)} Proof: ${evidence.path}:${at.startLine} on the head${whole}.`;
+    const added = found.find((at) => addedHere(changed.files, path, at));
+    if (added !== undefined) return { fixed: asFixed(f, proof(added)) };
+    if (deletedHere(changed.files, f)) {
+      if (!(await stillInFile(changed.files, f, read))) return { fixed: asFixed(f, `${REMOVED} ${proof(found[0]!)}`) };
+      return refused(`its quoted code was deleted but is still in ${f.path} at the head in another shape${whole}`);
     }
-    const said = [answer.explanation, answer.checked].map((t) => t.trim()).find((t) => t !== '') ?? 'The check found it fixed';
-    return { fixed: asFixed(f, `${asSentence(said)} Proof: ${evidence.path}:${added.startLine} on the head.`) };
+    return refused(`the code the check gave as the fix, in ${evidence.path}, was not changed since the last review, and the faulty code was not removed${whole}`);
   }
   const { anchored } = await anchorCandidates(
     [{ ...f, path: evidence.path, quote: evidence.quote, lineHint: null }], ctx.files, read, ctx.push?.whole ?? undefined,
   );
   const placed = anchored[0];
-  if (placed === undefined) return failed(`the check placed it, but its quote was not found in ${evidence.path} at the head; the finding stays open`);
+  if (placed === undefined) {
+    return refused(ownCode
+      ? `the check gave the finding's own code in ${evidence.path} as the fix, but it was not found there at the head`
+      : `the check ${said} in ${evidence.path}, but its quote was not found there at the head`);
+  }
   return { open: withPlace({ ...placed, lineHint: f.lineHint, status: 'moved' }) };
 }
 
 /**
  * The fixed check for the earlier findings whose quoted code is gone. Each Block or Fix finding gets one request (the
  * challenger, read tools on both worktrees) that answers `fixed` with the line at the head that now prevents the
- * consequence, or `still-open` with where the problem now is; code then checks the quote (see apply). A request that
- * fails, or an answer code cannot confirm, leaves the finding open with no place and adds a stage error: it is never
- * fixed. Ask and Note findings are fixed by code alone, without a request. Both lists keep the order given.
+ * consequence, or `still-open` with where the problem now is; code then checks the quote against `changed` (see apply).
+ * An answer code cannot confirm leaves the finding open with no place, saying why. A request that fails (a timeout, a turn
+ * limit, unusable output, a usage limit) leaves it open with no place and adds a stage error. Neither is ever fixed. Ask
+ * and Note findings are fixed by code alone, without a request. Both lists keep the order given. `changed` defaults to the
+ * review's own diff, which on a push re-review is what changed since the earlier review.
  */
-export async function confirmFixed(runner: AgentRunner, ctx: LensContext, vanished: Finding[]): Promise<FixedCheckResult> {
+export async function confirmFixed(
+  runner: AgentRunner, ctx: LensContext, vanished: Finding[], changed: ChangedSince = { files: ctx.files, rewritten: false },
+): Promise<FixedCheckResult> {
   const out: FixedCheckResult = { fixed: [], open: [], errors: [], usage: [], limits: [] };
   const instructions = vanished.some(needsCheck) ? instructionsFor(await loadTemplate('fixed-check'), ctx.packs, ctx.missingHelpers) : '';
   const results = await Promise.all(vanished.map(async (f): Promise<Outcome> => {
@@ -152,7 +215,7 @@ export async function confirmFixed(runner: AgentRunner, ctx: LensContext, vanish
     let usage: AgentUsage | undefined;
     let limit: string | undefined;
     try {
-      const { text, cut } = material(ctx, f);
+      const { text, cut } = material(ctx, changed, f);
       if (cut !== null) limit = diffCutSentence('fixed check', f.title, cut);
       const result = await sendRequest<FixedCheckOutput>(runner, ctx, {
         role: `challenge:fixed:${f.id}`,
@@ -170,7 +233,7 @@ export async function confirmFixed(runner: AgentRunner, ctx: LensContext, vanish
         const kind: StageErrorKind = result.kind;
         return { open: leftOpen(f), error: { stage: 'challenge', cohortId: f.cohortId, message: `${f.id}: ${result.error}`, kind }, ...noted };
       }
-      return { ...(await apply(ctx, f, result.output)), ...noted };
+      return { ...(await apply(ctx, changed, f, result.output)), ...noted };
     } catch (err) {
       const message = `${f.id}: ${err instanceof Error ? err.message : String(err)}`;
       return { open: leftOpen(f), error: { stage: 'challenge', cohortId: f.cohortId, message }, ...(usage ? { usage } : {}) };

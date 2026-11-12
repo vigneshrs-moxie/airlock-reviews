@@ -80,9 +80,152 @@ describe('confirmFixed', () => {
       expect(no.open.map((f) => [f.id, f.status, f.anchor])).toEqual([
         ['c_fix', 'still-open', { status: 'not-found', startLine: null, endLine: null, comment: null }],
       ]);
-      expect(no.errors).toHaveLength(1);
-      expect(no.errors[0]).toMatchObject({ stage: 'challenge', cohortId: null });
+      // A proof code refuses is an answer, not a failed stage: the finding stays open and says why.
+      expect(no.errors).toEqual([]);
+      expect(no.open[0]!.checked).toMatch(/^Airlock could not confirm this was fixed: .+\.$/);
     }
+  });
+
+  it('an answer whose proof code refuses leaves the finding open with no place and no stage error, saying why', async () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [answer({ evidence: null }), 'Airlock could not confirm this was fixed: the check said it is fixed but quoted no code at the head.'],
+      [answer({ outcome: 'still-open', evidence: null }), 'Airlock could not confirm this was fixed: the check said it is still open but quoted no code at the head.'],
+      [
+        answer({ outcome: 'still-open', evidence: { path: 'src/pay.ts', quote: 'nowhere(card); // gone' } }),
+        'Airlock could not confirm this was fixed: the check said it is still open in src/pay.ts, but its quote was not found there at the head.',
+      ],
+      [
+        answer({ evidence: { path: 'src/pay.ts', quote: 'if (!isValidCard(card)) return;' } }),
+        'Airlock could not confirm this was fixed: the code the check gave as the fix was not found in src/pay.ts at the head.',
+      ],
+      [
+        answer({ evidence: { path: 'src/guard.ts', quote: 'export const guarded = (card: string) => isValid(card) && notExpired(card);' } }),
+        'Airlock could not confirm this was fixed: the code the check gave as the fix, in src/guard.ts, was not changed since the last review, and the faulty code was not removed.',
+      ],
+    ];
+    for (const [given, checked] of cases) {
+      const r = await confirmFixed(createFakeRunner(() => given), checkCtx(), [vanishedFix({ severity: 'block' })]);
+      expect(r.errors).toEqual([]);
+      expect(r.fixed).toEqual([]);
+      expect(r.open.map((f) => [f.status, f.anchor.status, f.checked])).toEqual([['still-open', 'not-found', checked]]);
+    }
+  });
+
+  describe('a fix made by deleting the faulty code', () => {
+    const LOGGED = "  console.log('pay', card);";
+    /** The push deleted the log line from pay.ts; every other line was already there. */
+    const DELETED_DIFF: FileDiff = diff('src/pay.ts', 0, {
+      additions: 0, deletions: 1,
+      hunks: [{
+        oldStart: 1, oldLines: 5, newStart: 1, newLines: 4, header: '@@ -1,5 +1,4 @@',
+        lines: [
+          { kind: 'ctx', oldNo: 1, newNo: 1, text: 'export function pay(card: string) {' },
+          { kind: 'del', oldNo: 2, newNo: null, text: LOGGED },
+          { kind: 'ctx', oldNo: 3, newNo: 2, text: '  if (!isValid(card)) throw new Error("invalid card");' },
+          { kind: 'ctx', oldNo: 4, newNo: 3, text: '  charge(card);' },
+          { kind: 'ctx', oldNo: 5, newNo: 4, text: '}' },
+        ],
+      }],
+    });
+    const logged = (over: Partial<Finding> = {}): Finding => vanishedFix({ title: 'The card number is logged', quote: LOGGED, ...over });
+    const unchanged = { path: 'src/pay.ts', quote: 'export function pay(card: string) {' };
+    const deletedCtx = (files: FileDiff[] = [DELETED_DIFF]) => checkCtx({ files });
+
+    it('is fixed when the push deleted every line of the finding\'s quote, with unchanged code at the head as the proof', async () => {
+      const runner = createFakeRunner(() => answer({ evidence: unchanged, explanation: 'The log line was deleted.' }));
+      const r = await confirmFixed(runner, deletedCtx(), [logged()]);
+      expect(r.errors).toEqual([]);
+      expect(r.open).toEqual([]);
+      expect(r.fixed.map((f) => [f.id, f.status, f.checked])).toEqual([
+        ['c_fix', 'fixed', 'The faulty code was removed. The log line was deleted. Proof: src/pay.ts:1 on the head.'],
+      ]);
+    });
+
+    it('is fixed when the file was renamed and the deleted line is in the renamed file\'s diff', async () => {
+      await writeFile(join(head, 'src/payment.ts'), HEAD_PAY);
+      const renamed: FileDiff = { ...DELETED_DIFF, path: 'src/payment.ts', oldPath: 'src/pay.ts', status: 'renamed' };
+      const runner = createFakeRunner(() => answer({ evidence: { path: 'src/payment.ts', quote: unchanged.quote } }));
+      const r = await confirmFixed(runner, deletedCtx([renamed]), [logged()]);
+      expect(r.fixed.map((f) => f.checked)).toEqual([expect.stringMatching(/^The faulty code was removed\. .* Proof: src\/payment\.ts:1 on the head\.$/)]);
+    });
+
+    it('is not fixed when a line of the quote was not deleted, the deletion is in another file, or the code is still there reformatted', async () => {
+      await writeFile(join(head, 'src/fmt.ts'), "export function show(card: string) {\n  console.log(\n    'pay', card);\n}\n");
+      const reformatted: FileDiff = diff('src/fmt.ts', 0, {
+        hunks: [{
+          oldStart: 1, oldLines: 3, newStart: 1, newLines: 4, header: '@@ -1,3 +1,4 @@',
+          lines: [
+            { kind: 'ctx', oldNo: 1, newNo: 1, text: 'export function show(card: string) {' },
+            { kind: 'del', oldNo: 2, newNo: null, text: LOGGED },
+            { kind: 'add', oldNo: null, newNo: 2, text: '  console.log(' },
+            { kind: 'add', oldNo: null, newNo: 3, text: "    'pay', card);" },
+            { kind: 'ctx', oldNo: 3, newNo: 4, text: '}' },
+          ],
+        }],
+      });
+      const cases: [Finding, FileDiff[]][] = [
+        // Two lines of substance, and the push deleted only one of them.
+        [logged({ quote: `${LOGGED}\n  audit.write(card, 'paid');` }), [DELETED_DIFF]],
+        // The finding is in audit.ts; the deleted line is in pay.ts.
+        [logged({ path: 'src/audit.ts' }), [DELETED_DIFF]],
+        // Reformatted onto two lines: the old line is deleted, but the faulty code is still in the file.
+        [logged({ path: 'src/fmt.ts' }), [reformatted]],
+      ];
+      for (const [finding, files] of cases) {
+        const r = await confirmFixed(createFakeRunner(() => answer({ evidence: unchanged })), deletedCtx(files), [finding]);
+        expect(r.fixed).toEqual([]);
+        expect(r.errors).toEqual([]);
+        expect(r.open.map((f) => [f.status, f.anchor.status])).toEqual([['still-open', 'not-found']]);
+        expect(r.open[0]!.checked).toMatch(/^Airlock could not confirm this was fixed: /);
+      }
+    });
+
+    it('is not fixed when the proof is not code found at the head, or is the finding\'s own code', async () => {
+      for (const evidence of [
+        { path: 'src/pay.ts', quote: '// the log line was deleted' },
+        { path: 'src/pay.ts', quote: '}' },
+        { path: 'src/pay.ts', quote: 'export function payNow(card: string) {' },
+        { path: '../outside/pay.ts', quote: unchanged.quote },
+        { path: 'src/pay.ts', quote: LOGGED },
+      ]) {
+        const r = await confirmFixed(createFakeRunner(() => answer({ evidence })), deletedCtx(), [logged()]);
+        expect(r.fixed).toEqual([]);
+        expect(r.errors).toEqual([]);
+        expect(r.open.map((f) => [f.status, f.anchor.status])).toEqual([['still-open', 'not-found']]);
+      }
+    });
+  });
+
+  describe('what changed since the last review', () => {
+    /** The push changed only audit.ts; pay.ts's card check was added before the last review. */
+    const since = { files: [diff('src/audit.ts', 3)], rewritten: false };
+
+    it('judges a proof against what changed since the last review, not against the review\'s own diff', async () => {
+      // The review's own diff (the whole pull request's) adds the card check; nothing since the last review touched it.
+      const r = await confirmFixed(createFakeRunner(() => answer()), checkCtx(), [vanishedFix()], since);
+      expect(r.fixed).toEqual([]);
+      expect(r.errors).toEqual([]);
+      expect(r.open[0]!.checked).toBe(
+        'Airlock could not confirm this was fixed: the code the check gave as the fix, in src/pay.ts, was not changed since the last review, and the faulty code was not removed.',
+      );
+      const yes = await confirmFixed(createFakeRunner(() => answer()), checkCtx(), [vanishedFix()], { files: [PAY_DIFF], rewritten: false });
+      expect(yes.fixed.map((f) => f.checked)).toEqual(['The card is now checked before it is charged. Proof: src/pay.ts:2 on the head.']);
+    });
+
+    it('shows the model the diff since the last review', async () => {
+      const runner = createFakeRunner(() => answer());
+      await confirmFixed(runner, checkCtx(), [vanishedFix({ connected: [{ path: 'src/audit.ts', line: 2, role: 'logs it', quote: '' }] })], since);
+      const shown = block(runner.calls[0]!.material, 'diff')!;
+      expect(shown).toContain('src/audit.ts');
+      expect(shown).not.toContain('isValid(card)');
+    });
+
+    it('when the branch was rewritten, judges against the whole pull request and says so', async () => {
+      const r = await confirmFixed(createFakeRunner(() => answer()), checkCtx(), [vanishedFix()], { files: files, rewritten: true });
+      expect(r.fixed.map((f) => f.checked)).toEqual([
+        'The card is now checked before it is charged. Proof: src/pay.ts:2 on the head (the branch was rewritten, so this was judged against the whole pull request).',
+      ]);
+    });
   });
 
   it('a vanished finding the check places elsewhere becomes moved and keeps its old fingerprint as an alias', async () => {
@@ -110,12 +253,10 @@ describe('confirmFixed', () => {
     expect(r.open[0]!.aliases).toContain(earlier.fingerprint);
   });
 
-  it('a failed check leaves the finding open, adds a stage error and never marks it fixed', async () => {
+  it('a failed request leaves the finding open, adds a stage error and never marks it fixed', async () => {
     const cases = [
       createFakeRunner(() => failure('the model timed out', 'timeout')),
       createFakeRunner(() => ({ nonsense: true })),
-      createFakeRunner(() => answer({ evidence: null })),
-      createFakeRunner(() => answer({ outcome: 'still-open', evidence: { path: 'src/pay.ts', quote: 'nowhere(card); // gone' } })),
       createFakeRunner(() => { throw new Error('the runner broke'); }),
     ];
     for (const runner of cases) {

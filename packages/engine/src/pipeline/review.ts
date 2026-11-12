@@ -16,6 +16,7 @@ import type { ReadFile } from '../challenge/proof.js';
 import { linkFacts, loadDiff, recheckBinary } from '../diff/parse.js';
 import { runChecks } from '../facts/checks.js';
 import { binarySourcePaths, binarySourceSentence, classifyFiles } from '../facts/classify.js';
+import { inMirror } from '../intake/git-ids.js';
 import { fetchPr } from '../intake/pr.js';
 import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
 import { runCohortLenses } from '../lenses/cohort-lens.js';
@@ -30,7 +31,7 @@ import { findNeighbours } from '../map/neighbours.js';
 import { mergeSameProblems, withMergedCount, type AnchoredCandidate } from '../merge/merge.js';
 import type { Holdout, Pack } from '../packs/types.js';
 import { carryOver, claimVanished, mergeIntoCarried, unaccounted } from '../rereview/carry.js';
-import { confirmFixed, fixedByCode, leftOpen, needsCheck, type FixedCheckResult } from '../rereview/fixed.js';
+import { confirmFixed, fixedByCode, leftOpen, needsCheck, type ChangedSince, type FixedCheckResult } from '../rereview/fixed.js';
 import { baseMergeNote, CARRIED_QUESTIONS_NOTE, everythingNote } from '../rereview/notes.js';
 import { runSweep } from '../rules/sweep.js';
 import { decideVerdict, sameTextOnce, select, selfReviewText, type RereviewText, type SelectResult } from '../select/select.js';
@@ -288,6 +289,18 @@ interface Reviewed {
   covered?: RereviewCovered;
 }
 
+/**
+ * What changed since the earlier review (head `earlier`), for the fixed check. On a push re-review whose range starts at
+ * the earlier head, that is the review's own diff `files`; on any other re-review (everything again, or a range starting
+ * at a merge git made by itself) it is computed from the earlier head to the head. When the earlier head is not in the
+ * mirror (the branch was rewritten and that commit is gone), the review's own diff, the whole pull request's, stands in.
+ */
+async function changedSince(exec: Exec, ws: Workspace, earlier: string, files: FileDiff[]): Promise<ChangedSince> {
+  if (ws.range.baseSha === earlier && ws.merge?.kind !== 'nothing-by-hand') return { files, rewritten: false };
+  if (!(await inMirror(exec, ws.gitDir, `${earlier}^{commit}`))) return { files, rewritten: true };
+  return { files: await loadDiff(exec, ws.gitDir, { baseSha: earlier, headSha: ws.range.headSha, kind: 'rereview' }), rewritten: false };
+}
+
 /** A carried finding as an item for selection: its status kept, its list place and fingerprint made again there. */
 function asKept(f: Finding): KeptCandidate {
   const { fingerprint: _f, bucket: _b, rank: _r, ...item } = f;
@@ -298,9 +311,9 @@ function asKept(f: Finding): KeptCandidate {
 async function reviewInWorkspace(
   req: ReviewRequest, deps: EngineDeps & { gate: UsageGate }, log: StageLog, settings: Settings, pr: PrInfo, ws: Workspace,
   files: FileDiff[], diffFacts: Fact[], chosen: { packs: Pack[]; errors: StageError[]; notes: string[]; ms: number },
-  again: { previous: ReviewDocument | null; push: LensContext['push'] },
+  again: { previous: ReviewDocument | null; push: LensContext['push']; changed?: ChangedSince },
 ): Promise<Reviewed> {
-  const { previous, push } = again;
+  const { previous, push, changed } = again;
   // What decides a line's place in the diff GitHub shows: the whole diff on a push re-review (the push's when it could not
   // be worked out); otherwise the review's own diff.
   const whole = push === undefined ? undefined : (push.whole ?? undefined);
@@ -551,7 +564,7 @@ async function reviewInWorkspace(
     const r = await log.run('challenge', async (rec) => {
       let fixedOut: FixedCheckResult;
       try {
-        fixedOut = await confirmFixed(runner, ctx, vanished);
+        fixedOut = await confirmFixed(runner, ctx, vanished, changed);
       } catch (err) {
         rec.error({ stage: 'challenge', cohortId: null, message: messageOf(err) });
         fixedOut = notChecked();
@@ -583,8 +596,17 @@ async function reviewInWorkspace(
 
   if (depth === 'deep' && !sync && !(await limitedOut('lenses-deep'))) {
     const known = [...kept, ...[...schemaDropped, ...anchorDropped, ...carryDropped, ...mergeDropped, ...challengeDropped].map((d) => d.candidate)];
-    // A deep-pass item that is an earlier finding raised again is merged into it, as in the first pass.
+    // A deep-pass item that is an earlier finding raised again is merged into it, as in the first pass. A vanished one
+    // raised again (by its fingerprint or an alias) is that finding moved there, as in the first pass: taken back, as the
+    // earlier review had it, from the fixed list or from those left open with no place, and carried to the item's place.
+    const vanishedById = new Map(vanished.map((f) => [f.id, f]));
     const sameAsEarlier = previous === null ? undefined : (items: AnchoredCandidate[]): AnchoredCandidate[] => {
+      const unplaced = carried.open.filter((f) => f.anchor.status === 'not-found');
+      const claimable = [...carried.fixed, ...unplaced].flatMap((f) => vanishedById.get(f.id) ?? []);
+      const claimed = claimVanished(items, claimable);
+      const moved = new Set(claimed.moved.map((f) => f.id));
+      carried.fixed = carried.fixed.filter((f) => !moved.has(f.id));
+      carried.open = [...carried.open.filter((f) => !moved.has(f.id)), ...claimed.moved];
       const r = mergeIntoCarried(items, carried.open);
       carried.open = r.carried;
       carryDropped.push(...r.dropped);
@@ -709,6 +731,7 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
   let opened: Workspace | undefined;
   let intake: {
     pr: PrInfo; ws: Workspace; files: FileDiff[]; diffFacts: Fact[]; previous: ReviewDocument | null; push: LensContext['push'];
+    changed?: ChangedSince;
   };
   let reviewed: Reviewed;
   try {
@@ -738,11 +761,18 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
         .then((d) => d.files, () => null);
       // Told to the challenge only when its base worktree is the earlier head, not a merge git made by itself.
       const push = whole === undefined ? undefined : { whole, baseIsEarlierHead: ws.merge?.kind !== 'by-hand' };
-      return { pr, ws, files: loaded.files, diffFacts: [...loaded.facts, ...linkFacts(loaded.files)], previous, push };
+      // On a re-review, what changed since the earlier review, which a fix's proof must be in. When git cannot work it out
+      // the stage error says so, and with nothing to judge against no proof is accepted.
+      const changed = previous === null ? undefined
+        : await rec.attempt(() => changedSince(exec, ws, previous.pr.headSha, loaded.files), { files: [], rewritten: false });
+      return {
+        pr, ws, files: loaded.files, diffFacts: [...loaded.facts, ...linkFacts(loaded.files)], previous, push,
+        ...(changed === undefined ? {} : { changed }),
+      };
     }, { rethrow: true }))!;
     reviewed = await reviewInWorkspace(
       req, deps, log, settings, intake.pr, intake.ws, intake.files, intake.diffFacts, { ...chosen, ms: choiceMs },
-      { previous: intake.previous, push: intake.push },
+      { previous: intake.previous, push: intake.push, ...(intake.changed === undefined ? {} : { changed: intake.changed }) },
     );
   } finally {
     await (opened as Workspace | undefined)?.dispose().catch(() => undefined);

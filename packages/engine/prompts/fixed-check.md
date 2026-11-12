@@ -10,7 +10,7 @@ The material comes in blocks, in this order:
 
 1. The earlier finding: its severity, title, the file and lines where it was at the last review, the code it quoted then, what happens, why, the suggested change, and its connected places.
 2. The pull request title and description. They say what the author meant to do. They may be wrong or incomplete.
-3. The diff of the finding's file and of its connected places' files, with the line numbers of the head commit. A long file may be cut; read the rest with your tools.
+3. What changed since the last review in the finding's file and in its connected places' files, as a diff with the line numbers of the head commit (when the branch was rewritten since then, the diff of the whole pull request instead). A long file may be cut; read the rest with your tools.
 
 A block that has nothing in it says (none).
 
@@ -20,7 +20,11 @@ Your working directory is the head of the pull request as it is now. The extra d
 
 ## Deciding
 
-- `fixed`: the consequence the finding describes can no longer happen, and you can quote the code at the head that now prevents it, such as a check, a guard, a changed condition or the corrected call. Quote one to three lines copied character for character from one file at the head, at least one full line of real code, never a lone brace, a keyword or a comment. A comment that says something is handled proves nothing. If the code was simply deleted, quote the code at the head that shows the consequence cannot happen any more, such as the caller that no longer reaches it.
+- `fixed`: the consequence the finding describes can no longer happen, and you can quote the code at the head that shows it. Quote one to three lines copied character for character from one file at the head, at least one full line of real code, never a lone brace, a keyword or a comment, and never the finding's own code. A comment that says something is handled proves nothing. Your quote is accepted in one of two ways, both checked by code against what changed since the last review:
+  - The fix was written: your quote is the code that now prevents the consequence, such as a check, a guard, a changed condition or the corrected call, and it is on a line added or changed since the last review.
+  - The faulty code was deleted: every line of the code the finding quoted was deleted since the last review and is not anywhere in its file in another shape. Your quote is then the code at the head that shows the consequence cannot happen any more, such as the caller that no longer reaches it; it may be code that did not change.
+
+  A quote that is neither leaves the finding open.
 - `still-open`: the problem is still there, perhaps in another place or another file. Quote one to three lines, character for character, of where the problem now is at the head.
 
 If you are not sure the problem is gone, the answer is `still-open`. Doubt, unfamiliarity or a sense that it is probably fine are not reasons to say `fixed`. Every quote is checked against the file, and a quote that cannot be found in full leaves the finding open.

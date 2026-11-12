@@ -200,10 +200,50 @@ describe('fix round 1', () => {
     hooks.challenge = () => { throw new Error('the challenge broke'); };
     const two = (await again(s, earlier.id, head, answers)).doc;
     expect(two.findings.find((f) => f.title === ON_PAUSE.title)!.checked).toBe('challenge did not complete');
-    // The fixed check ran and its own error (no evidence) is there; the finding stays open.
-    expect(two.stageErrors.map((e) => e.message)).toEqual([
-      expect.stringMatching(/without saying where/), 'the challenge broke',
-    ]);
+    // The fixed check ran: its answer (no evidence) leaves the finding open, saying why, and is no stage error.
+    expect(two.findings.find((f) => f.title === GOOD.title)).toMatchObject({
+      status: 'still-open', anchor: { status: 'not-found' }, checked: expect.stringMatching(/^Airlock could not confirm this was fixed: /),
+    });
+    expect(two.stageErrors.map((e) => e.message)).toEqual(['the challenge broke']);
+  }, SLOW);
+
+  it('a deep-pass finding under the alias of a vanished earlier finding is that finding moved, not fixed and new', async () => {
+    const { s, doc: earlier } = await first();
+    const ruled = earlier.findings.find((f) => f.title === RULED.title)!;
+    // In the last review RULED, a Note, absorbed a duplicate D in money.ts, whose fingerprint it carries as an alias. As a
+    // Note that vanishes, it is fixed by code, with no request.
+    const D = rawCandidate({ severity: 'note', title: 'formatMoney takes any number', path: 'src/money.ts', quote: 'export function formatMoney(n: number): string {', lineHint: 1 });
+    const dPrint = fingerprint({ source: { pack: 'core', lens: 'correctness', ruleId: null }, path: D.path as string, quote: D.quote as string });
+    const stored: ReviewDocument = {
+      ...earlier, id: 'r_5555555555',
+      findings: earlier.findings.map((f) => (f.id === ruled.id ? { ...f, severity: 'note' as const, aliases: [dPrint] } : f)),
+    };
+    await saveReview(stored);
+    // The push removes RULED's own lines (the refund) and touches money.ts; the first-pass lenses raise nothing.
+    const head = await commitFiles(s.remote, {
+      'src/billing.ts': BASE_FILES['src/billing.ts']!, 'src/money.ts': `// money helpers\n${HEAD_FILES['src/money.ts']}`,
+    }, 'push');
+    const map = {
+      cohorts: [{
+        id: 'k1', title: 'Money and billing', summary: 'Both.', neighbours: [], inferredLinks: [],
+        layers: [
+          { id: 'l1', title: 'Rules', kind: 'rules', files: ['src/money.ts'], dependsOn: [], note: '' },
+          { id: 'l2', title: 'Billing', kind: 'writes', files: ['src/billing.ts'], dependsOn: [], note: '' },
+        ],
+      }],
+      standalone: [],
+    };
+    // The deep pass raises D again in money.ts.
+    const { doc, calls } = await again(s, stored.id, head, { paths: [], map, deep: [D] }, 'deep');
+    expect(calls.some((c) => c.role.startsWith('lens:') && c.instructions.includes(DEEP_SENTENCE))).toBe(true);
+    expect(doc.stageErrors).toEqual([]);
+    expect(doc.fixed).toEqual([]);
+    const moved = doc.findings.find((f) => f.id === ruled.id)!;
+    expect(moved).toMatchObject({ status: 'moved', title: RULED.title, path: 'src/money.ts', anchor: { startLine: 2 } });
+    expect([moved.fingerprint, ...(moved.aliases ?? [])]).toEqual(expect.arrayContaining([ruled.fingerprint, dPrint]));
+    expect(moved.checked).toBe(ruled.checked);
+    expect(doc.findings.filter((f) => f.status === 'new')).toEqual([]);
+    expect(doc.dropped.filter((d) => d.mergedInto === ruled.id).map((d) => [d.stage, d.candidate.title])).toEqual([['merge', D.title]]);
   }, SLOW);
 
   it('an earlier finding whose file is now too large to read stays open with a stage error', async () => {
