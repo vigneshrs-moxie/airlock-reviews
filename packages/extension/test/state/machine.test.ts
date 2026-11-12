@@ -3,6 +3,7 @@ import type { Brief, ChangeMap, Dismissal, ServiceEvent } from '@airlock/shared'
 import { NOT_PROVED } from '../../src/client/proof';
 import { NOT_UNDERSTOOD, ServiceClient } from '../../src/client/service';
 import { LOST_MESSAGE, NOT_A_TOKEN, OFFLINE_RETRY_MS, RUN_STOPPED, SHOWING_PROBLEM, TAB_UNREADABLE, WATCH_MS, startPanel } from '../../src/state/machine';
+import type { HeadState } from '../../src/state/notes';
 import type { PanelState } from '../../src/state/reduce';
 import { STAGE_WORDS } from '../../src/state/stage-words';
 import type { SettingsStore } from '../../src/state/settings';
@@ -24,10 +25,12 @@ function memorySettings(token: string | null): SettingsStore & { token: string |
   };
 }
 
-type FakeTab = TabWatcher & { go(url: string | undefined): void; listeners: Set<(url: string | undefined) => void>; reads: number };
+type FakeTab = TabWatcher & {
+  go(url: string | undefined, status?: string): void; listeners: Set<(url: string | undefined, status?: string) => void>; reads: number;
+};
 
 function fakeTab(url: string | undefined, failReads = 0): FakeTab {
-  const listeners = new Set<(url: string | undefined) => void>();
+  const listeners = new Set<(url: string | undefined, status?: string) => void>();
   const tab: FakeTab = {
     listeners,
     reads: 0,
@@ -40,8 +43,8 @@ function fakeTab(url: string | undefined, failReads = 0): FakeTab {
       listeners.add(fn);
       return () => listeners.delete(fn);
     },
-    go(next) {
-      for (const fn of listeners) fn(next);
+    go(next, status) {
+      for (const fn of listeners) fn(next, status);
     },
   };
   return tab;
@@ -58,6 +61,8 @@ function harness(opts: {
   url?: string; token?: string | null; failTabReads?: number; prepare?: (svc: FakeService) => void;
   /** Called before each state is recorded; a throw here is the panel's own listener failing. */
   onState?: (s: PanelState) => void;
+  /** Gets what the panel tells the notes of the pull request's head. */
+  heads?: HeadState[];
 } = {}) {
   const svc = new FakeService();
   opts.prepare?.(svc);
@@ -70,8 +75,10 @@ function harness(opts: {
   const timers = new FakeTimers();
   const states: PanelState[] = [];
   const clock = { now: T0 };
+  const heads = opts.heads;
   const panel = startPanel({
     client, tab, settings, timers, now: () => clock.now,
+    ...(heads === undefined ? {} : { notes: { review: () => undefined, head: (next: HeadState) => void heads.push(next) } }),
     onState: (s) => {
       states.push(s);
       opts.onState?.(s);
@@ -821,6 +828,81 @@ describe('startPanel: the tab moving', () => {
     const dismissRequest = h.svc.requests.find((r) => r.url.pathname === '/dismissals');
     expect(dismissRequest?.signal?.aborted).not.toBe(true);
     expect(h.last()).toEqual({ kind: 'ready', pr: pr2 });
+  });
+});
+
+describe('startPanel: reading the head again while a review is on screen', () => {
+  const MOVED = 'd'.repeat(40);
+  const reviewed = (svc: FakeService): void => { svc.latest.set('acme/widgets#1', latestFor(prSummary())); };
+  const reads = (h: Harness): number => h.svc.calls.filter((c) => c === 'GET /pr').length;
+
+  it('a move within the page to another tab of the same pull request reads it again; a fragment alone does not', async () => {
+    const heads: HeadState[] = [];
+    const h = harness({ heads, prepare: reviewed });
+    await until(h, 'review');
+    const before = reads(h);
+    h.svc.addPr(prSummary({ headSha: MOVED }));
+    // GitHub moves to Files changed inside the page: the address changes with no status.
+    h.tab.go(prUrl('acme/widgets', 1, '/files'));
+    expect(await until(h, 'review', (s) => s.stale)).toMatchObject({ pr: { headSha: MOVED }, stale: true });
+    expect(reads(h)).toBe(before + 1);
+    expect(heads.slice(-2)).toEqual(['reading', 'known']);
+    // A jump changes only the fragment: the diff is the same, nothing is read.
+    h.tab.go(prUrl('acme/widgets', 1, '/files#diff-abc'));
+    // A page still loading is read when it is complete, once.
+    h.tab.go(prUrl('acme/widgets', 1, '/commits'), 'loading');
+    await settle();
+    expect(reads(h)).toBe(before + 1);
+    h.tab.go(prUrl('acme/widgets', 1, '/commits'), 'complete');
+    await settle();
+    expect(reads(h)).toBe(before + 2);
+  });
+
+  it('a second trigger while a read is in flight: only the newest read\'s answer counts', async () => {
+    const heads: HeadState[] = [];
+    const h = harness({ heads, prepare: reviewed });
+    await until(h, 'review');
+    const first = held();
+    const second = held();
+    let n = 0;
+    h.svc.on('GET /pr', () => (++n === 1 ? first.reply() : second.reply()));
+    const shown = h.states.length;
+    h.tab.go(prUrl('acme/widgets', 1, '/files'));
+    await turnsUntil(first.asked);
+    h.tab.go(prUrl('acme/widgets', 1, '/files'), 'complete');
+    await turnsUntil(second.asked);
+    // One read at a time: the older one is aborted.
+    expect(h.svc.requests.filter((r) => r.url.pathname === '/pr').at(-2)?.signal?.aborted).toBe(true);
+    // The older read answers anyway (with the head moved): it does not count, and the notes still wait.
+    first.release(json(prSummary({ headSha: MOVED })));
+    await settle();
+    expect(h.states).toHaveLength(shown);
+    expect(heads.at(-1)).toBe('reading');
+    second.release(json(prSummary()));
+    await turnsUntil(() => heads.at(-1) === 'known');
+    expect(h.states).toHaveLength(shown);
+    expect(heads.slice(-3)).toEqual(['reading', 'reading', 'known']);
+  });
+
+  it('a load the notes wait on that fails tells them the head is unknown', async () => {
+    const heads: HeadState[] = [];
+    const read = held();
+    const h = harness({ heads, prepare: (svc) => { reviewed(svc); svc.on('GET /pr', read.reply); } });
+    await until(h, 'loading');
+    await turnsUntil(read.asked);
+    // The tab finishes loading while the panel is still loading: the load in progress is to answer for the head.
+    h.tab.go(prUrl('acme/widgets', 1), 'complete');
+    expect(heads).toEqual(['reading']);
+    read.release(json({ error: 'GitHub did not answer.' }, 502));
+    await until(h, 'problem');
+    expect(heads).toEqual(['reading', 'unknown']);
+  });
+
+  it('a load nobody waits on that fails tells the notes nothing', async () => {
+    const heads: HeadState[] = [];
+    const h = harness({ heads, prepare: (svc) => svc.on('GET /pr', () => json({ error: 'GitHub did not answer.' }, 502)) });
+    await until(h, 'problem');
+    expect(heads).toEqual([]);
   });
 });
 

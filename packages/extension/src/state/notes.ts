@@ -207,6 +207,9 @@ export function startNotes({ tab, settings, send, timers = realTimers, now = Dat
     const built = shown !== null && state.on && !shown.stale ? await notesFor(shown) : null;
     if (g !== generation || stopped) return;
     // The page loaded again and the pull request is being read again: the notes wait for it (what was asked carries over).
+    // Checked here, after the await, and not before it: the panel's tab listener and this module's both hear the same
+    // update in the same tick, in either order, and the panel says `reading` synchronously. Whichever hears it first, the
+    // hold is in place by the time this line runs.
     if (built !== null && head === 'reading') return;
     // It could not be read: the head is not known, so the review may be of an older commit and the page is cleared.
     const wanted = head === 'unknown' ? null : built;

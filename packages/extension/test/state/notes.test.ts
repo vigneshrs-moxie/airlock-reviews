@@ -33,20 +33,27 @@ function memorySettings(showNotes: boolean | 'fails' = true): SettingsStore & { 
   };
 }
 
-type FakeTab = TabWatcher & { go(url: string | undefined, status?: string): void };
+/** `heard`: each listener called, by the order it was added in, as `listener <n>`; a test may add its own entries. */
+type FakeTab = TabWatcher & { go(url: string | undefined, status?: string): void; heard: string[] };
 
 function fakeTab(start: string | undefined): FakeTab {
-  const listeners = new Set<(url: string | undefined, status?: string) => void>();
+  const listeners = new Map<(url: string | undefined, status?: string) => void, number>();
+  let added = 0;
   let url = start;
+  const heard: string[] = [];
   return {
+    heard,
     current: async () => ({ tabId: 3, url }),
     onChange(fn) {
-      listeners.add(fn);
+      listeners.set(fn, added++);
       return () => listeners.delete(fn);
     },
     go(next, status) {
       url = next;
-      for (const fn of listeners) fn(next, status);
+      for (const [fn, n] of listeners) {
+        heard.push(`listener ${n}`);
+        fn(next, status);
+      }
     },
   };
 }
@@ -573,6 +580,72 @@ describe('the notes after the GitHub tab loads again', () => {
     expect(h.sent.slice(1).map((s) => s.message)).toEqual([{ type: 'airlock:notes-clear' }]);
     // Quiet: the review stays on screen.
     expect(h.last()?.kind).toBe('review');
+  });
+
+  it('a move within the page from Conversation to Files changed after a push: a clear and no notes', async () => {
+    const h = setup({ url: prUrl('acme/widgets', 1), latest: review([finding(1)]) });
+    await until(() => h.last()?.kind === 'review', 'the review');
+    await settle();
+    expect(h.sent).toEqual([]);
+    h.svc.addPr(prSummary({ headSha: MOVED }));
+    // GitHub changes tabs inside the page: Chrome reports the new address with no status.
+    h.tab.go(FILES);
+    await until(() => viewOf(h.last()).stale, 'the review known as stale');
+    await until(() => h.sent.length === 1, 'the clear message');
+    await settle();
+    expect(h.sent.map((s) => s.message)).toEqual([{ type: 'airlock:notes-clear' }]);
+  });
+
+  it('a move within the page with no push: the notes are sent once, after the read', async () => {
+    const h = setup({ url: prUrl('acme/widgets', 1), latest: review([finding(1)]) });
+    await until(() => h.last()?.kind === 'review', 'the review');
+    await settle();
+    const read = held();
+    h.svc.on('GET /pr', read.reply);
+    h.tab.go(FILES);
+    await until(read.asked, 'the read');
+    await settle();
+    expect(h.sent).toEqual([]);
+    read.release(json(prSummary()));
+    await until(() => h.sent.length === 1, 'the notes after the read');
+    await settle();
+    expect(h.sent).toHaveLength(1);
+    expect(notesSent(h.sent[0]!).notes).toHaveLength(1);
+  });
+
+  it('an address change followed at once by complete: one notes message, not two', async () => {
+    const h = setup({ url: prUrl('acme/widgets', 1), latest: review([finding(1)]) });
+    await until(() => h.last()?.kind === 'review', 'the review');
+    await settle();
+    h.tab.go(FILES);
+    h.tab.go(FILES, 'complete');
+    await until(() => h.sent.length === 1, 'the notes');
+    await settle();
+    expect(h.sent).toHaveLength(1);
+    expect(notesSent(h.sent[0]!).notes).toHaveLength(1);
+  });
+
+  it('the notes hear the load before the panel, in the same tick: the hold still applies', async () => {
+    // `setup` starts the notes before the panel, so the notes' tab listener (0) is called before the panel's (1), and
+    // the panel says `reading` only after the notes' update has started.
+    const h = setup({ latest: review([finding(1)]) });
+    await until(() => h.sent.length === 1, 'the notes');
+    const notesHead = h.notes.head.bind(h.notes);
+    h.notes.head = (next) => { h.tab.heard.push(`head ${next}`); notesHead(next); };
+    const read = held();
+    h.svc.on('GET /pr', read.reply);
+    h.svc.addPr(prSummary({ headSha: MOVED }));
+    h.tab.heard.length = 0;
+    h.tab.go(FILES, 'complete');
+    expect(h.tab.heard).toEqual(['listener 0', 'listener 1', 'head reading']);
+    await until(read.asked, 'the read');
+    await settle();
+    // Nothing was sent while the read is out.
+    expect(h.sent).toHaveLength(1);
+    read.release(json(prSummary({ headSha: MOVED })));
+    await until(() => h.sent.length === 2, 'the clear message');
+    await settle();
+    expect(h.sent.slice(1).map((s) => s.message)).toEqual([{ type: 'airlock:notes-clear' }]);
   });
 
   it('a running review is left alone: no read, and nothing changes on screen', async () => {
