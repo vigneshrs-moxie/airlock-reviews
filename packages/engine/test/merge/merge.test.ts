@@ -1,6 +1,6 @@
 import type { Anchor, Candidate, Severity, Source } from '@airlock/shared';
 import { describe, expect, it } from 'vitest';
-import type { AgentRequest } from '../../src/agent/runner.js';
+import { withRetry, type AgentRequest } from '../../src/agent/runner.js';
 import { createFakeRunner, failure } from '../../src/agent/fake-runner.js';
 import { fingerprint } from '../../src/anchor/fingerprint.js';
 import { mergeSameProblems, proposeClusters, MAX_CLUSTER, type AnchoredCandidate } from '../../src/merge/merge.js';
@@ -210,6 +210,14 @@ describe('mergeSameProblems', () => {
       'Airlock could not confirm whether 7 findings at the same place are the same problem '
         + '("Finding m0", "Finding m1", "Finding m2", "Finding m3", "Finding m4" and 2 more), so they are listed separately.',
     ]);
+  });
+
+  it('marks the second ask not to be retried, so an unusable answer costs at most three requests behind the runner\'s retry', async () => {
+    const inner = createFakeRunner(() => new Error('bad json'));
+    const r = await mergeSameProblems(withRetry(inner, 1), ctx(), [item('a', 10), item('b', 11)]);
+    expect(inner.calls).toHaveLength(3);
+    expect(inner.calls.map((c) => c.noRetry === true)).toEqual([false, false, true]);
+    expect(r.notes).toHaveLength(1);
   });
 
   it('asks again after an unusable reply; a turn limit or timeout is not asked again and becomes a note', async () => {

@@ -321,6 +321,33 @@ describe('prepareWorkspace', () => {
     });
   });
 
+  it('removes the review folder and its worktree registration when it fails after making the folder', async () => {
+    const r = await remote();
+    await r.write('a.txt', '1');
+    const sha = await r.commit('one');
+    const exec: Exec = async (cmd, args, opts) => (args.includes('worktree') && args.includes('add') && args.at(-2)!.endsWith('base')
+      ? { stdout: '', stderr: 'fatal: no room left', code: 128 } : realExec(cmd, args, opts));
+    const req: WorkspaceRequest = { repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: sha, headSha: sha }, reviewId: 'r_fail' };
+    await expect(prepareWorkspace(exec, req)).rejects.toThrow(/no room left/);
+    expect(await exists(join(home, 'work', 'r_fail'))).toBe(false);
+    const mirror = join(home, 'repos', 'acme__app.git');
+    const listed = await realExec('git', ['--git-dir', mirror, 'worktree', 'list', '--porcelain']);
+    expect(listed.stdout).not.toContain('r_fail');
+  });
+
+  it('removes the review folder when it is stopped while adding a worktree', async () => {
+    const r = await remote();
+    await r.write('a.txt', '1');
+    const sha = await r.commit('one');
+    const exec: Exec = async (cmd, args, opts) => {
+      if (args.includes('worktree') && args.includes('add')) throw new Error('The review was stopped.');
+      return realExec(cmd, args, opts);
+    };
+    const req: WorkspaceRequest = { repo: 'acme/app', remoteUrl: r.dir, explicit: { baseSha: sha, headSha: sha }, reviewId: 'r_stop' };
+    await expect(prepareWorkspace(exec, req)).rejects.toThrow('The review was stopped.');
+    expect(await exists(join(home, 'work', 'r_stop'))).toBe(false);
+  });
+
   it('removes review folders left under work for more than a day, and keeps newer ones', async () => {
     const r = await remote();
     await r.write('a.txt', '1');

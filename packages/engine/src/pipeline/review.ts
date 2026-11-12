@@ -495,7 +495,7 @@ async function reviewOnce(req: ReviewRequest, given: EngineDeps, onEvent?: (e: R
   // `createdAt` is when the document is assembled, at the end; `startedAt` is when the review began.
   const draft = (): ReviewDocument => ({
     schemaVersion: 1, id, createdAt: given.now().toISOString(), startedAt, pr: intake.pr, range: reviewed.range, depth: settings.depth,
-    packs: reviewed.packs.map((p) => ({ id: p.id, version: p.version })), models: settings.models,
+    packs: reviewed.packs.map((p) => ({ id: p.id, version: p.version, title: p.title })), models: settings.models,
     files: reviewed.tiers, facts: reviewed.facts, map: reviewed.map, brief: reviewed.brief, verdict: selection.verdict,
     findings: selection.findings, questions: reviewed.questions, dropped: reviewed.dropped, candidates: reviewed.candidates,
     whoseCall: selection.whoseCall, checksAfterMerge: selection.checksAfterMerge, selfReviewText: selection.selfReviewText,

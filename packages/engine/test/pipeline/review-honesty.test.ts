@@ -8,7 +8,7 @@ import { renderReview } from '../../src/render/terminal.js';
 import type { Exec } from '../../src/util/exec.js';
 import { block, rawCandidate } from '../helpers/lens-context.js';
 import {
-  BASE_FILES, fakeGh, HEAD_FILES, KIT_DIR, NOW, PACKS_DIR, scenarioScript, useReviewHarness,
+  BASE_FILES, DEEP_SENTENCE, fakeGh, HEAD_FILES, KIT_DIR, NOW, PACKS_DIR, scenarioScript, useReviewHarness,
 } from '../helpers/review-scenario.js';
 
 const SLOW = 20_000;
@@ -265,5 +265,30 @@ describe('a combined lens request at quick depth', () => {
     expect(doc.findings.map((f) => [f.title, f.source])).toEqual([['canEdit lets everyone edit', { pack: 'core', lens: 'correctness', ruleId: null }]]);
     expect(doc.dropped).toEqual([]);
     expect(doc.verdict.label).not.toBe('approve');
+  }, SLOW);
+});
+
+describe('the deep pass', () => {
+  it('does not challenge again a candidate the first pass anchored by one line of its quote and the challenge dropped', async () => {
+    const PARTLY = rawCandidate({
+      severity: 'fix', title: 'formatMoney does not round half up', path: 'src/money.ts', quote: 'return n.toFixed(2);\n// round here', lineHint: 3,
+    });
+    const cohortLine = (req: AgentRequest<unknown>): string => block(req.material, 'cohort')?.split('\n')[0] ?? '';
+    const script = scenarioScript({
+      'lens:': (req: AgentRequest<unknown>) => {
+        if (req.role !== 'lens:core/correctness') return { candidates: [], questions: [] };
+        const deep = req.instructions.includes(DEEP_SENTENCE);
+        return (deep ? cohortLine(req) === 'Cohort: Money: Rules' : cohortLine(req) === 'Cohort: Money')
+          ? { candidates: [PARTLY], questions: [] } : { candidates: [], questions: [] };
+      },
+      'challenge:': () => ({
+        outcome: 'drop', ground: 'guarded-elsewhere', explanation: 'bill rounds first.', newSeverity: null, checked: 'Read billing.',
+        refutation: { path: 'src/billing.ts', quote: 'export function bill(total: number): string {', where: 'head' },
+      }),
+    });
+    const { doc, calls } = await review({ req: { depth: 'deep' }, script });
+    const challenged = calls.filter((c) => c.role.startsWith('challenge:') && c.material.includes(PARTLY.title as string));
+    expect(challenged).toHaveLength(1);
+    expect(doc.dropped.filter((d) => d.stage === 'challenge' && d.candidate.title === PARTLY.title)).toHaveLength(1);
   }, SLOW);
 });

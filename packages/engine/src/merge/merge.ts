@@ -296,7 +296,8 @@ export async function mergeSameProblems(runner: AgentRunner, ctx: LensContext, i
   if (clusters.length === 0) return out;
 
   const instructions = instructionsFor(await loadTemplate('merge'), ctx.packs, ctx.missingHelpers);
-  const ask = (asked: Cluster[]) => sendRequest<MergeOutput>(runner, ctx, {
+  // The second ask is itself the retry, so the runner does not retry it again.
+  const ask = (asked: Cluster[], again: boolean) => sendRequest<MergeOutput>(runner, ctx, {
     role: 'merge',
     instructions,
     material: asked.map(clusterBlock).join('\n\n'),
@@ -305,12 +306,13 @@ export async function mergeSameProblems(runner: AgentRunner, ctx: LensContext, i
     extraDirs: [ctx.baseDir],
     model: ctx.models.main,
     effort: 'low',
+    ...(again ? { noRetry: true } : {}),
   });
 
   const accepted: Accepted[] = [];
   let missing = clusters;
   for (let attempt = 0; attempt < 2 && missing.length > 0; attempt++) {
-    const result = await ask(missing);
+    const result = await ask(missing, attempt > 0);
     out.usage.push(result.usage);
     if (!result.ok) {
       if (result.kind === 'invalid-output') continue;

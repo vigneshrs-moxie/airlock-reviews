@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { asMaterial, fill, loadTemplate } from '../agent/prompt.js';
 import type { AgentRunner } from '../agent/runner.js';
 import { budgetedDiff } from '../lenses/cohort-lens.js';
-import { MAX_CANDIDATES_PER_LENS, RawCandidateSchema, acceptCandidates } from '../lenses/candidate.js';
+import { RawCandidateSchema, acceptCandidates } from '../lenses/candidate.js';
 import {
   briefBlock, cohortOutline, diffCutSentence, emptyResult, factsBlock, instructionsFor, mergeResults, prBlock, readerOf,
   sendRequest, standaloneCohort, tierOf,
@@ -12,6 +12,9 @@ import type { DiffCut, LensContext, LensStageResult } from '../lenses/context.js
 import type { Rule } from '../packs/types.js';
 import { planSweep, ruleApplies } from './match.js';
 import type { SweepBatch } from './match.js';
+
+/** A sweep request (one batch of up to MAX_BATCH_FILES files and MAX_BATCH_RULES rules) may return this many candidates. */
+export const MAX_CANDIDATES_PER_SWEEP = 12;
 
 /** The sweep's diff budget, in lines of formatForPrompt output. */
 export const SWEEP_DIFF_LINE_BUDGET = 1_200;
@@ -78,7 +81,7 @@ function acceptSweep(output: SweepOutput, batch: SweepBatch, taken: Set<string>)
   for (const { candidate, rule, named } of valid) {
     const reason = rule === null ? `names a rule that was not given: ${named}`
       : !ruleApplies(rule, candidate.path) ? `the rule ${rule.id} does not apply to ${candidate.path}`
-        : kept >= MAX_CANDIDATES_PER_LENS ? `more than ${MAX_CANDIDATES_PER_LENS} candidates from one lens` : null;
+        : kept >= MAX_CANDIDATES_PER_SWEEP ? `more than ${MAX_CANDIDATES_PER_SWEEP} candidates from one sweep request` : null;
     if (reason !== null) {
       const dropped: Dropped = { candidate, stage: 'schema', reason, refutation: null };
       out.dropped.push(dropped);
@@ -95,14 +98,14 @@ function acceptSweep(output: SweepOutput, batch: SweepBatch, taken: Set<string>)
 
 /**
  * The rule sweep: one request per batch of a group's changed files (see planSweep), carrying the rules that match them,
- * with each file listed beside the ids of its own rules. A failed request becomes a stage error naming the batch and the
- * others carry on. With no batches nothing is sent.
+ * with each file listed beside the ids of its own rules. A failed request becomes a stage error naming the batch and its
+ * files, and the others carry on. With no batches nothing is sent.
  */
 export async function runSweep(runner: AgentRunner, ctx: LensContext): Promise<LensStageResult> {
   const batches = planSweep(ctx.map, ctx.tiers, ctx.files, ctx.packs);
   if (batches.length === 0) return mergeResults([]);
 
-  const template = fill(await loadTemplate('sweep'), { reader: readerOf(ctx.pr) });
+  const template = fill(await loadTemplate('sweep'), { reader: readerOf(ctx.pr), maxCandidates: String(MAX_CANDIDATES_PER_SWEEP) });
   // The rules are the standard of a sweep, so the packs go in without theirs; the learned entries stay.
   const withoutStandards = ctx.packs.map((p) => ({ ...p, standards: [] }));
   const counters = new Map<string, number>();
@@ -129,7 +132,9 @@ export async function runSweep(runner: AgentRunner, ctx: LensContext): Promise<L
     if (!result.ok) {
       const failed = emptyResult();
       failed.usage.push(result.usage);
-      failed.errors.push({ stage: 'sweep', cohortId: batch.cohortId, message: `batch ${n}: ${result.error}`, kind: result.kind });
+      // A batch holds at most MAX_BATCH_FILES files, so naming them all says what was not checked.
+      const named = [...new Set(batch.files)].join(', ');
+      failed.errors.push({ stage: 'sweep', cohortId: batch.cohortId, message: `batch ${n} (${named}): ${result.error}`, kind: result.kind });
       failed.limits.push(...limits);
       return failed;
     }

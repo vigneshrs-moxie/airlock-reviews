@@ -71,7 +71,7 @@ function location(f: Finding): string {
   return endLine !== null && endLine !== line && status === 'in-diff' ? `${f.path}:${line}-${endLine}` : `${f.path}:${line}`;
 }
 
-function renderFinding(f: Finding, n: number, color: boolean): string[] {
+function renderFinding(f: Finding, n: number, color: boolean, packTitle: PackTitle): string[] {
   const status = f.status === null ? '' : ` (${STATUS_WORDS[f.status]})`;
   const word = SEVERITY_WORDS[f.severity];
   const title = wrap(`${n}. [${word}] ${f.title}${status}`, '', ' '.repeat(`${n}. `.length));
@@ -87,17 +87,25 @@ function renderFinding(f: Finding, n: number, color: boolean): string[] {
   }
   if (f.checked.trim() !== '') field('Checked:', f.checked);
   out.push(`   From: ${sourceWords(f.source)}`);
-  const also = alsoRaisedBy(f);
+  const also = alsoRaisedBy(f, packTitle);
   if (also !== null) out.push(...wrap(also, '   '));
   return out;
 }
 
 const sourceWords = (s: Finding['source']): string => `${s.pack} · ${s.ruleId ?? s.lens ?? 'unknown'}`;
 
-/** `Also raised by: <pack · lens or rule>, …` for a finding that absorbed duplicates, else null. */
-function alsoRaisedBy(f: Finding): string | null {
+/** A pack's title from the document, or its id when the document has no title for it. */
+type PackTitle = (packId: string) => string;
+const packTitles = (doc: ReviewDocument): PackTitle => {
+  const titles = new Map(doc.packs.flatMap((p) => (p.title === undefined ? [] : [[p.id, p.title] as const])));
+  return (id) => titles.get(id) ?? id;
+};
+
+/** `Also raised by: <pack title · lens or rule>, …` for a finding that absorbed duplicates, else null. */
+function alsoRaisedBy(f: Finding, packTitle: PackTitle): string | null {
   const sources = f.alsoRaisedBy ?? [];
-  return sources.length === 0 ? null : `Also raised by: ${sources.map(sourceWords).join(', ')}`;
+  return sources.length === 0 ? null
+    : `Also raised by: ${sources.map((s) => sourceWords({ ...s, pack: packTitle(s.pack) })).join(', ')}`;
 }
 
 function bullets(items: string[]): string[] {
@@ -188,17 +196,18 @@ export function renderReview(input: ReviewDocument, opts: { color?: boolean } = 
   const top = doc.findings.filter((f) => f.bucket === 'top').sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99));
   const also = doc.findings.filter((f) => f.bucket === 'also');
   const claims = doc.brief.claims.filter((c) => c.verdict !== 'verified');
+  const packTitle = packTitles(doc);
 
   const blocks: string[][] = [
     header,
     verdictBlock,
     section('What this does', bullets(doc.brief.whatItDoes)),
     section('Claims', bullets(claims.map((c) => `${c.verdict === 'unclear' ? 'Unclear' : 'Not supported'}: ${c.text} (${c.evidence})`))),
-    section('Findings', top.flatMap((f, i) => [...(i > 0 ? [''] : []), ...renderFinding(f, i + 1, color)])),
+    section('Findings', top.flatMap((f, i) => [...(i > 0 ? [''] : []), ...renderFinding(f, i + 1, color, packTitle)])),
     section('Also found', also.flatMap((f) => {
       const line = f.anchor.startLine ?? f.lineHint;
       const head = `- [${paint(color, SEVERITY_COLORS[f.severity], SEVERITY_WORDS[f.severity])}] ${f.title}  (${f.path}${line === null ? '' : `:${line}`})`;
-      const others = alsoRaisedBy(f);
+      const others = alsoRaisedBy(f, packTitle);
       return others === null ? [head] : [head, ...wrap(others, '  ')];
     })),
     section('Questions', bullets(doc.questions.map((q) => q.text))),

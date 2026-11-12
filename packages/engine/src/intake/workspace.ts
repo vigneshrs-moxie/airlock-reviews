@@ -142,19 +142,27 @@ async function prepare(exec: Exec, req: WorkspaceRequest): Promise<Workspace> {
   await removeStaleWork(join(home, 'work'));
   await rm(reviewDir, { recursive: true, force: true });
   await exec('git', ['--git-dir', mirror, 'worktree', 'prune']);
+  const dispose = async (): Promise<void> => {
+    await rm(reviewDir, { recursive: true, force: true });
+    // Cleanup runs even after the review was stopped, so it never carries the review's signal.
+    await exec('git', ['--git-dir', mirror, 'worktree', 'prune'], { signal: undefined });
+  };
   await mkdir(reviewDir, { recursive: true });
   // With core.symlinks=false a link is checked out as a small file holding its target, so no review read can leave the worktree.
   const addWorktree = (dir: string, sha: string) =>
     exec('git', ['-c', 'core.symlinks=false', '--git-dir', mirror, 'worktree', 'add', '--detach', dir, sha]);
-  must(await addWorktree(headDir, range.headSha), 'git worktree add (head)');
-  must(await addWorktree(baseDir, range.baseSha), 'git worktree add (base)');
+  try {
+    must(await addWorktree(headDir, range.headSha), 'git worktree add (head)');
+    must(await addWorktree(baseDir, range.baseSha), 'git worktree add (base)');
+  } catch (err) {
+    // The caller gets no workspace to dispose of, so a failure or a stop here removes the folder and its registration.
+    try {
+      await dispose();
+    } catch {
+      // the original error matters more; the 24-hour sweep removes what is left
+    }
+    throw err;
+  }
 
-  return {
-    headDir, baseDir, gitDir: mirror, range,
-    async dispose() {
-      await rm(reviewDir, { recursive: true, force: true });
-      // Cleanup runs even after the review was stopped, so it never carries the review's signal.
-      await exec('git', ['--git-dir', mirror, 'worktree', 'prune'], { signal: undefined });
-    },
-  };
+  return { headDir, baseDir, gitDir: mirror, range, dispose };
 }

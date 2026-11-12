@@ -126,6 +126,7 @@ describe('challenge', () => {
       ['a hash comment', ['# SAFE: the caller always checks canEdit(user) first']],
       ['an SQL comment', ['-- SAFE: the caller always checks canEdit(user) first']],
       ['a JSX comment', ['{/* SAFE: only admins ever reach this page at all */}']],
+      ['a comment beside a trivial line', ['// SAFE: the caller always checks canEdit(user) first', 'save(doc);']],
     ])('refuses %s as proof and keeps the finding', async (_name, lines) => {
       const runner = createFakeRunner(() => headDrop(lines.join('\n')));
       const { read } = withComments(lines);
