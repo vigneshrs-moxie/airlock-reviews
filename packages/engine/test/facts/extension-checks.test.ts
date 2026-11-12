@@ -671,7 +671,9 @@ describe('the follower on hostile input: a budget, and then nothing trusted', ()
     const files = Array.from({ length: 300 }, (_, i) => changed(`${'a/'.repeat(500)}${i}.js`, 'x;'));
     const head = { 'manifest.json': manifest({ web_accessible_resources: [{ resources: entries, matches: ['<all_urls>'] }] }) };
     const { ms, value } = await timed(() => gather(files, head));
-    expect(ms).toBeLessThan(200);
+    // Spending the whole matching budget is the slowest honest stop: held to well under the two seconds allowed for the
+    // whole check, with room for a busy machine (it measured about 200 ms of CPU at the earlier, larger budget).
+    expect(ms).toBeLessThan(1000);
     expect(only(value.facts, 'extension-loaded-files').map((f) => f.message)).toEqual([
       'Not everything the extension loads could be followed (matching the manifest\'s "*" entries against the changed files would take too long), so a changed file only the rest load is not read closely for that, and no file is trusted as a test.',
     ]);

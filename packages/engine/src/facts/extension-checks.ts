@@ -432,7 +432,7 @@ export const FOLLOW_BUDGET = {
   bytes: 8_000_000,
   calls: 50_000,
   entryLength: 256,
-  matchWork: 5_000_000,
+  matchWork: 2_000_000,
 } as const;
 
 /** What has been spent of FOLLOW_BUDGET, and what ran out first (null while nothing has). */
