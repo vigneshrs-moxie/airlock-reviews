@@ -59,6 +59,7 @@ async function routerRig(extra: { pairedOrigin?: string | null } = {}): Promise<
     { method: 'GET', path: '/search', query: z.object({ q: z.string().min(2, 'q is too short') }), handler: ok },
     { method: 'POST', path: '/things', body: z.object({ name: z.string() }), handler: ok },
     { method: 'POST', path: '/pairing', pairing: true, handler: ok },
+    { method: 'GET', path: '/strict', requiresOrigin: true, handler: ok },
     { method: 'GET', path: '/boom', handler: async () => { throw new Error('secret detail'); } },
     { method: 'GET', path: '/long', handler: async () => { throw new Error(`one\ntwo\r\n${'é'.repeat(400)}`); } },
     { method: 'GET', path: '/enoent', handler: async () => { throw new Error(`ENOENT: no such file or directory, open '${homedir()}/.airlock/service/token'`); } },
@@ -126,6 +127,18 @@ describe('the three checks', () => {
     const r = await send(port, 'GET', '/things/1', { headers: { ...bearer, Origin: ORIGIN } });
     expect(r.status).toBe(200);
     expect((r.json as { origin: string }).origin).toBe(ORIGIN);
+  });
+
+  it('a route that requires an Origin refuses none and a foreign one, and accepts the paired one', async () => {
+    const { port } = await routerRig({ pairedOrigin: ORIGIN });
+    for (const headers of [bearer, { ...bearer, Origin: OTHER }, { ...bearer, Origin: 'null' }]) {
+      const r = await send(port, 'GET', '/strict', { headers });
+      expect([r.status, r.json]).toEqual([403, { error: 'Airlock does not accept requests from this page.' }]);
+    }
+    expect((await send(port, 'GET', '/strict', { headers: { ...bearer, Origin: ORIGIN } })).status).toBe(200);
+    // The Origin is checked before the token there too.
+    expect((await send(port, 'GET', '/strict', {})).status).toBe(403);
+    expect((await send(port, 'GET', '/strict', { headers: { Origin: ORIGIN } })).status).toBe(401);
   });
 
   it('refuses any Origin on every route while nothing is paired, except pairing and the open /hello', async () => {

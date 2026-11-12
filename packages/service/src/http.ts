@@ -35,6 +35,11 @@ export interface Route {
   open?: boolean;
   /** The pairing route: the Origin header is required and must be a chrome-extension origin; the handler decides the rest. */
   pairing?: boolean;
+  /**
+   * The Origin header must be present and equal the paired origin (not merely checked when present): the routes that can
+   * lead to a GitHub write, so a local command without the extension's Origin cannot reach them.
+   */
+  requiresOrigin?: boolean;
   body?: ZodType;
   query?: ZodType;
   handler: Handler;
@@ -239,9 +244,14 @@ export function createRouter(
     }
     const { route, params } = found;
 
-    // Check 2: an Origin header, when present, is the paired extension (or, for pairing, any extension). The open route
-    // answers any Origin, so pairing can begin whatever a browser sends with it.
+    // Check 2: an Origin header, when present, is the paired extension (or, for pairing, any extension); a route that
+    // requires one refuses a request without it. The open route answers any Origin, so pairing can begin whatever a
+    // browser sends with it.
     const origin = req.headers.origin ?? null;
+    if (route.requiresOrigin === true && origin === null) {
+      writeJson(res, 403, { error: NOT_THIS_PAGE });
+      return;
+    }
     if (route.pairing === true) {
       if (origin === null || !isExtensionOrigin(origin)) {
         writeJson(res, 403, { error: NOT_THIS_PAGE });
