@@ -30,6 +30,10 @@ function memorySettings(showNotes: boolean | 'fails' = true): SettingsStore & { 
       if (showNotes === 'fails') throw new Error('storage is full');
       this.stored = on;
     },
+    async getSize() { return 'm'; },
+    async setSize() {},
+    async getTourSeen() { return true; },
+    async setTourSeen() {},
   };
 }
 

@@ -109,6 +109,7 @@ function fakeStart() {
 const settings: SettingsStore = {
   getToken: async () => null, setToken: async () => undefined, getDefaultDepth: async () => null, setDefaultDepth: async () => undefined,
   getShowNotes: async () => true, setShowNotes: async () => undefined,
+  getSize: async () => 'm', setSize: async () => undefined, getTourSeen: async () => true, setTourSeen: async () => undefined,
 };
 
 /** The App with a fake source of Open in Airlock presses, and fake notes whose line and setting the test sets. */

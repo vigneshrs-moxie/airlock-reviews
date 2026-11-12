@@ -27,6 +27,10 @@ function settings(): SettingsStore {
     async setDefaultDepth() {},
     async getShowNotes() { return true; },
     async setShowNotes() {},
+    async getSize() { return 'm'; },
+    async setSize() {},
+    async getTourSeen() { return true; },
+    async setTourSeen() {},
   };
 }
 

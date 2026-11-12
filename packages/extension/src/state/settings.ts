@@ -1,8 +1,11 @@
 import { DepthSchema, type Depth } from '@airlock/shared';
+import { DEFAULT_SIZE, isSize, type Size } from './size';
 
 const TOKEN_KEY = 'airlock.token';
 const DEPTH_KEY = 'airlock.defaultDepth';
 const NOTES_KEY = 'airlock.showNotes';
+const SIZE_KEY = 'airlock.size';
+const TOUR_KEY = 'airlock.tourSeen';
 
 /** What the panel keeps between sessions. Only the panel page reads the token. */
 export interface SettingsStore {
@@ -14,6 +17,12 @@ export interface SettingsStore {
   /** Whether the review's notes are shown in the diff on GitHub's page: on unless the person turned them off. */
   getShowNotes(): Promise<boolean>;
   setShowNotes(on: boolean): Promise<void>;
+  /** The text and button size: Default when none is stored or the stored value is not one of the four. */
+  getSize(): Promise<Size>;
+  setSize(size: Size): Promise<void>;
+  /** Whether the tour was finished or skipped; it shows by itself until then. */
+  getTourSeen(): Promise<boolean>;
+  setTourSeen(): Promise<void>;
 }
 
 /** The part of `chrome.storage.local` the store uses, so tests can pass a fake. */
@@ -46,6 +55,19 @@ export function createSettingsStore(area: StorageAreaLike): SettingsStore {
     },
     async setShowNotes(on) {
       await area.set({ [NOTES_KEY]: on });
+    },
+    async getSize() {
+      const value = await read(SIZE_KEY);
+      return isSize(value) ? value : DEFAULT_SIZE;
+    },
+    async setSize(size) {
+      await area.set({ [SIZE_KEY]: size });
+    },
+    async getTourSeen() {
+      return (await read(TOUR_KEY)) === true;
+    },
+    async setTourSeen() {
+      await area.set({ [TOUR_KEY]: true });
     },
   };
 }

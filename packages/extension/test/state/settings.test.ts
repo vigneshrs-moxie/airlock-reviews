@@ -58,4 +58,24 @@ describe('settings', () => {
     // Anything but a stored false leaves them on.
     for (const odd of ['false', 0, null]) expect(await createSettingsStore(fakeArea({ 'airlock.showNotes': odd })).getShowNotes()).toBe(true);
   });
+
+  it('keeps the text and button size under airlock.size, Default when missing or not one of the four', async () => {
+    const area = fakeArea();
+    const settings = createSettingsStore(area);
+    expect(await settings.getSize()).toBe('m');
+    await settings.setSize('xl');
+    expect(area.data).toEqual({ 'airlock.size': 'xl' });
+    expect(await settings.getSize()).toBe('xl');
+    for (const odd of ['huge', 1.3, null, true]) expect(await createSettingsStore(fakeArea({ 'airlock.size': odd })).getSize()).toBe('m');
+  });
+
+  it('keeps whether the tour was seen under airlock.tourSeen, not seen unless it is stored as true', async () => {
+    const area = fakeArea();
+    const settings = createSettingsStore(area);
+    expect(await settings.getTourSeen()).toBe(false);
+    await settings.setTourSeen();
+    expect(area.data).toEqual({ 'airlock.tourSeen': true });
+    expect(await settings.getTourSeen()).toBe(true);
+    for (const odd of ['true', 1, null]) expect(await createSettingsStore(fakeArea({ 'airlock.tourSeen': odd })).getTourSeen()).toBe(false);
+  });
 });

@@ -9,6 +9,7 @@ import { startPanel, type PanelState } from '../state/machine';
 import { browserNoteOpen, listenNoteOpen } from '../state/note-open';
 import { startNotes, type NotesState, type PageNotes } from '../state/notes';
 import { browserSettings, type SettingsStore } from '../state/settings';
+import type { SizeSetting } from '../state/size';
 import {
   browserJumpChrome, COULD_NOT_JUMP, jumpTo, sendToPage, type Jump, type JumpPlace, type JumpPr, type JumpResult, type PageReport,
 } from '../state/jump';
@@ -52,6 +53,8 @@ export interface PanelServices {
   notes?: PageNotes;
   /** Calls `open` with a finding's id each time `Open in Airlock` is pressed on a note in this tab; returns the way to stop. */
   noteOpen?: (open: (id: string) => void) => () => void;
+  /** The text and button size, already applied to the page when the panel starts. */
+  size?: SizeSetting;
 }
 
 /** `reload`: the person asked to reload the GitHub tab first. `signal`: aborted when a newer jump starts. */

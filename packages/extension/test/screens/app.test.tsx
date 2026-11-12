@@ -42,7 +42,7 @@ describe('App', () => {
       onReport({ view: 'react', missing: [] });
       return { sentence: `Showing ${place.path}:${String(place.line)}.`, needsReload: false };
     });
-    const services: PanelServices = { settings: { getToken: async () => null, setToken: async () => undefined, getDefaultDepth: async () => null, setDefaultDepth: async () => undefined, getShowNotes: async () => true, setShowNotes: async () => undefined }, fetchStatus: () => new Promise(() => undefined), jump };
+    const services: PanelServices = { settings: { getToken: async () => null, setToken: async () => undefined, getDefaultDepth: async () => null, setDefaultDepth: async () => undefined, getShowNotes: async () => true, setShowNotes: async () => undefined, getSize: async () => 'm', setSize: async () => undefined, getTourSeen: async () => true, setTourSeen: async () => undefined }, fetchStatus: () => new Promise(() => undefined), jump };
     render(<App start={f.start} services={services} />);
     f.send(reviewState([finding(1)]));
     fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
@@ -65,7 +65,7 @@ describe('App', () => {
       signals.push(signal);
       return new Promise(() => undefined);
     });
-    const services: PanelServices = { settings: { getToken: async () => null, setToken: async () => undefined, getDefaultDepth: async () => null, setDefaultDepth: async () => undefined, getShowNotes: async () => true, setShowNotes: async () => undefined }, fetchStatus: () => new Promise(() => undefined), jump };
+    const services: PanelServices = { settings: { getToken: async () => null, setToken: async () => undefined, getDefaultDepth: async () => null, setDefaultDepth: async () => undefined, getShowNotes: async () => true, setShowNotes: async () => undefined, getSize: async () => 'm', setSize: async () => undefined, getTourSeen: async () => true, setTourSeen: async () => undefined }, fetchStatus: () => new Promise(() => undefined), jump };
     render(<App start={f.start} services={services} />);
     f.send(reviewState([finding(1, { connected: [{ path: 'src/other.ts', line: 7, role: 'caller', quote: '' }] })]));
     fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));

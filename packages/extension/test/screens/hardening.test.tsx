@@ -70,6 +70,7 @@ describe('the real construction', () => {
       getToken: async () => 'tok-123', setToken: async () => undefined,
       getDefaultDepth: async () => null, setDefaultDepth: async () => undefined,
       getShowNotes: async () => true, setShowNotes: async () => undefined,
+      getSize: async () => 'm', setSize: async () => undefined, getTourSeen: async () => true, setTourSeen: async () => undefined,
     };
     const tab: TabWatcher = { current: async () => ({ tabId: 1, url: undefined }), onChange: () => noop };
     let seen: PanelDeps | undefined;
