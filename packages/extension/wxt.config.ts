@@ -28,6 +28,8 @@ export default defineConfig({
     minimum_chrome_version: '116',
     permissions: ['sidePanel', 'storage'],
     host_permissions: ['https://github.com/*', 'http://127.0.0.1/*'],
-    action: { default_title: 'Airlock' },
+    // Rendered from brand/logo.svg by `npm run icons -w @airlock/extension` into public/icon/.
+    icons: { 16: 'icon/16.png', 32: 'icon/32.png', 48: 'icon/48.png', 128: 'icon/128.png' },
+    action: { default_title: 'Airlock', default_icon: { 16: 'icon/16.png', 32: 'icon/32.png' } },
   },
 });

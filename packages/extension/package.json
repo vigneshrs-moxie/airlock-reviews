@@ -7,6 +7,7 @@
     "build": "wxt build",
     "build:e2e": "AIRLOCK_E2E=1 wxt build",
     "dev": "wxt",
+    "icons": "node scripts/make-icons.mjs",
     "typecheck": "wxt prepare && tsc --noEmit"
   },
   "dependencies": {

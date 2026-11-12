@@ -27,6 +27,7 @@
 body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
 .panel { max-width: 420px; min-width: 320px; margin: 0 auto; }
 .head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.mark { flex: none; width: 18px; height: 18px; background: url(/icon/32.png) center / contain no-repeat; }
 .name { margin: 0; font-size: 14px; font-weight: 700; }
 .status { margin-left: auto; font-size: 12px; color: var(--muted); }
 .body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
