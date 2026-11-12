@@ -14,8 +14,8 @@ import { buildBrief } from '../brief/brief.js';
 import { challenge, type KeptCandidate } from '../challenge/challenge.js';
 import type { ReadFile } from '../challenge/proof.js';
 import { linkFacts, loadDiff, recheckBinary } from '../diff/parse.js';
-import { runChecks } from '../facts/checks.js';
-import { binarySourcePaths, binarySourceSentence, classifyFiles } from '../facts/classify.js';
+import { gatherChecks } from '../facts/checks.js';
+import { binarySourcePaths, binarySourceSentence, classifyFiles, type ReadClosely } from '../facts/classify.js';
 import { fetchPr } from '../intake/pr.js';
 import { prepareWorkspace, type Workspace } from '../intake/workspace.js';
 import { runCohortLenses } from '../lenses/cohort-lens.js';
@@ -63,7 +63,7 @@ export interface ReviewRequest {
   parallel?: number;
   /**
    * Read the team review kit (TEAM_KIT_REPO in pipeline/packs.ts) from this folder instead of GitHub (tests and the
-   * replay), for the selected pack whose kit is that repository; every other kit is synced.
+   * replay), for the `raj-standard` pack when its kit is that repository; every other kit is synced.
    */
   kitDir?: string;
   /** The kit's version when `kitDir` is given; `pinned` otherwise. */
@@ -380,14 +380,17 @@ async function reviewInWorkspace(
   const range: ReviewRange = merge !== undefined ? { ...ws.range, kind: 'sync-merge' } : ws.range;
 
   const gathered = (await log.run('facts', async (rec) => {
-    const tiers = await rec.attempt(() => classifyFiles(files, packs), [] as FileFact[]);
+    // The checks run first: a file a code check asks to be read closely (an extension's manifest loads it) is read whatever
+    // its path says.
+    const checked = await rec.attempt(() => gatherChecks(files, packs, readHead, {
+      readBase: (path) => safeRead(ws.baseDir, path), sizeOfHead: (path) => safeSize(ws.headDir, path),
+    }), { facts: [] as Fact[], readClosely: [] as ReadClosely[] });
+    const tiers = await rec.attempt(() => classifyFiles(files, packs, checked.readClosely), [] as FileFact[]);
     // A push of only ignored files leaves nothing of the pull request unreviewed that the earlier review did not see.
     const unreviewed = (pushed ? null : notReviewed(files, tiers)) ?? emptyDiff(files, pr, givenRange);
     if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
-    for (const path of binarySourcePaths(files, packs)) rec.error({ stage: 'facts', cohortId: null, message: binarySourceSentence(path) });
-    const facts = [...diffFacts, ...await rec.attempt(() => runChecks(files, packs, readHead, {
-      readBase: (path) => safeRead(ws.baseDir, path), sizeOfHead: (path) => safeSize(ws.headDir, path),
-    }), [] as Fact[])];
+    for (const path of binarySourcePaths(files, packs, checked.readClosely)) rec.error({ stage: 'facts', cohortId: null, message: binarySourceSentence(path) });
+    const facts = [...diffFacts, ...checked.facts];
     const found = await rec.attempt(
       () => findLinks(exec, ws.headDir, files, packs), { links: [] as Link[], skippedNames: 0, limits: [] as string[] },
     );

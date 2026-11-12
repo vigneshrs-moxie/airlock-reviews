@@ -3,7 +3,8 @@ import type { Fact, FileDiff } from '@airlock/shared';
 import picomatch from 'picomatch';
 import { SYMLINK_MODE } from '../diff/parse.js';
 import type { CheckDef, Pack } from '../packs/types.js';
-import { EXTENSION_CHECKS, type CodeCheck } from './extension-checks.js';
+import { isIgnoredPath, type ReadClosely } from './classify.js';
+import { EXTENSION_CHECKS, type CodeCheck, type CodeCheckInput } from './extension-checks.js';
 
 type ReadHead = (path: string) => Promise<string | null>;
 
@@ -56,6 +57,16 @@ function once<T>(read: (path: string) => Promise<T>): (path: string) => Promise<
  * Nothing here runs code from the pull request: files are only read through the given readers.
  */
 export async function runChecks(files: FileDiff[], packs: Pack[], readHead: ReadHead, sides: OtherSides = {}): Promise<Fact[]> {
+  return (await gatherChecks(files, packs, readHead, sides)).facts;
+}
+
+/**
+ * runChecks, with the files the code checks ask to be read closely whatever their tier says (each with the first pack that
+ * named the check), for the classifier: the facts stage runs this before it settles the tiers.
+ */
+export async function gatherChecks(
+  files: FileDiff[], packs: Pack[], readHead: ReadHead, sides: OtherSides = {},
+): Promise<{ facts: Fact[]; readClosely: ReadClosely[] }> {
   const read = once(readHead);
   const out: Fact[] = [];
   for (const pack of packs) {
@@ -67,20 +78,30 @@ export async function runChecks(files: FileDiff[], packs: Pack[], readHead: Read
 
   // A symbolic link holds a path, not code, so no code check reads it.
   const live = files.filter((f) => f.mode !== SYMLINK_MODE);
-  const input = { files: live, readHead: read, readBase: once(sides.readBase ?? nothing), sizeOfHead: once(sides.sizeOfHead ?? nothing) };
+  const input: CodeCheckInput = {
+    files: live, readHead: read, readBase: once(sides.readBase ?? nothing), sizeOfHead: once(sides.sizeOfHead ?? nothing),
+    isIgnored: (path) => isIgnoredPath(path, packs),
+  };
   const ran = new Set<string>();
   const seen = new Set<string>();
-  for (const id of packs.flatMap((p) => p.codeChecks ?? [])) {
-    if (ran.has(id)) continue;
-    ran.add(id);
-    const check = Object.hasOwn(CODE_CHECKS, id) ? CODE_CHECKS[id] : undefined;
-    if (check === undefined) throw new Error(`No code check is called "${id}".`);
-    for (const fact of (await check(input)).sort(byPathThenLine)) {
-      const key = factKey(fact);
-      if (!seen.has(key)) { seen.add(key); out.push(fact); }
+  const readClosely: ReadClosely[] = [];
+  for (const pack of packs) {
+    for (const id of pack.codeChecks ?? []) {
+      if (ran.has(id)) continue;
+      ran.add(id);
+      const check = Object.hasOwn(CODE_CHECKS, id) ? CODE_CHECKS[id] : undefined;
+      if (check === undefined) throw new Error(`No code check is called "${id}".`);
+      const result = await check(input);
+      for (const fact of result.facts.sort(byPathThenLine)) {
+        const key = factKey(fact);
+        if (!seen.has(key)) { seen.add(key); out.push(fact); }
+      }
+      for (const r of result.readClosely ?? []) {
+        if (!readClosely.some((c) => c.path === r.path)) readClosely.push({ path: r.path, packId: pack.id, reason: r.reason });
+      }
     }
   }
-  return out;
+  return { facts: out, readClosely };
 }
 
 async function runOne(pack: Pack, check: CheckDef, files: FileDiff[], read: ReadHead): Promise<Fact[]> {

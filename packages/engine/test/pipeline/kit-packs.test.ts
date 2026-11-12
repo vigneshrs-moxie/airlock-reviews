@@ -106,15 +106,15 @@ describe('a pack names its kit', () => {
     expect(exec.gh).toEqual([]);
   });
 
-  it("the replay's kitDir and kitSha stand in for the team review kit's pack, found by its repository, and other kit packs are synced", async () => {
+  it("the replay's kitDir and kitSha stand in for raj-standard's kit when it is the team review kit, and every other kit pack is synced", async () => {
     const teamKit = { files: ['k/profile.md', 'k/orbit.md', 'k/calibration.md'], datedStandards: ['k/calibration.md'] };
     // in any letter case, and after another kit pack in the selection
-    const team = kitPack('team', { repo: 'moxie-pest-control-phoenix/Moxie-Review-Kit', ...teamKit });
+    const team = kitPack('raj-standard', { repo: 'moxie-pest-control-phoenix/Moxie-Review-Kit', ...teamKit });
     const ext = kitPack('ext', EXT);
     const exec = fakeExec({ 'acme/ext-kit': OTHER_SHA }, { 'decisions.md': 'Decisions.', 'standard.md': 'Standard.' });
     const ready = await prepare([kitPack('plain', undefined), ext, team], exec, { kitDir: KIT_DIR, kitSha: 'c'.repeat(40) });
     expect(ready.errors).toEqual([]);
-    expect(ready.packs.map((p) => [p.id, p.version])).toEqual([['plain', 'local'], ['ext', OTHER_SHA], ['team', 'c'.repeat(40)]]);
+    expect(ready.packs.map((p) => [p.id, p.version])).toEqual([['plain', 'local'], ['ext', OTHER_SHA], ['raj-standard', 'c'.repeat(40)]]);
     expect(shape(ready.packs[2]!)).toEqual([['profile.md', false], ['orbit.md', false], ['calibration.md', true]]);
     expect(ready.packs[2]!.standards[2]!.text).toContain('CAL_EARLY_MARKER');
     expect(shape(ready.packs[1]!)).toEqual([['decisions.md', true], ['standard.md', false]]);
@@ -125,6 +125,12 @@ describe('a pack names its kit', () => {
     const alone = fakeExec({ 'acme/ext-kit': OTHER_SHA }, { 'decisions.md': 'Decisions.', 'standard.md': 'Standard.' });
     const extOnly = await prepare([ext], alone, { kitDir: KIT_DIR, kitSha: 'c'.repeat(40) });
     expect(extOnly.packs.map((p) => p.version)).toEqual([OTHER_SHA]);
+    // another pack naming the team kit's repository is synced normally: the folder goes to raj-standard only
+    const second = kitPack('second', { repo: TEAM_REPO, ...teamKit });
+    const both = fakeExec({ [TEAM_REPO]: SHA });
+    const two = await prepare([second, team], both, { kitDir: KIT_DIR, kitSha: 'c'.repeat(40) });
+    expect(two.packs.map((p) => [p.id, p.version])).toEqual([['second', SHA], ['raj-standard', 'c'.repeat(40)]]);
+    expect(both.gh[0]).toEqual(['api', `repos/${TEAM_REPO}/commits/main`, '--jq', '.sha']);
     // and a kit pack naming another repository with the team kit's file names is not given it either
     const lookalike = kitPack('lookalike', { repo: 'acme/review-kit', ...teamKit });
     await expect(prepare([lookalike], fakeExec({}), { kitDir: KIT_DIR })).rejects.toThrow(/could not be fetched from acme\/review-kit/);
@@ -146,7 +152,7 @@ describe('a pack names its kit', () => {
     await expect(prepare([kitPack('plain', undefined), kitPack('ext', EXT)], fakeExec({})))
       .rejects.toThrow('The review kit could not be fetched from acme/ext-kit and none is cached: HTTP 404: Not Found');
     // a kit folder given for the team kit's pack that lacks one of its files is named too
-    const team = kitPack('team', { repo: TEAM_REPO, files: ['k/profile.md', 'k/decisions.md'] });
+    const team = kitPack('raj-standard', { repo: TEAM_REPO, files: ['k/profile.md', 'k/decisions.md'] });
     await expect(prepare([team], fakeExec({}), { kitDir: KIT_DIR }))
       .rejects.toThrow(/The review kit Moxie-Pest-Control-Phoenix\/moxie-review-kit could not be read from .*decisions\.md/);
   });

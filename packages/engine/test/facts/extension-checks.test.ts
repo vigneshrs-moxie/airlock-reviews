@@ -1,7 +1,7 @@
 import type { Fact, FileDiff } from '@airlock/shared';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { CODE_CHECK_IDS, runChecks } from '../../src/facts/checks.js';
+import { CODE_CHECK_IDS, gatherChecks, runChecks } from '../../src/facts/checks.js';
 import { EXTENSION_CHECKS } from '../../src/facts/extension-checks.js';
 import { loadPack } from '../../src/packs/load.js';
 import type { Pack } from '../../src/packs/types.js';
@@ -46,8 +46,8 @@ const manifest = (o: Record<string, unknown>): string => JSON.stringify({ manife
 describe('the extension code checks', () => {
   it('are each a known code check a pack can name', () => {
     expect([...ALL].sort()).toEqual([
-      'extension-broad-hosts', 'extension-html-injection', 'extension-large-files', 'extension-permissions',
-      'extension-remote-code', 'extension-version-changelog',
+      'extension-broad-hosts', 'extension-html-injection', 'extension-large-files', 'extension-loaded-files',
+      'extension-permissions', 'extension-remote-code', 'extension-version-changelog',
     ]);
     for (const id of ALL) expect(CODE_CHECK_IDS).toContain(id);
   });
@@ -218,14 +218,14 @@ describe('the extension code checks', () => {
     });
     expect(facts.map((f) => f.checkId)).toEqual(['extension-manifest-json']);
     expect(facts[0]).toMatchObject({ path: 'manifest.json', line: null });
-    expect(facts[0]!.message).toMatch(/^manifest\.json is not valid JSON at the head, so its permissions, hosts and version were not compared: /);
+    expect(facts[0]!.message).toBe('manifest.json could not be read as JSON, so its permissions and version were not compared.');
 
     // an unreadable base manifest is said, and the head's lists are given in full
     const good = manifest({ version: '1.0.1', permissions: ['storage'] });
     const fromBroken = await run([changed('manifest.json', good)], { head: { 'manifest.json': good }, base: { 'manifest.json': broken } });
     expect(fromBroken.map((f) => f.checkId)).toEqual(['extension-manifest-json', 'extension-permissions']);
-    expect(fromBroken[0]!.message).toMatch(/^manifest\.json was not valid JSON before this pull request, so what it held before is not known: /);
-    expect(fromBroken[1]!.message).toBe('permissions before: not known (the manifest was not valid JSON before this pull request); after: storage.');
+    expect(fromBroken[0]!.message).toBe('manifest.json could not be read as JSON before this pull request, so what it held before is not known.');
+    expect(fromBroken[1]!.message).toBe('permissions before: not known (the manifest could not be read before this pull request); after: storage.');
   });
 
   it('reports a file over 500 kB and an archive added to the repository', async () => {
@@ -286,5 +286,126 @@ describe('the Orbit checks with the code-check hook', () => {
       'migration-without-schema app/prisma/migrations/0160_x/migration.sql',
       'raw-unsafe app/src/lib/report.ts:4',
     ]);
+  });
+});
+
+describe('files the extension loads', () => {
+  const read = (tree: Tree) => async (p: string): Promise<string | null> => tree.head?.[p] ?? null;
+  const gather = (files: FileDiff[], tree: Tree, codeChecks: string[] = ALL) => gatherChecks(files, [pack(codeChecks)], read(tree), {
+    readBase: async (p) => tree.base?.[p] ?? null, sizeOfHead: async () => null,
+  });
+
+  it('names every file the head manifest loads, whatever its path, for the read tier, and says when one sits with the tests', async () => {
+    const head = manifest({
+      background: { service_worker: 'inject.spec.js' },
+      content_scripts: [{ matches: ['https://a.example.com/*'], js: ['fixtures/inject.js'], css: ['./styles/page.css'] }],
+      web_accessible_resources: [{ resources: ['pages/*.html'], matches: ['https://a.example.com/*'] }],
+      action: { default_popup: 'popup/popup.html' },
+      options_ui: { page: 'options/options.html' },
+      side_panel: { default_path: 'panel/panel.html' },
+      devtools_page: 'tools/devtools.html',
+      chrome_url_overrides: { newtab: 'tab/new.html' },
+      sandbox: { pages: ['sandbox/box.html'] },
+    });
+    const files = [
+      'fixtures/inject.js', 'inject.spec.js', 'styles/page.css', 'pages/a.html', 'pages/deep/b.html', 'popup/popup.html',
+      'options/options.html', 'panel/panel.html', 'tools/devtools.html', 'tab/new.html', 'sandbox/box.html',
+      'lib/test/sender.js', 'tests/real.test.js',
+    ].map((p) => changed(p, 'x;', 'modified'));
+    const { facts, readClosely } = await gather(files, { head: { 'manifest.json': head } });
+    expect(readClosely.map((r) => r.path).sort()).toEqual([
+      'fixtures/inject.js', 'inject.spec.js', 'options/options.html', 'pages/a.html', 'panel/panel.html', 'popup/popup.html',
+      'sandbox/box.html', 'styles/page.css', 'tab/new.html', 'tools/devtools.html',
+    ]);
+    expect(readClosely[0]).toEqual({ path: expect.any(String), packId: 'extensions', reason: 'loaded by manifest.json' });
+    expect(only(facts, 'extension-loaded-files').map((f) => `${f.path} ${f.message}`)).toEqual([
+      'fixtures/inject.js fixtures/inject.js sits under a test or fixture folder but the extension loads it.',
+      'inject.spec.js inject.spec.js is named like a test but the extension loads it.',
+    ]);
+  });
+
+  it('reads the older manifest shapes and a manifest one folder down, relative to its folder', async () => {
+    const top = manifest({
+      manifest_version: 2, background: { scripts: ['bg.js'], page: 'bg.html' }, browser_action: { default_popup: 'pop.html' },
+      page_action: { default_popup: 'page.html' }, options_page: 'opts.html', web_accessible_resources: ['img/*.svg', 'tests/hook.js'],
+    });
+    const inner = manifest({ background: { service_worker: 'worker.js' } });
+    const files = ['bg.js', 'bg.html', 'pop.html', 'page.html', 'opts.html', 'img/a.svg', 'tests/hook.js', 'route/worker.js', 'worker.js']
+      .map((p) => changed(p, 'x;'));
+    files.push(changed('route/manifest.json', inner));
+    const { facts, readClosely } = await gather(files, { head: { 'manifest.json': top, 'route/manifest.json': inner } });
+    expect(readClosely.map((r) => `${r.path} ${r.reason}`).sort()).toEqual([
+      'bg.html loaded by manifest.json', 'bg.js loaded by manifest.json', 'img/a.svg loaded by manifest.json',
+      'opts.html loaded by manifest.json', 'page.html loaded by manifest.json', 'pop.html loaded by manifest.json',
+      'route/worker.js loaded by route/manifest.json', 'tests/hook.js loaded by manifest.json',
+    ]);
+    expect(only(facts, 'extension-loaded-files').map((f) => f.path)).toEqual(['tests/hook.js']);
+  });
+
+  it('a file under tests/ that the manifest loads is scanned like any other, and one it does not load is not', async () => {
+    const head = manifest({ content_scripts: [{ matches: ['https://a.example.com/*'], js: ['tests/inject.js'] }] });
+    const code = 'el.innerHTML = name;';
+    const files = [changed('tests/inject.js', code, 'added'), changed('tests/other.js', code, 'added')];
+    const { facts } = await gather(files, { head: { 'manifest.json': head, 'tests/inject.js': code, 'tests/other.js': code } });
+    expect(only(facts, 'extension-html-injection').map((f) => f.path)).toEqual(['tests/inject.js']);
+  });
+
+  it('says when a source file loads code from a test or fixture path', async () => {
+    const code = [
+      "import { rows } from './fixtures/rows.js';", // 1
+      "importScripts('tests/helpers.js', 'util.js');", // 2
+      "chrome.scripting.executeScript({ target: { tabId }, files: ['test/inject.js'] });", // 3
+      "import { ok } from './lib/ok.js';", // 4
+      "// importScripts('tests/commented.js');", // 5
+      "import x from 'some-package';", // 6
+    ].join('\n');
+    const facts = only((await gather([changed('src/background.js', code, 'added')], { head: { 'src/background.js': code } })).facts,
+      'extension-loaded-files');
+    expect(facts.map((f) => `${f.line} ${f.message}`)).toEqual([
+      '1 An added line loads src/fixtures/rows.js, which sits under a test or fixture folder.',
+      '2 An added line loads src/tests/helpers.js, which sits under a test or fixture folder.',
+      '3 An added line loads test/inject.js, which sits under a test or fixture folder.',
+    ]);
+    // a test file loading its fixtures is not reported
+    expect(only((await gather([changed('tests/a.test.js', code, 'added')], { head: { 'tests/a.test.js': code } })).facts,
+      'extension-loaded-files')).toEqual([]);
+  });
+
+  it('skips files the classifier ignores, unless the manifest loads them', async () => {
+    const code = 'eval(s);';
+    const files = ['vendor/lib.min.js', 'dist/bundle.js', 'loaded.min.js'].map((p) => changed(p, code, 'added'));
+    const head = manifest({ background: { service_worker: 'loaded.min.js' } });
+    const { facts } = await gather(files, { head: { 'manifest.json': head, 'vendor/lib.min.js': code, 'dist/bundle.js': code, 'loaded.min.js': code } });
+    expect(only(facts, 'extension-remote-code').map((f) => f.path)).toEqual(['loaded.min.js']);
+  });
+});
+
+describe('manifest edge cases', () => {
+  it('a modified manifest whose base cannot be read is unknown before, not new', async () => {
+    const after = manifest({ version: '1.1.0', permissions: ['storage'], host_permissions: ['<all_urls>'] });
+    const facts = await run([changed('manifest.json', after)], { head: { 'manifest.json': after } });
+    expect(facts.map((f) => `${f.checkId} ${f.message}`)).toEqual([
+      'extension-permissions permissions before: not known (the manifest could not be read before this pull request); after: storage.',
+      'extension-permissions host_permissions before: not known (the manifest could not be read before this pull request); after: <all_urls>.',
+      'extension-broad-hosts host_permissions asks for "<all_urls>", every site (not known whether it was there before).',
+    ]);
+  });
+
+  it('comments in the manifest are read past', async () => {
+    const before = '{\n  // the first version\n  "manifest_version": 3, "version": "1.0.0", "permissions": ["storage"]\n}';
+    const after = '{\n  /* now with tabs */\n  "manifest_version": 3, "version": "1.0.0", "permissions": ["storage", "tabs"] // tabs for the switcher\n}';
+    expect((await run([changed('manifest.json', after)], { head: { 'manifest.json': after }, base: { 'manifest.json': before } }))
+      .map((f) => f.message)).toEqual(['permissions before: storage; after: storage, tabs; added: tabs.']);
+  });
+
+  it('a deleted changelog is not a changed one, and a file renamed to an archive is reported', async () => {
+    const v1 = manifest({ version: '1.0.0' });
+    const v2 = manifest({ version: '1.0.1' });
+    const facts = await run([changed('manifest.json', v2), changed('CHANGELOG.md', '', 'deleted')], {
+      head: { 'manifest.json': v2 }, base: { 'manifest.json': v1 },
+    });
+    expect(only(facts, 'extension-version-changelog').map((f) => f.path)).toEqual(['manifest.json']);
+    const renamed = { ...changed('build.zip', ''), status: 'renamed' as const, oldPath: 'build.txt' };
+    expect(only(await run([renamed]), 'extension-large-files').map((f) => f.message)).toEqual(['An archive (.zip) is added to the repository.']);
   });
 });

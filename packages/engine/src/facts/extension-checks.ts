@@ -5,7 +5,8 @@ import picomatch from 'picomatch';
 /**
  * Code checks for Chrome extension repositories, named by a pack under `codeChecks:`. Each reads the pull request's files
  * only through the readers it is given (the engine's safe reader on the head and base worktrees), never runs the
- * extension's code, and gives facts for the lenses, never findings.
+ * extension's code, and gives facts for the lenses, never findings. A check may also name changed files to be read
+ * closely whatever their path says: the files the extension's manifest loads.
  */
 export interface CodeCheckInput {
   /** The changed files, symbolic links left out. */
@@ -13,23 +14,29 @@ export interface CodeCheckInput {
   readHead: (path: string) => Promise<string | null>;
   readBase: (path: string) => Promise<string | null>;
   sizeOfHead: (path: string) => Promise<number | null>;
+  /** Whether the packs' ignore globs or the built-in ones leave a path out of the review. */
+  isIgnored: (path: string) => boolean;
 }
-export type CodeCheck = (input: CodeCheckInput) => Promise<Fact[]>;
+export interface CodeCheckResult { facts: Fact[]; readClosely?: { path: string; reason: string }[] }
+export type CodeCheck = (input: CodeCheckInput) => Promise<CodeCheckResult>;
 
-const TEST_GLOBS = ['**/tests/**', '**/test/**', '**/__tests__/**', '**/fixtures/**', '**/*.test.*', '**/*.spec.*'].map(
-  (g) => picomatch(g, { dot: true }),
-);
-const isTestPath = (path: string): boolean => TEST_GLOBS.some((m) => m(path));
+/** Files the review trusts as tests: under the top-level `tests/` folder, or named or placed as the engine's built-in rules say. */
+const TRUSTED_TEST = ['tests/**', '**/__tests__/**', '**/*.test.*', '**/*.spec.*'].map((g) => picomatch(g, { dot: true }));
+const isTrustedTest = (path: string): boolean => TRUSTED_TEST.some((m) => m(path));
+const TEST_FOLDERS = new Set(['tests', 'test', '__tests__', 'fixtures']);
+/** Under a folder named for tests or fixtures, at any depth. */
+const underTestFolder = (path: string): boolean => path.split('/').slice(0, -1).some((s) => TEST_FOLDERS.has(s));
+const namedLikeTest = (path: string): boolean => /\.(?:test|spec)\./i.test(posix.basename(path));
 const SCRIPT_FILE = /\.(?:m?js|cjs|jsx|tsx?|gs)$/i;
 const HTML_FILE = /\.html?$/i;
 const ARCHIVE = new Set(['zip', 'crx', 'xpi', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'jar']);
 const LARGE_BYTES = 500_000;
 
 const live = (files: FileDiff[]): FileDiff[] => files.filter((f) => f.status !== 'deleted');
-const oneLine = (s: string): string => s.replace(/\s+/g, ' ').trim();
 const cut = (s: string, n = 100): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const besideIt = (dir: string, name: string): string => (dir === '.' ? name : `${dir}/${name}`);
+const isManifest = (path: string): boolean => posix.basename(path) === 'manifest.json' && !isTrustedTest(path);
 
 /** The added lines of a file, by their line number on the head. */
 function addedLines(file: FileDiff): Map<number, string> {
@@ -41,28 +48,35 @@ function addedLines(file: FileDiff): Map<number, string> {
 // ---------------------------------------------------------------------------------------------------------------------
 // The manifest
 
-type Side = { kind: 'absent' } | { kind: 'bad'; why: string } | { kind: 'ok'; json: Record<string, unknown>; text: string };
+/** One side of a manifest: not there (new), not readable (unknown), not JSON (bad), or read. */
+type Side =
+  | { kind: 'absent' } | { kind: 'unknown' } | { kind: 'bad' }
+  | { kind: 'ok'; json: Record<string, unknown>; text: string };
 
-async function manifestSide(read: (path: string) => Promise<string | null>, path: string): Promise<Side> {
+/** Reads a manifest, its comments blanked first (Chrome accepts them); `missing` is what an unreadable file is. */
+async function manifestSide(read: (path: string) => Promise<string | null>, path: string, missing: 'absent' | 'unknown'): Promise<Side> {
   const text = await read(path);
-  if (text === null) return { kind: 'absent' };
+  if (text === null) return { kind: missing };
   try {
-    const json: unknown = JSON.parse(text.replace(/^﻿/, ''));
-    return isObj(json) ? { kind: 'ok', json, text } : { kind: 'bad', why: 'it is not a JSON object' };
-  } catch (err) {
-    return { kind: 'bad', why: cut(oneLine(err instanceof Error ? err.message : String(err)), 160) };
+    const json: unknown = JSON.parse(scriptViews(text.replace(/^﻿/, '')).code.join('\n'));
+    return isObj(json) ? { kind: 'ok', json, text } : { kind: 'bad' };
+  } catch {
+    return { kind: 'bad' };
   }
 }
 
 interface ChangedManifest { path: string; base: Side; head: Side }
 
-/** Every changed manifest.json outside the tests, with both sides read; a renamed one is read at its old path on the base. */
+/**
+ * Every changed manifest.json outside the trusted tests, with both sides read; a renamed one is read at its old path on the
+ * base. Only an added manifest is new: one whose base cannot be read is unknown before.
+ */
 async function changedManifests(input: CodeCheckInput): Promise<ChangedManifest[]> {
   const out: ChangedManifest[] = [];
   for (const f of live(input.files)) {
-    if (posix.basename(f.path) !== 'manifest.json' || isTestPath(f.path)) continue;
-    const base = f.status === 'added' ? { kind: 'absent' as const } : await manifestSide(input.readBase, f.oldPath ?? f.path);
-    out.push({ path: f.path, base, head: await manifestSide(input.readHead, f.path) });
+    if (!isManifest(f.path)) continue;
+    const base = f.status === 'added' ? { kind: 'absent' as const } : await manifestSide(input.readBase, f.oldPath ?? f.path, 'unknown');
+    out.push({ path: f.path, base, head: await manifestSide(input.readHead, f.path, 'unknown') });
   }
   return out;
 }
@@ -72,13 +86,14 @@ const NOT_JSON = 'extension-manifest-json';
 function jsonFacts(m: ChangedManifest): Fact[] {
   const out: Fact[] = [];
   if (m.base.kind === 'bad') {
-    out.push({ checkId: NOT_JSON, path: m.path, line: null, message: `${m.path} was not valid JSON before this pull request, so what it held before is not known: ${m.base.why}.` });
+    out.push({ checkId: NOT_JSON, path: m.path, line: null, message: `${m.path} could not be read as JSON before this pull request, so what it held before is not known.` });
   }
   if (m.head.kind === 'bad') {
-    out.push({ checkId: NOT_JSON, path: m.path, line: null, message: `${m.path} is not valid JSON at the head, so its permissions, hosts and version were not compared: ${m.head.why}.` });
+    out.push({ checkId: NOT_JSON, path: m.path, line: null, message: `${m.path} could not be read as JSON, so its permissions and version were not compared.` });
   }
   return out;
 }
+const beforeUnknown = (s: Side): boolean => s.kind === 'bad' || s.kind === 'unknown';
 
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 const unique = (list: string[]): string[] => [...new Set(list)];
@@ -102,8 +117,8 @@ const permissions: CodeCheck = async (input) => {
     for (const [label, pick] of LISTS) {
       const after = unique(pick(m.head.json));
       const fact = (message: string): void => { out.push({ checkId: 'extension-permissions', path: m.path, line: null, message }); };
-      if (m.base.kind === 'bad') {
-        if (after.length > 0) fact(`${label} before: not known (the manifest was not valid JSON before this pull request); after: ${listed(after)}.`);
+      if (beforeUnknown(m.base)) {
+        if (after.length > 0) fact(`${label} before: not known (the manifest could not be read before this pull request); after: ${listed(after)}.`);
         continue;
       }
       const before = m.base.kind === 'ok' ? unique(pick(m.base.json)) : [];
@@ -114,7 +129,7 @@ const permissions: CodeCheck = async (input) => {
       fact(`${label} before: ${was}; after: ${listed(after)}${added.length > 0 ? `; added: ${added.join(', ')}` : ''}${removed.length > 0 ? `; removed: ${removed.join(', ')}` : ''}.`);
     }
   }
-  return out;
+  return { facts: out };
 };
 
 // `<all_urls>`, or a match pattern whose host is every host (`*://*/*`, `https://*/*`) or none at all (`file:///*`).
@@ -130,7 +145,7 @@ const broadHosts: CodeCheck = async (input) => {
     for (const [label, pick] of LISTS) {
       const before = m.base.kind === 'ok' ? pick(m.base.json) : [];
       for (const entry of unique(pick(m.head.json)).filter(isBroad)) {
-        const when = m.base.kind === 'bad' ? 'not known whether it was there before'
+        const when = beforeUnknown(m.base) ? 'not known whether it was there before'
           : before.includes(entry) ? 'already there before' : 'added in this pull request';
         const at = lines.findIndex((l) => l.includes(JSON.stringify(entry)));
         out.push({
@@ -140,7 +155,7 @@ const broadHosts: CodeCheck = async (input) => {
       }
     }
   }
-  return out;
+  return { facts: out };
 };
 
 const versionOf = (s: Side): string | null => (s.kind === 'ok' && typeof s.json.version === 'string' ? s.json.version : null);
@@ -164,14 +179,14 @@ const versionChangelog: CodeCheck = async (input) => {
   const out: Fact[] = [];
   const fact = (path: string, message: string): void => { out.push({ checkId: 'extension-version-changelog', path, line: null, message }); };
   const changelogIn = (dir: string): FileDiff | undefined =>
-    input.files.find((f) => isChangelog(f.path) && posix.dirname(f.path) === dir);
+    live(input.files).find((f) => isChangelog(f.path) && posix.dirname(f.path) === dir);
   // Manifests whose version changed, or whose earlier version is not known: their changelog needs no fact of its own.
   const settled = new Set<string>();
 
   for (const m of await changedManifests(input)) {
     out.push(...jsonFacts(m));
-    if (m.base.kind === 'bad') settled.add(m.path);
-    if (m.head.kind !== 'ok' || m.base.kind === 'bad') continue;
+    if (beforeUnknown(m.base)) settled.add(m.path);
+    if (m.head.kind !== 'ok' || beforeUnknown(m.base)) continue;
     const now = versionOf(m.head);
     if (now === null) continue;
     const was = versionOf(m.base);
@@ -188,10 +203,10 @@ const versionChangelog: CodeCheck = async (input) => {
     }
   }
 
-  for (const log of live(input.files).filter((f) => isChangelog(f.path) && !isTestPath(f.path))) {
+  for (const log of live(input.files).filter((f) => isChangelog(f.path) && !isTrustedTest(f.path))) {
     const manifestPath = besideIt(posix.dirname(log.path), 'manifest.json');
     if (settled.has(manifestPath)) continue;
-    const head = await manifestSide(input.readHead, manifestPath);
+    const head = await manifestSide(input.readHead, manifestPath, 'absent');
     if (head.kind !== 'ok') continue;
     const now = versionOf(head);
     const name = posix.basename(log.path);
@@ -199,7 +214,7 @@ const versionChangelog: CodeCheck = async (input) => {
       ? `${name} changed and manifest.json beside it has no version.`
       : `${name} changed and the version in manifest.json beside it is still ${now}.`);
   }
-  return out;
+  return { facts: out };
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -246,11 +261,124 @@ function scriptViews(text: string): { code: string[]; bare: string[] } {
 
 const htmlView = (text: string): string[] => text.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' ')).split('\n');
 
-/** The script and page files of the pull request that are not tests, with their added lines and their head text. */
+// ---------------------------------------------------------------------------------------------------------------------
+// The files the extension loads
+
+/** A path the manifest at `dir` names, from the repository root; null when it leaves the repository. */
+function resolveIn(dir: string, named: string): string | null {
+  const from = named.startsWith('/') ? '.' : dir;
+  const joined = posix.normalize(posix.join(from === '.' ? '' : from, named.replace(/^\/+/, '')));
+  if (joined === '.' || joined === '' || joined.startsWith('../') || joined === '..') return null;
+  return joined.replace(/^\.\//, '');
+}
+
+/** Every path a manifest names as something Chrome loads: scripts, pages, styles and web-accessible resources. */
+function namedPaths(m: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const one = (v: unknown): void => { if (typeof v === 'string' && v !== '') out.push(v); };
+  const all = (v: unknown): void => { for (const s of strings(v)) one(s); };
+  const pick = (v: unknown, key: string): unknown => (isObj(v) ? v[key] : undefined);
+  one(pick(m.background, 'service_worker'));
+  all(pick(m.background, 'scripts'));
+  one(pick(m.background, 'page'));
+  if (Array.isArray(m.content_scripts)) for (const c of m.content_scripts) { all(pick(c, 'js')); all(pick(c, 'css')); }
+  if (Array.isArray(m.web_accessible_resources)) {
+    for (const w of m.web_accessible_resources) { if (typeof w === 'string') one(w); else all(pick(w, 'resources')); }
+  }
+  for (const key of ['action', 'browser_action', 'page_action']) one(pick(m[key], 'default_popup'));
+  one(m.options_page);
+  one(pick(m.options_ui, 'page'));
+  one(pick(m.side_panel, 'default_path'));
+  one(m.devtools_page);
+  if (isObj(m.chrome_url_overrides)) for (const v of Object.values(m.chrome_url_overrides)) one(v);
+  all(pick(m.sandbox, 'pages'));
+  return out;
+}
+
+const loadedMemo = new WeakMap<CodeCheckInput, Promise<Map<string, string>>>();
+
+/**
+ * The changed files the head's manifests load, each with why (`loaded by <manifest>`): the top-level manifest.json, read
+ * at the head whether it changed or not, and any other changed manifest.json, each read from its own folder. A glob the
+ * manifest names takes in every changed file it matches.
+ */
+function loadedFiles(input: CodeCheckInput): Promise<Map<string, string>> {
+  let hit = loadedMemo.get(input);
+  if (!hit) { hit = findLoaded(input); loadedMemo.set(input, hit); }
+  return hit;
+}
+
+async function findLoaded(input: CodeCheckInput): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const changed = live(input.files);
+  if (changed.length === 0) return out;
+  for (const manifestPath of unique(['manifest.json', ...changed.filter((f) => isManifest(f.path)).map((f) => f.path)])) {
+    const side = await manifestSide(input.readHead, manifestPath, 'absent');
+    if (side.kind !== 'ok') continue;
+    for (const named of namedPaths(side.json)) {
+      const path = resolveIn(posix.dirname(manifestPath), named);
+      if (path === null) continue;
+      const glob = /[*?[\]{}]/.test(path) ? picomatch(path, { dot: true }) : null;
+      for (const f of changed) {
+        if (!out.has(f.path) && (glob ? glob(f.path) : f.path === path)) out.set(f.path, `loaded by ${manifestPath}`);
+      }
+    }
+  }
+  return out;
+}
+
+const withTests = (path: string): string | null =>
+  underTestFolder(path) ? 'sits under a test or fixture folder' : namedLikeTest(path) ? 'is named like a test' : null;
+
+const IMPORT = /\bimport\s*(?:[\w$*{}\s,]+?\s*from\s*)?\(?\s*['"]([^'"]+)['"]/g;
+const IMPORT_SCRIPTS = /\bimportScripts\s*\(([^)]*)\)/g;
+const EXECUTE_SCRIPT = /\bexecuteScript\s*\(\s*\{(?:[^{}]|\{[^{}]*\})*?\bfiles\s*:\s*\[([^\]]*)\]/g;
+const QUOTED = /['"`]([^'"`]+)['"`]/g;
+
+/** The repository paths an added line of `file` loads code from with a literal path. */
+function loadsOn(code: string, file: string): string[] {
+  const dir = posix.dirname(file);
+  const out: string[] = [];
+  const add = (from: string, named: string): void => { const p = resolveIn(from, named); if (p !== null) out.push(p); };
+  for (const [, spec] of code.matchAll(IMPORT)) if (spec!.startsWith('.') || spec!.startsWith('/')) add(dir, spec!);
+  for (const [, args] of code.matchAll(IMPORT_SCRIPTS)) for (const [, p] of args!.matchAll(QUOTED)) add(dir, p!);
+  // chrome.scripting takes paths from the extension's root
+  for (const [, list] of code.matchAll(EXECUTE_SCRIPT)) for (const [, p] of list!.matchAll(QUOTED)) add('.', p!);
+  return out;
+}
+
+const loadedFilesCheck: CodeCheck = async (input) => {
+  const loaded = await loadedFiles(input);
+  const facts: Fact[] = [];
+  for (const path of loaded.keys()) {
+    const where = withTests(path);
+    if (where !== null) facts.push({ checkId: 'extension-loaded-files', path, line: null, message: `${path} ${where} but the extension loads it.` });
+  }
+  for (const { file, added, head } of await sources(input, SCRIPT_FILE)) {
+    // A test loading its own fixtures is not news; a file the extension loads is not a test.
+    if (!loaded.has(file.path) && withTests(file.path) !== null) continue;
+    for (const [n, code] of viewOfLines(head, added, (t) => scriptViews(t).code)) {
+      for (const target of loadsOn(code, file.path)) {
+        const where = withTests(target);
+        if (where !== null) {
+          facts.push({ checkId: 'extension-loaded-files', path: file.path, line: n, message: `An added line loads ${target}, which ${where}.` });
+        }
+      }
+    }
+  }
+  return { facts, readClosely: [...loaded].map(([path, reason]) => ({ path, reason })) };
+};
+
+/**
+ * The script or page files of the pull request worth scanning, with their added lines and their head text: not a trusted test
+ * and not an ignored file (minified, built, vendored), unless the extension loads it.
+ */
 async function sources(input: CodeCheckInput, pick: RegExp): Promise<{ file: FileDiff; added: Map<number, string>; head: string | null }[]> {
+  const loaded = await loadedFiles(input);
   const out = [];
   for (const file of live(input.files)) {
-    if (!pick.test(file.path) || isTestPath(file.path)) continue;
+    if (!pick.test(file.path) || file.binary) continue;
+    if (!loaded.has(file.path) && (isTrustedTest(file.path) || input.isIgnored(file.path))) continue;
     const added = addedLines(file);
     if (added.size === 0) continue;
     out.push({ file, added, head: await input.readHead(file.path) });
@@ -300,7 +428,7 @@ const remoteCode: CodeCheck = async (input) => {
       }
     }
   }
-  return out;
+  return { facts: out };
 };
 
 const SINK = /\.(innerHTML|outerHTML)\s*(?:\+=|=(?!=))|\.(insertAdjacentHTML)\s*\(/g;
@@ -374,7 +502,7 @@ const htmlInjection: CodeCheck = async (input) => {
       for (const [n, text] of added) scan(scriptViews(text).code[0]!, () => n);
     }
   }
-  return out;
+  return { facts: out };
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -390,7 +518,8 @@ const largeFiles: CodeCheck = async (input) => {
   const out: Fact[] = [];
   for (const f of live(input.files)) {
     const ext = extensionOf(f.path);
-    if (f.status === 'added' && ARCHIVE.has(ext)) {
+    const becameArchive = f.status === 'renamed' && f.oldPath !== null && extensionOf(f.oldPath) !== ext;
+    if (ARCHIVE.has(ext) && (f.status === 'added' || becameArchive)) {
       out.push({ checkId: 'extension-large-files', path: f.path, line: null, message: `An archive (.${ext}) is added to the repository.` });
     }
     const size = await input.sizeOfHead(f.path);
@@ -401,7 +530,7 @@ const largeFiles: CodeCheck = async (input) => {
       });
     }
   }
-  return out;
+  return { facts: out };
 };
 
 /** The extension checks, by the id a pack names them with. */
@@ -412,4 +541,5 @@ export const EXTENSION_CHECKS: Readonly<Record<string, CodeCheck>> = {
   'extension-remote-code': remoteCode,
   'extension-html-injection': htmlInjection,
   'extension-large-files': largeFiles,
+  'extension-loaded-files': loadedFilesCheck,
 };
