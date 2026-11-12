@@ -86,13 +86,32 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
 }
 
+/**
+ * Yields to the event loop until `done` holds, for at most ten seconds of real time. A count of turns is not enough: every
+ * attach proves first, and the proof is checked with Web Crypto, whose work runs on Node's thread pool, so how many turns
+ * it takes depends on how busy the machine is.
+ */
+async function turnsUntil(done: () => boolean): Promise<void> {
+  const end = Date.now() + 10_000;
+  while (!done() && Date.now() < end) await new Promise((r) => setImmediate(r));
+}
+
 async function until<K extends PanelState['kind']>(h: Harness, kind: K, more: (s: Extract<PanelState, { kind: K }>) => boolean = () => true): Promise<Extract<PanelState, { kind: K }>> {
-  for (let i = 0; i < 500; i++) {
-    await new Promise((r) => setImmediate(r));
+  const reached = (): boolean => {
     const s = h.last();
-    if (s?.kind === kind && more(s as Extract<PanelState, { kind: K }>)) return s as Extract<PanelState, { kind: K }>;
-  }
+    return s?.kind === kind && more(s as Extract<PanelState, { kind: K }>);
+  };
+  await new Promise((r) => setImmediate(r));
+  await turnsUntil(reached);
+  if (reached()) return h.last() as Extract<PanelState, { kind: K }>;
   throw new Error(`waited for ${kind}; the state is ${JSON.stringify(h.last())}`);
+}
+
+/** Waits until exactly these panel timers are pending (a re-attach's wait, a check), then says so. */
+async function timersAre(h: Harness, delays: number[]): Promise<void> {
+  const same = (): boolean => JSON.stringify(h.timers.delays()) === JSON.stringify(delays);
+  await turnsUntil(same);
+  expect(h.timers.delays()).toEqual(delays);
 }
 
 const stage = (name: string, status: 'start' | 'done' | 'error', detail = ''): ServiceEvent => ({
@@ -250,10 +269,9 @@ describe('startPanel: noticing the service stop while nothing is running (Task 1
     expect(h.timers.delays()).toEqual([WATCH_MS]);
     // While the service answers, each check is one hello and nothing on screen changes.
     h.timers.fire();
-    await settle();
+    await timersAre(h, [WATCH_MS]);
     expect(h.svc.calls.filter((c) => c === 'GET /hello')).toHaveLength(2);
     expect(h.last()).toBe(shown);
-    expect(h.timers.delays()).toEqual([WATCH_MS]);
 
     h.svc.down = true;
     // One unanswered check changes nothing; the second in a row goes offline.
@@ -290,9 +308,8 @@ describe('startPanel: noticing the service stop while nothing is running (Task 1
     for (const down of [true, false, true, false, true]) {
       h.svc.down = down;
       h.timers.fire();
-      await settle();
+      await timersAre(h, [WATCH_MS]);
       expect(h.last()).toBe(shown);
-      expect(h.timers.delays()).toEqual([WATCH_MS]);
     }
     h.svc.down = true;
     h.timers.fire();
@@ -319,8 +336,7 @@ describe('startPanel: noticing the service stop while nothing is running (Task 1
     await until(h, 'review');
     // The check set while Ready, and the one set when the review finished, make one check, not two.
     h.timers.fire();
-    await settle();
-    expect(h.timers.delays()).toEqual([WATCH_MS]);
+    await timersAre(h, [WATCH_MS]);
     const hellos = h.svc.calls.filter((c) => c === 'GET /hello').length;
     h.timers.fire();
     await settle();
@@ -487,8 +503,7 @@ describe('startPanel: following a review', () => {
     });
     const before = await until(h, 'running', (s) => s.stages.length === 2);
     run.close();
-    await settle();
-    expect(h.timers.delays()).toEqual([1000]);
+    await timersAre(h, [1000]);
     expect(h.last()).toEqual(before);
     run.emit(stage('packs', 'done'));
     run.emit(stage('facts', 'start'));
@@ -511,11 +526,10 @@ describe('startPanel: following a review', () => {
     const h = harness({ prepare: (svc) => { run = svc.startRun('acme/widgets', 1); run.emit(stage('intake', 'start')); } });
     await until(h, 'running', (s) => s.stages.length === 1);
     run.lose();
-    await settle();
+    await timersAre(h, [1000]);
     expect(h.svc.calls.at(-1)).toBe('GET /hello');
-    expect(h.timers.delays()).toEqual([1000]);
     h.timers.fire();
-    await settle();
+    await turnsUntil(() => run.attaches === 2);
     expect(run.attaches).toBe(2);
     expect(h.last()?.kind).toBe('running');
   });
@@ -549,8 +563,7 @@ describe('startPanel: following a review', () => {
     h.svc.on('GET /reviews/:runId/events', () => new Response(''));
     run.close();
     for (let attempt = 1; attempt <= 5; attempt++) {
-      await settle();
-      expect(h.timers.delays()).toEqual([1000]);
+      await timersAre(h, [1000]);
       h.timers.fire();
     }
     const problem = await until(h, 'problem');
@@ -573,8 +586,7 @@ describe('startPanel: following a review', () => {
       },
     });
     for (let reattach = 1; reattach <= 20; reattach++) {
-      await settle();
-      expect(h.timers.delays()).toEqual([1000]);
+      await timersAre(h, [1000]);
       h.timers.fire();
     }
     expect(await until(h, 'problem')).toEqual({ kind: 'problem', pr: prSummary(), message: LOST_MESSAGE });
@@ -609,8 +621,7 @@ describe('startPanel: following a review', () => {
     })));
     run.lose();
     for (let attempt = 1; attempt <= 5; attempt++) {
-      await settle();
-      expect(h.timers.delays()).toEqual([1000]);
+      await timersAre(h, [1000]);
       h.timers.fire();
     }
     expect(await until(h, 'problem')).toEqual({ kind: 'problem', pr: prSummary(), message: LOST_MESSAGE });
@@ -733,15 +744,17 @@ describe('startPanel: the tab moving', () => {
     const pr2 = prSummary({ number: 2 });
     const pr3 = prSummary({ number: 3 });
     const h = harness({ prepare: (svc) => { svc.addPr(pr2); svc.addPr(pr3); svc.on('GET /pr', never); } });
+    const askedFor = (path: string, number: string) => () =>
+      h.svc.requests.some((r) => r.url.pathname === path && r.url.searchParams.get('number') === number);
     await until(h, 'loading');
-    await settle();
+    await turnsUntil(askedFor('/pr', '1'));
     h.svc.on('GET /pr', (req) => json(req.url.searchParams.get('number') === '2' ? pr2 : pr3));
     h.svc.on('GET /reviews/running', (req) => (req.url.searchParams.get('number') === '3' ? never(req) : json({ error: 'none' }, 404)));
     h.tab.go(prUrl('acme/widgets', 3));
-    await settle();
+    await turnsUntil(askedFor('/reviews/running', '3'));
     h.svc.on('GET /reviews/latest', (req) => (req.url.searchParams.get('number') === '2' ? never(req) : json({ error: 'none' }, 404)));
     h.tab.go(prUrl('acme/widgets', 2));
-    await settle();
+    await turnsUntil(askedFor('/reviews/latest', '2'));
     h.svc.on('GET /reviews/latest', () => json({ error: 'none' }, 404));
     h.tab.go(prUrl('acme/widgets', 3));
     await settle();
@@ -781,7 +794,7 @@ describe('startPanel: the tab moving', () => {
     await until(h, 'running');
     h.svc.on('GET /reviews/latest', (req) => (req.url.searchParams.get('number') === '1' ? slow.reply() : json({ error: 'none' }, 404)));
     run.emit({ type: 'done', document: latestFor(prSummary()).document });
-    await settle();
+    await turnsUntil(() => slow.asked());
     expect(slow.asked()).toBe(true);
     h.tab.go(prUrl('acme/widgets', 2));
     await until(h, 'ready');
@@ -813,7 +826,7 @@ describe('startPanel: stopping', () => {
   it('stop() while a request is in flight: its reply changes nothing', async () => {
     const late = held();
     const h = harness({ prepare: (svc) => svc.on('GET /pr', late.reply) });
-    await settle();
+    await turnsUntil(() => late.asked());
     expect(late.asked()).toBe(true);
     h.panel.stop();
     const count = h.states.length;
@@ -828,8 +841,7 @@ describe('startPanel: stopping', () => {
     const h = harness({ prepare: (svc) => { run = svc.startRun('acme/widgets', 1); run.emit(stage('intake', 'start')); } });
     await until(h, 'running', (s) => s.stages.length === 1);
     run.close();
-    await settle();
-    expect(h.timers.delays()).toEqual([1000]);
+    await timersAre(h, [1000]);
     h.panel.stop();
     expect(h.timers.delays()).toEqual([]);
     const count = h.states.length;

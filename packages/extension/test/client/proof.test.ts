@@ -14,9 +14,9 @@ function setup(stored: { token: string | null } = { token: TOKEN }) {
 }
 
 /** A hello as the service gives it, with the proof for the request's nonce made with `key`. */
-function helloWith(req: Request, key: string): Response {
+function helloWith(req: Request, key: string, port = PORT): Response {
   const nonce = req.url.searchParams.get('nonce') ?? '';
-  return json({ airlock: true, version: '0.1.0', paired: true, proof: createHmac('sha256', key).update(`airlock-hello:${nonce}`).digest('hex') });
+  return json({ airlock: true, version: '0.1.0', paired: true, proof: createHmac('sha256', key).update(`airlock-hello:${port}:${nonce}`).digest('hex') });
 }
 
 async function failure(work: Promise<unknown>): Promise<ServiceError> {
@@ -29,14 +29,18 @@ async function failure(work: Promise<unknown>): Promise<ServiceError> {
   throw new Error('expected a ServiceError');
 }
 
+/** The port of BASE, where the panel's client connects in these tests. */
+const PORT = '4611';
+
 const withToken = (svc: FakeService) => svc.requests.filter((r) => r.headers.has('authorization'));
 const NOT_PROVED_WORDS = "The service could not show that it holds this panel's token, so the token was not sent. "
   + "If you replaced the token, paste the new one. If you did not, another program may be answering on Airlock's port.";
 
 describe('the proof, in the panel', () => {
-  it('is the service\'s HMAC-SHA256 of "airlock-hello:<nonce>" keyed with the token, in lower-case hex', async () => {
+  it('is the service\'s HMAC-SHA256 of "airlock-hello:<port>:<nonce>" keyed with the token, in lower-case hex', async () => {
     const nonce = '0123456789abcdef'.repeat(2);
-    expect(await helloProof(TOKEN, nonce)).toBe(createHmac('sha256', TOKEN).update(`airlock-hello:${nonce}`).digest('hex'));
+    expect(await helloProof(TOKEN, '4611', nonce)).toBe(createHmac('sha256', TOKEN).update(`airlock-hello:4611:${nonce}`).digest('hex'));
+    expect(await helloProof(TOKEN, '4699', nonce)).not.toBe(await helloProof(TOKEN, '4611', nonce));
   });
 
   it('asks with 16 random bytes as 32 hex characters, new each time', () => {
@@ -51,6 +55,35 @@ describe('the proof, in the panel', () => {
 });
 
 describe('the client and the proof', () => {
+  it('checks the proof with the port of the address it connects to: a proof made for another port is refused', async () => {
+    // What answers on 4611 relays the proof the real service on 4612 gave for the panel's nonce.
+    const relayed = setup();
+    relayed.svc.on('GET /hello', (req) => helloWith(req, TOKEN, '4612'));
+    expect(await failure(relayed.client.pr('acme/widgets', 1))).toMatchObject({ kind: 'unproven', message: NOT_PROVED_WORDS });
+    expect(withToken(relayed.svc)).toEqual([]);
+    // The same proof for the port connected to goes through.
+    const direct = setup();
+    direct.svc.on('GET /hello', (req) => helloWith(req, TOKEN, '4611'));
+    await direct.client.pr('acme/widgets', 1);
+    expect(direct.svc.calls).toEqual(['GET /hello', 'GET /pr']);
+  });
+
+  it('takes the port from its own address, not from a constant: a client for 4699 proves with 4699', async () => {
+    const asked: string[] = [];
+    const fetchFn: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      asked.push(url.host);
+      const nonce = url.searchParams.get('nonce') ?? '';
+      if (url.pathname === '/hello') {
+        return json({ airlock: true, version: '0.1.0', paired: true, proof: createHmac('sha256', TOKEN).update(`airlock-hello:4699:${nonce}`).digest('hex') });
+      }
+      return json({ error: 'Not found.' }, 404);
+    };
+    const client = new ServiceClient('http://127.0.0.1:4699', async () => TOKEN, fetchFn, new FakeTimers(), () => 0);
+    expect(await client.hello()).toMatchObject({ airlock: true, paired: true });
+    expect(asked).toEqual(['127.0.0.1:4699']);
+  });
+
   it('the client sends no Authorization header until a proof has matched', async () => {
     const { svc, client } = setup();
     await client.pr('acme/widgets', 1);

@@ -7,7 +7,7 @@ import {
 } from '@airlock/shared';
 import { z } from 'zod';
 import { EventDataError, readEventStream } from './event-stream';
-import { NOT_PROVED, newNonce, proves } from './proof';
+import { NOT_PROVED, newNonce, portOf, proves } from './proof';
 import { realTimers, type Timers } from './timers';
 
 export const NOT_UNDERSTOOD = 'Airlock got a reply from its service that it does not understand.';
@@ -41,11 +41,19 @@ export const STREAM_IDLE_MS = 45_000;
  * `problem` (anything else, with a sentence to show).
  */
 export class ServiceError extends Error {
-  constructor(readonly kind: 'offline' | 'unpaired' | 'unproven' | 'problem', message: string) {
+  constructor(
+    readonly kind: 'offline' | 'unpaired' | 'unproven' | 'problem',
+    message: string,
+    /** The proof that comes before every request failed, so this request was never sent. */
+    readonly beforeSending = false,
+  ) {
     super(message);
     this.name = 'ServiceError';
   }
 }
+
+/** A post whose proof got no answer: the token was not sent, and neither was the post. */
+export const POST_NOT_SENT = 'Airlock could not reach its service, so nothing was sent.';
 
 interface Schema<T> {
   safeParse(value: unknown): { success: true; data: T } | { success: false };
@@ -53,18 +61,28 @@ interface Schema<T> {
 
 const RunningReplySchema = StartReviewReplySchema.pick({ runId: true });
 const ForgetReplySchema = z.object({ forgotten: z.boolean() });
+/** The service's 409 to a forget when GitHub has the review: its sentence, and the record, now posted. */
+const FoundReplySchema = z.object({ error: z.string(), record: PostRecordSchema });
+
+/**
+ * What came of a forget: `forgotten` (false when there was no such record), and with `found` the service's answer that
+ * GitHub has the review, so the record was kept as posted and nothing was forgotten.
+ */
+export type ForgetOutcome = { forgotten: boolean; found?: { record: PostRecord; message: string } };
 
 /**
  * What came of a post, as far as the reply says.
  * - `posted`: GitHub took the review; the record holds its address.
  * - `refused`: nothing was posted (the service refused it, or GitHub did), in the service's words.
+ * - `unsent`: the proof that comes first failed, so the post never left the panel; `why` is how (`offline`: no answer).
  * - `unclear`: the reply does not say (504, any other server error, no answer in time, a cut connection, a reply off the
- *   contract); only the post records can tell.
+ *   contract); only the post records can tell. `status` and `message`: a server error's, when it said something.
  */
 export type PostOutcome =
   | { outcome: 'posted'; record: PostRecord }
   | { outcome: 'refused'; message: string }
-  | { outcome: 'unclear'; message?: string };
+  | { outcome: 'unsent'; why: ServiceError['kind']; message: string }
+  | { outcome: 'unclear'; message?: string; status?: number };
 
 /** Thrown inside the stream reader to stop it after a `done` or `failed` event. */
 const LAST_EVENT = new Error('last event');
@@ -92,6 +110,8 @@ export class ServiceClient {
   private checkFailure: unknown = null;
   private checks = 0;
   private newestFinished = 0;
+  /** The port of the address this client connects to, which the proof names. */
+  private readonly port: string;
 
   constructor(
     private readonly base: string,
@@ -103,6 +123,7 @@ export class ServiceClient {
   ) {
     // Called through a wrapper: an extension page's fetch throws when called without its window as `this`.
     this.fetchFn = fetchFn ?? ((input, init) => fetch(input, init));
+    this.port = portOf(base);
   }
 
   /**
@@ -171,7 +192,8 @@ export class ServiceClient {
 
   /**
    * Asks the service to post the preview it stored, once; nothing here ever sends it again. Only a refused or missing
-   * token throws (`unpaired`), before or instead of an answer; every other ending is a `PostOutcome`.
+   * token throws (`unpaired`), before or instead of an answer; every other ending is a `PostOutcome`. A proof that fails
+   * before the post is sent is `unsent`, never a post whose outcome is not known.
    */
   async post(body: PostBody): Promise<PostOutcome> {
     const token = await this.storedToken();
@@ -186,16 +208,39 @@ export class ServiceClient {
         const said = ApiErrorSchema.safeParse(await bodyOf(res));
         // A 4xx, or the 502 that says GitHub refused (or could not be read before anything was sent): nothing was posted.
         if (res.status < 500 || res.status === 502) return { outcome: 'refused', message: said.success ? said.data.error : NOT_UNDERSTOOD };
-        return said.success ? { outcome: 'unclear', message: said.data.error } : { outcome: 'unclear' };
+        return said.success ? { outcome: 'unclear', message: said.data.error, status: res.status } : { outcome: 'unclear', status: res.status };
       });
     } catch (error) {
+      if (error instanceof ServiceError && error.beforeSending) {
+        return { outcome: 'unsent', why: error.kind, message: error.kind === 'offline' ? POST_NOT_SENT : error.message };
+      }
       if (error instanceof ServiceError && error.kind === 'offline') return { outcome: 'unclear' };
       throw error;
     }
   }
 
-  forgetPost(body: ForgetPostBody): Promise<{ forgotten: boolean }> {
-    return this.call({ method: 'POST', path: '/posts/forget', body }, ForgetReplySchema);
+  /**
+   * Forgets a record whose outcome is not known. The service asks GitHub first: when GitHub has the review it answers
+   * 409 with the record, now posted (`found`); any other refusal, its 502 that GitHub could not be asked included, throws
+   * as a problem in its words.
+   */
+  async forgetPost(body: ForgetPostBody): Promise<ForgetOutcome> {
+    const token = await this.storedToken();
+    return this.timed(CALL_TIMEOUT_MS, undefined, async (signal) => {
+      const res = await this.send({ method: 'POST', path: '/posts/forget', body }, token, signal);
+      if (res.ok) return { forgotten: (await parse(res, ForgetReplySchema)).forgotten };
+      if (res.status !== 409) throw await failure(res);
+      const said = await bodyOf(res);
+      const found = FoundReplySchema.safeParse(said);
+      // Only the record asked about, of this pull request, now posted, is taken as GitHub's answer.
+      if (found.success) {
+        const { record, error } = found.data;
+        const same = record.id === body.id && record.number === body.number && record.repo.toLowerCase() === body.repo.toLowerCase();
+        if (same && record.outcome === 'posted') return { forgotten: false, found: { record, message: error } };
+      }
+      const refusal = ApiErrorSchema.safeParse(said);
+      throw new ServiceError('problem', refusal.success ? refusal.data.error : NOT_UNDERSTOOD);
+    });
   }
 
   /** The learned lines of the packs chosen for a repository, newest first. */
@@ -343,7 +388,7 @@ export class ServiceClient {
         });
         if (!res.ok) throw await failure(res);
         const reply = await parse(res, HelloReplySchema);
-        if (token !== null && nonce !== null && !(await proves(reply.proof, token, nonce))) {
+        if (token !== null && nonce !== null && !(await proves(reply.proof, token, this.port, nonce))) {
           throw new ServiceError('unproven', NOT_PROVED);
         }
         return reply;
@@ -381,9 +426,16 @@ export class ServiceClient {
     throw this.checkFailure instanceof ServiceError ? this.checkFailure : new ServiceError('unproven', NOT_PROVED);
   }
 
-  /** The only place the Authorization header is added, and only after `proven`. */
+  /**
+   * The only place the Authorization header is added, and only after `proven`. A failed proof is thrown marked
+   * `beforeSending`: nothing of this request left the panel.
+   */
   private async send(call: Call, token: string, signal: AbortSignal, alwaysProve = false): Promise<Response> {
-    await this.proven(token, signal, alwaysProve);
+    try {
+      await this.proven(token, signal, alwaysProve);
+    } catch (error) {
+      throw error instanceof ServiceError ? new ServiceError(error.kind, error.message, true) : error;
+    }
     const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
     const init: RequestInit = { method: call.method, headers, signal };
     if (call.body !== undefined) {

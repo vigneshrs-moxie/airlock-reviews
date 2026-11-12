@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { minimalDocument, type LatestReply, type PrSummary, type ServiceEvent } from '@airlock/shared';
+import { minimalDocument, type LatestReply, type PostRecord, type PrSummary, type ServiceEvent } from '@airlock/shared';
 
 export const BASE = 'http://127.0.0.1:4611';
 export const TOKEN = 'a'.repeat(64);
@@ -45,6 +45,14 @@ export function held(): { reply: () => Promise<Response>; release: (res: Respons
 export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
+
+/** The service's answers to `POST /posts/forget` once it asks GitHub first (packages/service/src/posts/records.ts). */
+export const GITHUB_HAS_IT = 'GitHub has this review: it was posted. Nothing was forgotten.';
+export const CANNOT_ASK_GITHUB = 'Airlock could not ask GitHub whether this review exists, so the record was kept.';
+/** GitHub has the review: nothing was forgotten, and the record, now posted, comes with the sentence. */
+export const githubHasIt = (record: PostRecord): Response => json({ error: GITHUB_HAS_IT, record }, 409);
+/** GitHub could not be asked whether it has the review: the record was kept. */
+export const cannotAskGithub = (): Response => json({ error: CANNOT_ASK_GITHUB }, 502);
 
 export interface Request {
   method: string;
@@ -124,6 +132,8 @@ export class FakeService {
    * something else on the port that answers like Airlock, or null for a hello with no proof.
    */
   proofKey: string | null | undefined = undefined;
+  /** The port the fake service says it listens on, which its proof names, as the real service's does. */
+  port = new URL(BASE).port;
   readonly calls: string[] = [];
   readonly requests: Request[] = [];
   readonly prs = new Map<string, PrSummary>();
@@ -179,7 +189,7 @@ export class FakeService {
       if (nonces.length === 1 && !/^[0-9a-f]{32}$/.test(nonces[0] as string)) return json({ error: 'nonce: not a nonce' }, 400);
       const nonce = req.url.searchParams.get('nonce');
       const key = this.proofKey === undefined ? this.token : this.proofKey;
-      const proof = nonce === null || key === null ? {} : { proof: createHmac('sha256', key).update(`airlock-hello:${nonce}`).digest('hex') };
+      const proof = nonce === null || key === null ? {} : { proof: createHmac('sha256', key).update(`airlock-hello:${this.port}:${nonce}`).digest('hex') };
       return json({ airlock: true, version: '0.1.0', paired: this.paired, ...proof });
     }
     if (req.headers.get('authorization') !== `Bearer ${this.token}`) {
