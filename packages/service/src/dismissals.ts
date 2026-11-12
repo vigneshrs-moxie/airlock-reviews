@@ -69,10 +69,11 @@ export function serialised<T>(work: () => Promise<T>): Promise<T> {
 }
 
 /**
- * The file for a pull request. A folder that spells the repository in another letter case is the same folder, so a
- * request is matched to it whatever case it uses; a new file gets the repository's own spelling.
+ * The folder of a repository's dismissal files, one file per pull request. A folder that spells the repository in another
+ * letter case is the same folder, so a request is matched to it whatever case it uses; a new one gets the repository's
+ * own spelling.
  */
-export async function dismissalsPath(home: string, repo: string, number: number): Promise<string> {
+export async function dismissalsFolder(home: string, repo: string): Promise<string> {
   const root = join(home, 'dismissals');
   const slug = repoSlug(repo);
   let folder = slug;
@@ -80,7 +81,12 @@ export async function dismissalsPath(home: string, repo: string, number: number)
     const names = await readdir(root);
     folder = names.includes(slug) ? slug : names.find((n) => n.toLowerCase() === slug.toLowerCase()) ?? slug;
   } catch { /* no dismissals yet */ }
-  return join(root, folder, `${number}.json`);
+  return join(root, folder);
+}
+
+/** The file for a pull request, in its repository's folder. */
+export async function dismissalsPath(home: string, repo: string, number: number): Promise<string> {
+  return join(await dismissalsFolder(home, repo), `${number}.json`);
 }
 
 async function readList(path: string): Promise<{ list: Dismissal[]; broken: boolean }> {
@@ -116,15 +122,20 @@ export async function listForChange(path: string, now: Date, log: (line: string)
   return list;
 }
 
-/** Writes a list as JSON atomically: a temporary file in the same folder, synced, then renamed over the old one. */
+/** Writes a list as JSON atomically. */
 export async function writeList(path: string, list: readonly unknown[]): Promise<void> {
+  await replaceFile(path, `${JSON.stringify(list, null, 2)}\n`);
+}
+
+/** Replaces a file whole: a temporary file in the same folder, synced, then renamed over the old one. */
+export async function replaceFile(path: string, text: string): Promise<void> {
   const folder = dirname(path);
   await mkdir(folder, { recursive: true });
   const temporary = join(folder, `.${basename(path)}.${randomBytes(4).toString('hex')}.tmp`);
   try {
     const file = await open(temporary, 'wx');
     try {
-      await file.writeFile(`${JSON.stringify(list, null, 2)}\n`);
+      await file.writeFile(text);
       await file.sync();
     } finally {
       await file.close();

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -9,6 +9,7 @@ import {
   type ReviewDocument,
 } from '@airlock/shared';
 import { pair, readOrCreateToken } from '../src/config.js';
+import { dismissalsFolder } from '../src/dismissals.js';
 import { createServer } from '../src/server.js';
 import { FakeClock, send, type Reply } from './helpers.js';
 
@@ -18,6 +19,8 @@ const ORIGIN = `chrome-extension://${'a'.repeat(32)}`;
 const REVIEW = 'r_0123456789';
 const FINDING = 'c_aaaaaaaa';
 const FP = '1111111111111111';
+const FINDING_2 = 'c_bbbbbbbb';
+const FP_2 = '2222222222222222';
 const TEXT = 'The totals are rounded by the caller on purpose.';
 
 const savedHome = process.env['AIRLOCK_HOME'];
@@ -33,11 +36,11 @@ const key = (kind: string, date: string, repo: string, text: string): string =>
 
 function review(): ReviewDocument {
   const base = minimalDocument();
-  const finding: Finding = {
-    ...candidate(), id: FINDING, fingerprint: FP, checked: 'checked', bucket: 'top', rank: 1, status: null,
+  const finding = (id: string, fingerprint: string, rank: number): Finding => ({
+    ...candidate(), id, fingerprint, checked: 'checked', bucket: 'top', rank, status: null,
     anchor: { status: 'in-diff', startLine: 12, endLine: 12 },
-  };
-  return { ...base, id: REVIEW, pr: { ...base.pr, repo: REPO, number: 7 }, findings: [finding] };
+  });
+  return { ...base, id: REVIEW, pr: { ...base.pr, repo: REPO, number: 7 }, findings: [finding(FINDING, FP, 1), finding(FINDING_2, FP_2, 2)] };
 }
 
 async function writePack(packsDir: string, name: string, yaml: string, learned: Record<string, string> = {}): Promise<void> {
@@ -64,12 +67,13 @@ async function startService() {
   });
   await saveReview(review());
   const clock = new FakeClock();
+  const logs: string[] = [];
   const engine: EngineDeps = {
     exec: async () => { throw new Error('no commands are run in these tests'); },
     runner: { run: () => { throw new Error('the runner is not used in these tests'); } },
     now: clock.date,
   };
-  const service = createServer({ config: { port: 0, home, packsDir, version: '1.2.3' }, engine, now: clock.date, log: () => undefined, timers: clock.timers });
+  const service = createServer({ config: { port: 0, home, packsDir, version: '1.2.3' }, engine, now: clock.date, log: (line) => { logs.push(line); }, timers: clock.timers });
   const { port } = await service.listen();
   const token = await readOrCreateToken(home);
   await pair(home, ORIGIN);
@@ -79,7 +83,11 @@ async function startService() {
     send(port, method, path, body === undefined ? { headers } : { headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const lines = async (repo = REPO): Promise<LearnedLine[]> => LearnedReplySchema.parse((await call('GET', `/learned?repo=${repo}`)).json).lines;
   const file = (pack: string, name: string): Promise<string> => readFile(join(packsDir, pack, 'learned', name), 'utf8');
-  return { home, packsDir, call, lines, file, clock, token };
+  const dismissals = async (): Promise<Dismissal[]> =>
+    ((await call('GET', `/reviews/latest?repo=${REPO}&number=7`)).json as { dismissals: Dismissal[] }).dismissals;
+  const dismissOne = (findingId: string, text = TEXT, reason = 'wrong') =>
+    call('POST', '/dismissals', { repo: REPO, number: 7, reviewId: REVIEW, findingId, reason, text });
+  return { home, packsDir, call, lines, file, clock, token, logs, dismissals, dismissOne };
 }
 
 describe('GET /learned', () => {
@@ -99,6 +107,37 @@ describe('GET /learned', () => {
     ]);
     expect(reply.lines[0]).toMatchObject({ packTitle: 'Acme pack', key: key('wrong', '2026-11-05', REPO, 'Acme wrong line.') });
     expect(reply.lines[3]!.key).toBe(key('wrong', '2026-11-02', '-', 'Hand written line.'));
+  });
+
+  it('a malformed line does not hide its pack: the good lines are listed and removable, and the log names the file and line', async () => {
+    const s = await startService();
+    const wrong = join(s.packsDir, 'acme', 'learned', 'wrong.md');
+    const good = `2026-11-07 · ${REPO} · Good after.`;
+    await writeFile(wrong, [
+      '# notes', `2026-11-05 · ${REPO} · Acme wrong line.`, 'This is not a learned line, SECRET.', good,
+      '2026-11-08 · not a repository · Also SECRET.', '',
+    ].join('\n'));
+    const lines = await s.lines();
+    expect(lines.filter((l) => l.pack === 'acme').map((l) => [l.kind, l.text])).toEqual([
+      ['wrong', 'Good after.'], ['wrong', 'Acme wrong line.'], ['product-knowledge', 'Acme knowledge line.'],
+    ]);
+    expect(lines.some((l) => l.pack === 'generic')).toBe(true);
+    // Each malformed line once for the request, by file and line number, and never its text.
+    expect(s.logs.filter((l) => l.includes(`${wrong}:3`))).toHaveLength(1);
+    expect(s.logs.filter((l) => l.includes(`${wrong}:5`))).toHaveLength(1);
+    expect(s.logs.join('\n')).not.toContain('SECRET');
+    // Loading the pack without its learned files leaves the pack itself as it was.
+    expect(await readFile(join(s.packsDir, 'acme', 'pack.yaml'), 'utf8')).toContain('id: acme');
+    expect(await readFile(join(s.packsDir, 'acme', 'lenses', 'look.md'), 'utf8')).toBe('Look closely.\n');
+
+    const target = lines.find((l) => l.text === 'Good after.')!;
+    const r = await s.call('POST', '/learned/remove', { repo: REPO, pack: target.pack, kind: target.kind, key: target.key });
+    expect(r.json).toEqual({ removed: true, note: null });
+    expect(await s.file('acme', 'wrong.md')).toBe([
+      '# notes', `2026-11-05 · ${REPO} · Acme wrong line.`, 'This is not a learned line, SECRET.',
+      '2026-11-08 · not a repository · Also SECRET.', '',
+    ].join('\n'));
+    expect(s.logs.join('\n')).not.toContain('SECRET');
   });
 
   it('refuses a missing or malformed repo', async () => {
@@ -125,6 +164,79 @@ describe('POST /learned/remove', () => {
     expect(latest.dismissals).toHaveLength(1);
     expect(latest.dismissals[0]).toMatchObject({ fingerprint: FP, reason: 'wrong', text: TEXT, learned: null });
     expect((await s.lines()).some((l) => l.text === TEXT)).toBe(false);
+
+    // A restore after the link was cleared leaves the pack alone, even when the same line is back in the file.
+    const again = `# notes\n2026-11-05 · ${REPO} · Acme wrong line.\n${DismissalSchema.parse(made.json).learned!.date} · ${REPO} · ${TEXT}\n`;
+    await writeFile(join(s.packsDir, 'acme', 'learned', 'wrong.md'), again);
+    expect((await s.call('POST', '/dismissals/restore', { repo: REPO, number: 7, fingerprint: FP })).json).toEqual({ restored: true, note: null });
+    expect(await s.file('acme', 'wrong.md')).toBe(again);
+    expect(await s.dismissals()).toEqual([]);
+  });
+
+  it('of two identical lines, removes the first and leaves the other', async () => {
+    const s = await startService();
+    const twice = `2026-11-05 · ${REPO} · Twice line.`;
+    await writeFile(join(s.packsDir, 'acme', 'learned', 'wrong.md'), `# notes\n${twice}\n2026-11-06 · ${REPO} · Between.\n${twice}\n`);
+    const both = (await s.lines()).filter((l) => l.text === 'Twice line.');
+    expect(both).toHaveLength(2);
+    expect(both[0]!.key).toBe(both[1]!.key);
+    expect((await s.call('POST', '/learned/remove', body(both[0]!))).json).toEqual({ removed: true, note: null });
+    expect(await s.file('acme', 'wrong.md')).toBe(`# notes\n2026-11-06 · ${REPO} · Between.\n${twice}\n`);
+  });
+
+  it('with an identical line written by hand, takes the first out and clears exactly one link, the oldest dismissal\'s', async () => {
+    const s = await startService();
+    const d = s.clock.date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const line = `${today} · ${REPO} · ${TEXT}`;
+    const other = `2026-11-05 · ${REPO} · Acme wrong line.`;
+    await writeFile(join(s.packsDir, 'acme', 'learned', 'wrong.md'), `# notes\n${line}\n${other}\n`);
+    // The older dismissal is on pull request 7 and the newer on 10, so the oldest is not simply the first file read.
+    const LATER = 'r_1000000000';
+    await saveReview({ ...review(), id: LATER, pr: { ...review().pr, number: 10 } });
+    expect((await s.dismissOne(FINDING)).status).toBe(200);
+    s.clock.now += 60_000;
+    const later = await s.call('POST', '/dismissals', { repo: REPO, number: 10, reviewId: LATER, findingId: FINDING_2, reason: 'wrong', text: TEXT });
+    expect(later.status).toBe(200);
+    expect(await s.file('acme', 'wrong.md')).toBe(`# notes\n${line}\n${other}\n${line}\n${line}\n`);
+
+    const target = (await s.lines()).find((l) => l.text === TEXT)!;
+    expect((await s.call('POST', '/learned/remove', body(target))).json).toEqual({ removed: true, note: null });
+    expect(await s.file('acme', 'wrong.md')).toBe(`# notes\n${other}\n${line}\n${line}\n`);
+    expect((await s.dismissals())[0]?.learned).toBeNull();
+    const onTen = async (): Promise<Dismissal[]> =>
+      ((await s.call('GET', `/reviews/latest?repo=${REPO}&number=10`)).json as { dismissals: Dismissal[] }).dismissals;
+    expect((await onTen())[0]?.learned).toMatchObject({ packId: 'acme', kind: 'wrong', date: today });
+
+    // The other dismissal still finds its own line; the cleared one then takes nothing out.
+    expect((await s.call('POST', '/dismissals/restore', { repo: REPO, number: 10, fingerprint: FP_2 })).json).toEqual({ restored: true, note: null });
+    expect(await s.file('acme', 'wrong.md')).toBe(`# notes\n${other}\n${line}\n`);
+    expect((await s.call('POST', '/dismissals/restore', { repo: REPO, number: 7, fingerprint: FP })).json).toEqual({ restored: true, note: null });
+    expect(await s.file('acme', 'wrong.md')).toBe(`# notes\n${other}\n${line}\n`);
+  });
+
+  it('removes a line with white space at its ends by its stored form, and leaves the same line without it', async () => {
+    const s = await startService();
+    const plain = `2026-11-05 · ${REPO} · Spaced line.`;
+    await writeFile(join(s.packsDir, 'acme', 'learned', 'wrong.md'), `# notes\n${plain}\n${plain}   \n2026-11-06 · ${REPO} ·  Leading space.\n`);
+    const spaced = (await s.lines()).find((l) => l.text === 'Spaced line.   ')!;
+    expect((await s.call('POST', '/learned/remove', body(spaced))).json).toEqual({ removed: true, note: null });
+    expect(await s.file('acme', 'wrong.md')).toBe(`# notes\n${plain}\n2026-11-06 · ${REPO} ·  Leading space.\n`);
+    const leading = (await s.lines()).find((l) => l.text === ' Leading space.')!;
+    expect((await s.call('POST', '/learned/remove', body(leading))).json).toEqual({ removed: true, note: null });
+    expect(await s.file('acme', 'wrong.md')).toBe(`# notes\n${plain}\n`);
+  });
+
+  it('reads the dismissals of other pull requests without setting an unreadable one aside', async () => {
+    const s = await startService();
+    expect((await s.dismissOne(FINDING)).status).toBe(200);
+    const folder = await dismissalsFolder(s.home, REPO);
+    await writeFile(join(folder, '99.json'), 'not json');
+    const target = (await s.lines()).find((l) => l.text === TEXT)!;
+    expect((await s.call('POST', '/learned/remove', body(target))).json).toEqual({ removed: true, note: null });
+    expect(await readFile(join(folder, '99.json'), 'utf8')).toBe('not json');
+    expect((await readdir(folder)).sort()).toEqual(['7.json', '99.json']);
+    expect((await s.dismissals())[0]?.learned).toBeNull();
   });
 
   it('removes only the line asked for and leaves other lines and files alone', async () => {
@@ -159,6 +271,22 @@ describe('POST /learned/remove', () => {
     const s = await startService();
     const line = (await s.lines())[0]!;
     expect((await s.call('POST', '/learned/remove', body(line, { pack: 'nowhere' }))).status).toBe(404);
+    // A pack that exists, but for another repository.
+    const theirs = `2026-11-05 · ${OTHER} · Their line.\n`;
+    await writePack(s.packsDir, 'theirs', `id: theirs\ntitle: Theirs\nrepos: [${OTHER}]\n`, { 'wrong.md': theirs });
+    expect((await s.lines()).some((l) => l.pack === 'theirs')).toBe(false);
+    const r = await s.call('POST', '/learned/remove', { repo: REPO, pack: 'theirs', kind: 'wrong', key: key('wrong', '2026-11-05', OTHER, 'Their line.') });
+    expect(r.status).toBe(404);
+    expect(await s.file('theirs', 'wrong.md')).toBe(theirs);
+  });
+
+  it('refuses a pack or kind that is not valid', async () => {
+    const s = await startService();
+    const line = (await s.lines())[0]!;
+    for (const over of [{ pack: '../acme' }, { pack: 'Acme' }, { pack: '' }, { kind: 'intended' }, { kind: 'Wrong' }]) {
+      expect((await s.call('POST', '/learned/remove', body(line, over))).status, JSON.stringify(over)).toBe(400);
+    }
+    expect(await s.file('acme', 'wrong.md')).toBe(`# notes\n2026-11-05 · ${REPO} · Acme wrong line.\n`);
   });
 
   it('requires the paired Origin', async () => {
@@ -182,6 +310,17 @@ describe('the cap on learned lines', () => {
     expect(dismissed.dismissals).toEqual([]);
     // The other kind has room.
     expect((await s.call('POST', '/dismissals', { repo: REPO, number: 7, reviewId: REVIEW, findingId: FINDING, reason: 'intended', text: TEXT })).status).toBe(200);
+  });
+
+  it('two dismissals racing for the 300th line: one is accepted and the other refused', async () => {
+    const s = await startService();
+    const full = Array.from({ length: 299 }, (_, i) => `2026-10-01 · ${REPO} · Line number ${i}.`).join('\n') + '\n';
+    await writeFile(join(s.packsDir, 'acme', 'learned', 'wrong.md'), full);
+    const replies = await Promise.all([s.dismissOne(FINDING, TEXT), s.dismissOne(FINDING_2, 'A second reason that is long enough.')]);
+    expect(replies.map((r) => r.status).sort()).toEqual([200, 409]);
+    const written = (await s.file('acme', 'wrong.md')).split('\n').filter((l) => l !== '');
+    expect(written).toHaveLength(300);
+    expect(await s.dismissals()).toHaveLength(1);
   });
 
   it('the 300th line is accepted', async () => {
