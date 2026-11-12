@@ -3,6 +3,9 @@ import {
   ServiceEventSchema, type ReviewDocument, type ReviewEvent, type ServiceEvent, type StartReviewBody,
 } from '@airlock/shared';
 
+/** What a run is started with: the body, and the stored review a re-review continues from when it is one. */
+export type RunStart = StartReviewBody & { sinceReviewId?: string };
+
 /** Timers the service schedules with, injected so tests move a fake clock. Each call returns its own cancel. */
 export interface Timers {
   setTimeout(fn: () => void, ms: number): () => void;
@@ -53,7 +56,7 @@ export interface RunsOptions {
    * Runs the review; every event it emits is kept and passed on, and its own `done` ends the run. `signal` is aborted when
    * the review is to stop: at the ceiling, or when the registry closes.
    */
-  launch: (body: StartReviewBody, emit: (e: ReviewEvent) => void, signal: AbortSignal) => Promise<ReviewDocument>;
+  launch: (body: RunStart, emit: (e: ReviewEvent) => void, signal: AbortSignal) => Promise<ReviewDocument>;
   /** Removes what a review stopped at the ceiling stored when it settled anyway. */
   discard?: (document: ReviewDocument) => Promise<void>;
   /** The message of the `failed` event for an error the review ended with. */
@@ -108,7 +111,7 @@ export class Runs {
   }
 
   /** Starts a review, or hands back the run of that pull request when one is running. Throws LimitError at the limit. */
-  start(body: StartReviewBody): { runId: string; reused: boolean } {
+  start(body: RunStart): { runId: string; reused: boolean } {
     if (this.closed) throw new Error('Airlock is shutting down and does not start reviews now.');
     const existing = this.running(body.repo, body.number);
     if (existing !== null) return { runId: existing, reused: true };

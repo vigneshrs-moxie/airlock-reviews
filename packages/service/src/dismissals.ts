@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdir, open, readdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
-  appendLearned, choosePacks, removeLearned, repoSlug, reviewById, type LearnedEntry, type Pack,
+  appendLearned, choosePacks, loadPack, removeLearned, repoSlug, reviewById, type LearnedEntry, type Pack,
 } from '@airlock/engine';
 import {
   checkLearnedText, DismissalSchema, type DismissBody, type Dismissal, type RestoreBody, type RestoreReply, type ReviewDocument,
@@ -30,6 +30,8 @@ export class DismissError extends Error {
 /** The team kit's pack. Must stay equal to the engine's KIT_PACK_ID (pipeline/packs.ts), which is not exported. */
 export const KIT_PACK = 'raj-standard';
 const GENERIC_PACK = 'generic';
+/** The most learned lines one pack may hold of one kind. */
+export const LEARNED_CAP = 300;
 const NOT_FOUND = 'Airlock cannot find that finding in the stored review.';
 const DismissalsFileSchema = z.array(DismissalSchema);
 
@@ -60,7 +62,7 @@ export async function assertWritable(pack: Pack, packsDir: string): Promise<void
  * requests, so a per-pull-request queue could lose a line.
  */
 let tail: Promise<unknown> = Promise.resolve();
-function serialised<T>(work: () => Promise<T>): Promise<T> {
+export function serialised<T>(work: () => Promise<T>): Promise<T> {
   const run = tail.then(work, work);
   tail = run.catch(() => undefined);
   return run;
@@ -70,7 +72,7 @@ function serialised<T>(work: () => Promise<T>): Promise<T> {
  * The file for a pull request. A folder that spells the repository in another letter case is the same folder, so a
  * request is matched to it whatever case it uses; a new file gets the repository's own spelling.
  */
-async function dismissalsPath(home: string, repo: string, number: number): Promise<string> {
+export async function dismissalsPath(home: string, repo: string, number: number): Promise<string> {
   const root = join(home, 'dismissals');
   const slug = repoSlug(repo);
   let folder = slug;
@@ -104,7 +106,7 @@ export async function dismissalsFor(home: string, repo: string, number: number):
 }
 
 /** The stored list for a change: a file that does not parse is renamed aside, not overwritten. */
-async function listForChange(path: string, now: Date, log: (line: string) => void): Promise<Dismissal[]> {
+export async function listForChange(path: string, now: Date, log: (line: string) => void): Promise<Dismissal[]> {
   const { list, broken } = await readList(path);
   if (broken) {
     const aside = `${path}.broken-${now.getTime()}-${randomBytes(4).toString('hex')}`;
@@ -214,6 +216,11 @@ export async function dismiss(deps: DismissDeps, body: DismissBody): Promise<Dis
         if (gone.removed && gone.pack !== null && gone.entry !== null) removedOld = { pack: gone.pack, entry: gone.entry };
       }
       if (target !== null) {
+        // Counted after the replaced line is out, so replacing a dismissal in a full pack still works.
+        const held = (await loadPack(target.dir)).learned.filter((e) => e.kind === kind).length;
+        if (held >= LEARNED_CAP) {
+          throw new DismissError(409, `${target.title} already holds ${LEARNED_CAP} learned lines of this kind. Remove some under Packs first.`);
+        }
         await appendLearned(target.dir, line);
         written = true;
       }

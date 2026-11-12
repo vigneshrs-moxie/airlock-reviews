@@ -1,19 +1,20 @@
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { airlockHome, choosePacks, fetchPr, findClaude, latestReview, repoSlug, runReview, type ReviewRequest } from '@airlock/engine';
+import { airlockHome, choosePacks, fetchPr, findClaude, latestReview, repoSlug, runReview, type Pack, type ReviewRequest } from '@airlock/engine';
 import {
   ApiErrorSchema, DismissalSchema, DismissBodySchema, ForgetPostBodySchema, LatestReplySchema, PostBodySchema, PostPreviewBodySchema,
-  PostRecordSchema, PrNumberSchema, PrSummarySchema, RepoSchema, RestoreBodySchema, RestoreReplySchema, ReviewIdSchema,
+  LearnedReplySchema, PostRecordSchema, PrNumberSchema, PrSummarySchema, RemoveLearnedBodySchema, RemoveLearnedReplySchema, RepoSchema, RestoreBodySchema, RestoreReplySchema, ReviewIdSchema,
   RunIdSchema, ServiceStatusSchema, StartReviewBodySchema, StartReviewReplySchema, suggestedDepth, type DismissBody, type Dismissal,
   type ForgetPostBody, type LatestReply, type PostBody, type PostPreviewBody, type PostRecord, type RestoreBody,
-  type RestoreReply, type PrSummary, type PrInfo, type ReviewDocument, type ServiceStatus, type StartReviewBody,
+  type RemoveLearnedBody, type RestoreReply, type LearnedReply, type RemoveLearnedReply, type PrSummary, type PrInfo, type ReviewDocument, type ServiceStatus, type StartReviewBody,
 } from '@airlock/shared';
 import { z, type ZodType } from 'zod';
 import { dismiss, DismissError, restore } from './dismissals.js';
 import { plainMessage, type Handler, type Req, type Res, type Route } from './http.js';
 import { buildPreview, PREVIEW_BODY_MAX, PreviewReplySchema, Previews, type PreviewReply } from './posts/preview.js';
 import { forget, post, PostError, postsFor, type PostDeps } from './posts/records.js';
-import { LimitError, realTimers, Runs } from './runs.js';
+import { listLearned, removeLearnedLine } from './learned.js';
+import { LimitError, realTimers, Runs, type RunStart } from './runs.js';
 import type { ServiceDeps } from './server.js';
 import { RUN_GONE, runStream } from './sse.js';
 
@@ -22,6 +23,8 @@ export const STATUS_CACHE_MS = 60_000;
 const NOTHING_HERE = 'Airlock has nothing at this address.';
 const NOT_RUNNING = 'Airlock is not reviewing this pull request now.';
 const NO_REVIEW = 'Airlock has no review of this pull request yet.';
+const NO_EARLIER = 'There is no earlier review of this pull request.';
+const NOTHING_PUSHED = 'Nothing was pushed since the last review.';
 const NO_SUCH_PR = 'GitHub has no such pull request, or you cannot see it.';
 
 /** `?repo=<owner/name>&number=<n>`, checked with the shared rules. */
@@ -61,11 +64,12 @@ const posting = (handler: Handler): Handler => async (req) => {
 };
 
 /** The engine request for a start body; depth and pack ids only when the body has them. */
-export function engineRequest(body: StartReviewBody, packsDir: string): ReviewRequest {
+export function engineRequest(body: RunStart, packsDir: string): ReviewRequest {
   return {
     repo: body.repo, number: body.number,
     ...(body.depth === undefined ? {} : { depth: body.depth }),
     ...(body.packIds === undefined ? {} : { packIds: body.packIds }),
+    ...(body.sinceReviewId === undefined ? {} : { since: { reviewId: body.sinceReviewId } }),
     packsDir,
   };
 }
@@ -115,6 +119,32 @@ export function reviewRoutes(
     return tools;
   };
 
+  /** The pull request from GitHub, or the refusal to answer with. The stage rules are the first selected pack's that has any. */
+  const readPr = async (repo: string, number: number, packs: Pack[]): Promise<{ pr: PrInfo } | { refusal: Res }> => {
+    const rules = packs.find((p) => p.stageRules.length > 0)?.stageRules ?? [];
+    try {
+      return { pr: await fetchPr(engine.exec, repo, number, rules) };
+    } catch (e) {
+      // Judged on the whole message: the bounded one may have lost gh's status at its end.
+      if (/HTTP 404/.test(e instanceof Error ? e.message : String(e))) return { refusal: refuse(404, NO_SUCH_PR) };
+      return { refusal: refuse(502, plainMessage(e, hidePaths, 'GitHub did not answer: ')) };
+    }
+  };
+
+  /** A start body with `since: 'last'` made into the stored review it continues from, or the refusal to answer with. */
+  const resolveSince = async (body: StartReviewBody): Promise<RunStart | Res> => {
+    if (body.since === undefined) return body;
+    const last = await latestReview(body.repo, body.number);
+    if (last === null) return refuse(409, NO_EARLIER);
+    const chosen = await choosePacks(config.packsDir, body.repo);
+    const read = await readPr(body.repo, body.number, chosen.packs);
+    if ('refusal' in read) return read.refusal;
+    if (read.pr.headSha.toLowerCase() === last.pr.headSha.toLowerCase()) return refuse(409, NOTHING_PUSHED);
+    return {
+      ...body, depth: body.depth ?? last.depth, packIds: body.packIds ?? last.packs.map((p) => p.id), sinceReviewId: last.id,
+    };
+  };
+
   const routes: Route[] = [
     {
       method: 'GET', path: '/status',
@@ -131,23 +161,17 @@ export function reviewRoutes(
         const { repo, number } = prOf(req);
         const chosen = await choosePacks(config.packsDir, repo);
         for (const e of chosen.errors) deps.log(`packs for ${repo}: ${e.message}`);
-        // As in the pipeline: the stage rules of the first selected pack that has any.
-        const rules = chosen.packs.find((p) => p.stageRules.length > 0)?.stageRules ?? [];
-        let pr: PrInfo;
-        try {
-          pr = await fetchPr(engine.exec, repo, number, rules);
-        } catch (e) {
-          // Judged on the whole message: the bounded one may have lost gh's status at its end.
-          if (/HTTP 404/.test(e instanceof Error ? e.message : String(e))) return refuse(404, NO_SUCH_PR);
-          return refuse(502, plainMessage(e, hidePaths, 'GitHub did not answer: '));
-        }
+        const read = await readPr(repo, number, chosen.packs);
+        if ('refusal' in read) return read.refusal;
+        const { pr } = read;
+        const last = await latestReview(repo, number);
         return reply<PrSummary>(PrSummarySchema, 200, {
           repo, number, title: pr.title, author: pr.author, viewer: pr.viewer, isOwn: pr.author === pr.viewer,
           stage: pr.stage, baseRef: pr.baseRef, headRef: pr.headRef, headSha: pr.headSha,
           additions: pr.additions, deletions: pr.deletions, changedFiles: pr.changedFiles,
           packs: chosen.packs.map((p) => ({ id: p.id, title: p.title })), suggestedDepth: suggestedDepth(pr.additions, pr.deletions),
           state: pr.merged === true ? 'merged' : pr.state === 'closed' ? 'closed' : 'open',
-          lastReview: null, // Filled in by a later task of step 3.
+          lastReview: last === null ? null : { reviewId: last.id, headSha: last.pr.headSha, createdAt: last.createdAt, depth: last.depth },
         });
       },
     },
@@ -155,7 +179,11 @@ export function reviewRoutes(
       method: 'POST', path: '/reviews', body: StartReviewBodySchema,
       handler: async (req) => {
         try {
-          return reply(StartReviewReplySchema, 200, runs.start(req.body as StartReviewBody));
+          const body = req.body as StartReviewBody;
+          // A review of either kind already running for this pull request is the answer, whatever this start asks.
+          const resolved = runs.running(body.repo, body.number) === null ? await resolveSince(body) : body;
+          if ('status' in resolved) return resolved;
+          return reply(StartReviewReplySchema, 200, runs.start(resolved));
         } catch (e) {
           if (e instanceof LimitError) return refuse(429, e.message);
           throw e;
@@ -212,6 +240,10 @@ export function reviewRoutes(
         }
       },
     },
+    {
+      method: 'GET', path: '/learned', query: z.object({ repo: RepoSchema }),
+      handler: async (req) => reply<LearnedReply>(LearnedReplySchema, 200, await listLearned(deps, req.query.get('repo') as string)),
+    },
     // The routes that can lead to the one GitHub write require the paired extension's Origin, not only the token.
     {
       method: 'POST', path: '/posts/preview', requiresOrigin: true, maxBodyBytes: PREVIEW_BODY_MAX, body: PostPreviewBodySchema,
@@ -227,6 +259,17 @@ export function reviewRoutes(
     {
       method: 'POST', path: '/posts/forget', requiresOrigin: true, body: ForgetPostBodySchema,
       handler: posting(async (req) => reply(ForgetReplySchema, 200, await forget(posts, req.body as ForgetPostBody))),
+    },
+    {
+      method: 'POST', path: '/learned/remove', requiresOrigin: true, body: RemoveLearnedBodySchema,
+      handler: async (req) => {
+        try {
+          return reply<RemoveLearnedReply>(RemoveLearnedReplySchema, 200, await removeLearnedLine(deps, req.body as RemoveLearnedBody));
+        } catch (e) {
+          if (e instanceof DismissError) return refuse(e.status, e.message);
+          throw e;
+        }
+      },
     },
   ];
   return { routes, stop: () => runs.close() };

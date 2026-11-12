@@ -418,6 +418,69 @@ describe('GET /reviews/latest', () => {
   });
 });
 
+describe('re-review through POST /reviews and the last review in GET /pr', () => {
+  const stored = (over: Record<string, unknown> = {}): ReviewDocument => {
+    const d = doc('r_0123456789');
+    return { ...d, depth: 'deep', packs: [{ id: 'acme', version: '1' }], pr: { ...d.pr, headSha: 'c'.repeat(40) }, ...over } as ReviewDocument;
+  };
+
+  it('/pr reports the state and the last stored review, or null', async () => {
+    const s = await startService();
+    expect((await s.call('GET', `/pr?repo=${REPO}&number=7`)).json).toMatchObject({ state: 'open', lastReview: null });
+    await saveReview(stored());
+    expect((await s.call('GET', `/pr?repo=${REPO}&number=7`)).json).toMatchObject({
+      lastReview: { reviewId: 'r_0123456789', headSha: 'c'.repeat(40), createdAt: '2026-11-10T00:00:00.000Z', depth: 'deep' },
+    });
+    s.exec.set(`gh api repos/${REPO}/pulls/7`, { stdout: pull({ state: 'closed', merged: true }), stderr: '', code: 0 });
+    expect((await s.call('GET', `/pr?repo=${REPO}&number=7`)).json).toMatchObject({ state: 'merged' });
+    s.exec.set(`gh api repos/${REPO}/pulls/7`, { stdout: pull({ state: 'closed', merged: false }), stderr: '', code: 0 });
+    expect((await s.call('GET', `/pr?repo=${REPO}&number=7`)).json).toMatchObject({ state: 'closed' });
+  });
+
+  it('since last starts the engine with that review id, depth and packs, unless the body names others', async () => {
+    const s = await startService();
+    await saveReview(stored());
+    const r = await start(s, 7, { since: 'last' });
+    expect(r.status).toBe(200);
+    expect(s.launched[0]!.req).toEqual({
+      repo: REPO, number: 7, depth: 'deep', packIds: ['acme'], since: { reviewId: 'r_0123456789' }, packsDir: join(s.home, 'packs'),
+    });
+    const t = await startService();
+    await saveReview(stored());
+    await start(t, 7, { since: 'last', depth: 'quick', packIds: ['generic'] });
+    expect(t.launched[0]!.req).toEqual({
+      repo: REPO, number: 7, depth: 'quick', packIds: ['generic'], since: { reviewId: 'r_0123456789' }, packsDir: join(t.home, 'packs'),
+    });
+  });
+
+  it('since last is refused with no earlier review and with an unchanged head', async () => {
+    const s = await startService();
+    const none = await start(s, 7, { since: 'last' });
+    expect(none.status).toBe(409);
+    expect(none.json).toEqual({ error: 'There is no earlier review of this pull request.' });
+    await saveReview(stored({ pr: { ...doc().pr, headSha: 'b'.repeat(40) } }));
+    const same = await start(s, 7, { since: 'last' });
+    expect(same.status).toBe(409);
+    expect(same.json).toEqual({ error: 'Nothing was pushed since the last review.' });
+    expect(s.launched).toHaveLength(0);
+  });
+
+  it('a re-review and a first review of the same pull request share one run, either way round', async () => {
+    const s = await startService();
+    await saveReview(stored());
+    const first = await start(s, 7);
+    const again = await start(s, 7, { since: 'last' });
+    expect(again.json).toEqual({ runId: runIdOf(first), reused: true });
+    const t = await startService();
+    await saveReview(stored());
+    const re = await start(t, 7, { since: 'last' });
+    const plain = await start(t, 7);
+    expect(plain.json).toEqual({ runId: runIdOf(re), reused: true });
+    expect(s.launched).toHaveLength(1);
+    expect(t.launched).toHaveLength(1);
+  });
+});
+
 describe('GET /pr', () => {
   it('pr returns the stage, the packs that will run and quick for a small pull request', async () => {
     const s = await startService();
