@@ -100,13 +100,13 @@ describe('the Extensions pack', () => {
     ]) expect(tierOf(path), path).toBe('read');
     for (const path of [
       'popup.html', 'popup.js', 'popup.css', 'styles.css', 'options.html', 'options.js', 'sidepanel.js', 'batch-controller.js',
-      'fixtures/inject.js', 'lib/test/sender.js', 'src/fixtures/data.js', 'lib/tests/helper.js',
+      'fixtures/inject.js', 'lib/test/sender.js', 'src/fixtures/data.js', 'lib/tests/helper.js', 'icons/logo.svg', 'icons/build.js',
     ]) {
       expect(tierOf(path), path).toBe('skim');
     }
     for (const path of [
       'tests/reminder-policy.test.js', 'tests/run-all.cjs', 'tests/content.js', 'tests/fixtures/manifest.json', 'tests/check.py',
-      'README.md', 'CHANGELOG.md', 'PRIVACY.md', 'TEST-CHECKLIST.md', 'apps-script/SETUP.md', 'inject.spec.js',
+      'README.md', 'CHANGELOG.md', 'PRIVACY.md', 'TEST-CHECKLIST.md', 'apps-script/SETUP.md', 'inject.spec.js', 'icons/icon128.png', 'icons/a/b.webp',
     ]) expect(tierOf(path), path).toBe('trust');
   });
 
@@ -119,8 +119,8 @@ describe('the Extensions pack', () => {
     });
     const paths = ['fixtures/inject.js', 'inject.spec.js', 'tests/hook.js', 'lib/test/sender.js', 'tests/real.test.js'];
     const files = paths.map(changed);
-    const { readClosely } = await gatherChecks(files, [pack, generic], async (p) => (p === 'manifest.json' ? head : null));
-    const tiers = classifyFiles(files, [pack, generic], readClosely);
+    const checked = await gatherChecks(files, [pack, generic], async (p) => (p === 'manifest.json' ? head : null));
+    const tiers = classifyFiles(files, [pack, generic], checked);
     expect(tiers.map((t) => [t.path, t.tier, t.reason])).toEqual([
       ['fixtures/inject.js', 'read', 'extensions: loaded by manifest.json'],
       ['inject.spec.js', 'read', 'extensions: loaded by manifest.json'],
@@ -128,6 +128,10 @@ describe('the Extensions pack', () => {
       ['lib/test/sender.js', 'skim', 'default'],
       ['tests/real.test.js', 'trust', 'extensions: tests/**'],
     ]);
+    // with no manifest to read, no code file is trusted as a test: it is skimmed at least
+    const blind = await gatherChecks(files, [pack, generic], async () => null);
+    expect(classifyFiles(files, [pack, generic], blind).find((t) => t.path === 'tests/real.test.js'))
+      .toEqual({ path: 'tests/real.test.js', tier: 'skim', reason: 'extensions: manifest.json could not be read, so no file is trusted as a test' });
   });
 
   it('has four lens briefs, each under 40 lines, pointing at the attached standards by name and asking for the whole candidate', async () => {

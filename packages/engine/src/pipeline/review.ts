@@ -381,15 +381,15 @@ async function reviewInWorkspace(
 
   const gathered = (await log.run('facts', async (rec) => {
     // The checks run first: a file a code check asks to be read closely (an extension's manifest loads it) is read whatever
-    // its path says.
+    // its path says, and one it says not to trust is skimmed at least.
     const checked = await rec.attempt(() => gatherChecks(files, packs, readHead, {
       readBase: (path) => safeRead(ws.baseDir, path), sizeOfHead: (path) => safeSize(ws.headDir, path),
-    }), { facts: [] as Fact[], readClosely: [] as ReadClosely[] });
-    const tiers = await rec.attempt(() => classifyFiles(files, packs, checked.readClosely), [] as FileFact[]);
+    }), { facts: [] as Fact[], readClosely: [] as ReadClosely[], notTrusted: [] as ReadClosely[] });
+    const tiers = await rec.attempt(() => classifyFiles(files, packs, checked), [] as FileFact[]);
     // A push of only ignored files leaves nothing of the pull request unreviewed that the earlier review did not see.
     const unreviewed = (pushed ? null : notReviewed(files, tiers)) ?? emptyDiff(files, pr, givenRange);
     if (unreviewed !== null) rec.error({ stage: 'facts', cohortId: null, message: unreviewed });
-    for (const path of binarySourcePaths(files, packs, checked.readClosely)) rec.error({ stage: 'facts', cohortId: null, message: binarySourceSentence(path) });
+    for (const path of binarySourcePaths(files, packs, checked)) rec.error({ stage: 'facts', cohortId: null, message: binarySourceSentence(path) });
     const facts = [...diffFacts, ...checked.facts];
     const found = await rec.attempt(
       () => findLinks(exec, ws.headDir, files, packs), { links: [] as Link[], skippedNames: 0, limits: [] as string[] },

@@ -3,7 +3,7 @@ import type { Fact, FileDiff } from '@airlock/shared';
 import picomatch from 'picomatch';
 import { SYMLINK_MODE } from '../diff/parse.js';
 import type { CheckDef, Pack } from '../packs/types.js';
-import { isIgnoredPath, type ReadClosely } from './classify.js';
+import { isIgnoredPath, type FromChecks, type ReadClosely } from './classify.js';
 import { EXTENSION_CHECKS, type CodeCheck, type CodeCheckInput } from './extension-checks.js';
 
 type ReadHead = (path: string) => Promise<string | null>;
@@ -61,12 +61,12 @@ export async function runChecks(files: FileDiff[], packs: Pack[], readHead: Read
 }
 
 /**
- * runChecks, with the files the code checks ask to be read closely whatever their tier says (each with the first pack that
- * named the check), for the classifier: the facts stage runs this before it settles the tiers.
+ * runChecks, with what the code checks said about tiers (each entry with the first pack that named the check): files to read
+ * closely whatever their path says, and files not to trust as tests. The facts stage runs this before it settles the tiers.
  */
 export async function gatherChecks(
   files: FileDiff[], packs: Pack[], readHead: ReadHead, sides: OtherSides = {},
-): Promise<{ facts: Fact[]; readClosely: ReadClosely[] }> {
+): Promise<{ facts: Fact[] } & FromChecks> {
   const read = once(readHead);
   const out: Fact[] = [];
   for (const pack of packs) {
@@ -85,6 +85,7 @@ export async function gatherChecks(
   const ran = new Set<string>();
   const seen = new Set<string>();
   const readClosely: ReadClosely[] = [];
+  const notTrusted: ReadClosely[] = [];
   for (const pack of packs) {
     for (const id of pack.codeChecks ?? []) {
       if (ran.has(id)) continue;
@@ -99,9 +100,12 @@ export async function gatherChecks(
       for (const r of result.readClosely ?? []) {
         if (!readClosely.some((c) => c.path === r.path)) readClosely.push({ path: r.path, packId: pack.id, reason: r.reason });
       }
+      for (const r of result.notTrusted ?? []) {
+        if (!notTrusted.some((c) => c.path === r.path)) notTrusted.push({ path: r.path, packId: pack.id, reason: r.reason });
+      }
     }
   }
-  return { facts: out, readClosely };
+  return { facts: out, readClosely, notTrusted };
 }
 
 async function runOne(pack: Pack, check: CheckDef, files: FileDiff[], read: ReadHead): Promise<Fact[]> {

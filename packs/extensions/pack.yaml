@@ -29,10 +29,12 @@ kit:
 # Read: the manifest, the background and content scripts, configuration, and whatever sends data out (Apps Script
 # receivers, files that wrap fetch or a Google or CRM call), at the top or one folder down (a feature such as
 # route-monitor/ may carry its own). On top of these, every changed file the manifest loads is read whatever its path,
-# test and fixture folders included (the extension-loaded-files check names them).
+# test and fixture folders included, and every local script a page it loads pulls in (the extension-loaded-files check
+# names them).
 # Skimmed (the default): the popup, options and side panel pages, their scripts and the styles.
 # Trusted: the top-level tests/ folder (and the engine's built-in test names) and the words for people (README,
-# CHANGELOG, privacy and setup notes), and the icons.
+# CHANGELOG, privacy and setup notes), and the image files under icons/. If manifest.json cannot be read at the head,
+# no code file is trusted (the extension-loaded-files check names them), since what the extension loads is not known.
 tiers:
   read:
     - "manifest.json"
@@ -51,7 +53,7 @@ tiers:
   trust:
     - "tests/**"
     - "**/*.md"
-    - "icons/**"
+    - "icons/**/*.{png,jpg,jpeg,gif,ico,webp}"
 
 codeChecks:
   - extension-permissions

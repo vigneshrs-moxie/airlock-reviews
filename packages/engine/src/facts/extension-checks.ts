@@ -17,7 +17,12 @@ export interface CodeCheckInput {
   /** Whether the packs' ignore globs or the built-in ones leave a path out of the review. */
   isIgnored: (path: string) => boolean;
 }
-export interface CodeCheckResult { facts: Fact[]; readClosely?: { path: string; reason: string }[] }
+/** A check's facts, and what it says about tiers: changed files to read closely, and changed files not to trust as tests. */
+export interface CodeCheckResult {
+  facts: Fact[];
+  readClosely?: { path: string; reason: string }[];
+  notTrusted?: { path: string; reason: string }[];
+}
 export type CodeCheck = (input: CodeCheckInput) => Promise<CodeCheckResult>;
 
 /** Files the review trusts as tests: under the top-level `tests/` folder, or named or placed as the engine's built-in rules say. */
@@ -35,8 +40,9 @@ const LARGE_BYTES = 500_000;
 const live = (files: FileDiff[]): FileDiff[] => files.filter((f) => f.status !== 'deleted');
 const cut = (s: string, n = 100): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-const besideIt = (dir: string, name: string): string => (dir === '.' ? name : `${dir}/${name}`);
-const isManifest = (path: string): boolean => posix.basename(path) === 'manifest.json' && !isTrustedTest(path);
+/** The extension's manifest: only the one at the top of the repository counts. */
+const MANIFEST = 'manifest.json';
+const isManifest = (path: string): boolean => path === MANIFEST;
 
 /** The added lines of a file, by their line number on the head. */
 function addedLines(file: FileDiff): Map<number, string> {
@@ -68,7 +74,7 @@ async function manifestSide(read: (path: string) => Promise<string | null>, path
 interface ChangedManifest { path: string; base: Side; head: Side }
 
 /**
- * Every changed manifest.json outside the trusted tests, with both sides read; a renamed one is read at its old path on the
+ * The top-level manifest.json when it changed, with both sides read; a renamed one is read at its old path on the
  * base. Only an added manifest is new: one whose base cannot be read is unknown before.
  */
 async function changedManifests(input: CodeCheckInput): Promise<ChangedManifest[]> {
@@ -82,6 +88,8 @@ async function changedManifests(input: CodeCheckInput): Promise<ChangedManifest[
 }
 
 const NOT_JSON = 'extension-manifest-json';
+const headNotJson = (path: string): string =>
+  `${path} could not be read as JSON, so its permissions and version were not compared and so no file could be trusted as a test.`;
 /** The facts saying a side of a manifest is not JSON: the head stops the comparison, the base leaves "before" unknown. */
 function jsonFacts(m: ChangedManifest): Fact[] {
   const out: Fact[] = [];
@@ -89,7 +97,7 @@ function jsonFacts(m: ChangedManifest): Fact[] {
     out.push({ checkId: NOT_JSON, path: m.path, line: null, message: `${m.path} could not be read as JSON before this pull request, so what it held before is not known.` });
   }
   if (m.head.kind === 'bad') {
-    out.push({ checkId: NOT_JSON, path: m.path, line: null, message: `${m.path} could not be read as JSON, so its permissions and version were not compared.` });
+    out.push({ checkId: NOT_JSON, path: m.path, line: null, message: headNotJson(m.path) });
   }
   return out;
 }
@@ -203,8 +211,8 @@ const versionChangelog: CodeCheck = async (input) => {
     }
   }
 
-  for (const log of live(input.files).filter((f) => isChangelog(f.path) && !isTrustedTest(f.path))) {
-    const manifestPath = besideIt(posix.dirname(log.path), 'manifest.json');
+  for (const log of live(input.files).filter((f) => isChangelog(f.path) && posix.dirname(f.path) === '.')) {
+    const manifestPath = MANIFEST;
     if (settled.has(manifestPath)) continue;
     const head = await manifestSide(input.readHead, manifestPath, 'absent');
     if (head.kind !== 'ok') continue;
@@ -264,7 +272,7 @@ const htmlView = (text: string): string[] => text.replace(/<!--[\s\S]*?-->/g, (m
 // ---------------------------------------------------------------------------------------------------------------------
 // The files the extension loads
 
-/** A path the manifest at `dir` names, from the repository root; null when it leaves the repository. */
+/** A path named relative to `dir`, from the repository root (a leading `/` is the extension's root); null when it leaves it. */
 function resolveIn(dir: string, named: string): string | null {
   const from = named.startsWith('/') ? '.' : dir;
   const joined = posix.normalize(posix.join(from === '.' ? '' : from, named.replace(/^\/+/, '')));
@@ -295,36 +303,74 @@ function namedPaths(m: Record<string, unknown>): string[] {
   return out;
 }
 
-const loadedMemo = new WeakMap<CodeCheckInput, Promise<Map<string, string>>>();
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
- * The changed files the head's manifests load, each with why (`loaded by <manifest>`): the top-level manifest.json, read
- * at the head whether it changed or not, and any other changed manifest.json, each read from its own folder. A glob the
- * manifest names takes in every changed file it matches.
+ * How Chrome matches a manifest entry against the extension's files: from the extension's root after a leading `./` or
+ * `/`, letter case ignored here, a `*` matching any run of characters (`/` included) and every other character itself.
  */
-function loadedFiles(input: CodeCheckInput): Promise<Map<string, string>> {
+const entryMatcher = (entry: string): RegExp => new RegExp(`^${entry.split('*').map(escapeRegExp).join('.*')}$`, 'i');
+const stripLead = (entry: string): string => entry.replace(/^(?:\.?\/)+/, '');
+
+interface Loaded {
+  /** The changed files the extension loads, each with why (`loaded by <manifest or page>`). */
+  files: Map<string, string>;
+  /** Whether the head's manifest.json could be read; when not, nothing can be trusted as a test. */
+  manifestRead: boolean;
+  facts: Fact[];
+}
+
+const loadedMemo = new WeakMap<CodeCheckInput, Promise<Loaded>>();
+
+/**
+ * The changed files the head's top-level manifest.json loads, read whether it changed or not: every path it names (a
+ * `*` taking in every changed file it matches) and every local script a page it names pulls in with `<script src>`,
+ * relative to that page. An entry holding `..` promotes nothing and is a fact.
+ */
+function loadedFiles(input: CodeCheckInput): Promise<Loaded> {
   let hit = loadedMemo.get(input);
   if (!hit) { hit = findLoaded(input); loadedMemo.set(input, hit); }
   return hit;
 }
 
-async function findLoaded(input: CodeCheckInput): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+const SCRIPT_TAG_SRC = /<script\b[^>]*?\bsrc\s*=\s*["']?([^"'\s>]+)/gi;
+
+async function findLoaded(input: CodeCheckInput): Promise<Loaded> {
+  const files = new Map<string, string>();
+  const facts: Fact[] = [];
   const changed = live(input.files);
-  if (changed.length === 0) return out;
-  for (const manifestPath of unique(['manifest.json', ...changed.filter((f) => isManifest(f.path)).map((f) => f.path)])) {
-    const side = await manifestSide(input.readHead, manifestPath, 'absent');
-    if (side.kind !== 'ok') continue;
-    for (const named of namedPaths(side.json)) {
-      const path = resolveIn(posix.dirname(manifestPath), named);
+  if (changed.length === 0) return { files, manifestRead: true, facts };
+  const side = await manifestSide(input.readHead, MANIFEST, 'absent');
+  if (side.kind !== 'ok') return { files, manifestRead: false, facts };
+
+  const promote = (match: (path: string) => boolean, reason: string): string[] => {
+    const hits = changed.filter((f) => match(f.path)).map((f) => f.path);
+    for (const path of hits) if (!files.has(path)) files.set(path, reason);
+    return hits;
+  };
+  const pages = new Set<string>();
+  for (const named of namedPaths(side.json)) {
+    const entry = stripLead(named);
+    if (entry.split('/').includes('..')) {
+      facts.push({ checkId: 'extension-loaded-files', path: MANIFEST, line: null, message: `The manifest names a path outside the extension: ${cut(named)}.` });
+      continue;
+    }
+    const re = entryMatcher(entry);
+    const hits = promote((path) => re.test(path), `loaded by ${MANIFEST}`);
+    if (HTML_FILE.test(entry)) for (const page of entry.includes('*') ? hits : [entry]) pages.add(page);
+  }
+  for (const page of pages) {
+    const text = await input.readHead(changed.find((f) => f.path.toLowerCase() === page.toLowerCase())?.path ?? page);
+    if (text === null) continue;
+    for (const [, raw] of htmlView(text).join('\n').matchAll(SCRIPT_TAG_SRC)) {
+      const src = raw!.replace(/[?#].*$/, '');
+      if (src === '' || /^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith('//')) continue;
+      const path = resolveIn(posix.dirname(page), src);
       if (path === null) continue;
-      const glob = /[*?[\]{}]/.test(path) ? picomatch(path, { dot: true }) : null;
-      for (const f of changed) {
-        if (!out.has(f.path) && (glob ? glob(f.path) : f.path === path)) out.set(f.path, `loaded by ${manifestPath}`);
-      }
+      promote((p) => p.toLowerCase() === path.toLowerCase(), `loaded by ${page}`);
     }
   }
-  return out;
+  return { files, manifestRead: true, facts };
 }
 
 const withTests = (path: string): string | null =>
@@ -347,16 +393,29 @@ function loadsOn(code: string, file: string): string[] {
   return out;
 }
 
+const CODE_FILE = /\.(?:m?js|cjs|jsx|tsx?|gs|html?|css|json)$/i;
+const NO_MANIFEST = 'manifest.json could not be read, so no file is trusted as a test';
+
 const loadedFilesCheck: CodeCheck = async (input) => {
   const loaded = await loadedFiles(input);
-  const facts: Fact[] = [];
-  for (const path of loaded.keys()) {
+  const facts: Fact[] = [...loaded.facts];
+  for (const path of loaded.files.keys()) {
     const where = withTests(path);
     if (where !== null) facts.push({ checkId: 'extension-loaded-files', path, line: null, message: `${path} ${where} but the extension loads it.` });
   }
+  const notTrusted: { path: string; reason: string }[] = [];
+  if (!loaded.manifestRead) {
+    // Unread, the manifest could load any file: none is trusted as a test, and the fact says why.
+    const side = await manifestSide(input.readHead, MANIFEST, 'absent');
+    facts.push({
+      checkId: NOT_JSON, path: MANIFEST, line: null,
+      message: side.kind === 'bad' ? headNotJson(MANIFEST) : `${MANIFEST} could not be read at the head, so no file could be trusted as a test.`,
+    });
+    for (const f of live(input.files)) if (CODE_FILE.test(f.path)) notTrusted.push({ path: f.path, reason: NO_MANIFEST });
+  }
   for (const { file, added, head } of await sources(input, SCRIPT_FILE)) {
     // A test loading its own fixtures is not news; a file the extension loads is not a test.
-    if (!loaded.has(file.path) && withTests(file.path) !== null) continue;
+    if (!loaded.files.has(file.path) && withTests(file.path) !== null) continue;
     for (const [n, code] of viewOfLines(head, added, (t) => scriptViews(t).code)) {
       for (const target of loadsOn(code, file.path)) {
         const where = withTests(target);
@@ -366,19 +425,20 @@ const loadedFilesCheck: CodeCheck = async (input) => {
       }
     }
   }
-  return { facts, readClosely: [...loaded].map(([path, reason]) => ({ path, reason })) };
+  return { facts, readClosely: [...loaded.files].map(([path, reason]) => ({ path, reason })), notTrusted };
 };
 
 /**
  * The script or page files of the pull request worth scanning, with their added lines and their head text: not a trusted test
- * and not an ignored file (minified, built, vendored), unless the extension loads it.
+ * (one only while the manifest can be read) and not an ignored file (minified, built, vendored), unless the extension loads it.
  */
 async function sources(input: CodeCheckInput, pick: RegExp): Promise<{ file: FileDiff; added: Map<number, string>; head: string | null }[]> {
   const loaded = await loadedFiles(input);
   const out = [];
   for (const file of live(input.files)) {
     if (!pick.test(file.path) || file.binary) continue;
-    if (!loaded.has(file.path) && (isTrustedTest(file.path) || input.isIgnored(file.path))) continue;
+    const scanned = loaded.files.has(file.path) || (!input.isIgnored(file.path) && !(isTrustedTest(file.path) && loaded.manifestRead));
+    if (!scanned) continue;
     const added = addedLines(file);
     if (added.size === 0) continue;
     out.push({ file, added, head: await input.readHead(file.path) });

@@ -4,9 +4,9 @@ What to follow across files:
 
 - the version from the manifest to the CHANGELOG, the README and the pull request title, and against the version on the base;
 - each claim in the README, the CHANGELOG, a comment or the pull request description to the code that should bear it out;
-- each piece of logic that decides something about a record to the test that runs it, and each fix to the test that shows it;
+- each changed piece of logic to the tests that run it;
 - each helper the change adds to other copies of it in the repository, and through `register.md` to the other extensions;
-- each changed logic file to the files beside it that do the same job, to see the way the repository already does it;
+- each changed logic file to the files beside it that do similar work;
 - the files the pull request touches, to whether they make one change or several.
 
 The engine's facts say when the version changed without the changelog, or the changelog without the version.

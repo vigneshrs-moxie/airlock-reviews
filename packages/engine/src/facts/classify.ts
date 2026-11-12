@@ -24,19 +24,26 @@ function firstMatch(path: string, packs: Pack[], pick: (p: Pack) => string[], bu
 
 /** A file a pack's code check asks to be read closely (an extension's manifest loads it), with the pack and why. */
 export interface ReadClosely { path: string; packId: string; reason: string }
+/**
+ * What the code checks said about tiers: files to read closely whatever their path says, and files that must not be trusted
+ * as tests (skimmed at least), each with the pack and why.
+ */
+export interface FromChecks { readClosely: ReadClosely[]; notTrusted: ReadClosely[] }
+const NOTHING_FROM_CHECKS: FromChecks = { readClosely: [], notTrusted: [] };
 
 /** Whether a pack's ignore globs or the built-in ones leave `path` out of the review. */
 export const isIgnoredPath = (path: string, packs: Pack[]): boolean => firstMatch(path, packs, (p) => p.tiers.ignore, BUILT_IN_IGNORE) !== null;
 
 /**
  * A symbolic link is classified by its path like any other file, so a pull request cannot take a source file out of the
- * lenses by turning it into a link; the lenses see its diff and the fact saying where it points. A file in `closely` is read
+ * lenses by turning it into a link; the lenses see its diff and the fact saying where it points. A file in `readClosely` is read
  * whatever its path says (a test, a fixture or an ignored folder), because the extension loads it; a binary file stays ignored.
+ * A file in `notTrusted` that would be trusted is skimmed instead.
  */
-function classify(file: FileDiff, packs: Pack[], closely: ReadClosely[] = []): FileFact {
+function classify(file: FileDiff, packs: Pack[], checks: FromChecks = NOTHING_FROM_CHECKS): FileFact {
   const fact = (tier: Tier, reason: string): FileFact => ({ path: file.path, tier, reason });
   if (file.binary) return fact('ignored', 'binary file');
-  const loaded = closely.find((c) => c.path === file.path);
+  const loaded = checks.readClosely.find((c) => c.path === file.path);
   if (loaded) return fact('read', `${loaded.packId}: ${loaded.reason}`);
   const ignored = firstMatch(file.path, packs, (p) => p.tiers.ignore, BUILT_IN_IGNORE);
   if (ignored) {
@@ -46,12 +53,15 @@ function classify(file: FileDiff, packs: Pack[], closely: ReadClosely[] = []): F
   const read = firstMatch(file.path, packs, (p) => p.tiers.read, []);
   if (read) return fact('read', read);
   const trust = firstMatch(file.path, packs, (p) => p.tiers.trust, BUILT_IN_TRUST);
-  if (trust) return fact('trust', trust);
+  if (trust) {
+    const doubted = checks.notTrusted.find((c) => c.path === file.path);
+    return doubted ? fact('skim', `${doubted.packId}: ${doubted.reason}`) : fact('trust', trust);
+  }
   return fact('skim', 'default');
 }
 
-export function classifyFiles(files: FileDiff[], packs: Pack[], closely: ReadClosely[] = []): FileFact[] {
-  return files.map((f) => classify(f, packs, closely));
+export function classifyFiles(files: FileDiff[], packs: Pack[], checks: FromChecks = NOTHING_FROM_CHECKS): FileFact[] {
+  return files.map((f) => classify(f, packs, checks));
 }
 
 /**
@@ -83,10 +93,10 @@ const extensionOf = (path: string): string => {
  * The binary files (by git's verdict or the NUL check) that look like source code: their path would put them in the read
  * or skim tier and their extension is not in BINARY_EXTENSIONS. Such a file is not reviewed, so it must not pass in silence.
  */
-export function binarySourcePaths(files: FileDiff[], packs: Pack[], closely: ReadClosely[] = []): string[] {
+export function binarySourcePaths(files: FileDiff[], packs: Pack[], checks: FromChecks = NOTHING_FROM_CHECKS): string[] {
   return files.filter((f) => {
     if (!f.binary || BINARY_EXTENSIONS.has(extensionOf(f.path))) return false;
-    const { tier } = classify({ ...f, binary: false }, packs, closely);
+    const { tier } = classify({ ...f, binary: false }, packs, checks);
     return tier === 'read' || tier === 'skim';
   }).map((f) => f.path);
 }
