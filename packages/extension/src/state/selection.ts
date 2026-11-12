@@ -1,4 +1,4 @@
-import type { Dismissal, Finding } from '@airlock/shared';
+import type { Dismissal, Finding, PostRecord } from '@airlock/shared';
 
 export interface DismissedFinding { finding: Finding; dismissal: Dismissal }
 
@@ -22,6 +22,17 @@ export function dismissalOf(finding: Pick<Finding, 'fingerprint' | 'aliases'>, d
   if (own !== undefined || finding.aliases === undefined || finding.aliases.length === 0) return own;
   const aliases = new Set(finding.aliases);
   return dismissals.find((d) => aliases.has(d.fingerprint));
+}
+
+/**
+ * The post record that holds a finding: one with an item known by the finding's fingerprint or any of its aliases, by
+ * the item's own fingerprint or any of the item's aliases. A posted record comes before one whose outcome is not known.
+ * The one place this is decided.
+ */
+export function postOf(finding: Pick<Finding, 'fingerprint' | 'aliases'>, posts: readonly PostRecord[]): PostRecord | undefined {
+  const keys = new Set([finding.fingerprint, ...(finding.aliases ?? [])]);
+  const holds = (r: PostRecord): boolean => r.items.some((item) => keys.has(item.fingerprint) || item.aliases.some((a) => keys.has(a)));
+  return posts.find((r) => r.outcome === 'posted' && holds(r)) ?? posts.find(holds);
 }
 
 /** Splits a document's findings into what is shown and what is dismissed. A dismissal for a finding not in the document is ignored. */

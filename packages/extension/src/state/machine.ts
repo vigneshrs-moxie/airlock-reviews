@@ -1,11 +1,14 @@
-import { prRefFromUrl, type Depth, type LatestReply, type PrSummary, type ReviewDocument } from '@airlock/shared';
+import { prRefFromUrl, type Depth, type LatestReply, type PostRecord, type PrSummary, type ReviewDocument } from '@airlock/shared';
 import { ServiceError, type ServiceClient } from '../client/service';
 import { realTimers, type Timers } from '../client/timers';
-import { reduce, withStage, type Action, type PanelState, type StageLine, type UserAction } from './reduce';
+import {
+  isFor, NO_POST_RECORD, POST_UNKNOWN, reduce, withStage, type Action, type PanelState, type PostReply, type StageLine, type UserAction,
+} from './reduce';
 import type { SettingsStore } from './settings';
 import type { TabWatcher } from './tab';
 
-export type { PanelState, StageLine, UserAction } from './reduce';
+export type { PanelState, PostReply, StageLine, UserAction } from './reduce';
+export { NO_POST_RECORD, POST_UNKNOWN } from './reduce';
 
 export const LOST_MESSAGE = 'Airlock lost its connection to the review. Press Retry to look again.';
 export const NOT_A_TOKEN = 'That is not a pairing token. Run "npm run service -- token" and paste the 64 characters it prints.';
@@ -377,6 +380,45 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     begin(false);
   };
 
+  const answer = (g: number, reply: PostReply): void => {
+    if (current(g)) apply({ type: 'post-reply', reply });
+  };
+  /** A refusal in the service's words is the post sheet's to show; anything else goes on to `act`. */
+  const refusedOr = (g: number, ticket: number, error: unknown): void => {
+    if (!(error instanceof ServiceError && error.kind === 'problem')) throw error;
+    answer(g, { ticket, kind: 'refused', message: error.message });
+  };
+
+  /**
+   * Posts a stored preview, once. When the reply does not say what happened, the post records do: the record this post
+   * made (one not on screen before, holding one of its findings) is the outcome; with none, the panel says it does not know.
+   * Records the service will not give are not known either. When it does not answer at all, `act` takes the panel offline
+   * (or to pairing), keeping the review; the sheet reads the records itself when the service is back.
+   */
+  const post = async (g: number, pr: PrSummary, known: ReadonlySet<string>, action: Extract<UserAction, { type: 'post' }>): Promise<void> => {
+    const { ticket } = action;
+    const sent = await client.post({ previewId: action.previewId });
+    // A record for another pull request is not this post's answer: its address is not shown here.
+    if (sent.outcome === 'posted' && isFor(sent.record, pr)) { answer(g, { ticket, kind: 'posted', record: sent.record }); return; }
+    if (sent.outcome === 'refused') { answer(g, { ticket, kind: 'refused', message: sent.message }); return; }
+    const said = sent.outcome === 'unclear' ? sent.message ?? POST_UNKNOWN : POST_UNKNOWN;
+    let latest: LatestReply | null;
+    try {
+      latest = await client.latest(pr.repo, pr.number, live.signal);
+    } catch (error) {
+      // Records the service answered about but did not give: still not known, and never called a refusal.
+      if (!(error instanceof ServiceError && error.kind === 'problem')) throw error;
+      answer(g, { ticket, kind: 'unclear', message: said });
+      return;
+    }
+    const mine = (r: PostRecord): boolean =>
+      isFor(r, pr) && !known.has(r.id) && r.items.some((item) => action.fingerprints.includes(item.fingerprint));
+    const record = latest?.posts.find(mine);
+    if (record === undefined) answer(g, { ticket, kind: 'unclear', message: NO_POST_RECORD });
+    else if (record.outcome === 'posted') answer(g, { ticket, kind: 'posted', record });
+    else answer(g, { ticket, kind: 'unknown', message: said, record });
+  };
+
   const start = async (g: number, pr: PrSummary, depth: Depth, packIds: string[] | undefined): Promise<void> => {
     const startedAt = now();
     const reply = await client.start({ repo: pr.repo, number: pr.number, depth, ...(packIds === undefined ? {} : { packIds }) });
@@ -416,6 +458,39 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
           act(state.pr, async (g) => {
             const reply = await client.restore({ repo, number, fingerprint: action.fingerprint });
             if (current(g)) apply({ type: 'restored', fingerprint: action.fingerprint, note: reply.note });
+          });
+        }
+        return;
+      // Posting: only from a finished review that is live, for the pull request on screen. Like a dismissal, a request
+      // already sent is not aborted when the tab moves; only its answer is dropped.
+      case 'preview-post':
+        if (state.kind === 'review' && action.body.repo === state.pr.repo && action.body.number === state.pr.number) {
+          act(state.pr, async (g) => {
+            try {
+              answer(g, { ticket: action.ticket, kind: 'preview', preview: await client.previewPost(action.body) });
+            } catch (error) {
+              refusedOr(g, action.ticket, error);
+            }
+          });
+        }
+        return;
+      case 'post':
+        if (state.kind === 'review') {
+          const known = new Set(state.latest.posts.map((r) => r.id));
+          const shown = state.pr;
+          act(shown, (g) => post(g, shown, known, action));
+        }
+        return;
+      case 'forget-post':
+        if (state.kind === 'review') {
+          const { repo, number } = state.pr;
+          act(state.pr, async (g) => {
+            try {
+              await client.forgetPost({ repo, number, id: action.id });
+              answer(g, { ticket: action.ticket, kind: 'forgotten', id: action.id });
+            } catch (error) {
+              refusedOr(g, action.ticket, error);
+            }
           });
         }
         return;

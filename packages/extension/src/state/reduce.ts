@@ -1,11 +1,16 @@
 import {
-  MESSAGE_MAX, type Brief, type ChangeMap, type Depth, type DismissBody, type Dismissal, type LatestReply, type PrSummary,
-  type ServiceEvent,
+  MESSAGE_MAX, type Brief, type ChangeMap, type Depth, type DismissBody, type Dismissal, type LatestReply, type PostPreviewBody,
+  type PostPreviewReply, type PostRecord, type PrSummary, type ServiceEvent,
 } from '@airlock/shared';
 import { stageWords } from './stage-words';
 
 /** Text from the service that is shown (an error, a failed review's message, a restore note) is cut to this many characters. */
 export const NOTICE_MAX = MESSAGE_MAX;
+
+/** A post whose reply did not say what happened, and whose record says it is not known. The service's 504 sentence. */
+export const POST_UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
+/** A post whose reply did not say what happened, and that left no record. */
+export const NO_POST_RECORD = 'Airlock got no answer about this post and has no record of it. Look at the pull request before posting again.';
 
 export interface StageLine {
   stage: string;
@@ -19,6 +24,28 @@ export interface ReviewView {
   latest: LatestReply;
   /** The pull request's head moved since this review. */
   stale: boolean;
+}
+
+/**
+ * The answer to the post sheet's last request, with the ticket the sheet sent it under, so a sheet only takes its own.
+ * - `preview`: the preview the service stored.
+ * - `refused`: nothing was done, in the service's words (a preview, a post or a forget).
+ * - `posted` and `unknown`: the record a post made; `unknown` with the sentence to show.
+ * - `unclear`: a post whose answer did not say what happened, with no record of it to show.
+ * - `forgotten`: the unknown record is gone.
+ */
+export type PostReply = { ticket: number } & (
+  | { kind: 'preview'; preview: PostPreviewReply }
+  | { kind: 'refused'; message: string }
+  | { kind: 'posted'; record: PostRecord }
+  | { kind: 'unknown'; message: string; record: PostRecord }
+  | { kind: 'unclear'; message: string }
+  | { kind: 'forgotten'; id: string }
+);
+
+/** Whether a post record is of this pull request (a repository name in any letter case, as on GitHub). */
+export function isFor(record: Pick<PostRecord, 'repo' | 'number'>, pr: Pick<PrSummary, 'repo' | 'number'>): boolean {
+  return record.repo.toLowerCase() === pr.repo.toLowerCase() && record.number === pr.number;
 }
 
 /** What a running review had shown when the service stopped answering. */
@@ -40,8 +67,11 @@ export type PanelState =
   /** `notice`: why the last action was refused. `busy`: an action is in flight. */
   | { kind: 'ready'; pr: PrSummary; notice?: string; busy?: boolean }
   | { kind: 'running'; pr: PrSummary; stages: StageLine[]; brief: Brief | null; map: ChangeMap | null }
-  /** `notice`: why the last action was refused, or the note on the last restore. `busy`: an action is in flight. */
-  | ({ kind: 'review'; notice?: string; busy?: boolean } & ReviewView)
+  /**
+   * `notice`: why the last action was refused, or the note on the last restore. `busy`: an action is in flight. `post`: the
+   * answer to the post sheet's last request.
+   */
+  | ({ kind: 'review'; notice?: string; busy?: boolean; post?: PostReply } & ReviewView)
   /** `brief` and `map`: what a failed review showed before it stopped. */
   | { kind: 'problem'; pr: PrSummary | null; message: string; brief?: Brief; map?: ChangeMap };
 
@@ -50,6 +80,11 @@ export type UserAction =
   | { type: 'start'; depth: Depth; packIds?: string[] }
   | { type: 'dismiss'; body: DismissBody }
   | { type: 'restore'; fingerprint: string }
+  /** The post sheet's requests; each answer comes back as the review's `post`, under the same ticket. */
+  | { type: 'preview-post'; ticket: number; body: PostPreviewBody }
+  /** `fingerprints`: the preview's findings, to find its record by when the reply does not say what happened. */
+  | { type: 'post'; ticket: number; previewId: string; fingerprints: string[] }
+  | { type: 'forget-post'; ticket: number; id: string }
   | { type: 'retry' };
 
 /** The results of calls to the service, and the events of a review, that change the state. */
@@ -70,7 +105,8 @@ export type Action =
   | { type: 'busy'; busy: boolean }
   | { type: 'refused'; message: string }
   | { type: 'dismissed'; dismissal: Dismissal }
-  | { type: 'restored'; fingerprint: string; note: string | null };
+  | { type: 'restored'; fingerprint: string; note: string | null }
+  | { type: 'post-reply'; reply: PostReply };
 
 /** At most `NOTICE_MAX` characters, ending in `…` when cut. Counts code points, so a character is never split. */
 export function clip(text: string): string {
@@ -181,6 +217,18 @@ export function reduce(state: PanelState, action: Action): PanelState {
       const dismissals = state.latest.dismissals.filter((d) => d.fingerprint !== action.fingerprint);
       const next = { ...settled(state), latest: { ...state.latest, dismissals } };
       return action.note === null ? next : { ...next, notice: clip(action.note) };
+    }
+    case 'post-reply': {
+      if (state.kind !== 'review') return state;
+      const reply = action.reply;
+      let posts = state.latest.posts;
+      if (reply.kind === 'posted' || reply.kind === 'unknown') {
+        const { record } = reply;
+        if (isFor(record, state.pr)) posts = [...posts.filter((p) => p.id !== record.id), record];
+      }
+      if (reply.kind === 'forgotten') posts = posts.filter((p) => p.id !== reply.id);
+      const said = 'message' in reply ? { ...reply, message: clip(reply.message) } : reply;
+      return { ...settled(state), latest: { ...state.latest, posts }, post: said };
     }
   }
 }
