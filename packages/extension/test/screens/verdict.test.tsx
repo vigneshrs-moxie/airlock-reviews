@@ -1183,17 +1183,27 @@ describe('what this review did not see stays in sight', () => {
   const APPROVE = { label: 'approve' as const, sentence: 'Nothing that needs fixing was found.', counts: NO_COUNTS };
   const PREVIOUS = { reviewId: 'r_0000000000', headSha: 'a'.repeat(40) };
 
-  it('a first review with the nothing-read note shows About this review under the strip, closed, without a tab pressed, and no green', () => {
+  it('a first review with the nothing-read note and nothing open shows About this review under the strip, open, its note in sight, and no green', () => {
     review([], { doc: { verdict: APPROVE, notes: [NOTHING_READ] } });
     const about = fold('About this review');
     expect(about.textContent).toBe('About this review 1 note');
-    expect(about.getAttribute('aria-expanded')).toBe('false');
+    expect(about.getAttribute('aria-expanded')).toBe('true');
     expect(follows(strip(), about)).toBe(true);
     expect(follows(about, screen.getByRole('tablist'))).toBe(true);
     expect(heading('Approve').className).not.toMatch(/sev-ok/);
-    fireEvent.click(about);
     expect(within(foldSection('About this review')).getByText(NOTHING_READ)).toBeTruthy();
     expect(heading('Notes')).toBeTruthy();
+    // It can still be closed.
+    fireEvent.click(about);
+    expect(about.getAttribute('aria-expanded')).toBe('false');
+  });
+  it('About this review starts closed when a finding is open, and open when every finding is dismissed', () => {
+    const f = finding(1);
+    review([f], { doc: { notes: [NOTHING_READ] } });
+    expect(fold('About this review').getAttribute('aria-expanded')).toBe('false');
+    cleanup();
+    review([f], { doc: { notes: [NOTHING_READ] }, dismissals: [dismissal(f)] });
+    expect(fold('About this review').getAttribute('aria-expanded')).toBe('true');
   });
   it('counts limits and notes in words, a zero part left out, and lists the limits first', () => {
     review([finding(1)], { doc: { limits: ['82 of 673 lines were cut.'], notes: ['One.', 'Two.'] } });
