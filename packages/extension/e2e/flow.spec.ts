@@ -316,7 +316,7 @@ test('4. the verdict: its words and sentence, three top findings in rank order, 
   await expect(noteRow(alsoFound[1]!.id)).toHaveCount(0);
   await expect(verdictLines().getByText('4 shown, 1 waiting for their lines to load')).toBeVisible();
   // What the reviewer was not shown and the review's note, in one closed fold above the tabs.
-  const notes = panel.getByRole('button', { name: 'About this review 1 not shown to the reviewer, 1 note' });
+  const notes = panel.getByRole('button', { name: 'About this review 1 thing the reviewer did not see, 1 note' });
   await expect(notes).toHaveAttribute('aria-expanded', 'false');
   await expect(panel.getByText(NOTE, { exact: true })).toHaveCount(0);
   await notes.click();
@@ -450,7 +450,7 @@ test('9. the service starts again: the panel returns to the review by itself, th
   await reviewTab('More').click();
   await expect(foldButton('Dismissed')).toHaveAttribute('aria-expanded', 'true');
   await expect(panel.getByText(top[1]!.title, { exact: true })).toBeVisible();
-  await expect(panel.getByText('Wrong', { exact: true })).toBeVisible();
+  await expect(panel.getByText('The finding is mistaken', { exact: true })).toBeVisible();
   await expect(panel.getByText(WRONG_LINE, { exact: true })).toBeVisible();
   await expect(panel.getByRole('button', { name: `Restore ${top[1]!.title}` })).toBeEnabled();
   // The review came back from the service: the last thing the panel read was the stored review.

@@ -556,7 +556,7 @@ describe('startPanel: following a review', () => {
     await until(h, 'running', (s) => s.map !== null);
     h.svc.down = true;
     run.lose();
-    expect(await until(h, 'offline')).toEqual({ kind: 'offline', progress: { pr: prSummary(), brief, map, startedAt: T0 } });
+    expect(await until(h, 'offline')).toEqual({ kind: 'offline', progress: { pr: prSummary(), brief, map, startedAt: T0, current: 'Reading the pull request' } });
     expect(h.timers.delays()).toEqual([5000]);
     h.timers.fire();
     await settle();
@@ -669,7 +669,7 @@ describe('startPanel: the service restarting during a review', () => {
     h.svc.down = true;
     run.lose();
     const offline = await until(h, 'offline');
-    expect(offline.progress).toEqual({ pr: prSummary(), brief, map: null, startedAt: T0 });
+    expect(offline.progress).toEqual({ pr: prSummary(), brief, map: null, startedAt: T0, current: 'Reading the pull request' });
     h.svc.down = false;
     restart(h.svc);
     h.timers.fire();

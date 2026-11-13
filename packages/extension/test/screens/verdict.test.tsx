@@ -413,12 +413,13 @@ describe('the more tab', () => {
     const toggle = fold('Dismissed');
     expect(toggle.textContent).toBe('Dismissed 2');
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    expect(screen.queryByText('Intended')).toBeNull();
+    expect(screen.queryByText('The code is right for a reason Airlock could not know')).toBeNull();
     fireEvent.click(toggle);
     expect(screen.getByText('Problem 2')).toBeTruthy();
-    expect(screen.getByText('Intended')).toBeTruthy();
+    // Each reason in the dismiss sheet's words.
+    expect(screen.getByText('The code is right for a reason Airlock could not know')).toBeTruthy();
     expect(screen.getByText('The team wants this.')).toBeTruthy();
-    expect(screen.getByText('Not now')).toBeTruthy();
+    expect(screen.getByText('Hidden on this pull request only')).toBeTruthy();
     fireEvent.click(screen.getAllByRole('button', { name: /Restore/ })[0]!);
     expect(dispatch).toHaveBeenCalledWith({ type: 'restore', fingerprint: f[1]!.fingerprint });
   });
@@ -981,12 +982,12 @@ describe('a verdict never stands alone', () => {
     expect(within(strip()).getByText('The review did not finish, so nothing here is cleared.')).toBeTruthy();
     expect(screen.queryByText('No findings.')).toBeNull();
   });
-  it('says no open findings in the strip and on the Findings tab, whose Show dismissed goes to More with Dismissed open', () => {
+  it('says no open findings once, in the strip; the Findings tab\'s Show dismissed goes to More with Dismissed open', () => {
     const f = [finding(1), also(2)];
     review(f, { dismissals: f.map((x) => dismissal(x)) });
     expect(within(strip()).getByText('No open findings. 2 dismissed.')).toBeTruthy();
+    expect(screen.getAllByText('No open findings. 2 dismissed.')).toHaveLength(1);
     const panel = screen.getByRole('tabpanel');
-    expect(within(panel).getByText('No open findings. 2 dismissed.')).toBeTruthy();
     fireEvent.click(within(panel).getByRole('button', { name: 'Show dismissed' }));
     expect(tab('More').getAttribute('aria-selected')).toBe('true');
     expect(fold('Dismissed').getAttribute('aria-expanded')).toBe('true');
@@ -1225,14 +1226,14 @@ describe('what this review did not see stays in sight', () => {
   });
   it('counts limits and notes in words, a zero part left out, and lists the limits first', () => {
     review([finding(1)], { doc: { limits: ['82 of 673 lines were cut.'], notes: ['One.', 'Two.'] } });
-    expect(fold('About this review').textContent).toBe('About this review 1 not shown to the reviewer, 2 notes');
+    expect(fold('About this review').textContent).toBe('About this review 1 thing the reviewer did not see, 2 notes');
     openFold('About this review');
     const section = foldSection('About this review');
     expect([...section.querySelectorAll('h4')].map((h) => h.textContent)).toEqual(['Not shown to the reviewer', 'Notes']);
     expect([...section.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['82 of 673 lines were cut.', 'One.', 'Two.']);
     cleanup();
     review([finding(1)], { doc: { limits: ['A.', 'B.'] } });
-    expect(fold('About this review').textContent).toBe('About this review 2 not shown to the reviewer');
+    expect(fold('About this review').textContent).toBe('About this review 2 things the reviewer did not see');
     cleanup();
     review([finding(1)]);
     expect(queryFold('About this review')).toBeNull();
@@ -1240,7 +1241,7 @@ describe('what this review did not see stays in sight', () => {
   it('a re-review prints its notes in the strip, and only its limits get the fold', () => {
     review([finding(1)], { doc: { previous: PREVIOUS, notes: ['The push changed only files Airlock does not review.'], limits: ['A limit.'] } });
     expect(within(strip()).getByText('The push changed only files Airlock does not review.')).toBeTruthy();
-    expect(fold('About this review').textContent).toBe('About this review 1 not shown to the reviewer');
+    expect(fold('About this review').textContent).toBe('About this review 1 thing the reviewer did not see');
     openFold('About this review');
     expect(within(foldSection('About this review')).queryByText('The push changed only files Airlock does not review.')).toBeNull();
     cleanup();
@@ -1264,14 +1265,14 @@ describe('Open in Airlock and Back', () => {
     expect(tab('Findings').getAttribute('aria-selected')).toBe('true');
     expect(document.activeElement).toBe(within(cards()[1]!).getByRole('button'));
   });
-  it('puts focus on the Findings tab when the finding\'s row is not drawn (Also found closed)', () => {
+  it('opens Also found on Back when the finding\'s row is in it, and puts focus on that row', () => {
     const state = reviewState([finding(1), also(2)]);
     const dispatch = vi.fn();
     const { rerender } = render(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} openFinding={null} />);
     rerender(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} openFinding={asked('c_00000002', 1)} />);
     fireEvent.click(button('Back to the review'));
-    expect(fold('Also found').getAttribute('aria-expanded')).toBe('false');
-    expect(document.activeElement).toBe(tab('Findings'));
+    expect(fold('Also found').getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement).toBe(within(cards()[1]!).getByRole('button'));
   });
 });
 

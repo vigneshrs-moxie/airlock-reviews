@@ -87,14 +87,21 @@ describe('offline', () => {
     fireEvent.click(screen.getByRole('button', { name: /copy/i }));
     await vi.waitFor(() => expect(window.getSelection()?.toString()).toContain('npm run service'));
   });
-  it('shows the kept brief and map of a running review', () => {
-    show({ kind: 'offline', progress: { pr: prSummary(), brief, map, startedAt: null } });
+  it('shows a running review as the progress screen does: its lead card with the step it was on, and the kept brief and map in a fold', () => {
+    show({ kind: 'offline', progress: { pr: prSummary(), brief, map, startedAt: null, current: 'Mapping the change' } });
+    const card = screen.getByRole('heading', { name: 'Reviewing' }).closest('section')!;
+    expect(card.className).toContain('ap-lead');
+    expect(within(card).getByText('Mapping the change', { selector: '.ap-title' })).toBeTruthy();
+    expect(screen.getByText('Shown from before the service stopped.')).toBeTruthy();
+    const found = screen.getByRole('button', { name: 'What it has found so far' });
+    expect(found.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(found);
     expect(screen.getByText('Adds a totals column.')).toBeTruthy();
     expect(screen.getByText('Data layer')).toBeTruthy();
   });
   it('shows a kept review under one line and no brief or map from a running review', () => {
     const pr = prSummary();
-    show({ kind: 'offline', review: { pr, latest: latestFor(pr), stale: false }, progress: { pr, brief, map, startedAt: null } });
+    show({ kind: 'offline', review: { pr, latest: latestFor(pr), stale: false }, progress: { pr, brief, map, startedAt: null, current: null } });
     expect(screen.getAllByText('Shown from before the service stopped.')).toHaveLength(1);
     expect(screen.queryByText(/Your last review is kept/)).toBeNull();
     expect(screen.queryByText('Adds a totals column.')).toBeNull();

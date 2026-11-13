@@ -35,7 +35,7 @@ describe('what the reviewer was not shown', () => {
       doc: { limits: LIMITS, stageErrors: [{ stage: 'lenses', cohortId: null, message: 'Timed out' }] },
     });
     const toggle = fold('About this review');
-    expect(toggle.textContent).toBe('About this review 2 not shown to the reviewer');
+    expect(toggle.textContent).toBe('About this review 2 things the reviewer did not see');
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByText(LIMITS[0]!)).toBeNull();
     expect(follows(toggle, heading('Stage errors'))).toBe(true);
@@ -69,7 +69,7 @@ describe('the review\'s notes (second round)', () => {
   it('on a first review, are listed in About this review after what was not shown, one item per note, as text', () => {
     show([finding(1)], { doc: { limits: ['The diff was cut.'], notes: NOTES } });
     const toggle = fold('About this review');
-    expect(toggle.textContent).toBe('About this review 1 not shown to the reviewer, 2 notes');
+    expect(toggle.textContent).toBe('About this review 1 thing the reviewer did not see, 2 notes');
     expect(screen.queryByText(NOTES[0]!)).toBeNull();
     fireEvent.click(toggle);
     const section = toggle.closest('section')!;

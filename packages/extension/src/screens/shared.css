@@ -63,7 +63,7 @@
 .ap-fold-heading, .ap-fold-head { margin: 0; font-size: inherit; }
 .ap-fold { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 2px; font: inherit; font-weight: 600; color: var(--fg); text-align: left; background: none; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
 .ap-fold .n { margin-left: auto; flex: none; font-weight: 400; font-size: 12px; color: var(--muted); }
-/* A fold of the review and the progress screen whose count is long ("1 not shown to the reviewer") puts the count on a
+/* A fold of the review and the progress screen whose count is long ("1 thing the reviewer did not see") puts the count on a
    second line, at the right, when the two do not fit side by side, rather than squeeze the fold's name into one word a line. */
 .ap-fold-heading > .ap-fold { flex-wrap: wrap; row-gap: 2px; }
 .ap-folded { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 8px 2px 12px; border-bottom: 1px solid var(--border); }
@@ -74,7 +74,7 @@
    buttons (a prompt to copy by hand) scrolls on its own, and the buttons stay. .ap-pinned-room keeps the end of the
    screen clear of it, and a control reached with Tab is scrolled clear of it. All in shares of the panel, never vh,
    which the size setting's zoom would grow past the panel. */
-html:has(.ap-pinned) { scroll-padding-bottom: calc(var(--ap-pinned-height, 100px) + 8px); }
+html:has(.kept:not([hidden]) .ap-pinned) { scroll-padding-bottom: calc(var(--ap-pinned-height, 100px) + 8px); }
 /* The room takes back the gap the screen's column puts above it (the body's 10px), so it adds the bar's height only. */
 .ap-pinned-room { flex: none; margin-top: -10px; }
 .ap-pinned { position: fixed; left: 0; right: 0; bottom: 0; z-index: 1; display: flex; flex-direction: column; max-width: 420px; min-width: 0; max-height: 60%; margin: 0 auto; overflow-y: auto; background: var(--bg); border-top: 1px solid var(--border); }

@@ -117,9 +117,9 @@ describe('reduce', () => {
       kind: 'offline', review: { pr, latest, stale: true },
     });
     expect(reduce({ ...running, brief, map, stages: withStage([], stage('intake', 'start')) }, { type: 'offline', startedAt: 1234 })).toEqual({
-      kind: 'offline', progress: { pr, brief, map, startedAt: 1234 },
+      kind: 'offline', progress: { pr, brief, map, startedAt: 1234, current: 'Reading the pull request' },
     });
-    expect(reduce(running, { type: 'offline' })).toEqual({ kind: 'offline', progress: { pr, brief: null, map: null, startedAt: null } });
+    expect(reduce(running, { type: 'offline' })).toEqual({ kind: 'offline', progress: { pr, brief: null, map: null, startedAt: null, current: null } });
     const offline: PanelState = { kind: 'offline' };
     expect(reduce(offline, { type: 'offline' })).toBe(offline);
   });

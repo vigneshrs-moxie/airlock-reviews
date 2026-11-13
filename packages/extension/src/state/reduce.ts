@@ -64,6 +64,8 @@ export interface Progress {
   map: ChangeMap | null;
   /** When the panel started the run, or attached to it (milliseconds since 1970); null when not known. */
   startedAt: number | null;
+  /** The step it was on, in words (the one started last, else the last reported); null before the first was reported. */
+  current: string | null;
 }
 
 export type PanelState =
@@ -196,7 +198,8 @@ export function reduce(state: PanelState, action: Action): PanelState {
       if (state.kind === 'review') return { kind: 'offline', review: { pr: state.pr, latest: state.latest, stale: state.stale } };
       if (state.kind === 'ready') return { kind: 'offline', ready: state.pr };
       if (state.kind === 'running') {
-        return { kind: 'offline', progress: { pr: state.pr, brief: state.brief, map: state.map, startedAt: action.startedAt ?? null } };
+        const current = (state.stages.filter((s) => s.status === 'working').at(-1) ?? state.stages.at(-1))?.words ?? null;
+        return { kind: 'offline', progress: { pr: state.pr, brief: state.brief, map: state.map, startedAt: action.startedAt ?? null, current } };
       }
       return { kind: 'offline' };
     case 'unpaired':

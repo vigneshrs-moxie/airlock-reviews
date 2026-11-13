@@ -160,7 +160,8 @@ describe('brief block', () => {
     expect(line?.textContent).toBe('Unclear');
   });
   it('an offline state with a brief and a map shows both', () => {
-    render(<PanelScreen state={{ kind: 'offline', progress: { pr: prSummary(), brief, map, startedAt: 1 } }} dispatch={noop} onOpenSettings={noop} />);
+    render(<PanelScreen state={{ kind: 'offline', progress: { pr: prSummary(), brief, map, startedAt: 1, current: null } }} dispatch={noop} onOpenSettings={noop} />);
+    fireEvent.click(screen.getByRole('button', { name: 'What it has found so far' }));
     expect(screen.getByRole('heading', { name: 'What this does' })).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Read in this order' })).toBeTruthy();
   });
@@ -187,7 +188,8 @@ describe('markup-looking text from the state', () => {
   it('on Offline, in the kept brief and map', () => {
     const b = { whatItDoes: [evil], claims: [{ text: js, verdict: 'unclear' as const, evidence: js }] };
     const m = { cohorts: [{ id: 'c', title: evil, summary: '', neighbours: [], inferredLinks: [], layers: [{ id: 'l', title: js, kind: 'data' as const, files: [evil], dependsOn: [], note: '' }] }], standalone: [], links: [] };
-    render(<PanelScreen state={{ kind: 'offline', progress: { pr, brief: b, map: m, startedAt: null } }} dispatch={noop} onOpenSettings={noop} />);
+    render(<PanelScreen state={{ kind: 'offline', progress: { pr, brief: b, map: m, startedAt: null, current: evil } }} dispatch={noop} onOpenSettings={noop} />);
+    fireEvent.click(screen.getByRole('button', { name: 'What it has found so far' }));
     expect(screen.getAllByText(evil).length).toBeGreaterThan(0);
     noMarkup();
   });

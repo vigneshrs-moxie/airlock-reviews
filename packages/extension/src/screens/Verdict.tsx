@@ -228,8 +228,8 @@ export function Verdict({
   }, [detailId, visible]);
 
   // Opening a finding is announced by the focus on its heading. Leaving it puts focus back on its row when the row is drawn.
-  // Otherwise: from a row (and Previous and Next), Also found is opened when the row is in it; from the dropped sheet, on
-  // More, Dropped; else the Findings tab, or the verdict when no finding is open.
+  // Otherwise: from a row (and Previous and Next) or a note on GitHub, Also found is opened when the row is in it; from the
+  // dropped sheet, on More, Dropped; else the Findings tab, or the verdict when no finding is open.
   useEffect(() => {
     if (detailId !== null) { shownDetail.current = detailId; return; }
     const id = shownDetail.current;
@@ -243,7 +243,7 @@ export function Verdict({
       return;
     }
     const from = opener.current;
-    if (from === 'row' && tab === 'findings' && lists.also.some((f) => f.id === id) && !folds.has('also')) {
+    if ((from === 'row' || from === 'note') && tab === 'findings' && lists.also.some((f) => f.id === id) && !folds.has('also')) {
       setFolds((was) => toggled(was, 'also'));
       return;
     }
@@ -356,7 +356,7 @@ export function Verdict({
   const limits = doc.limits ?? [];
   const aboutNotes = doc.previous === undefined ? (doc.notes ?? []) : [];
   const aboutCount = [
-    ...(limits.length > 0 ? [`${limits.length} not shown to the reviewer`] : []),
+    ...(limits.length > 0 ? [`${limits.length} ${limits.length === 1 ? 'thing' : 'things'} the reviewer did not see`] : []),
     ...(aboutNotes.length > 0 ? [`${aboutNotes.length} ${aboutNotes.length === 1 ? 'note' : 'notes'}`] : []),
   ].join(', ');
   const tabs: TabItem<Tab>[] = [
@@ -392,9 +392,9 @@ export function Verdict({
       <Tabs label="The review" items={tabs} chosen={tab} onChoose={setTab}>
         {tab === 'findings' && (
           <>
+            {/* The strip says "No open findings. n dismissed." once; the tab offers the way to them. */}
             {empty && lists.dismissed.length > 0 && (
               <div className="ap-group">
-                <p>{`No open findings. ${lists.dismissed.length} dismissed.`}</p>
                 <button type="button" className="btn ap-start" onClick={showDismissed}>Show dismissed</button>
               </div>
             )}
