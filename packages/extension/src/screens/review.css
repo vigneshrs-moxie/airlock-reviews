@@ -55,3 +55,6 @@
 @container (max-width: 300px) {
   .ap-pinned-review .ap-bar > .btn, .ap-pinned-review .ap-bar-main { flex: 1 0 100%; }
 }
+
+/* The dismissed count among the verdict's chips: quieter than a kind. */
+.ap-chip.ap-chip-quiet { color: var(--muted); border-style: dashed; font-weight: 400; }

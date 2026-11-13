@@ -1,4 +1,4 @@
-import { verdictWords, type Finding, type ReviewDocument, type Severity } from '@airlock/shared';
+import { verdictWords, type Finding, type ReviewDocument, type Severity, type VerdictLabel } from '@airlock/shared';
 import type { Ref } from 'react';
 import type { NotesLine } from '../state/notes';
 import { depthWord } from './words';
@@ -28,6 +28,18 @@ export function kindChips(open: readonly Finding[]): Chip[] {
   });
 }
 
+/** The engine's labels that approve the pull request: the only ones whose verdict may read as clear (green). */
+const APPROVING = new Set<VerdictLabel>(['approve', 'ready-for-pr2']);
+
+/**
+ * Whether the verdict may be shown as clear: an approving label, nothing open, and nothing that says the review saw less
+ * than all of the change (no stage error, no limit, no note) on the commit the pull request is at (not stale).
+ */
+export function readsClear(doc: Pick<ReviewDocument, 'verdict' | 'stageErrors' | 'limits' | 'notes'>, open: readonly Finding[], stale: boolean): boolean {
+  return APPROVING.has(doc.verdict.label) && open.length === 0 && doc.stageErrors.length === 0
+    && (doc.limits ?? []).length === 0 && (doc.notes ?? []).length === 0 && !stale;
+}
+
 /** What a re-review changed: fixed, still open, new and moved, each left out when it is none. */
 export function sinceChips(open: readonly Finding[], fixed: number): Chip[] {
   const count = (status: Finding['status']): number => open.filter((f) => f.status === status).length;
@@ -48,14 +60,19 @@ function Chips({ chips, label }: { chips: readonly Chip[]; label: string }) {
 }
 
 /**
- * The card at the top of a finished review: the verdict in words, coloured by the worst open kind; its sentence; the open
- * findings counted by kind; on a re-review what changed since the last one and the range it covered; when and how deep it
- * was reviewed; and what the notes on GitHub's page did, with its Reload button.
+ * The card at the top of a finished review: the verdict in words (the engine's), coloured by the worst open kind, green
+ * only when it reads clear (`readsClear`); its sentence; the open findings counted by kind, and how many were dismissed;
+ * on a re-review what changed since the last one, the range it covered and its notes; when and how deep it was reviewed;
+ * and what the notes on GitHub's page did, with its Reload button.
  */
-export function VerdictStrip({ doc, open, empty, range, notesLine, onReloadNotes, headingRef }: {
+export function VerdictStrip({ doc, open, dismissed, stale, empty, range, notesLine, onReloadNotes, headingRef }: {
   doc: ReviewDocument;
   /** The open findings: top and also found, none dismissed. */
   open: readonly Finding[];
+  /** How many of the review's findings are dismissed: a quiet chip, so the engine's sentence (which counts them) adds up. */
+  dismissed: number;
+  /** The pull request has moved on since this review. */
+  stale: boolean;
   /** The sentence for a review with no open finding; null when there are some. */
   empty: string | null;
   /** The line saying what a re-review covered; null for none. */
@@ -65,14 +82,16 @@ export function VerdictStrip({ doc, open, empty, range, notesLine, onReloadNotes
   headingRef: Ref<HTMLHeadingElement>;
 }) {
   const worst = worstKind(open);
-  const tone = worst !== null ? `sev-${worst}` : doc.verdict.label === 'incomplete' ? '' : 'sev-ok';
-  const kinds = kindChips(open);
+  const tone = worst !== null ? `sev-${worst}` : readsClear(doc, open, stale) ? 'sev-ok' : '';
+  const kinds = [...kindChips(open), ...(dismissed > 0 ? [{ text: `${dismissed} dismissed`, tone: 'ap-chip-quiet' }] : [])];
+  // A re-review's notes say what it covered, so they stay in the strip; a first review's are in About this review.
+  const notes = doc.previous === undefined ? [] : (doc.notes ?? []);
   const since = doc.previous === undefined ? [] : sinceChips(open, doc.fixed?.length ?? 0);
   return (
     <section className="card verdict ap-verdict">
       <h2 className={`ap-vword ${tone}`} tabIndex={-1} data-focus="verdict" ref={headingRef}>{verdictWords(doc.verdict.label, doc.pr.stage)}</h2>
       <p className="ap-headline">{doc.verdict.sentence}</p>
-      {kinds.length > 0 && <Chips chips={kinds} label="Open findings" />}
+      {kinds.length > 0 && <Chips chips={kinds} label="Finding counts" />}
       {empty !== null && <p>{empty}</p>}
       {since.length > 0 && (
         <>
@@ -81,6 +100,7 @@ export function VerdictStrip({ doc, open, empty, range, notesLine, onReloadNotes
         </>
       )}
       {range !== null && <p>{range}</p>}
+      {notes.map((note, i) => <p key={i}>{note}</p>)}
       <p className="muted">{`Reviewed at ${doc.pr.headSha.slice(0, 7)} · ${depthWord(doc.depth)}`}</p>
       {notesLine !== null && <p>{notesLine.text}</p>}
       {notesLine?.reload === true && (

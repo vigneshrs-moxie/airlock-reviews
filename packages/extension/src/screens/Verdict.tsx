@@ -46,7 +46,9 @@ export interface VerdictProps {
 export interface OpenFinding { id: string; seq: number }
 
 type Tab = 'findings' | 'change' | 'more';
-type Fold = 'also' | 'fixed' | ChangeFold | MoreFold;
+type Fold = 'about' | 'also' | 'fixed' | ChangeFold | MoreFold;
+/** What opened the finding on screen: a row (or Previous and Next from one), the dropped sheet, or a note on GitHub. */
+type Opener = 'row' | 'dropped' | 'note';
 
 const noDismiss = (): void => undefined;
 const noPost = (): void => undefined;
@@ -114,6 +116,11 @@ export function Verdict({
   const selectButton = useRef<HTMLButtonElement>(null);
   const nodes = useRef(new Map<string, HTMLButtonElement>());
   const shownDetail = useRef<string | null>(null);
+  const opener = useRef<Opener>('row');
+  /** True after Show dismissed: focus goes to the Dismissed fold on the More tab. */
+  const toDismissed = useRef(false);
+  const visibleNow = useRef(visible);
+  visibleNow.current = visible;
   /** Where the panel was scrolled when a finding was opened, put back when the review is shown again. */
   const scrolledTo = useRef<number | null>(null);
   const verdictHeading = useRef<HTMLHeadingElement>(null);
@@ -151,9 +158,15 @@ export function Verdict({
     );
   };
 
-  /** Opens a finding, keeping where the review was scrolled to. */
-  const open = useCallback((id: string): void => {
-    if (shownDetail.current === null) scrolledTo.current = scroller().scrollTop;
+  /**
+   * Opens a finding, keeping where the review was scrolled to, and what opened it. Nothing is kept while the review is out
+   * of sight (Settings open): what scrolls then is Settings.
+   */
+  const open = useCallback((id: string, from: Opener = 'row'): void => {
+    if (shownDetail.current === null) {
+      opener.current = from;
+      scrolledTo.current = visibleNow.current ? scroller().scrollTop : null;
+    }
     setOpenId(id);
   }, []);
 
@@ -185,8 +198,13 @@ export function Verdict({
   useEffect(() => {
     if (openFinding === null || openFinding.seq === askedOpen.current) return;
     askedOpen.current = openFinding.seq;
-    if (lists.order.some((f) => f.id === openFinding.id)) open(openFinding.id);
-  }, [openFinding, lists.order, open]);
+    if (!lists.order.some((f) => f.id === openFinding.id)) return;
+    // The finding is one of the Findings tab's: Back returns there, at its top when another tab was chosen.
+    const fresh = shownDetail.current === null;
+    open(openFinding.id, 'note');
+    if (fresh && tab !== 'findings' && scrolledTo.current !== null) scrolledTo.current = 0;
+    setTab('findings');
+  }, [openFinding, lists.order, open, tab]);
 
   // The notes line is said when it changes, not when the notes are sent again with the same counts.
   const notesText = notesLine?.text ?? null;
@@ -207,9 +225,9 @@ export function Verdict({
     scrolledTo.current = null;
   }, [detailId, visible]);
 
-  // Opening a finding is announced by the focus on its heading. Leaving it puts focus back on the row that opened it (opening
-  // Also found when the row is in it), or on the Findings tab, or the verdict, when that finding is gone; on the More tab,
-  // from a finding the dropped sheet showed, on Dropped.
+  // Opening a finding is announced by the focus on its heading. Leaving it puts focus back on its row when the row is drawn.
+  // Otherwise: from a row (and Previous and Next), Also found is opened when the row is in it; from the dropped sheet, on
+  // More, Dropped; else the Findings tab, or the verdict when no finding is open.
   useEffect(() => {
     if (detailId !== null) { shownDetail.current = detailId; return; }
     const id = shownDetail.current;
@@ -222,8 +240,12 @@ export function Verdict({
       shownDetail.current = null;
       return;
     }
-    if (tab === 'findings' && lists.also.some((f) => f.id === id) && !folds.has('also')) { setFolds((was) => toggled(was, 'also')); return; }
-    ((tab === 'more' ? droppedButton.current : null) ?? findingsTab() ?? verdictHeading.current)?.focus();
+    const from = opener.current;
+    if (from === 'row' && tab === 'findings' && lists.also.some((f) => f.id === id) && !folds.has('also')) {
+      setFolds((was) => toggled(was, 'also'));
+      return;
+    }
+    ((from === 'dropped' && tab === 'more' ? droppedButton.current : null) ?? findingsTab() ?? verdictHeading.current)?.focus();
     shownDetail.current = null;
   }, [detailId, folds, lists, visible, tab]);
 
@@ -263,11 +285,22 @@ export function Verdict({
   useEffect(() => { if (allDismissed) setFolds((was) => (was.has('dismissed') ? was : toggled(was, 'dismissed'))); }, [allDismissed]);
   // With nothing open there is nothing to select.
   useEffect(() => { if (empty) setSelecting(false); }, [empty]);
+  // Show dismissed: the More tab is chosen with Dismissed open, and focus goes to that fold.
+  useEffect(() => {
+    if (!toDismissed.current || tab !== 'more') return;
+    toDismissed.current = false;
+    document.querySelector<HTMLElement>('[data-fold="dismissed"]')?.focus();
+  }, [tab]);
+  const showDismissed = (): void => {
+    toDismissed.current = true;
+    setFolds((was) => (was.has('dismissed') ? was : toggled(was, 'dismissed')));
+    setTab('more');
+  };
 
   const fold = (key: Fold): void => setFolds((was) => toggled(was, key));
   const closeSheet = useCallback((): void => setSheet(false), []);
   const shownIds = useMemo(() => new Set(lists.order.map((f) => f.id)), [lists.order]);
-  const showMerged = useCallback((id: string): void => { setSheet(false); open(id); }, [open]);
+  const showMerged = useCallback((id: string): void => { setSheet(false); open(id, 'dropped'); }, [open]);
   const restore = (d: Dismissal): void => dispatch({ type: 'restore', fingerprint: d.fingerprint });
   const promptFor = (findings: readonly Finding[]) => (): string => fixPrompt(doc, [...findings]);
 
@@ -316,6 +349,14 @@ export function Verdict({
     : unfinished ? 'The review did not finish, so nothing here is cleared.'
       : lists.dismissed.length > 0 ? `No open findings. ${lists.dismissed.length} dismissed.` : 'No findings.';
   const toggle = (f: Finding): void => setSelected((was) => toggled(was, f.id));
+  // What could make a clean-looking verdict less than it seems, in sight before any tab: what the reviewer was not shown,
+  // and on a first review its notes (a re-review's notes are printed in the strip).
+  const limits = doc.limits ?? [];
+  const aboutNotes = doc.previous === undefined ? (doc.notes ?? []) : [];
+  const aboutCount = [
+    ...(limits.length > 0 ? [`${limits.length} not shown to the reviewer`] : []),
+    ...(aboutNotes.length > 0 ? [`${aboutNotes.length} ${aboutNotes.length === 1 ? 'note' : 'notes'}`] : []),
+  ].join(', ');
   const tabs: TabItem<Tab>[] = [
     { key: 'findings', label: `Findings · ${lists.order.length}`, ...(empty ? {} : { focusName: 'findings' }) },
     { key: 'change', label: 'The change' },
@@ -325,14 +366,36 @@ export function Verdict({
   return (
     <>
       <VerdictStrip
-        doc={doc} open={lists.order} empty={emptySentence} range={rangeLine(doc)} notesLine={notesLine} onReloadNotes={onReloadNotes}
-        headingRef={verdictHeading}
+        doc={doc} open={lists.order} dismissed={lists.dismissed.length} stale={stale} empty={emptySentence} range={rangeLine(doc)}
+        notesLine={notesLine} onReloadNotes={onReloadNotes} headingRef={verdictHeading}
       />
+      {aboutCount !== '' && (
+        <Collapsible title="About this review" count={aboutCount} open={folds.has('about')} onToggle={() => fold('about')}>
+          {limits.length > 0 && (
+            <div className="ap-part">
+              <h4 className="label">Not shown to the reviewer</h4>
+              <ul className="plain ap-points">{limits.map((line, i) => <li key={i}>{line}</li>)}</ul>
+            </div>
+          )}
+          {aboutNotes.length > 0 && (
+            <div className="ap-part">
+              <h4 className="label">Notes</h4>
+              <ul className="plain ap-points">{aboutNotes.map((line, i) => <li key={i}>{line}</li>)}</ul>
+            </div>
+          )}
+        </Collapsible>
+      )}
       {banners}
       <StageErrors errors={doc.stageErrors} map={doc.map} />
       <Tabs label="The review" items={tabs} chosen={tab} onChoose={setTab}>
         {tab === 'findings' && (
           <>
+            {empty && lists.dismissed.length > 0 && (
+              <div className="ap-group">
+                <p>{`No open findings. ${lists.dismissed.length} dismissed.`}</p>
+                <button type="button" className="btn ap-start" onClick={showDismissed}>Show dismissed</button>
+              </div>
+            )}
             {lists.top.length > 0 && (
               <ol className="plain ap-list" aria-label="Top findings">
                 {lists.top.map((f) => (

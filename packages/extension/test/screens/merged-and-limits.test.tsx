@@ -30,74 +30,64 @@ const follows = (a: HTMLElement, b: HTMLElement) => Boolean(a.compareDocumentPos
 describe('what the reviewer was not shown', () => {
   const LIMITS = ['The diff of src/big.ts was cut at 4,000 lines.', 'The rule file docs/rules.md was left out: <b>too long</b>.'];
 
-  it('is a collapsed fold on the More tab, after Review again, listing each limit when opened', () => {
+  it('is listed in the closed About this review fold, under the strip and before the tabs, with no tab pressed', () => {
     show([finding(1)], {
       doc: { limits: LIMITS, stageErrors: [{ stage: 'lenses', cohortId: null, message: 'Timed out' }] },
     });
-    expect(queryFold('Not shown to the reviewer')).toBeNull();
-    chooseTab('More');
-    const toggle = fold('Not shown to the reviewer');
-    expect(toggle.textContent).toBe('Not shown to the reviewer 2');
+    const toggle = fold('About this review');
+    expect(toggle.textContent).toBe('About this review 2 not shown to the reviewer');
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByText(LIMITS[0]!)).toBeNull();
-    expect(follows(heading('Stage errors'), toggle)).toBe(true);
-    expect(follows(button('Review again'), toggle)).toBe(true);
+    expect(follows(toggle, heading('Stage errors'))).toBe(true);
+    expect(follows(toggle, screen.getByRole('tablist'))).toBe(true);
     fireEvent.click(toggle);
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(heading('Not shown to the reviewer')).toBeTruthy();
     expect(screen.getByText(LIMITS[0]!)).toBeTruthy();
     // Text from the document is only ever text.
     expect(screen.getByText(LIMITS[1]!)).toBeTruthy();
     expect(document.querySelector('b')).toBeNull();
   });
-  it('is the first fold on the More tab', () => {
+  it('is not on the More tab', () => {
     show([finding(1)], { doc: { limits: [LIMITS[0]!], notes: ['A note.'] } });
     chooseTab('More');
-    expect(follows(fold('Not shown to the reviewer'), fold('Notes from the review'))).toBe(true);
+    expect(queryFold('Not shown to the reviewer')).toBeNull();
+    expect(queryFold('Notes from the review')).toBeNull();
   });
   it('is absent when the list is empty or missing', () => {
     show([finding(1)], { doc: { limits: [] } });
-    chooseTab('More');
-    expect(queryFold('Not shown to the reviewer')).toBeNull();
+    expect(queryFold('About this review')).toBeNull();
     cleanup();
     show([finding(1)]);
-    chooseTab('More');
-    expect(queryFold('Not shown to the reviewer')).toBeNull();
+    expect(queryFold('About this review')).toBeNull();
   });
 });
 
 describe('the review\'s notes (second round)', () => {
   const NOTES = ['The kit was a day old.', 'Two files were <img src=x onerror=alert(1)> skipped [click](javascript:alert(1)).'];
 
-  it('is a collapsed fold Notes from the review directly after Not shown to the reviewer, one item per note, as text', () => {
+  it('on a first review, are listed in About this review after what was not shown, one item per note, as text', () => {
     show([finding(1)], { doc: { limits: ['The diff was cut.'], notes: NOTES } });
-    chooseTab('More');
-    const toggle = fold('Notes from the review');
-    expect(toggle.textContent).toBe('Notes from the review 2');
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    const toggle = fold('About this review');
+    expect(toggle.textContent).toBe('About this review 1 not shown to the reviewer, 2 notes');
     expect(screen.queryByText(NOTES[0]!)).toBeNull();
-    const limits = fold('Not shown to the reviewer');
-    expect(follows(limits, toggle)).toBe(true);
-    // Directly after: no other section between the two.
-    expect(limits.closest('section')?.nextElementSibling).toBe(toggle.closest('section'));
     fireEvent.click(toggle);
-    const items = within(toggle.closest('section')!).getAllByRole('listitem').map((li) => li.textContent);
-    expect(items).toEqual(NOTES);
+    const section = toggle.closest('section')!;
+    expect(within(section).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['The diff was cut.', ...NOTES]);
+    expect(follows(heading('Not shown to the reviewer'), heading('Notes'))).toBe(true);
     expect(document.querySelector('img')).toBeNull();
     expect(document.querySelector('a')).toBeNull();
   });
-  it('follows Review again when nothing was left out', () => {
+  it('alone make the fold when nothing was left out', () => {
     show([finding(1)], { doc: { notes: [NOTES[0]!] } });
-    chooseTab('More');
-    expect(follows(button('Review again'), fold('Notes from the review'))).toBe(true);
+    expect(fold('About this review').textContent).toBe('About this review 1 note');
   });
-  it('is absent when there are no notes or the field is missing', () => {
+  it('make no fold when there are none or the field is missing', () => {
     show([finding(1)], { doc: { notes: [] } });
-    chooseTab('More');
-    expect(queryButton(/^Notes/)).toBeNull();
+    expect(queryFold('About this review')).toBeNull();
     cleanup();
     show([finding(1)]);
-    chooseTab('More');
-    expect(queryButton(/^Notes/)).toBeNull();
+    expect(queryFold('About this review')).toBeNull();
   });
 });
 

@@ -312,16 +312,14 @@ test('4. the verdict: its words and sentence, three top findings in rank order, 
   for (const f of [...top, alsoFound[0]!]) await expect(noteRow(f.id)).toHaveCount(1);
   await expect(noteRow(alsoFound[1]!.id)).toHaveCount(0);
   await expect(verdictLines().getByText('4 shown, 1 waiting for their lines to load')).toBeVisible();
-  await reviewTab('More').click();
-  await expect(foldButton('Not shown to the reviewer')).toHaveAttribute('aria-expanded', 'false');
-  const notes = panel.getByRole('button', { name: 'Notes from the review 1' });
+  // What the reviewer was not shown and the review's note, in one closed fold above the tabs.
+  const notes = panel.getByRole('button', { name: 'About this review 1 not shown to the reviewer, 1 note' });
   await expect(notes).toHaveAttribute('aria-expanded', 'false');
   await expect(panel.getByText(NOTE, { exact: true })).toHaveCount(0);
   await notes.click();
   await expect(panel.getByText(NOTE, { exact: true })).toBeVisible();
   await notes.click();
   await expect(notes).toHaveAttribute('aria-expanded', 'false');
-  await reviewTab('Findings').click();
 
   const fold = foldButton('Also found');
   await expect(fold).toHaveAttribute('aria-expanded', 'false');
@@ -801,10 +799,7 @@ test('18. a push: the banner, Review the push starts with since last, and the re
 
   const line = `Review of the push ${'b'.repeat(7)} to ${'d'.repeat(7)}`;
   await expect(panel.getByText(line)).toBeVisible();
-  await reviewTab('More').click();
-  await foldButton('Notes from the review').click();
-  await expect(panel.getByText(PUSH_NOTE)).toBeVisible();
-  await reviewTab('Findings').click();
+  await expect(verdictLines().getByText(PUSH_NOTE)).toBeVisible();
   await expect(panel.getByText('New commits since this review.')).toHaveCount(0);
   await expect(cards()).toHaveCount(2);
   // Neither finding's file is on the fixture page: both notes wait for their lines.
@@ -959,7 +954,7 @@ test('21. a merge review says it reviewed what was changed by hand only when its
     11: { heading: null, line: null },
     12: { heading: null, line: `Review of the merge pushed since ${'f'.repeat(7)}: only what was changed by hand was reviewed.` },
     13: { heading: null, line: 'The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.' },
-    // A pull request of only a merge reviewed again in full: no line, its note under More, and no merge sentence.
+    // A pull request of only a merge reviewed again in full: its note is the only line, and no merge sentence.
     14: { heading: null, line: null, note: EVERYTHING_NOTE },
   };
   for (const { number } of MERGE_PULLS) {
@@ -978,12 +973,7 @@ test('21. a merge review says it reviewed what was changed by hand only when its
     if (want.line !== null) await expect(panel.getByText(want.line, { exact: true })).toBeVisible();
     const count = (want.heading?.includes('by hand') === true ? 1 : 0) + (want.line?.includes('by hand') === true ? 1 : 0);
     await expect(sentences).toHaveCount(count);
-    if (want.note !== undefined) {
-      await reviewTab('More').click();
-      await foldButton('Notes from the review').click();
-      await expect(panel.getByText(want.note, { exact: true })).toBeVisible();
-      await expect(sentences).toHaveCount(0);
-    }
+    if (want.note !== undefined) await expect(verdictLines().getByText(want.note, { exact: true })).toBeVisible();
   }
 });
 

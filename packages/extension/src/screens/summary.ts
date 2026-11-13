@@ -32,10 +32,25 @@ export function shortTitle(finding: Pick<Finding, 'title' | 'short'>): string {
   return present(finding.short) ? finding.short.trim() : cutAtWord(finding.title, SHORT_TITLE_MAX);
 }
 
-/** The first sentence of `text`: up to the first `.`, `!` or `?` followed by a space or the end; the whole text when there is none. */
+/** Words whose full stop does not end a sentence: abbreviations, written without their last full stop. */
+const ABBREVIATIONS = new Set(['e.g', 'i.e', 'vs', 'etc']);
+
+/** Whether the full stop at `at` ends an abbreviation ("e.g.", "vs.") or a single capital letter ("J."), not a sentence. */
+function abbreviationAt(text: string, at: number): boolean {
+  const word = text.slice(0, at).split(' ').at(-1)?.replace(/^[("'“‘[]+/u, '') ?? '';
+  return ABBREVIATIONS.has(word.toLowerCase()) || /^\p{Lu}$/u.test(word);
+}
+
+/**
+ * The first sentence of `text`: up to the first `.`, `!` or `?` followed by a space or the end, passing over the full stop
+ * of "e.g.", "i.e.", "vs.", "etc." and a single capital letter; the whole text when there is none.
+ */
 function firstSentence(text: string): string {
-  const end = /[.!?](?=\s|$)/u.exec(text);
-  return end === null ? text : text.slice(0, end.index + 1);
+  for (const end of text.matchAll(/[.!?](?=\s|$)/gu)) {
+    if (end[0] === '.' && abbreviationAt(text, end.index)) continue;
+    return text.slice(0, end.index + 1);
+  }
+  return text;
 }
 
 /** The finding in one paragraph: the summary stage's `gist`, else the first sentence of `happens`, at most 200 characters. */

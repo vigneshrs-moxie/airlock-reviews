@@ -1,12 +1,27 @@
 import { POST_MAX_ITEMS, type Finding } from '@airlock/shared';
 import { useId, type Ref } from 'react';
 import type { Timers } from '../client/timers';
-import { CopyButton } from './CopyButton';
+import { RefusedCopy, useCopy } from './CopyButton';
+import { COPIED_PROMPT } from './FindingDetail';
 import { Pinned } from './Pinned';
 import { ALL_POSTED, Reason, TOO_MANY, WAIT } from './PostedMark';
 
 /** The bar's label for one prompt covering every open Block and Fix. */
 export const fixesLabel = (n: number): string => `Copy fix prompt for the ${n} ${n === 1 ? 'fix' : 'fixes'}`;
+
+/**
+ * A fix prompt's Copy button in the bar: it says Copied for two seconds and announces where the prompt goes, as the
+ * finding screen's does. A refused copy shows the prompt to copy by hand, with Close.
+ */
+function CopyPrompt({ text, label, timers }: { text: () => string; label: string; timers?: Timers | undefined }) {
+  const { copied, shown, copy, putAway, box } = useCopy(text, timers, COPIED_PROMPT);
+  return (
+    <>
+      <button type="button" className="btn small" onClick={copy}>{copied ? 'Copied' : label}</button>
+      {shown !== null && <RefusedCopy shown={shown} box={box} onClose={putAway} />}
+    </>
+  );
+}
 
 /**
  * Why Comment on GitHub cannot be pressed for the ticked findings; null when it can. The rules of the old Post selected:
@@ -41,13 +56,12 @@ export function ReviewBar({ selecting, fixes, ticked, postable, blocked, busy, p
   timers?: Timers | undefined;
 }) {
   const whyId = useId();
-  const t = timers ? { timers } : {};
   if (!selecting) {
     return (
       <Pinned name="review" label="Findings actions">
         {fixes.length > 0 && (
           <div className="ap-bar-main ap-primary">
-            <CopyButton key={fixes.map((f) => f.id).join()} text={prompt(fixes)} label={fixesLabel(fixes.length)} {...t} />
+            <CopyPrompt key={fixes.map((f) => f.id).join()} text={prompt(fixes)} label={fixesLabel(fixes.length)} timers={timers} />
           </div>
         )}
         <button type="button" className="btn" ref={selectRef} onClick={onSelect}>Select</button>
@@ -61,7 +75,7 @@ export function ReviewBar({ selecting, fixes, ticked, postable, blocked, busy, p
       <div className="ap-bar-main">
         {ticked.length === 0
           ? <button type="button" className="btn" disabled>Copy fix prompt (0)</button>
-          : <CopyButton key={ticked.map((f) => f.id).join()} text={prompt(ticked)} label={`Copy fix prompt (${ticked.length})`} {...t} />}
+          : <CopyPrompt key={ticked.map((f) => f.id).join()} text={prompt(ticked)} label={`Copy fix prompt (${ticked.length})`} timers={timers} />}
       </div>
       <button
         type="button" className="btn primary ap-bar-main" data-post-selected disabled={disabled}
