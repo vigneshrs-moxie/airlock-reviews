@@ -62,8 +62,15 @@ export async function otherPages(context: BrowserContext, via: Page, url: string
     if (reply.id !== undefined) replies.get(reply.id)?.(reply.result?.result?.value);
   });
   let next = 0;
-  return Promise.all(targetInfos.filter((t) => t.type === 'page' && t.url === url && !own.includes(t.targetId)).map(async (t) => {
-    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: t.targetId, flatten: false }) as { sessionId: string };
+  const pages = await Promise.all(targetInfos.filter((t) => t.type === 'page' && t.url === url && !own.includes(t.targetId)).map(async (t) => {
+    // A page that closed between the listing and now (a side panel just closed) is no longer one of them.
+    const attached = await cdp.send('Target.attachToTarget', { targetId: t.targetId, flatten: false })
+      .then((r) => r as { sessionId: string }, (error: unknown) => {
+        if (error instanceof Error && error.message.includes('No target with given id')) return null;
+        throw error;
+      });
+    if (attached === null) return null;
+    const { sessionId } = attached;
     return {
       evaluate: (expression: string) => new Promise<unknown>((resolve) => {
         const id = ++next;
@@ -75,4 +82,5 @@ export async function otherPages(context: BrowserContext, via: Page, url: string
       close: async () => { await cdp.send('Target.closeTarget', { targetId: t.targetId }); },
     };
   }));
+  return pages.filter((p): p is OtherPage => p !== null);
 }
