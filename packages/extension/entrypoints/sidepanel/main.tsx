@@ -11,6 +11,7 @@ import '../../src/screens/shared.css';
 import '../../src/screens/settings.css';
 import '../../src/screens/review.css';
 import '../../src/screens/finding.css';
+import '../../src/screens/start.css';
 
 // One store, one tab watcher and one set of notes, so the panel, its jumps and its notes read the same tab.
 const settings = browserSettings();

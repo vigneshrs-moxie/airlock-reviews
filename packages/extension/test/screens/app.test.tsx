@@ -32,7 +32,7 @@ describe('App', () => {
     expect(f.start).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Looking at this pull request…')).toBeTruthy();
     f.send({ kind: 'ready', pr: prSummary() });
-    screen.getByRole('button', { name: 'Review' }).click();
+    screen.getByRole('button', { name: 'Review this pull request' }).click();
     expect(f.dispatch).toHaveBeenCalledWith({ type: 'start', depth: 'quick' });
     f.send({ kind: 'offline' });
     expect(screen.getByText('Not running')).toBeTruthy();

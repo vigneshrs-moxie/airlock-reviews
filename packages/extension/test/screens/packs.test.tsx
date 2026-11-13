@@ -102,9 +102,9 @@ describe('Settings, Packs and Service (moved from the Packs and settings screen)
     show({ kind: 'ready', pr: prSummary() }, { dispatch });
     const button = screen.getByRole('button', { name: 'Settings' });
     await openSettings();
-    expect(screen.queryByRole('button', { name: 'Review' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Review this pull request' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
-    expect(screen.getByRole('button', { name: 'Review' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review this pull request' })).toBeTruthy();
     expect(document.activeElement).toBe(button);
     expect(dispatch).not.toHaveBeenCalled();
   });
@@ -249,7 +249,7 @@ describe('the Packs screen (fix round 1)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     await act(async () => { resolve(STATUS); });
     expect(screen.queryByText('Claude: found')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Review' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review this pull request' })).toBeTruthy();
   });
 
   it('disables Check again while a fetch is in flight', async () => {
