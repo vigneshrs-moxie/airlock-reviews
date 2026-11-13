@@ -123,7 +123,8 @@ async function activate(address: string): Promise<void> {
 const tab = (name: 'Findings' | 'The change' | 'More') => panel.getByRole('tab', { name: name === 'Findings' ? /^Findings · / : name });
 const rows = () => panel.locator('.finding-card');
 const strip = () => panel.locator('.ap-verdict');
-const bar = () => panel.locator('.ap-bar');
+/** The review's own pinned bar (a finding's actions are pinned the same way, in .ap-pinned-finding). */
+const bar = () => panel.locator('.ap-pinned-review .ap-bar');
 const scrollTop = () => panel.evaluate(() => (document.scrollingElement ?? document.documentElement).scrollTop);
 /** Nothing in the panel is wider than the panel: no sideways scrolling. */
 const noSideways = async () => {
@@ -138,6 +139,11 @@ test('1. paired, the review opens on its verdict strip, the tabs and one row per
   panel = await context.newPage();
   await panel.setViewportSize({ width: WIDTH, height: 640 });
   await panel.goto(`${ORIGIN}/sidepanel.html`);
+  // The tour already seen, so it does not open over the first review (settings.spec.ts and the flow show it).
+  await panel.evaluate(async () => {
+    const chrome = (globalThis as unknown as { chrome: typeof browser }).chrome;
+    await chrome.storage.local.set({ 'airlock.tourSeen': true });
+  });
   const cdp = await context.newCDPSession(panel);
   for (const name of ['clipboard-read', 'clipboard-write']) {
     await cdp.send('Browser.setPermission', { origin: ORIGIN, permission: { name }, setting: 'granted' });
@@ -219,7 +225,8 @@ test('4. the tabs move with the arrow keys, keep their place while a finding is 
   // From the dropped sheet on More, to the finding it was merged into, and Back: More again, focus on Dropped.
   await panel.getByRole('button', { name: 'Dropped: 1' }).click();
   await panel.getByRole('dialog').getByRole('button', { name: 'Show the finding it was merged into' }).click();
-  await expect(panel.getByRole('heading', { name: LONG })).toBeVisible();
+  // The finding is headed by its title cut at a word; the whole title is the first line of What happens.
+  await expect(panel.getByRole('heading', { name: 'The totals module rounds each line before adding them, so…' })).toBeVisible();
   await panel.getByRole('button', { name: 'Back to the review' }).click();
   await expect(tab('More')).toHaveAttribute('aria-selected', 'true');
   await expect(panel.getByRole('button', { name: 'Dropped: 1' })).toBeFocused();
