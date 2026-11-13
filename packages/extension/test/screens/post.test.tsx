@@ -67,6 +67,16 @@ function previewed(findings: Finding[] = [finding(1)], opts: ReviewOptions = {},
 }
 
 describe('the post sheet', () => {
+  it('a second Comment on GitHub while a comment draft is kept does nothing: no new preview, the draft as it was', () => {
+    const m = previewed([finding(1), finding(2)]);
+    type('Comment 1', 'Typed by hand.');
+    const calls = m.dispatch.mock.calls.length;
+    // Reached behind the sheet, as no person can: the guard does not rely on the sheet covering the screen.
+    fireEvent.click(document.querySelector<HTMLButtonElement>('[data-post-for="c_00000001"]')!);
+    expect(m.dispatch.mock.calls.length).toBe(calls);
+    expect(field('Comment 1').value).toBe('Typed by hand.');
+    expect(dialog().getByText('Where it goes')).toBeTruthy();
+  });
   it('Comment on GitHub opens the sheet with the service preview for that finding', () => {
     const f = finding(1);
     const m = mount([f, finding(2)]);

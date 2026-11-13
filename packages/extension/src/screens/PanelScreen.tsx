@@ -196,8 +196,10 @@ export function PanelScreen({
   postDraftRef.current = postDraft;
   const postClosing = useRef<PostDraft | null>(null);
   const closePost = useCallback((): void => { postClosing.current = postDraftRef.current; setPostDraft(null); }, []);
+  // A kept comment draft is never replaced: a second Comment on GitHub does nothing until that sheet is closed (today the
+  // sheet covering the screen is what stops it; this does not rely on that).
   const startPost = (findings: Finding[], opener: string): void => {
-    if (state.kind !== 'review' || findings.length === 0) return;
+    if (state.kind !== 'review' || findings.length === 0 || postDraftRef.current !== null) return;
     const { pr, latest } = state;
     const fingerprints = findings.map((f) => f.fingerprint);
     const ticket = nextTicket();
