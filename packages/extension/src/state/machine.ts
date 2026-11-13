@@ -311,9 +311,9 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
    * shown only once it is at least as long, so a re-attach never flickers. A stream that broke at the network level
    * is followed by one hello: no answer means offline (the retry then reloads); an answer means re-attach.
    */
-  const follow = async (g: number, pr: PrSummary, runId: string, startedAt: number): Promise<void> => {
+  const follow = async (g: number, pr: PrSummary, runId: string, startedAt: number, depth?: Depth): Promise<void> => {
     const signal = live.signal;
-    apply({ type: 'attached', pr });
+    apply({ type: 'attached', pr, ...(depth === undefined ? {} : { depth }) });
     let best = 0;
     let inARow = 0;
     let inAll = 0;
@@ -558,7 +558,8 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     const startedAt = now();
     const reply = await client.start({ repo: pr.repo, number: pr.number, depth, ...(packIds === undefined ? {} : { packIds }), ...(since === undefined ? {} : { since }) });
     if (!current(g)) return;
-    void follow(g, pr, reply.runId, startedAt).catch((error: unknown) => fail(g, error, pr));
+    // A run the service reused was started by someone else, perhaps at another depth: its depth is not known here.
+    void follow(g, pr, reply.runId, startedAt, reply.reused ? undefined : depth).catch((error: unknown) => fail(g, error, pr));
   };
 
   const dispatch = (action: UserAction): void => {

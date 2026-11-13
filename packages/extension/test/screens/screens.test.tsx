@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PanelState } from '../../src/state/reduce';
 import { PanelScreen } from '../../src/screens/PanelScreen';
+import { STAGE_WORDS } from '../../src/state/stage-words';
 import { brief, latestFor, map, prSummary, running } from './fixtures';
 
 afterEach(cleanup);
@@ -143,6 +144,13 @@ describe('unpaired', () => {
   });
 });
 
+/** The start screen's Packs row opens the pack choice under it. */
+const openPacks = (): void => {
+  const row = screen.getByRole('button', { name: 'Packs' });
+  if (row.getAttribute('aria-expanded') !== 'true') fireEvent.click(row);
+};
+const reviewButton = (): HTMLButtonElement => screen.getByRole('button', { name: 'Review this pull request' });
+
 describe('ready', () => {
   it('names the stage in words', () => {
     const cases: [Partial<ReturnType<typeof prSummary>>, string][] = [
@@ -158,50 +166,98 @@ describe('ready', () => {
       cleanup();
     }
   });
-  it('shows the size', () => {
+  it('shows the pull request under its label, with one quiet line: repository, number, files and lines', () => {
     show({ kind: 'ready', pr: prSummary({ changedFiles: 3, additions: 10, deletions: 2 }) });
-    expect(screen.getByText('3 files, 12 changed lines')).toBeTruthy();
+    const card = screen.getByRole('region', { name: 'Add totals' });
+    expect(within(card).getByText('Pull request')).toBeTruthy();
+    expect(within(card).getByRole('heading', { name: 'Add totals' })).toBeTruthy();
+    expect(within(card).getByText('acme/widgets #1 · 3 files · 10 lines added, 2 removed')).toBeTruthy();
+    cleanup();
+    show({ kind: 'ready', pr: prSummary({ changedFiles: 1, additions: 1, deletions: 0 }) });
+    expect(screen.getByText('acme/widgets #1 · 1 file · 1 line added, 0 removed')).toBeTruthy();
   });
-  it('preselects the suggested depth, with a line for each', () => {
+  it('preselects the suggested depth in a group of three, and says only the chosen depth\'s line under it', () => {
     show({ kind: 'ready', pr: prSummary({ suggestedDepth: 'deep' }) });
-    expect((screen.getByRole('radio', { name: /Deep/ }) as HTMLInputElement).checked).toBe(true);
-    expect((screen.getByRole('radio', { name: /Quick/ }) as HTMLInputElement).checked).toBe(false);
+    const group = screen.getByRole('radiogroup', { name: 'Depth' });
+    expect(within(group).getAllByRole('radio').map((r) => r.closest('label')?.textContent)).toEqual(['Quick', 'Standard', 'Deep']);
+    expect((within(group).getByRole('radio', { name: 'Deep' }) as HTMLInputElement).checked).toBe(true);
+    expect((within(group).getByRole('radio', { name: 'Quick' }) as HTMLInputElement).checked).toBe(false);
+    const line = screen.getByText('Standard, plus a closer second pass over each layer.');
+    expect(group.getAttribute('aria-describedby')).toBe(line.id);
+    expect(screen.queryByText('One pass, no second opinion. For small changes.')).toBeNull();
+    expect(screen.queryByText('Every finding is challenged before you see it.')).toBeNull();
+    fireEvent.click(within(group).getByRole('radio', { name: 'Quick' }));
     expect(screen.getByText('One pass, no second opinion. For small changes.')).toBeTruthy();
+    expect(screen.queryByText('Standard, plus a closer second pass over each layer.')).toBeNull();
+    fireEvent.click(within(group).getByRole('radio', { name: 'Standard' }));
     expect(screen.getByText('Every finding is challenged before you see it.')).toBeTruthy();
-    expect(screen.getByText('Standard, plus a closer second pass over each layer.')).toBeTruthy();
+    expect(within(group).getByRole('radio', { name: 'Standard' }).closest('label')?.className).toBe('on');
+  });
+  it('lists the packs on its Packs row, and opens the pack choice in place under it', () => {
+    show({ kind: 'ready', pr: prSummary(two) });
+    const row = screen.getByRole('button', { name: 'Packs' });
+    expect(row.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByText('Orbit, Generic').id).toBe(row.getAttribute('aria-describedby'));
+    expect(screen.queryByRole('switch')).toBeNull();
+    fireEvent.click(row);
+    expect(row.getAttribute('aria-expanded')).toBe('true');
+    expect(document.getElementById(row.getAttribute('aria-controls') ?? '')?.contains(screen.getByRole('switch', { name: 'Orbit' }))).toBe(true);
+    // Still the start screen: the pull request and the button are where they were.
+    expect(screen.getByRole('heading', { name: 'Add totals' })).toBeTruthy();
+    expect(reviewButton()).toBeTruthy();
+    fireEvent.click(row);
+    expect(screen.queryByRole('switch')).toBeNull();
   });
   it('names the packs, each with a switch that is on', () => {
     show({ kind: 'ready', pr: prSummary(two) });
+    openPacks();
     expect((screen.getByRole('switch', { name: 'Orbit' }) as HTMLInputElement).checked).toBe(true);
     expect((screen.getByRole('switch', { name: 'Generic' }) as HTMLInputElement).checked).toBe(true);
   });
   it('leaves packIds out when every pack is on, and sends the depth', () => {
     const { dispatch } = show({ kind: 'ready', pr: prSummary({ ...two, suggestedDepth: 'standard' }) });
-    fireEvent.click(screen.getByRole('radio', { name: /Quick/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Quick' }));
+    fireEvent.click(reviewButton());
     expect(dispatch).toHaveBeenCalledWith({ type: 'start', depth: 'quick' });
   });
   it('sends the remaining pack ids when one is off, and the last pack cannot be switched off', () => {
     const { dispatch } = show({ kind: 'ready', pr: prSummary(two) });
+    openPacks();
     fireEvent.click(screen.getByRole('switch', { name: 'Orbit' }));
     expect((screen.getByRole('switch', { name: 'Generic' }) as HTMLInputElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('switch', { name: 'Generic' }));
     expect((screen.getByRole('switch', { name: 'Generic' }) as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    // The row says which packs are on, with the choice closed as with it open.
+    expect(screen.getByRole('button', { name: 'Packs' }).getAttribute('aria-describedby')).toBe(screen.getByText('Generic', { selector: '.grow > .muted' }).id);
+    fireEvent.click(screen.getByRole('button', { name: 'Packs' }));
+    fireEvent.click(reviewButton());
     expect(dispatch).toHaveBeenCalledWith({ type: 'start', depth: 'quick', packIds: ['generic'] });
   });
-  it('disables Review while busy, and shows a notice', () => {
+  it('pins the button that starts the review, with the line that says where it runs and that nothing is posted', () => {
+    show({ kind: 'ready', pr: prSummary() });
+    const bar = screen.getByRole('group', { name: 'Start the review' });
+    expect(bar.closest('.ap-pinned')).not.toBeNull();
+    const button = within(bar).getByRole('button', { name: 'Review this pull request' });
+    expect(button.className).toContain('primary');
+    const note = within(bar).getByText('Runs on your Claude login. Nothing is posted to GitHub.');
+    expect(button.getAttribute('aria-describedby')).toBe(note.id);
+  });
+  it('disables Review while busy, and shows a notice over the button', () => {
     show({ kind: 'ready', pr: prSummary(), busy: true, notice: 'Another review is running.' });
-    expect((screen.getByRole('button', { name: 'Review' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText('Another review is running.')).toBeTruthy();
+    expect(reviewButton().disabled).toBe(true);
+    const notice = screen.getByRole('alert');
+    expect(notice.textContent).toBe('Another review is running.');
+    expect(notice.closest('.ap-pinned')).not.toBeNull();
   });
   it('disables the switches and the depth choice while busy', () => {
     show({ kind: 'ready', pr: prSummary(two), busy: true });
+    openPacks();
     for (const box of screen.getAllByRole('switch')) expect((box as HTMLInputElement).disabled).toBe(true);
     for (const radio of screen.getAllByRole('radio')) expect((radio as HTMLInputElement).disabled).toBe(true);
   });
   it('explains the last pack switch that cannot be turned off', () => {
     show({ kind: 'ready', pr: prSummary(two) });
+    openPacks();
     expect(screen.queryByText('At least one pack stays on.')).toBeNull();
     fireEvent.click(screen.getByRole('switch', { name: 'Orbit' }));
     const hint = screen.getByText('At least one pack stays on.');
@@ -214,27 +270,119 @@ describe('ready', () => {
   });
 });
 
+/** Every stage the engine runs, in order; `lenses-deep` only at deep depth. */
+const ENGINE_STAGES = ['intake', 'packs', 'shape', 'facts', 'map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge', 'lenses-deep', 'select', 'summary', 'store'];
+const line = (stage: string, status: 'working' | 'done' | 'failed' | 'skipped' = 'done', detail = '') => ({ stage, words: STAGE_WORDS[stage as keyof typeof STAGE_WORDS] ?? stage, status, detail });
+const progressbar = (): HTMLElement => screen.getByRole('progressbar', { name: 'Progress' });
+const openSteps = (): HTMLElement => {
+  fireEvent.click(screen.getByRole('button', { name: /^Show the steps/ }));
+  return screen.getByRole('list', { name: 'Stages' });
+};
+
 describe('running', () => {
-  it('lists every stage with its words and a status word', () => {
+  it('names the stage now as its title, under the label Reviewing', () => {
     show(running());
     expect(screen.getByRole('heading', { name: 'Reviewing' })).toBeTruthy();
-    const items = within(screen.getByRole('list', { name: 'Stages' })).getAllByRole('listitem');
-    expect(items).toHaveLength(2);
-    expect(items[0]?.textContent).toContain('Reading the pull request');
-    expect(items[0]?.textContent).toContain('Done');
-    expect(items[1]?.textContent).toContain('Working');
+    expect(screen.getByText('Mapping the change', { selector: '.ap-title' })).toBeTruthy();
+    cleanup();
+    show(running({ stages: [] }));
+    expect(screen.getByText('Starting the review', { selector: '.ap-title' })).toBeTruthy();
+    expect(progressbar().getAttribute('aria-valuetext')).toBe('Starting the review');
+  });
+  it('names the stage started last while two run side by side', () => {
+    show(running({ stages: [line('intake'), line('lenses', 'working'), line('sweep', 'working')] }));
+    expect(screen.getByText('Checking each file against the pack rules', { selector: '.ap-title' })).toBeTruthy();
+  });
+  it('shows a real progress bar whose value is the step in words, out of the stages the engine runs at that depth', () => {
+    show(running({ depth: 'standard' }));
+    const bar = progressbar();
+    expect(bar.getAttribute('aria-valuetext')).toBe('Step 2 of 15');
+    expect(bar.getAttribute('aria-valuenow')).toBe('2');
+    expect(bar.getAttribute('aria-valuemin')).toBe('0');
+    expect(bar.getAttribute('aria-valuemax')).toBe('15');
+    expect((bar.querySelector('i') as HTMLElement).style.width).toBe(`${(2 / 15) * 100}%`);
+    expect(screen.getByText(/^Step 2 of 15 · /)).toBeTruthy();
+    cleanup();
+    show(running({ depth: 'quick' }));
+    expect(progressbar().getAttribute('aria-valuetext')).toBe('Step 2 of 15');
+    cleanup();
+    show(running({ depth: 'deep' }));
+    expect(progressbar().getAttribute('aria-valuetext')).toBe('Step 2 of 16');
+  });
+  it('says "Step n" with no total, and shows no share, when it cannot know how many stages there are', () => {
+    show(running());
+    const bar = progressbar();
+    expect(bar.getAttribute('aria-valuetext')).toBe('Step 2');
+    expect(bar.hasAttribute('aria-valuenow')).toBe(false);
+    expect(bar.hasAttribute('aria-valuemax')).toBe(false);
+    expect(bar.querySelector('i')).toBeNull();
+    expect(bar.className).toContain('unknown');
+    expect(screen.getByText(/^Step 2 · /)).toBeTruthy();
+    cleanup();
+    // A stage this panel has no words for: a newer engine, so the count would be a guess.
+    show(running({ depth: 'standard', stages: [line('intake'), line('new-stage', 'working')] }));
+    expect(progressbar().getAttribute('aria-valuetext')).toBe('Step 2');
+  });
+  it('learns the count from the stages reported when it did not choose the depth', () => {
+    show(running({ stages: [...ENGINE_STAGES.slice(0, 12).map((s) => line(s)), line('lenses-deep', 'working')] }));
+    expect(progressbar().getAttribute('aria-valuetext')).toBe('Step 13 of 16');
+    cleanup();
+    show(running({ stages: [...ENGINE_STAGES.slice(0, 12).map((s) => line(s)), line('select', 'working')] }));
+    expect(progressbar().getAttribute('aria-valuetext')).toBe('Step 13 of 15');
+    cleanup();
+    // A deep review with no deep pass (a sync merge): the later stage settles it.
+    show(running({ depth: 'deep', stages: [...ENGINE_STAGES.slice(0, 12).map((s) => line(s)), line('select', 'working')] }));
+    expect(progressbar().getAttribute('aria-valuetext')).toBe('Step 13 of 15');
+  });
+  it('says the time so far, and the files and groups once the map is known, on one quiet line', () => {
+    vi.useFakeTimers();
+    try {
+      show(running({ depth: 'standard' }));
+      expect(screen.getByText('Step 2 of 15 · 0 s')).toBeTruthy();
+      act(() => { vi.advanceTimersByTime(130_000); });
+      expect(screen.getByText('Step 2 of 15 · 2 min 10 s')).toBeTruthy();
+      cleanup();
+      show(running({ depth: 'standard', map }));
+      expect(screen.getByText('Step 2 of 15 · 0 s · 4 files in 2 groups')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('lists every stage the review will run in a fold, in the engine\'s order, each with Done, Now or Next', () => {
+    show(running({ depth: 'standard', stages: [line('intake'), line('packs'), line('shape', 'skipped', 'not a sync merge'), line('facts'), line('map', 'working')] }));
+    const fold = screen.getByRole('button', { name: /^Show the steps/ });
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    expect(fold.textContent).toContain('15');
+    expect(screen.queryByRole('list', { name: 'Stages' })).toBeNull();
+    const items = within(openSteps()).getAllByRole('listitem');
+    expect(items.map((i) => i.querySelector('.ap-sev')?.textContent)).toEqual(['Done', 'Done', 'Skipped', 'Done', 'Now', ...Array<string>(10).fill('Next')]);
+    expect(items.map((i) => i.querySelector('.ap-step-words')?.textContent)).toEqual(
+      ENGINE_STAGES.filter((s) => s !== 'lenses-deep').map((s) => STAGE_WORDS[s as keyof typeof STAGE_WORDS]),
+    );
+    expect(progressbar().getAttribute('aria-valuetext')).toBe('Step 5 of 15');
+  });
+  it('lists only the stages reported so far when it cannot know the rest', () => {
+    show(running());
+    expect(screen.getByRole('button', { name: /^Show the steps/ }).textContent).toContain('2');
+    const items = within(openSteps()).getAllByRole('listitem');
+    expect(items.map((i) => i.textContent)).toEqual(['DoneReading the pull request', 'NowMapping the change']);
   });
   it('shows a failed stage as failed with its message, and a skipped one as skipped', () => {
     show(running({ stages: [
       { stage: 'lenses', words: 'Looking through each lens', status: 'failed', detail: 'Claude timed out' },
       { stage: 'seams', words: 'Checking where the groups meet', status: 'skipped', detail: 'one group' },
     ] }));
-    expect(screen.getByText('Failed')).toBeTruthy();
-    expect(screen.getByText('Claude timed out')).toBeTruthy();
-    expect(screen.getByText('Skipped')).toBeTruthy();
+    const list = openSteps();
+    expect(within(list).getByText('Failed')).toBeTruthy();
+    expect(within(list).getByText('Claude timed out')).toBeTruthy();
+    expect(within(list).getByText('Skipped')).toBeTruthy();
   });
-  it('shows the brief before the last stage is done, with only unverified claims', () => {
+  it('shows the brief before the last stage is done, with only unverified claims, under What it has found so far', () => {
     show(running({ brief }));
+    const fold = screen.getByRole('button', { name: 'What it has found so far' });
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText('Rounds to cents.')).toBeNull();
+    fireEvent.click(fold);
     expect(screen.getByRole('heading', { name: 'What this does' })).toBeTruthy();
     expect(screen.getByText('Rounds to cents.')).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Claims to check' })).toBeTruthy();
@@ -243,13 +391,16 @@ describe('running', () => {
     expect(screen.getByText('No migration touches old rows.')).toBeTruthy();
     expect(screen.queryByText('Totals are rounded')).toBeNull();
   });
-  it('shows nothing of the brief or map before they exist', () => {
+  it('shows nothing of the brief or map before they exist, or when they hold nothing', () => {
     show(running());
-    expect(screen.queryByRole('heading', { name: 'What this does' })).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Read in this order' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'What it has found so far' })).toBeNull();
+    cleanup();
+    show(running({ brief: { whatItDoes: [], claims: [{ text: 'Fine', verdict: 'verified', evidence: '' }] }, map: { cohorts: [], standalone: [], links: [] } }));
+    expect(screen.queryByRole('button', { name: 'What it has found so far' })).toBeNull();
   });
   it('lists groups in order with their layers and files', () => {
     show(running({ map }));
+    fireEvent.click(screen.getByRole('button', { name: 'What it has found so far' }));
     expect(screen.getByRole('heading', { name: 'Read in this order' })).toBeTruthy();
     const text = document.body.textContent ?? '';
     const order = ['Totals', 'Data layer', 'db/001.sql', 'Screens layer', 'src/Cart.tsx', 'src/Totals.tsx', 'Docs', 'Notes layer', 'README.md'];
@@ -307,6 +458,15 @@ describe('problem and review', () => {
 });
 
 describe('text from the state', () => {
+  it('shows a pull request\'s and a pack\'s markup as characters on the start screen', () => {
+    const evil = '<img src=x onerror=alert(1)><script>alert(1)</script>';
+    show({ kind: 'ready', pr: prSummary({ title: evil, repo: 'acme/widgets', packs: [{ id: 'evil', title: evil }, { id: 'generic', title: 'Generic' }] }), notice: evil });
+    openPacks();
+    expect(screen.getAllByText(evil, { exact: false }).length).toBeGreaterThanOrEqual(4);
+    expect(document.querySelector('script')).toBeNull();
+    expect(document.querySelector('a')).toBeNull();
+    expect(document.querySelector('img')).toBeNull();
+  });
   it('shows markup and javascript: as characters and builds no script or a element', () => {
     const evil = '<img src=x onerror=alert(1)><script>alert(1)</script>';
     const js = '[click](javascript:alert(1))';
@@ -316,6 +476,8 @@ describe('text from the state', () => {
       brief: { whatItDoes: [evil], claims: [{ text: js, verdict: 'unclear', evidence: js }] },
       map: { cohorts: [{ id: 'c', title: evil, summary: '', neighbours: [], inferredLinks: [], layers: [{ id: 'l', title: js, kind: 'data', files: [evil], dependsOn: [], note: '' }] }], standalone: [], links: [] },
     }));
+    fireEvent.click(screen.getByRole('button', { name: /^Show the steps/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'What it has found so far' }));
     expect(screen.getAllByText(evil, { exact: false }).length).toBeGreaterThan(0);
     expect(screen.getAllByText(js, { exact: false }).length).toBeGreaterThan(0);
     expect(document.querySelector('script')).toBeNull();

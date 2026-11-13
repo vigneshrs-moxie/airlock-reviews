@@ -1024,7 +1024,27 @@ describe('startPanel: actions', () => {
     const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary(), 'd'.repeat(40))) });
     await until(h, 'review');
     h.panel.dispatch({ type: 'start', depth: 'quick' });
-    expect(await until(h, 'running')).toEqual({ kind: 'running', pr: prSummary(), stages: [], brief: null, map: null });
+    expect(await until(h, 'running')).toEqual({ kind: 'running', pr: prSummary(), stages: [], brief: null, map: null, depth: 'quick' });
+  });
+
+  it('keeps the depth it asked for on the running review, for the progress screen', async () => {
+    const h = harness();
+    await until(h, 'ready');
+    h.panel.dispatch({ type: 'start', depth: 'deep', since: 'last' });
+    expect((await until(h, 'running')).depth).toBe('deep');
+  });
+
+  it('does not know the depth of a run the service reused, or of one it attached to when it loaded', async () => {
+    const h = harness();
+    await until(h, 'ready');
+    // Someone else started a review of this pull request meanwhile: the service hands back that run.
+    h.svc.startRun('acme/widgets', 1);
+    h.panel.dispatch({ type: 'start', depth: 'deep' });
+    const reused = await until(h, 'running');
+    expect('depth' in reused).toBe(false);
+
+    const attached = harness({ prepare: (svc) => { svc.startRun('acme/widgets', 1); } });
+    expect('depth' in await until(attached, 'running')).toBe(false);
   });
 
   it('a refused start, dismiss or restore keeps the review on screen with the service words, and a success clears them', async () => {

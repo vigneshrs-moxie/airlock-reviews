@@ -254,12 +254,13 @@ test('1. not paired: the pairing screen, and the token typed into it pairs the p
 test('2. Ready: the stage in words, the packs, the suggested depth chosen; Review starts it', async () => {
   await expect(panel.getByRole('heading', { name: pr.title })).toBeVisible();
   await expect(panel.getByText("Your pull request, first stage: your branch into the team's branch.")).toBeVisible();
+  await panel.getByRole('button', { name: 'Packs', exact: true }).click();
   await expect(panel.getByRole('switch', { name: 'Orbit' })).toBeChecked();
   await expect(panel.getByRole('switch', { name: 'Generic' })).toBeChecked();
   await expect(panel.getByRole('radio', { name: /^Standard/ })).toBeChecked();
   await expect(panel.getByRole('radio', { name: /^Quick/ })).not.toBeChecked();
 
-  await panel.getByRole('button', { name: 'Review', exact: true }).click();
+  await panel.getByRole('button', { name: 'Review this pull request', exact: true }).click();
   await expect.poll(() => bodiesOf('POST', '/reviews')).toHaveLength(1);
   const body = StartReviewBodySchema.parse(bodiesOf('POST', '/reviews')[0]);
   // All packs on, so the service chooses them.
@@ -268,10 +269,12 @@ test('2. Ready: the stage in words, the packs, the suggested depth chosen; Revie
 
 test('3. Running: stage lines arrive, and the brief and map are shown while a later stage still works', async () => {
   await expect(panel.getByRole('heading', { name: 'Reviewing' })).toBeVisible();
+  await panel.getByRole('button', { name: /^Show the steps/ }).click();
   const stages = panel.getByRole('list', { name: 'Stages' });
   await expect(stages.locator('li').filter({ hasText: 'Reading the pull request' })).toHaveAttribute('data-status', 'done');
-  await expect(stages.locator('li').filter({ hasText: 'Looking through each lens' })).toHaveAttribute('data-status', 'working');
-  await expect(stages.locator('li').filter({ hasText: 'Looking through each lens' })).toContainText('Working');
+  await expect(stages.locator('li').filter({ hasText: 'Looking through each lens' })).toHaveAttribute('data-status', 'now');
+  await expect(stages.locator('li').filter({ hasText: 'Looking through each lens' })).toContainText('Now');
+  await panel.getByRole('button', { name: 'What it has found so far' }).click();
   await expect(panel.getByText('Lets a person pause a subscription from the account page.')).toBeVisible();
   await expect(panel.getByText('Paused accounts are never billed')).toBeVisible();
   await expect(panel.getByText('billing.ts still bills a paused account.')).toBeVisible();
@@ -1051,11 +1054,12 @@ test('24. an extension repository whose review kit cannot be had: Extensions and
   await github.goto(EXT_FILES);
   await activate(EXT_FILES);
   await expect(panel.getByRole('heading', { name: ext.title })).toBeVisible();
+  await panel.getByRole('button', { name: 'Packs', exact: true }).click();
   await expect(panel.getByRole('switch', { name: 'Extensions' })).toBeChecked();
   await expect(panel.getByRole('switch', { name: 'Generic' })).toBeChecked();
   await expect(panel.getByRole('switch')).toHaveCount(2);
 
-  await panel.getByRole('button', { name: 'Review', exact: true }).click();
+  await panel.getByRole('button', { name: 'Review this pull request', exact: true }).click();
   await expect.poll(() => bodiesOf('POST', '/reviews').length).toBe(3);
   expect(StartReviewBodySchema.parse(bodiesOf('POST', '/reviews').at(-1))).toMatchObject({ repo: EXT_REPO, number: EXT_NUMBER });
   // The person reads the service's sentence, naming the kit, with Retry; nothing else stands in for it.

@@ -104,6 +104,7 @@ describe('ready keeps its choices', () => {
     const dispatch = vi.fn();
     const { rerender } = render(<PanelScreen state={{ kind: 'ready', pr }} dispatch={dispatch} onOpenSettings={noop} />);
     fireEvent.click(screen.getByRole('radio', { name: /Deep/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Packs' }));
     fireEvent.click(screen.getByRole('switch', { name: 'Orbit' }));
     rerender(<PanelScreen state={{ kind: 'ready', pr, notice: 'Refused.' }} dispatch={dispatch} onOpenSettings={noop} />);
     expect((screen.getByRole('radio', { name: /Deep/ }) as HTMLInputElement).checked).toBe(true);
