@@ -75,7 +75,8 @@ export type PanelState =
   | { kind: 'unpaired'; message?: string }
   /** `notice`: why the last action was refused. `busy`: an action is in flight. */
   | { kind: 'ready'; pr: PrSummary; notice?: string; busy?: boolean }
-  | { kind: 'running'; pr: PrSummary; stages: StageLine[]; brief: Brief | null; map: ChangeMap | null }
+  /** `depth`: the depth this panel asked for when it started the run; left out when it did not start it (an attach). */
+  | { kind: 'running'; pr: PrSummary; stages: StageLine[]; brief: Brief | null; map: ChangeMap | null; depth?: Depth }
   /**
    * `notice`: why the last action was refused, or the note on the last restore. `busy`: an action is in flight. `post`: the
    * answer to the post sheet's last request.
@@ -109,7 +110,8 @@ export type Action =
    * sheet that could not be given while the review was away (a post never sent before the Pair screen).
    */
   | { type: 'loaded'; pr: PrSummary; latest: LatestReply | null; notice?: string; post?: PostReply }
-  | { type: 'attached'; pr: PrSummary }
+  /** `depth`: the depth asked for, when this panel started the run it attached to. */
+  | { type: 'attached'; pr: PrSummary; depth?: Depth }
   /** The pull request read again while its review is on screen: the review's `stale` is worked out again from it. */
   | { type: 'head'; pr: PrSummary }
   /** The stage list to show, built by the runtime from the stream's stage events. */
@@ -202,7 +204,7 @@ export function reduce(state: PanelState, action: Action): PanelState {
       return action.notice === undefined ? landed : { ...landed, notice: clip(action.notice) };
     }
     case 'attached':
-      return { kind: 'running', pr: action.pr, stages: [], brief: null, map: null };
+      return { kind: 'running', pr: action.pr, stages: [], brief: null, map: null, ...(action.depth === undefined ? {} : { depth: action.depth }) };
     case 'head': {
       if (state.kind !== 'review' || !isFor(action.pr, state.pr)) return state;
       const { stale } = reviewOf(action.pr, state.latest);
