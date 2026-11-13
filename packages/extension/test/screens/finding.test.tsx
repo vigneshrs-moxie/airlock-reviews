@@ -318,9 +318,9 @@ describe('the pinned actions', () => {
     expect(follows(box, actions())).toBe(true);
     expect(window.getSelection()?.toString()).toContain('Prompt for Problem 1');
     // Close puts the box away, so it no longer covers the screen, and focus goes back to the button.
-    fireEvent.click(within(box.closest('.ap-refused') as HTMLElement).getByRole('button', { name: 'Close' }));
+    fireEvent.click(within(box.closest('.ap-pinned-above') as HTMLElement).getByRole('button', { name: 'Close' }));
     expect(screen.queryByText('Prompt for Problem 1', { selector: 'pre' })).toBeNull();
-    expect(document.querySelector('.ap-refused')).toBeNull();
+    expect(document.querySelector('.ap-pinned-above')).toBeNull();
     expect(document.activeElement).toBe(button('Copy fix prompt'));
   });
 });

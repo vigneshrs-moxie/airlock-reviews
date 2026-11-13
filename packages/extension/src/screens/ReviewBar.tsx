@@ -1,7 +1,8 @@
 import { POST_MAX_ITEMS, type Finding } from '@airlock/shared';
-import { useId, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react';
+import { useId, type Ref } from 'react';
 import type { Timers } from '../client/timers';
 import { CopyButton } from './CopyButton';
+import { Pinned } from './Pinned';
 import { ALL_POSTED, Reason, TOO_MANY, WAIT } from './PostedMark';
 
 /** The bar's label for one prompt covering every open Block and Fix. */
@@ -15,34 +16,6 @@ export const fixesLabel = (n: number): string => `Copy fix prompt for the ${n} $
 export function whyNotCommenting(ticked: number, postable: number, blocked: string | null, busy: boolean): string | null {
   if (ticked === 0) return null;
   return blocked ?? (postable === 0 ? ALL_POSTED : postable > POST_MAX_ITEMS ? TOO_MANY : busy ? WAIT : null);
-}
-
-/** The bar's last measured height, so a bar drawn again (back from a finding) leaves its space from the first paint. */
-let lastRoom = 0;
-
-/**
- * The bar fixed to the bottom of the panel, and a space as tall as it at the end of the review, so nothing scrolls out of
- * reach under it. Its height is measured, as its buttons wrap at narrow widths and large sizes.
- */
-function Pinned({ label, children }: { label: string; children: ReactNode }) {
-  const bar = useRef<HTMLDivElement>(null);
-  const [room, setRoom] = useState(lastRoom);
-  useLayoutEffect(() => {
-    const node = bar.current;
-    if (node === null) return undefined;
-    const measure = (): void => { lastRoom = node.offsetHeight; setRoom(lastRoom); };
-    measure();
-    if (typeof ResizeObserver === 'undefined') return undefined;
-    const watch = new ResizeObserver(measure);
-    watch.observe(node);
-    return () => watch.disconnect();
-  }, []);
-  return (
-    <>
-      <div className="ap-bar-room" style={{ height: room }} aria-hidden="true" />
-      <div className="ap-bar" role="group" aria-label={label} ref={bar}>{children}</div>
-    </>
-  );
 }
 
 /**
@@ -71,7 +44,7 @@ export function ReviewBar({ selecting, fixes, ticked, postable, blocked, busy, p
   const t = timers ? { timers } : {};
   if (!selecting) {
     return (
-      <Pinned label="Findings actions">
+      <Pinned name="review" label="Findings actions">
         {fixes.length > 0 && (
           <div className="ap-bar-main ap-primary">
             <CopyButton key={fixes.map((f) => f.id).join()} text={prompt(fixes)} label={fixesLabel(fixes.length)} {...t} />
@@ -84,7 +57,7 @@ export function ReviewBar({ selecting, fixes, ticked, postable, blocked, busy, p
   const why = whyNotCommenting(ticked.length, postable.length, blocked, busy);
   const disabled = ticked.length === 0 || why !== null;
   return (
-    <Pinned label="Actions on the selected findings">
+    <Pinned name="review" label="Actions on the selected findings">
       <div className="ap-bar-main">
         {ticked.length === 0
           ? <button type="button" className="btn" disabled>Copy fix prompt (0)</button>

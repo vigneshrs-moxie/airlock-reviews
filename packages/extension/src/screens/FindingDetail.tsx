@@ -5,6 +5,7 @@ import { connectedPlace, COULD_NOT_JUMP, ownPlace, type Jump, type JumpOptions, 
 import { RefusedCopy, useCopy } from './CopyButton';
 import { useFindingFolds, type FindingFold } from './finding-folds';
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Crosshair } from './FindingIcons';
+import { Pinned } from './Pinned';
 import { PostedMark, Reason, WAIT } from './PostedMark';
 import { gistOf, shortTitle } from './summary';
 import { useVisible } from './visible';
@@ -105,21 +106,6 @@ export function FindingDetail({
   const copy = useCopy(fixPrompt, timers, COPIED_PROMPT);
   const copyButton = useRef<HTMLButtonElement>(null);
   const putAwayCopy = (): void => { copy.putAway(); copyButton.current?.focus(); };
-  // The pinned actions' height, so a control reached with Tab is scrolled clear of them, never behind them.
-  const pinnedBox = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const node = pinnedBox.current;
-    const root = document.documentElement;
-    if (node === null) return undefined;
-    const measure = (): void => root.style.setProperty('--ap-pinned-height', `${Math.ceil(node.getBoundingClientRect().height)}px`);
-    measure();
-    const watch = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
-    watch?.observe(node);
-    return () => {
-      watch?.disconnect();
-      root.style.removeProperty('--ap-pinned-height');
-    };
-  }, []);
   const visible = useVisible();
   const focused = useRef(false);
   useEffect(() => {
@@ -243,35 +229,35 @@ export function FindingDetail({
         </Fold>
       </div>
 
-      <div className="ap-pinned" ref={pinnedBox}>
-        {copy.shown !== null && <div className="ap-refused"><RefusedCopy shown={copy.shown} box={copy.box} onClose={putAwayCopy} /></div>}
-        <div className="ap-bar">
-          <div className="ap-act">
-            <button type="button" className={filled('copy')} ref={copyButton} aria-describedby={ids.copy} onClick={copy.copy}>
-              {copy.copied ? 'Copied' : 'Copy fix prompt'}
-            </button>
-            <span className="cap" id={ids.copy}>{CAPTION.copy}</span>
-          </div>
-          <div className="ap-act">
-            <button
-              type="button" className={filled('post')} data-post-for={finding.id} disabled={postDisabled} aria-describedby={ids.post}
-              onClick={() => onPost(finding)}
-            >
-              Comment on GitHub
-            </button>
-            {postLine}
-          </div>
-          <div className="ap-act">
-            <button
-              type="button" className="btn" data-dismiss-for={finding.id} disabled={!canDismiss} aria-describedby={ids.dismiss}
-              onClick={() => onDismiss(finding)}
-            >
-              Dismiss
-            </button>
-            <span className="cap" id={ids.dismiss}>{CAPTION.dismiss}</span>
-          </div>
+      <Pinned
+        name="finding" label="Actions on this finding"
+        above={copy.shown !== null && <RefusedCopy shown={copy.shown} box={copy.box} onClose={putAwayCopy} />}
+      >
+        <div className="ap-act">
+          <button type="button" className={filled('copy')} ref={copyButton} aria-describedby={ids.copy} onClick={copy.copy}>
+            {copy.copied ? 'Copied' : 'Copy fix prompt'}
+          </button>
+          <span className="cap" id={ids.copy}>{CAPTION.copy}</span>
         </div>
-      </div>
+        <div className="ap-act">
+          <button
+            type="button" className={filled('post')} data-post-for={finding.id} disabled={postDisabled} aria-describedby={ids.post}
+            onClick={() => onPost(finding)}
+          >
+            Comment on GitHub
+          </button>
+          {postLine}
+        </div>
+        <div className="ap-act">
+          <button
+            type="button" className="btn" data-dismiss-for={finding.id} disabled={!canDismiss} aria-describedby={ids.dismiss}
+            onClick={() => onDismiss(finding)}
+          >
+            Dismiss
+          </button>
+          <span className="cap" id={ids.dismiss}>{CAPTION.dismiss}</span>
+        </div>
+      </Pinned>
     </div>
   );
 }

@@ -180,6 +180,69 @@ test('4. at Largest in a 320 px panel nothing scrolls sideways, and the tour and
     await primary.click();
   }
   await expect(tour()).toHaveCount(0);
+});
+
+/**
+ * The bar pinned to the bottom, measured in the page: inside the panel, every button whole inside it and its words inside
+ * the button, the room under the content as tall as the bar, and, scrolled to the end, the content ending above the bar.
+ */
+async function pinnedBarFits(tall = false): Promise<void> {
+  // The room follows the bar's height once the bar has been measured (a frame after its buttons change).
+  await expect.poll(() => panel.evaluate(() =>
+    document.querySelector<HTMLElement>('.ap-pinned-room')!.offsetHeight - document.querySelector<HTMLElement>('.ap-pinned')!.offsetHeight)).toBe(0);
+  await panel.evaluate(() => { const s = document.scrollingElement ?? document.documentElement; s.scrollTop = s.scrollHeight; });
+  const m = await panel.evaluate(() => {
+    const bar = document.querySelector<HTMLElement>('.ap-pinned')!;
+    const room = document.querySelector<HTMLElement>('.ap-pinned-room')!;
+    const box = bar.getBoundingClientRect();
+    const buttons = [...bar.querySelectorAll<HTMLButtonElement>('button')].map((b) => {
+      const r = b.getBoundingClientRect();
+      return { name: b.textContent, inside: r.left >= box.left - 0.5 && r.right <= box.right + 0.5, words: b.scrollWidth <= b.clientWidth };
+    });
+    const content = room.previousElementSibling!.getBoundingClientRect();
+    const scroller = document.scrollingElement ?? document.documentElement;
+    return {
+      scrolls: scroller.scrollHeight > scroller.clientHeight,
+      zoom: document.documentElement.style.zoom, width: innerWidth, height: innerHeight, box: box.toJSON() as DOMRect, buttons,
+      room: room.offsetHeight, bar: bar.offsetHeight, contentBottom: content.bottom,
+    };
+  });
+  expect(m.zoom).toBe('1.3');
+  expect(m.box.left).toBeGreaterThanOrEqual(0);
+  expect(m.box.right).toBeLessThanOrEqual(m.width + 0.5);
+  expect(Math.abs(m.box.bottom - m.height)).toBeLessThanOrEqual(1);
+  expect(m.buttons.length).toBeGreaterThan(0);
+  for (const b of m.buttons) expect(b, b.name ?? '').toMatchObject({ inside: true, words: true });
+  expect(m.room).toBe(m.bar);
+  expect(m.contentBottom).toBeLessThanOrEqual(m.box.top + 0.5);
+  // Scrolled to the end of a screen taller than the panel, what is left between the end of the content and the bar is
+  // the body's own padding (12 CSS px, 15.6 at Largest), not a second bar's height.
+  if (tall) expect(m.scrolls).toBe(true);
+  if (m.scrolls) expect(m.box.top - m.contentBottom).toBeLessThanOrEqual(24);
+  await noSidewaysScroll();
+}
+
+test('5. at Largest in a 320 px panel the review\'s bar and a finding\'s actions keep their buttons whole, with room above them', async () => {
+  await button('Settings').click();
+  await panel.getByRole('radio', { name: 'Largest' }).check();
+  await expect.poll(() => panel.evaluate(() => document.documentElement.style.zoom)).toBe('1.3');
+  await button('Back').click();
+
+  await expect(button('Select')).toBeVisible();
+  await pinnedBarFits();
+  await button('Select').click();
+  await expect(panel.getByRole('button', { name: /^Comment on GitHub \(\d+\)$/ })).toBeVisible();
+  await pinnedBarFits();
+  await button('Done').click();
+
+  await panel.locator('.finding-card button').first().click();
+  await expect(panel.getByRole('button', { name: 'Dismiss', exact: true })).toBeVisible();
+  await pinnedBarFits();
+  for (const name of ['What happens', 'Why it matters', 'The code', 'How sure is this']) {
+    await panel.getByRole('button', { name: new RegExp(`^${name}`) }).click();
+  }
+  await pinnedBarFits(true);
+  await button('Back to the review').click();
 
   // Back to Default, which the next run of this spec starts from anyway.
   await button('Settings').click();

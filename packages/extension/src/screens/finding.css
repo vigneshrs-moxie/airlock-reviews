@@ -1,13 +1,8 @@
 /* The finding screen, its pinned actions, and the comment and dismiss sheets (the redesign's .ap-* rules from
-   docs/design/panel-redesign/theme.css, as the panel uses them). */
+   docs/design/panel-redesign/theme.css, as the panel uses them). Those other screens use too (kind colours, the tag,
+   folds, a sheet's title, the pinned bar) are in shared.css. */
 
-/* A control reached with Tab scrolls clear of the pinned actions: the page keeps their height free at its bottom. */
-html:has(.finding-screen) { scroll-padding-bottom: calc(var(--ap-pinned-height, 100px) + 8px); }
-
-/* The finding screen fills the panel's height, so its actions sit at the bottom edge even when the finding is short. */
-.panel:has(.finding-screen) { min-height: 100vh; display: flex; flex-direction: column; }
-.panel:has(.finding-screen) > main { flex: 1 0 auto; }
-.finding-screen { flex: 1 0 auto; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.finding-screen { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .finding-screen p { margin: 0; overflow-wrap: anywhere; }
 .ap-svg { flex: none; }
 
@@ -22,15 +17,10 @@ html:has(.finding-screen) { scroll-padding-bottom: calc(var(--ap-pinned-height, 
 
 /* Heading block. */
 .ap-heading { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; }
-.ap-tag { display: inline-block; padding: 0 6px; font-size: 11px; font-weight: 700; border: 1px solid currentColor; border-radius: 4px; }
-.sev-block { color: var(--danger); }
-.sev-fix { color: var(--warn); }
-.sev-ask { color: var(--accent); }
-.sev-note { color: var(--muted); }
 .ap-title { margin: 0; font-size: 16px; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
 .ap-title:focus { outline: none; }
 .ap-title:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.ap-where { display: flex; align-items: center; gap: 8px; align-self: stretch; min-width: 0; }
+.ap-heading .ap-where { align-items: center; align-self: stretch; }
 .ap-where .path { flex: 1; min-width: 0; }
 /* A place too long for its row is cut at its start, so the file name and the line number stay in view. */
 .ap-end { direction: rtl; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -39,43 +29,42 @@ html:has(.finding-screen) { scroll-padding-bottom: calc(var(--ap-pinned-height, 
 .ap-where .btn { display: inline-flex; align-items: center; gap: 5px; flex: none; min-height: 32px; }
 
 /* Summary and what to do. */
-.ap-short { font-size: 14px; }
 .ap-do { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; background: var(--tint); border-radius: 8px; }
 .ap-do .label { margin: 0; }
 .ap-onhub { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
 
 /* Folds. */
 .ap-folds { display: flex; flex-direction: column; }
-.ap-fold-head { margin: 0; font-size: inherit; }
-.ap-fold { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 2px; font: inherit; font-weight: 600; color: var(--fg); text-align: left; background: none; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
 .ap-fold .ap-svg { color: var(--muted); transition: transform 0.12s; }
 .ap-fold[aria-expanded='true'] .ap-svg { transform: rotate(90deg); }
-.ap-fold .n { margin-left: auto; min-width: 0; font-weight: 400; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ap-folded { display: flex; flex-direction: column; gap: 8px; padding: 8px 2px 12px; border-bottom: 1px solid var(--border); min-width: 0; }
-.ap-folded .quote { margin: 0; }
+/* A fold's place (The code) shrinks and is cut, rather than push the fold's name. */
+.ap-folds .ap-fold .n { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ap-whole { font-weight: 600; }
 .ap-line { display: flex; flex-direction: column; gap: 2px; }
 .ap-line .label { margin: 0; }
 
-/* The pinned action bar: three equal buttons, each with one quiet line under it. */
-.ap-pinned { position: sticky; bottom: 0; z-index: 1; margin: auto -12px -12px; background: var(--bg); border-top: 1px solid var(--border); }
-.ap-refused { max-height: 40vh; overflow-y: auto; padding: 8px 12px 0; }
-.ap-bar { display: flex; gap: 8px; padding: 8px 12px 10px; }
+/* The pinned actions (Pinned.tsx; the bar itself is in shared.css): three equal buttons, each with one quiet line under
+   it. Their room takes back this screen's 12px gap. */
+.finding-screen > .ap-pinned-room { margin-top: -12px; }
+.ap-pinned-finding > .ap-bar { flex-wrap: nowrap; }
 .ap-act { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; }
-.ap-act .btn { width: 100%; min-height: 44px; padding: 4px 6px; line-height: 1.2; overflow-wrap: anywhere; }
+.ap-act .btn { width: 100%; min-height: 44px; padding: 4px 6px; line-height: 1.2; overflow-wrap: break-word; }
 .ap-act .cap, .ap-act > .muted, .ap-act > .mark { font-size: 11px; line-height: 1.25; color: var(--muted); text-align: center; overflow-wrap: anywhere; }
 .ap-act > .mark { color: var(--fg); }
+/* Narrow (Large and Largest in a narrow panel): the three actions stack, each with its line beside it. */
+@container (max-width: 300px) {
+  .ap-pinned-finding > .ap-bar { flex-direction: column; gap: 6px; }
+  .ap-act { flex: none; flex-direction: row; align-items: center; gap: 8px; }
+  .ap-act .btn { flex: 0 0 55%; width: auto; min-height: 40px; }
+  .ap-act .cap, .ap-act > .muted, .ap-act > .mark { flex: 1; min-width: 0; text-align: left; }
+}
 
 /* The comment and dismiss sheets. */
 .ap-sheet { display: flex; flex-direction: column; gap: 12px; }
 .ap-sheet p { margin: 0; }
 .ap-sheet .title { margin: 0; }
-.ap-sheet-title { margin: 0; font-size: 15px; font-weight: 700; }
-.ap-sheet-title:focus { outline: none; }
-.ap-sheet-title:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .ap-sheet .label { margin: 0; }
 .ap-sheet .actions { margin: 0; }
-.ap-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .ap-dest { display: flex; gap: 8px; align-items: flex-start; padding: 10px; background: var(--tint); border-radius: 8px; }
 .ap-dest > .ap-svg { margin-top: 1px; color: var(--accent); }
 .ap-dest > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }

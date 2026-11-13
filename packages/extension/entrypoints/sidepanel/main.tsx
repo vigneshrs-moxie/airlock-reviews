@@ -7,6 +7,7 @@ import { browserSettings } from '../../src/state/settings';
 import { startSize } from '../../src/state/size';
 import { browserTab } from '../../src/state/tab';
 import '../../src/screens/panel.css';
+import '../../src/screens/shared.css';
 import '../../src/screens/settings.css';
 import '../../src/screens/review.css';
 import '../../src/screens/finding.css';

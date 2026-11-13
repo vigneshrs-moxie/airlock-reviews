@@ -32,7 +32,10 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
 .panel { max-width: 420px; min-width: 320px; margin: 0 auto; }
-.head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+/* At Large and Largest the panel is narrower in CSS pixels than the side panel is wide (zoom): it never asks for more. */
+:root[data-size] .panel { min-width: 0; }
+/* The row wraps rather than overflow at a large size: the Settings button moves to a second line. */
+.head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; row-gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
 .brand-mark { flex: none; width: 18px; height: 18px; background: url(/icon/32.png) center / contain no-repeat; }
 .name { margin: 0; font-size: 14px; font-weight: 700; }
 .status { margin-left: auto; font-size: 12px; color: var(--muted); }
@@ -97,7 +100,8 @@ div.quote { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible;
 .sheet-body > .row { justify-content: space-between; align-items: center; }
 /* A sheet that rises from the bottom edge and leaves the screen behind it in view. */
 .sheet.bottom { align-items: flex-end; }
-.sheet.bottom .sheet-body { margin: 0; max-height: 90vh; padding: 16px 14px 18px; border-bottom: 0; border-radius: 14px 14px 0 0; }
+/* A bottom sheet is at most 90% of the panel: a share of the panel, not vh, which the size setting's zoom grows. */
+.sheet.bottom .sheet-body { margin: 0; max-height: 90%; padding: 16px 14px 18px; border-bottom: 0; border-radius: 14px 14px 0 0; }
 .sheet-body li { padding: 8px 0; border-bottom: 1px solid var(--border); }
 .proof { margin-top: 4px; overflow-wrap: anywhere; }
 .kept { display: contents; }

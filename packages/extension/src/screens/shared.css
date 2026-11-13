@@ -1,0 +1,68 @@
+/* The redesign's rules that more than one screen uses (from docs/design/panel-redesign/theme.css). Each screen's own
+   rules stay in its own file: settings.css (Settings, Packs, Service, the tour), review.css (the review), finding.css
+   (a finding and its two sheets). Imported after panel.css and before those three. */
+
+/* The header's Settings button and the small inline icons beside words. */
+.head .settings { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; min-height: 32px; }
+.icon { flex: none; }
+
+/* Kind and state colours: always a second cue beside a word. */
+.sev-block { color: var(--danger); }
+.sev-fix { color: var(--warn); }
+.sev-ask { color: var(--accent); }
+.sev-note { color: var(--muted); }
+.sev-ok { color: var(--ok); }
+
+/* A kind or a state as a small boxed word. */
+.ap-tag { flex: none; display: inline-block; padding: 0 6px; font-size: 11px; font-weight: 700; line-height: 1.5; border: 1px solid currentColor; border-radius: 4px; white-space: nowrap; }
+
+/* Counts as chips: the verdict strip, and the tour's picture of it. */
+.ap-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ap-chip { display: inline-flex; align-items: center; padding: 2px 9px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; border-radius: 999px; background: var(--bg); }
+
+/* A finding's row: the kind as a word, then its title and its place. The review's rows, and the pictures of one in
+   Settings and the tour. */
+.ap-row { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.ap-sev { flex: 0 0 44px; white-space: nowrap; padding-top: 1px; font-size: 11px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
+.ap-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ap-row-main p { margin: 0; }
+.ap-row-title { font-weight: 600; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ap-row-title.whole { display: block; -webkit-line-clamp: none; overflow: visible; }
+.ap-row-sub { display: flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--muted); }
+
+/* A labelled group, and a finding's summary. */
+.ap-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ap-group > .label, .ap-group > p { margin: 0; }
+.ap-short { font-size: 14px; }
+
+/* An icon beside its words: a finding's place, and the tour's three actions. */
+.ap-where { display: flex; gap: 8px; min-width: 0; }
+
+/* A bottom sheet's title: the comment and dismiss sheets, and the tour. */
+.ap-sheet-title { margin: 0; font-size: 15px; font-weight: 700; overflow-wrap: anywhere; }
+.ap-sheet-title:focus { outline: none; }
+.ap-sheet-title:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* Folds: an h3 holding a button with aria-expanded, its count or place on the right, and what it holds under it. The
+   review's tabs and a finding. Each screen draws its own arrow. */
+.ap-fold-heading, .ap-fold-head { margin: 0; font-size: inherit; }
+.ap-fold { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 2px; font: inherit; font-weight: 600; color: var(--fg); text-align: left; background: none; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.ap-fold .n { margin-left: auto; flex: none; font-weight: 400; font-size: 12px; color: var(--muted); }
+.ap-folded { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 8px 2px 12px; border-bottom: 1px solid var(--border); }
+.ap-folded p, .ap-folded .quote { margin: 0; }
+
+/* The bar pinned to the bottom of the panel (Pinned.tsx): the review's bar and a finding's actions. It is fixed to the
+   bottom edge, as wide as the panel at any size, and never more than 60% of the panel's height: what sits above the
+   buttons (a prompt to copy by hand) scrolls on its own, and the buttons stay. .ap-pinned-room keeps the end of the
+   screen clear of it, and a control reached with Tab is scrolled clear of it. All in shares of the panel, never vh,
+   which the size setting's zoom would grow past the panel. */
+html:has(.ap-pinned) { scroll-padding-bottom: calc(var(--ap-pinned-height, 100px) + 8px); }
+/* The room takes back the gap the screen's column puts above it (the body's 10px), so it adds the bar's height only. */
+.ap-pinned-room { flex: none; margin-top: -10px; }
+.ap-pinned { position: fixed; left: 0; right: 0; bottom: 0; z-index: 1; display: flex; flex-direction: column; max-width: 420px; min-width: 0; max-height: 60%; margin: 0 auto; overflow-y: auto; background: var(--bg); border-top: 1px solid var(--border); }
+.ap-pinned-above { flex: 0 1 auto; min-height: 0; overflow-y: auto; padding: 8px 12px 0; }
+.ap-pinned > .ap-bar { flex: none; display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; padding: 8px 12px 10px; }
+.ap-bar .btn { min-height: 40px; line-height: 1.2; white-space: normal; overflow-wrap: break-word; }
+/* The bar measures its own width: at Large and Largest in a narrow panel (under 300 CSS px) a button's words would no
+   longer fit side by side, so the buttons stack, each the whole width, rather than break inside a word. */
+.ap-pinned { container-type: inline-size; }
