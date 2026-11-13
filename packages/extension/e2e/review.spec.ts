@@ -156,8 +156,15 @@ test('1. paired, the review opens on its verdict strip, the tabs and one row per
 
   await expect(panel.getByRole('heading', { name: 'Request changes' })).toBeVisible();
   await expect(strip().getByText('One thing blocks this.')).toBeVisible();
-  await expect(strip().getByRole('list', { name: 'Open findings' }).getByRole('listitem')).toHaveText(['1 blocking', '2 to fix', '10 questions', '1 note']);
+  await expect(strip().getByRole('list', { name: 'Finding counts' }).getByRole('listitem')).toHaveText(['1 blocking', '2 to fix', '10 questions', '1 note']);
   await expect(strip().getByText('Reviewed at a1b2c3d · Standard')).toBeVisible();
+  // The review's note, in sight above the tabs before any is pressed: a closed fold that says how many.
+  const about = panel.getByRole('button', { name: 'About this review 1 note' });
+  await expect(about).toHaveAttribute('aria-expanded', 'false');
+  expect((await about.boundingBox())!.y).toBeLessThan((await panel.getByRole('tablist').boundingBox())!.y);
+  await about.click();
+  await expect(panel.getByText('A note from the review.', { exact: true })).toBeVisible();
+  await about.click();
   await expect(panel.getByRole('tab')).toHaveText(['Findings · 14', 'The change', 'More']);
   await expect(tab('Findings')).toHaveAttribute('aria-selected', 'true');
   await expect(rows()).toHaveCount(12);
@@ -188,6 +195,7 @@ test('1. paired, the review opens on its verdict strip, the tabs and one row per
 test('2. one fix prompt covers every open Block and Fix, top first, then also found', async () => {
   await bar().getByRole('button', { name: 'Copy fix prompt for the 3 fixes' }).click();
   await expect(bar().getByRole('button', { name: 'Copied' })).toBeVisible();
+  await expect(panel.locator('[aria-live="polite"]')).toHaveText('Copied. Paste it to your coding agent.');
   const copied = await panel.evaluate(() => navigator.clipboard.readText());
   expect(copied).toBe(fixPrompt(reviewed, [top[0]!, top[1]!, alsoFound[1]!]));
 });
@@ -220,6 +228,8 @@ test('4. the tabs move with the arrow keys, keep their place while a finding is 
   await panel.keyboard.press('ArrowRight');
   await expect(tab('More')).toHaveAttribute('aria-selected', 'true');
   await expect(panel.getByText('Reviewed at a1b2c3d · Standard depth · Packs: Generic')).toBeVisible();
+  // The note is above the tabs, not repeated here.
+  await expect(panel.getByRole('tabpanel').getByText('A note from the review.')).toHaveCount(0);
   await noSideways();
 
   // From the dropped sheet on More, to the finding it was merged into, and Back: More again, focus on Dropped.

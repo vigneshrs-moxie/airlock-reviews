@@ -65,17 +65,45 @@ describe('the verdict strip', () => {
     ['two blocking', [finding(1, { severity: 'block' }), finding(2, { severity: 'block' })], ['2 blocking'], 'sev-block'],
   ])('counts the open findings by kind, worst first, and colours the verdict by the worst: %s', (_name, findings, chips, tone) => {
     review(findings);
-    expect(chipTexts('Open findings')).toEqual(chips);
+    expect(chipTexts('Finding counts')).toEqual(chips);
     expect(heading('Approve after fixes').className).toContain(tone);
   });
-  it('leaves dismissed findings out of the counts, and shows no chips when nothing is open', () => {
-    const f = [finding(1), finding(2, { severity: 'ask' })];
-    review(f, { dismissals: [dismissal(f[1]!)] });
-    expect(chipTexts('Open findings')).toEqual(['1 to fix']);
+  it('leaves dismissed findings out of the kinds and counts them in a quiet chip of their own, and shows no chips when there is nothing', () => {
+    const f = [finding(1), finding(2, { severity: 'ask' }), also(3)];
+    review(f, { dismissals: [dismissal(f[1]!), dismissal(f[2]!)] });
+    expect(chipTexts('Finding counts')).toEqual(['1 to fix', '2 dismissed']);
+    expect(within(strip()).getByText('2 dismissed').className).toContain('ap-chip-quiet');
+    cleanup();
+    review(f, { dismissals: f.map((x) => dismissal(x)) });
+    expect(chipTexts('Finding counts')).toEqual(['3 dismissed']);
     cleanup();
     review([]);
-    expect(strip().querySelector('[aria-label="Open findings"]')).toBeNull();
-    expect(heading('Approve after fixes').className).toContain('sev-ok');
+    expect(strip().querySelector('[aria-label="Finding counts"]')).toBeNull();
+  });
+  const APPROVE = { label: 'approve' as const, sentence: 'Nothing that needs fixing was found.', counts: NO_COUNTS };
+  it('is green only for a clean approve: an approving label, nothing open, no stage error, limit or note, and not stale', () => {
+    review([], { doc: { verdict: APPROVE } });
+    expect(heading('Approve').className).toContain('sev-ok');
+    const notClear: [string, ReviewOptions][] = [
+      ['a note', { doc: { verdict: APPROVE, notes: ['Nothing in this pull request was read closely: all 3 changed files are of kinds Airlock trusts.'] } }],
+      ['a limit', { doc: { verdict: APPROVE, limits: ['82 of 673 changed lines were cut.'] } }],
+      ['a stage error', { doc: { verdict: APPROVE, stageErrors: [{ stage: 'brief', cohortId: null, message: 'No reply' }] } }],
+      ['a stale review', { doc: { verdict: APPROVE }, stale: true }],
+    ];
+    for (const [name, opts] of notClear) {
+      cleanup();
+      review([], opts);
+      expect(heading('Approve').className, name).not.toMatch(/sev-/);
+    }
+    // Not an approving label, with nothing open (every fix dismissed): the engine's words, plain.
+    cleanup();
+    const f = finding(1);
+    review([f], { dismissals: [dismissal(f)] });
+    expect(heading('Approve after fixes').className).not.toMatch(/sev-/);
+    // Something open: the worst open kind, whatever the label.
+    cleanup();
+    review([also(2)], { doc: { verdict: APPROVE } });
+    expect(heading('Approve').className).toContain('sev-note');
   });
   it('keeps the verdict in words for a review that did not finish, with no colour claiming it is clear', () => {
     review([], { doc: { verdict: { label: 'incomplete', sentence: 'It stopped.', counts: NO_COUNTS } } });
@@ -400,16 +428,26 @@ describe('the more tab', () => {
       ['Total', '15.0', '5', '7,000'],
     ]);
   });
-  it('shows every note from the review in a fold, on a first review as on a re-review', () => {
+  it('holds neither what the reviewer was not shown nor the notes: they are above the tabs', () => {
     for (const previous of [undefined, { reviewId: 'r_0000000000', headSha: 'a'.repeat(40) }]) {
-      review([finding(1)], { doc: { notes: ['One note.', 'Two notes.'], ...(previous === undefined ? {} : { previous }) } });
-      expect(within(strip()).queryByText('One note.')).toBeNull();
+      review([finding(1)], { doc: { notes: ['One note.'], limits: ['A limit.'], ...(previous === undefined ? {} : { previous }) } });
       chooseTab('More');
-      const toggle = openFold('Notes from the review');
-      expect(toggle.textContent).toBe('Notes from the review 2');
-      expect([...foldSection('Notes from the review').querySelectorAll('li')].map((li) => li.textContent)).toEqual(['One note.', 'Two notes.']);
+      const more = screen.getByRole('tabpanel');
+      expect(within(more).queryByText('One note.')).toBeNull();
+      expect(within(more).queryByText('A limit.')).toBeNull();
+      expect(within(more).queryByRole('button', { name: /Not shown|Notes|About this review/ })).toBeNull();
       cleanup();
     }
+  });
+  it('gives the review\'s total time on its quiet line when the timings say', () => {
+    const t = (stage: string, startedAt: string, finishedAt: string) => ({ stage, ms: 1000, agentRuns: 1, inputTokens: 1, outputTokens: 1, costUsd: null, startedAt, finishedAt });
+    review([], { doc: { timings: [t('intake', '2026-11-12T10:00:00.000Z', '2026-11-12T10:00:30.000Z'), t('lenses', '2026-11-12T10:00:20.000Z', '2026-11-12T10:05:25.000Z')] } });
+    chooseTab('More');
+    expect(screen.getByText('Reviewed at ccccccc · Standard depth · 5 min 25 s · Packs: Generic')).toBeTruthy();
+    cleanup();
+    review([], { doc: { startedAt: '2026-11-12T10:00:00.000Z', createdAt: '2026-11-12T10:00:42.000Z' } });
+    chooseTab('More');
+    expect(screen.getByText('Reviewed at ccccccc · Standard depth · 42 s · Packs: Generic')).toBeTruthy();
   });
 });
 
@@ -421,7 +459,7 @@ describe('a part is shown only when it has something in it', () => {
     }
     expect(screen.queryByRole('list', { name: 'Top findings' })).toBeNull();
     const absent = ['Also found', 'Fixed since the last review', 'What it does', 'Questions for the author', 'Whose call', 'Check after merge', 'Text for your pull request', 'Files',
-      'Not shown to the reviewer', 'Notes from the review', 'Dismissed', 'Timing'];
+      'About this review', 'Dismissed', 'Timing'];
     for (const name of ['Findings', 'The change', 'More'] as const) {
       chooseTab(name);
       for (const title of absent) expect(queryFold(title), title).toBeNull();
@@ -925,12 +963,22 @@ describe('a verdict never stands alone', () => {
     expect(within(strip()).getByText('The review did not finish, so nothing here is cleared.')).toBeTruthy();
     expect(screen.queryByText('No findings.')).toBeNull();
   });
-  it('says no open findings in the strip and opens Dismissed when all are dismissed', () => {
+  it('says no open findings in the strip and on the Findings tab, whose Show dismissed goes to More with Dismissed open', () => {
     const f = [finding(1), also(2)];
     review(f, { dismissals: f.map((x) => dismissal(x)) });
     expect(within(strip()).getByText('No open findings. 2 dismissed.')).toBeTruthy();
-    chooseTab('More');
+    const panel = screen.getByRole('tabpanel');
+    expect(within(panel).getByText('No open findings. 2 dismissed.')).toBeTruthy();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Show dismissed' }));
+    expect(tab('More').getAttribute('aria-selected')).toBe('true');
     expect(fold('Dismissed').getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement).toBe(fold('Dismissed'));
+    expect(screen.getByText('Problem 1')).toBeTruthy();
+  });
+  it('offers no Show dismissed while findings are open', () => {
+    const f = [finding(1), finding(2)];
+    review(f, { dismissals: [dismissal(f[0]!)] });
+    expect(queryButton('Show dismissed')).toBeNull();
   });
   it('says No findings when there are none, and nothing of the kind when some are shown', () => {
     review([]);
@@ -1036,12 +1084,12 @@ describe('the live region', () => {
     fireEvent.click(button('Copy fix prompt (1)'));
     await screen.findByRole('button', { name: 'Copied' });
     act(() => timers.fire());
-    expect(region.textContent).toBe('Copied');
+    expect(region.textContent).toBe('Copied. Paste it to your coding agent.');
     fireEvent.click(button('Copy fix prompt (1)'));
     await screen.findByRole('button', { name: 'Copied' });
     expect(region.textContent).toBe('');
     act(() => timers.fire());
-    expect(region.textContent).toBe('Copied');
+    expect(region.textContent).toBe('Copied. Paste it to your coding agent.');
   });
 });
 
@@ -1127,5 +1175,93 @@ describe('every field of document text is only text', () => {
     literal(proof, 'checked');
     literal(proof, 'wrong');
     literal(section('What to do'), 'change');
+  });
+});
+
+describe('what this review did not see stays in sight', () => {
+  const NOTHING_READ = 'Nothing in this pull request was read closely: all 3 changed files are of kinds Airlock trusts.';
+  const APPROVE = { label: 'approve' as const, sentence: 'Nothing that needs fixing was found.', counts: NO_COUNTS };
+  const PREVIOUS = { reviewId: 'r_0000000000', headSha: 'a'.repeat(40) };
+
+  it('a first review with the nothing-read note shows About this review under the strip, closed, without a tab pressed, and no green', () => {
+    review([], { doc: { verdict: APPROVE, notes: [NOTHING_READ] } });
+    const about = fold('About this review');
+    expect(about.textContent).toBe('About this review 1 note');
+    expect(about.getAttribute('aria-expanded')).toBe('false');
+    expect(follows(strip(), about)).toBe(true);
+    expect(follows(about, screen.getByRole('tablist'))).toBe(true);
+    expect(heading('Approve').className).not.toMatch(/sev-ok/);
+    fireEvent.click(about);
+    expect(within(foldSection('About this review')).getByText(NOTHING_READ)).toBeTruthy();
+    expect(heading('Notes')).toBeTruthy();
+  });
+  it('counts limits and notes in words, a zero part left out, and lists the limits first', () => {
+    review([finding(1)], { doc: { limits: ['82 of 673 lines were cut.'], notes: ['One.', 'Two.'] } });
+    expect(fold('About this review').textContent).toBe('About this review 1 not shown to the reviewer, 2 notes');
+    openFold('About this review');
+    const section = foldSection('About this review');
+    expect([...section.querySelectorAll('h4')].map((h) => h.textContent)).toEqual(['Not shown to the reviewer', 'Notes']);
+    expect([...section.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['82 of 673 lines were cut.', 'One.', 'Two.']);
+    cleanup();
+    review([finding(1)], { doc: { limits: ['A.', 'B.'] } });
+    expect(fold('About this review').textContent).toBe('About this review 2 not shown to the reviewer');
+    cleanup();
+    review([finding(1)]);
+    expect(queryFold('About this review')).toBeNull();
+  });
+  it('a re-review prints its notes in the strip, and only its limits get the fold', () => {
+    review([finding(1)], { doc: { previous: PREVIOUS, notes: ['The push changed only files Airlock does not review.'], limits: ['A limit.'] } });
+    expect(within(strip()).getByText('The push changed only files Airlock does not review.')).toBeTruthy();
+    expect(fold('About this review').textContent).toBe('About this review 1 not shown to the reviewer');
+    openFold('About this review');
+    expect(within(foldSection('About this review')).queryByText('The push changed only files Airlock does not review.')).toBeNull();
+    cleanup();
+    review([finding(1)], { doc: { previous: PREVIOUS, notes: ['A note.'] } });
+    expect(within(strip()).getByText('A note.')).toBeTruthy();
+    expect(queryFold('About this review')).toBeNull();
+  });
+});
+
+describe('Open in Airlock and Back', () => {
+  const asked = (id: string, seq: number) => ({ id, seq });
+
+  it('chooses the Findings tab, and Back puts focus on the finding\'s row', () => {
+    const state = reviewState([finding(1), finding(2)]);
+    const dispatch = vi.fn();
+    const { rerender } = render(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} openFinding={null} />);
+    chooseTab('More');
+    rerender(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} openFinding={asked('c_00000002', 1)} />);
+    expect(heading('Problem 2')).toBeTruthy();
+    fireEvent.click(button('Back to the review'));
+    expect(tab('Findings').getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(within(cards()[1]!).getByRole('button'));
+  });
+  it('puts focus on the Findings tab when the finding\'s row is not drawn (Also found closed)', () => {
+    const state = reviewState([finding(1), also(2)]);
+    const dispatch = vi.fn();
+    const { rerender } = render(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} openFinding={null} />);
+    rerender(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} openFinding={asked('c_00000002', 1)} />);
+    fireEvent.click(button('Back to the review'));
+    expect(fold('Also found').getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(tab('Findings'));
+  });
+});
+
+describe('the tab panel', () => {
+  it('is in the Tab order and named by its tab', () => {
+    review([finding(1)]);
+    chooseTab('The change');
+    const panel = screen.getByRole('tabpanel', { name: 'The change' });
+    expect(panel.tabIndex).toBe(0);
+  });
+});
+
+describe('the bar\'s copy', () => {
+  it('says Copied on the button and announces where the prompt goes', async () => {
+    clipboard(vi.fn().mockResolvedValue(undefined));
+    review([finding(1)]);
+    fireEvent.click(button('Copy fix prompt for the 1 fix'));
+    await screen.findByRole('button', { name: 'Copied' });
+    expect(document.querySelector('[aria-live="polite"]')!.textContent).toBe('Copied. Paste it to your coding agent.');
   });
 });

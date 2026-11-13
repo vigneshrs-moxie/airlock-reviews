@@ -3,15 +3,15 @@ import type { ReactNode, Ref } from 'react';
 import type { DismissedFinding } from '../state/selection';
 import { Collapsible } from './Collapsible';
 import { DismissedList } from './DismissedList';
-import { TimingTable, tookTime } from './TimingTable';
+import { reviewTime, TimingTable, tookTime } from './TimingTable';
 import { depthWord } from './words';
 
-export type MoreFold = 'limits' | 'notes' | 'dismissed' | 'timing';
+export type MoreFold = 'dismissed' | 'timing';
 
 /**
- * The More tab: when, how deep and with which packs it was reviewed; Review again; then folds with counts, each left out
- * when empty: what the reviewer was not shown, the review's notes, the dismissed findings with Restore, and the timing;
- * and the button that opens what was dropped.
+ * The More tab: when, how deep, how long and with which packs it was reviewed; Review again; then folds with counts, each
+ * left out when empty: the dismissed findings with Restore, and the timing; and the button that opens what was dropped.
+ * What the reviewer was not shown and the review's notes are not here: they stay in sight above the tabs.
  */
 export function MoreTab({ doc, packTitles, reviewAgain, dismissed, canRestore, onRestore, folds, onFold, droppedRef, onDropped }: {
   doc: ReviewDocument;
@@ -27,25 +27,14 @@ export function MoreTab({ doc, packTitles, reviewAgain, dismissed, canRestore, o
   onDropped: () => void;
 }) {
   const fold = (key: MoreFold) => ({ open: folds.has(key), onToggle: () => onFold(key) });
-  const limits = doc.limits ?? [];
-  const notes = doc.notes ?? [];
+  const took = reviewTime(doc);
   const stages = doc.timings.filter(tookTime).length;
   return (
     <>
-      <p className="muted">{`Reviewed at ${doc.pr.headSha.slice(0, 7)} · ${depthWord(doc.depth)} depth${packTitles === '' ? '' : ` · Packs: ${packTitles}`}`}</p>
+      <p className="muted">{`Reviewed at ${doc.pr.headSha.slice(0, 7)} · ${depthWord(doc.depth)} depth${took === null ? '' : ` · ${took}`}${packTitles === '' ? '' : ` · Packs: ${packTitles}`}`}</p>
       {reviewAgain}
-      {limits.length > 0 && (
-        <Collapsible title="Not shown to the reviewer" count={String(limits.length)} {...fold('limits')}>
-          <ul className="plain ap-points">{limits.map((line, i) => <li key={i}>{line}</li>)}</ul>
-        </Collapsible>
-      )}
-      {notes.length > 0 && (
-        <Collapsible title="Notes from the review" count={String(notes.length)} {...fold('notes')}>
-          <ul className="plain ap-points">{notes.map((line, i) => <li key={i}>{line}</li>)}</ul>
-        </Collapsible>
-      )}
       {dismissed.length > 0 && (
-        <Collapsible title="Dismissed" count={String(dismissed.length)} {...fold('dismissed')}>
+        <Collapsible title="Dismissed" count={String(dismissed.length)} name="dismissed" {...fold('dismissed')}>
           <DismissedList items={dismissed} canRestore={canRestore} onRestore={onRestore} />
         </Collapsible>
       )}

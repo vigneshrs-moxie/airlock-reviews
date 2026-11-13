@@ -10,7 +10,8 @@ export interface TabItem<K extends string> {
 /**
  * A row of tabs over one panel: real buttons with `role="tab"`, the chosen one `aria-selected`. Left and Right move to the
  * next tab and choose it, wrapping at the ends; Home and End go to the first and last. Only the chosen tab is in the Tab
- * order, and only its panel is drawn. The choice is kept by the caller.
+ * order, and only its panel is drawn. The panel, named by its tab, is in the Tab order too, as it may start with no
+ * control (The change opens on a sentence). The choice is kept by the caller.
  */
 export function Tabs<K extends string>({ label, items, chosen, onChoose, children }: {
   label: string;
@@ -52,7 +53,7 @@ export function Tabs<K extends string>({ label, items, chosen, onChoose, childre
           );
         })}
       </div>
-      <div role="tabpanel" id={panelId} aria-labelledby={tabId(chosen)} className="ap-group ap-panel">
+      <div role="tabpanel" id={panelId} aria-labelledby={tabId(chosen)} tabIndex={0} className="ap-group ap-panel">
         {children}
       </div>
     </>

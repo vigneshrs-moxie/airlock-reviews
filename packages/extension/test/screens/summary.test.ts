@@ -139,3 +139,22 @@ describe('cutAtWord', () => {
     expect(cutAtWord('  a  b\nc ', 10)).toBe('a b c');
   });
 });
+
+describe('gistOf passes over full stops that do not end a sentence', () => {
+  it.each([
+    ['e.g.', 'Some fields, e.g. the phone, are skipped. The rest are read.', 'Some fields, e.g. the phone, are skipped.'],
+    ['i.e.', 'It reads the file once, i.e. at start-up. Later reads miss changes.', 'It reads the file once, i.e. at start-up.'],
+    ['vs.', 'It compares cents vs. dollars. The total is wrong.', 'It compares cents vs. dollars.'],
+    ['etc.', 'Names, phones etc. are copied. Nothing is checked.', 'Names, phones etc. are copied.'],
+    ['a capital letter', 'The call goes to J. Smith instead. Nobody notices.', 'The call goes to J. Smith instead.'],
+    ['a capital letter in brackets', 'Option (B. the second) is taken. It fails.', 'Option (B. the second) is taken.'],
+    ['upper-case E.G.', 'Some fields, E.G. the phone, are skipped. The rest are read.', 'Some fields, E.G. the phone, are skipped.'],
+  ])('%s', (_name, happens, gist) => {
+    expect(gistOf({ happens })).toBe(gist);
+  });
+  it('still ends a sentence at a word that only looks short, or at a lower-case letter', () => {
+    expect(gistOf({ happens: 'It fails on Mac. It works on Linux.' })).toBe('It fails on Mac.');
+    expect(gistOf({ happens: 'It reads plan a. Then plan b.' })).toBe('It reads plan a.');
+    expect(gistOf({ happens: 'It stops! Then it goes on.' })).toBe('It stops!');
+  });
+});
