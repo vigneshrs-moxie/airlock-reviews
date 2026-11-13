@@ -43,7 +43,9 @@ describe('the dismiss sheet', () => {
   it('shows the title, what dismissing does, three reasons with their lines, and nothing chosen with Dismiss disabled', () => {
     const { dialog } = open();
     expect(within(dialog).getByRole('heading', { name: 'Dismiss this finding' })).toBeTruthy();
-    expect(within(dialog).getByText('Problem 1')).toBeTruthy();
+    // The short title, with the kind as a word before it.
+    expect(within(dialog).getByText(/Problem 1/).textContent).toBe('Fix Problem 1');
+    expect(within(dialog).getByText('Fix').className).toBe('ap-tag sev-fix');
     expect(within(dialog).getByText('It leaves this review. Nothing is sent to GitHub. You can bring it back under More.')).toBeTruthy();
     expect(within(dialog).getByRole('radiogroup', { name: 'Why?' })).toBeTruthy();
     expect(screen.getAllByRole('radio').map((r) => (r as HTMLInputElement).checked)).toEqual([false, false, false]);
@@ -78,7 +80,12 @@ describe('the dismiss sheet', () => {
     expect(field().value).toBe(WRONG_LINE);
     expect(screen.getByText('Airlock reads this line in every later review of this repository. You can remove it in Settings.')).toBeTruthy();
     expect(save().disabled).toBe(true);
+    // The starting line ends with a space on purpose: that is not called a problem until the person types.
+    expect(screen.queryByText('The text starts or ends with a space; remove it.')).toBeNull();
+    expect(field().getAttribute('aria-invalid')).toBeNull();
+    type(`${WRONG_LINE}the cart `);
     expect(screen.getByText('The text starts or ends with a space; remove it.')).toBeTruthy();
+    expect(save().disabled).toBe(true);
     type(`${WRONG_LINE}the cart is never empty here`);
     expect(save().disabled).toBe(false);
     expect(screen.queryByText('The text starts or ends with a space; remove it.')).toBeNull();
@@ -514,7 +521,10 @@ describe('the field', () => {
     open([finding(1, { path: `src/${'p'.repeat(500)}.ts` })]);
     fireEvent.click(radio(WRONG));
     expect(screen.getByText(`${[...field().value].length} of 500`)).toBeTruthy();
-    expect(screen.getByText('The text starts or ends with a space; remove it.')).toBeTruthy();
+    // Before any typing the starting line's last space is not called a problem; its length is.
+    expect(screen.queryByText('The text starts or ends with a space; remove it.')).toBeNull();
+    expect(screen.getByText('The text is longer than 500 characters.')).toBeTruthy();
+    expect(save().disabled).toBe(true);
     type(`${field().value}x`);
     expect(screen.getByText('The text is longer than 500 characters.')).toBeTruthy();
     expect(save().disabled).toBe(true);

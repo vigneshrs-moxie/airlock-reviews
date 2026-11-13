@@ -6,6 +6,7 @@ import { CopyButton } from './CopyButton';
 import { useAnnounce } from './Frame';
 import { Sheet } from './Sheet';
 import { shortTitle } from './summary';
+import { severityWord } from './words';
 
 export const TITLE_IN_DRAFT_MAX = 120;
 
@@ -138,6 +139,9 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
 
   const saves = reason !== null && reason !== 'not-now';
   const problem = saves ? checkLearnedText(text, reason) : null;
+  // The line as it is shown judged: the starting line ends with a space on purpose (the person finishes the sentence), so
+  // until the person types, that space is not called a problem. Dismiss stays disabled by the real rule.
+  const shownProblem = saves && !draft.typed ? checkLearnedText(text.trimEnd(), reason) : problem;
   // Closing is for when the person can see how the request ended.
   const close = (): void => { if (!busy) onClose(); };
 
@@ -172,7 +176,9 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
   const header = (
     <>
       <h2 className="ap-sheet-title" id={titleId} tabIndex={-1} ref={heading}>Dismiss this finding</h2>
-      <p className="muted">{shortTitle(finding)}</p>
+      <p className="muted ap-kinded">
+        <span className={`ap-tag sev-${finding.severity}`}>{severityWord(finding.severity)}</span>{' '}{shortTitle(finding)}
+      </p>
     </>
   );
   const shell = (children: React.ReactNode) => (
@@ -238,12 +244,12 @@ export function DismissSheet({ draft, onDraft, view, dispatch, active, onClose }
           <textarea
             id={fieldId} className="input" rows={3} value={text} spellCheck={false}
             {...(reason === 'intended' ? { placeholder: INTENDED_PLACEHOLDER } : {})}
-            {...(problem === null ? {} : { 'aria-describedby': errorId, 'aria-invalid': true })}
+            {...(shownProblem === null ? {} : { 'aria-describedby': errorId, 'aria-invalid': true })}
             onChange={(e) => edit(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') e.preventDefault(); }}
           />
           <p className="muted">{`${[...text].length} of ${LEARNED_TEXT_MAX}`}</p>
-          {problem !== null && <p id={errorId} className="detail">{problem}</p>}
+          {shownProblem !== null && <p id={errorId} className="detail">{shownProblem}</p>}
           <p className="muted">{INSTRUCTION_NOTE}</p>
         </div>
       )}

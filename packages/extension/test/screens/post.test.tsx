@@ -106,7 +106,7 @@ describe('the post sheet', () => {
 
   it('says for each comment whether it goes on the line or in the review summary', () => {
     const long = 'The pause handler calls the billing guard only after the account state is written, so it can order.';
-    const [a, b, c] = [finding(1, { short: 'Pausing skips the guard' }), finding(2, { title: long }), finding(3)];
+    const [a, b, c] = [finding(1, { short: 'Pausing skips the guard', severity: 'block' }), finding(2, { title: long }), finding(3, { severity: 'ask' })];
     previewed([a, b, c], {}, previewOf([
       itemFor(a), itemFor(b, { placement: 'summary', whySummary: 'The line is not part of the diff GitHub shows.' }),
       itemFor(c, { placement: 'summary', whySummary: 'You chose the summary.', line: null }),
@@ -116,16 +116,25 @@ describe('the post sheet', () => {
     expect(d.getByText('Where they go')).toBeTruthy();
     const places = [...document.querySelectorAll<HTMLElement>('.ap-dest')];
     expect(places.map((p) => p.querySelector('strong')?.textContent)).toEqual(['On the line', 'In the review summary', 'In the review summary']);
-    // Each is headed by its short title: the summary stage's, else the title cut at a word.
-    expect(places.map((p) => p.querySelector('.title')?.textContent)).toEqual(['Pausing skips the guard', 'The pause handler calls the billing guard only after the…', 'Problem 3']);
-    expect([...document.querySelectorAll('.ap-field > .muted:first-child')].map((p) => p.textContent))
-      .toEqual(['Pausing skips the guard', 'The pause handler calls the billing guard only after the…', 'Problem 3']);
+    // Each is headed by its kind as a word, then its short title: the summary stage's, else the title cut at a word.
+    const headings = ['Block Pausing skips the guard', 'Fix The pause handler calls the billing guard only after the…', 'Ask Problem 3'];
+    expect(places.map((p) => p.querySelector('.title')?.textContent)).toEqual(headings);
+    expect(places.map((p) => p.querySelector('.title .ap-tag')?.className)).toEqual(['ap-tag sev-block', 'ap-tag sev-fix', 'ap-tag sev-ask']);
+    expect([...document.querySelectorAll('.ap-field > .muted:first-child')].map((p) => p.textContent)).toEqual(headings);
     expect(within(places[0]!).getByText(ON_LINE('src/file1.ts, line 10'))).toBeTruthy();
     expect(within(places[1]!).getByText('The line is not part of the diff GitHub shows. The comment names the file and line.')).toBeTruthy();
     expect(within(places[2]!).getByText('You chose the summary. The comment names the file.')).toBeTruthy();
-    expect(d.getByText(`Posts as bob on acme/widgets#1, as 3 comments in one review. Airlock never approves, requests changes or merges. ${NOTHING_SENT}`)).toBeTruthy();
+    expect(d.getByText(`Posts as bob on acme/widgets#1, as one review with 3 comments. Airlock never approves, requests changes or merges. ${NOTHING_SENT}`)).toBeTruthy();
     expect(d.queryByText(/Open each to read or edit|Posted together/)).toBeNull();
     expect(button('Post 3 comments')).toBeTruthy();
+  });
+
+  it('heads a comment whose finding is not on screen with the service\'s title and no kind word', () => {
+    const [a, gone] = [finding(1), finding(9, { title: 'A finding from elsewhere' })];
+    previewed([a], {}, previewOf([itemFor(a), itemFor(gone)]));
+    const places = [...document.querySelectorAll<HTMLElement>('.ap-dest')];
+    expect(places.map((p) => p.querySelector('.title')?.textContent)).toEqual(['Fix Problem 1', 'A finding from elsewhere']);
+    expect(places[1]!.querySelector('.ap-tag')).toBeNull();
   });
 
   it('says why a comment goes in the summary, and a range of lines', () => {

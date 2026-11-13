@@ -80,3 +80,6 @@
 .ap-opt label { cursor: pointer; }
 .ap-opt label::after { content: ''; position: absolute; inset: 0; }
 .ap-opts { display: flex; flex-direction: column; gap: 8px; }
+
+/* The kind as a word before a short title in the comment and dismiss sheets. */
+.ap-kinded > .ap-tag { vertical-align: 1px; }

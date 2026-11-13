@@ -11,6 +11,7 @@ import { useAnnounce } from './Frame';
 import { ForgetAsk, mentionNotice, NO_POST_OFFLINE, WAIT, whyNotPosting } from './PostedMark';
 import { Sheet } from './Sheet';
 import { shortTitle } from './summary';
+import { severityWord } from './words';
 
 export const ONLY_COMMENTS = 'Airlock never approves, requests changes or merges.';
 export const NOTHING_SENT = 'Nothing has been sent yet.';
@@ -19,7 +20,7 @@ export const NOTHING_SENT = 'Nothing has been sent yet.';
  * `nothingSent` adds that nothing has been sent yet.
  */
 export function accountLine(viewer: string, pr: { repo: string; number: number }, n: number, nothingSent: boolean): string {
-  const as = n === 1 ? 'as a comment' : `as ${n} comments in one review`;
+  const as = n === 1 ? 'as a comment' : `as one review with ${n} comments`;
   const line = `Posts as ${viewer} on ${pr.repo}#${pr.number}, ${as}. ${ONLY_COMMENTS}`;
   return nothingSent ? `${line} ${NOTHING_SENT}` : line;
 }
@@ -169,15 +170,29 @@ export const IN_THE_SUMMARY = 'In the review summary';
 export const SHOWS_NEXT_TO_CODE = 'It shows in Files changed, next to the code.';
 export const NAMES_FILE_AND_LINE = 'The comment names the file and line.';
 
+/** A comment's heading: its finding's short title, with the kind as a word before it when the finding is on screen. */
+interface ItemHeading { short: string; severity: Finding['severity'] | null }
+
+/** The heading's words: the kind as a word (a short title is written by a quick model and can be wrong), then the title. */
+function HeadingWords({ heading }: { heading: ItemHeading }) {
+  return (
+    <>
+      {heading.severity !== null && <span className={`ap-tag sev-${heading.severity}`}>{severityWord(heading.severity)}</span>}
+      {heading.severity !== null && ' '}
+      {heading.short}
+    </>
+  );
+}
+
 /** Where one comment goes: on its line, or in the review summary with the reason, and the control that moves it. */
-function Destination({ item, heading, movable }: { item: PostPreviewItem; heading: string; movable: ReactNode }) {
+function Destination({ item, heading, movable }: { item: PostPreviewItem; heading: ItemHeading; movable: ReactNode }) {
   const inline = item.placement === 'inline';
   const summaryLine = [item.whySummary, item.line === null ? 'The comment names the file.' : NAMES_FILE_AND_LINE].filter((s) => s !== null).join(' ');
   return (
     <div className="ap-dest" data-placement={item.placement}>
       {inline ? <MessageSquare /> : <FileText />}
       <div>
-        <p className="title">{heading}</p>
+        <p className="title ap-kinded"><HeadingWords heading={heading} /></p>
         <p><strong>{inline ? ON_THE_LINE : IN_THE_SUMMARY}</strong></p>
         <p>{inline ? `${lineOf(item)} ${SHOWS_NEXT_TO_CODE}` : summaryLine}</p>
         {movable}
@@ -425,11 +440,11 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
   const describedByBlock = blocked === null ? {} : { 'aria-describedby': blockedId };
   const n = preview.items.length;
   const several = n > 1;
-  // Each comment is headed by its finding's short title (the service's title when the finding is not on screen); the
-  // text that is posted is the field's, never this.
-  const headingOf = (item: PostPreviewItem): string => {
+  // Each comment is headed by its finding's kind as a word and its short title (the service's title, and no kind, when the
+  // finding is not on screen); the text that is posted is the field's, never this.
+  const headingOf = (item: PostPreviewItem): ItemHeading => {
     const found = latest.document.findings.find((f) => f.fingerprint === item.fingerprint || (f.aliases ?? []).includes(item.fingerprint));
-    return shortTitle(found ?? { title: item.title });
+    return { short: shortTitle(found ?? { title: item.title }), severity: found?.severity ?? null };
   };
   const toSummaryControl = (item: PostPreviewItem): ReactNode => {
     const movable = item.placement === 'inline' || draft.previewToSummary.includes(item.fingerprint) || draft.toSummary.includes(item.fingerprint);
@@ -454,7 +469,7 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
         <p className="label">The exact text</p>
         {preview.items.map((item, i) => (
           <div key={item.fingerprint} className="ap-field">
-            {several && <p className="muted">{headingOf(item)}</p>}
+            {several && <p className="muted ap-kinded"><HeadingWords heading={headingOf(item)} /></p>}
             <TextField
               label={`Comment ${i + 1}`} value={draft.texts[item.fingerprint] ?? ''} max={COMMENT_MAX} locked={locked}
               names={draft.texts[item.fingerprint] === item.body ? item.mentions : undefined}
