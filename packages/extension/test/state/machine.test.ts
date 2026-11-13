@@ -1024,7 +1024,7 @@ describe('startPanel: actions', () => {
     const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary(), 'd'.repeat(40))) });
     await until(h, 'review');
     h.panel.dispatch({ type: 'start', depth: 'quick' });
-    expect(await until(h, 'running')).toEqual({ kind: 'running', pr: prSummary(), stages: [], brief: null, map: null, depth: 'quick' });
+    expect(await until(h, 'running')).toEqual({ kind: 'running', pr: prSummary(), stages: [], brief: null, map: null, depth: 'quick', startedAt: T0 });
   });
 
   it('keeps the depth it asked for on the running review, for the progress screen', async () => {
@@ -1032,6 +1032,32 @@ describe('startPanel: actions', () => {
     await until(h, 'ready');
     h.panel.dispatch({ type: 'start', depth: 'deep', since: 'last' });
     expect((await until(h, 'running')).depth).toBe('deep');
+  });
+
+  it('keeps the depth and start of a run it started when it attaches to the same run again (the service away and back, the tab away and back)', async () => {
+    const pr2 = prSummary({ number: 2, title: 'Second' });
+    const h = harness({ prepare: (svc) => svc.addPr(pr2) });
+    await until(h, 'ready');
+    h.panel.dispatch({ type: 'start', depth: 'deep' });
+    const first = await until(h, 'running');
+    expect(first).toMatchObject({ depth: 'deep', startedAt: T0 });
+    const run = [...h.svc.runs.values()].at(-1)!;
+    run.emit(stage('intake', 'start'));
+    await until(h, 'running', (s) => s.stages.length === 1);
+    // The service goes away and comes back with the run still going.
+    h.clock.now = T0 + 60_000;
+    h.svc.down = true;
+    run.lose();
+    await until(h, 'offline');
+    h.svc.down = false;
+    h.timers.fire();
+    expect(await until(h, 'running', (s) => s.stages.length === 1)).toMatchObject({ depth: 'deep', startedAt: T0 });
+    // The tab moves to another pull request and back.
+    h.tab.go(prUrl('acme/widgets', 2));
+    await until(h, 'ready', (s) => s.pr.number === 2);
+    h.clock.now = T0 + 120_000;
+    h.tab.go(prUrl('acme/widgets', 1));
+    expect(await until(h, 'running', (s) => s.stages.length === 1)).toMatchObject({ depth: 'deep', startedAt: T0 });
   });
 
   it('does not know the depth of a run the service reused, or of one it attached to when it loaded', async () => {

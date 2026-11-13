@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { elapsedWords, filesAndGroups, prLine, progressOf, stepWords } from '../../src/screens/progress';
+import { durationWords } from '../../src/screens/TimingTable';
+import { filesAndGroups, prLine, progressOf, stepWords } from '../../src/screens/progress';
 import { STAGE_WORDS } from '../../src/state/stage-words';
 import { map } from './fixtures';
 
@@ -32,13 +33,13 @@ describe('words on the progress screen', () => {
     expect(stepWords({ step: 4, total: 15 })).toBe('Step 4 of 15');
     expect(stepWords({ step: 4, total: null })).toBe('Step 4');
   });
-  it('says the time in seconds, minutes and seconds, or hours and minutes', () => {
-    expect(elapsedWords(0)).toBe('0 s');
-    expect(elapsedWords(59_999)).toBe('59 s');
-    expect(elapsedWords(60_000)).toBe('1 min 0 s');
-    expect(elapsedWords(130_000)).toBe('2 min 10 s');
-    expect(elapsedWords(3_900_000)).toBe('1 h 5 min');
-    expect(elapsedWords(-5)).toBe('0 s');
+  it('says the time with the one formatter the More tab uses, so the two never disagree', () => {
+    expect(durationWords(0)).toBe('0 s');
+    expect(durationWords(59_000)).toBe('59 s');
+    expect(durationWords(60_000)).toBe('1 min');
+    expect(durationWords(130_000)).toBe('2 min 10 s');
+    expect(durationWords(3_900_000)).toBe('1 h 5 min');
+    expect(durationWords(-5)).toBe('0 s');
   });
   it('counts the files and groups of the map, each file once', () => {
     expect(filesAndGroups(null)).toBeNull();

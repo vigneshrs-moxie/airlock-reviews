@@ -372,10 +372,27 @@ describe('running', () => {
       { stage: 'lenses', words: 'Looking through each lens', status: 'failed', detail: 'Claude timed out' },
       { stage: 'seams', words: 'Checking where the groups meet', status: 'skipped', detail: 'one group' },
     ] }));
+    // Said on the card itself, with the list of steps still closed.
+    const card = screen.getByRole('heading', { name: 'Reviewing' }).closest('section')!;
+    expect(within(card).getByText('A step failed: Looking through each lens')).toBeTruthy();
+    expect(within(card).getAllByText(/^A step failed/)).toHaveLength(1);
     const list = openSteps();
     expect(within(list).getByText('Failed')).toBeTruthy();
     expect(within(list).getByText('Claude timed out')).toBeTruthy();
     expect(within(list).getByText('Skipped')).toBeTruthy();
+    cleanup();
+    show(running());
+    expect(screen.queryByText(/^A step failed/)).toBeNull();
+  });
+  it('counts the time from when the panel asked for the run, when it knows, not from when the screen appeared', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.parse('2026-11-12T10:05:00.000Z'));
+      show(running({ depth: 'standard', startedAt: Date.parse('2026-11-12T10:00:00.000Z') }));
+      expect(screen.getByText('Step 2 of 15 · 5 min')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it('shows the brief before the last stage is done, with only unverified claims, under What it has found so far', () => {
     show(running({ brief }));
@@ -422,6 +439,12 @@ describe('running', () => {
     expect(regions).toHaveLength(1);
     expect(regions[0]?.textContent).toContain('Mapping the change: Done');
     expect(regions[0]?.closest('.panel')).not.toBeNull();
+  });
+  it('announces the running step with the word the list of steps uses: Now', () => {
+    const { rerender, dispatch } = show(running({ stages: [line('intake')] }));
+    rerender(<PanelScreen state={running({ stages: [line('intake'), line('packs', 'working')] })} dispatch={dispatch} onOpenSettings={() => undefined} />);
+    expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe(`${STAGE_WORDS.packs}: Now`);
+    expect(within(openSteps()).getByText(STAGE_WORDS.packs).closest('li')?.querySelector('.ap-sev')?.textContent).toBe('Now');
   });
   it('does not announce a finished review that was there when the panel opened, or one shown read-only', () => {
     const pr = prSummary();

@@ -32,7 +32,8 @@ export interface Progress {
   rows: StepRow[];
 }
 
-const DONE_WORDS: Record<StageLine['status'], StepRow['word']> = { working: 'Now', done: 'Done', failed: 'Failed', skipped: 'Skipped' };
+/** A reported stage's word: the same in "Show the steps" and in what is announced. */
+export const STEP_WORD: Record<StageLine['status'], StepRow['word']> = { working: 'Now', done: 'Done', failed: 'Failed', skipped: 'Skipped' };
 
 /**
  * The stages the review will run, from the depth this panel asked for and from what has been reported: a deep pass reported
@@ -55,7 +56,7 @@ export function progressOf(lines: readonly StageLine[], depth?: Depth): Progress
   const working = lines.filter((l) => l.status === 'working');
   // Stages can run side by side (the lenses and the sweep): the one started last is the one named.
   const now = working.at(-1) ?? lines.at(-1);
-  const reported = (l: StageLine): StepRow => ({ stage: l.stage, words: l.words, word: DONE_WORDS[l.status], detail: l.status === 'failed' ? l.detail : '' });
+  const reported = (l: StageLine): StepRow => ({ stage: l.stage, words: l.words, word: STEP_WORD[l.status], detail: l.status === 'failed' ? l.detail : '' });
   const byStage = new Map(lines.map((l) => [l.stage, l]));
   const rows = plan === null ? lines.map(reported) : plan.map((stage) => {
     const line = byStage.get(stage);
@@ -67,15 +68,6 @@ export function progressOf(lines: readonly StageLine[], depth?: Depth): Progress
 /** The progress in words: "Step 4 of 15", "Step 4" when the total is not known. */
 export function stepWords({ step, total }: Pick<Progress, 'step' | 'total'>): string {
   return total === null ? `Step ${step}` : `Step ${step} of ${total}`;
-}
-
-/** Time in words: "45 s", "2 min 10 s", "1 h 5 min". */
-export function elapsedWords(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 60) return `${seconds} s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} min ${seconds % 60} s`;
-  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
 }
 
 const count = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;

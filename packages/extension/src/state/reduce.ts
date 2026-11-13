@@ -75,8 +75,11 @@ export type PanelState =
   | { kind: 'unpaired'; message?: string }
   /** `notice`: why the last action was refused. `busy`: an action is in flight. */
   | { kind: 'ready'; pr: PrSummary; notice?: string; busy?: boolean }
-  /** `depth`: the depth this panel asked for when it started the run; left out when it did not start it (an attach). */
-  | { kind: 'running'; pr: PrSummary; stages: StageLine[]; brief: Brief | null; map: ChangeMap | null; depth?: Depth }
+  /**
+   * `depth`: the depth this panel asked for when it started the run; left out when it did not start it (an attach).
+   * `startedAt`: when this panel asked for the run, or first attached to it (the panel's clock, milliseconds since 1970).
+   */
+  | { kind: 'running'; pr: PrSummary; stages: StageLine[]; brief: Brief | null; map: ChangeMap | null; depth?: Depth; startedAt?: number }
   /**
    * `notice`: why the last action was refused, or the note on the last restore. `busy`: an action is in flight. `post`: the
    * answer to the post sheet's last request.
@@ -110,8 +113,8 @@ export type Action =
    * sheet that could not be given while the review was away (a post never sent before the Pair screen).
    */
   | { type: 'loaded'; pr: PrSummary; latest: LatestReply | null; notice?: string; post?: PostReply }
-  /** `depth`: the depth asked for, when this panel started the run it attached to. */
-  | { type: 'attached'; pr: PrSummary; depth?: Depth }
+  /** `depth`: the depth asked for, when this panel started the run it attached to. `startedAt`: when it was asked for or attached. */
+  | { type: 'attached'; pr: PrSummary; depth?: Depth; startedAt?: number }
   /** The pull request read again while its review is on screen: the review's `stale` is worked out again from it. */
   | { type: 'head'; pr: PrSummary }
   /** The stage list to show, built by the runtime from the stream's stage events. */
@@ -204,7 +207,10 @@ export function reduce(state: PanelState, action: Action): PanelState {
       return action.notice === undefined ? landed : { ...landed, notice: clip(action.notice) };
     }
     case 'attached':
-      return { kind: 'running', pr: action.pr, stages: [], brief: null, map: null, ...(action.depth === undefined ? {} : { depth: action.depth }) };
+      return {
+        kind: 'running', pr: action.pr, stages: [], brief: null, map: null,
+        ...(action.depth === undefined ? {} : { depth: action.depth }), ...(action.startedAt === undefined ? {} : { startedAt: action.startedAt }),
+      };
     case 'head': {
       if (state.kind !== 'review' || !isFor(action.pr, state.pr)) return state;
       const { stale } = reviewOf(action.pr, state.latest);
