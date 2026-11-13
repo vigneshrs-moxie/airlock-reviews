@@ -32,11 +32,14 @@ export function kindChips(open: readonly Finding[]): Chip[] {
 const APPROVING = new Set<VerdictLabel>(['approve', 'ready-for-pr2']);
 
 /**
- * Whether the verdict may be shown as clear: an approving label, nothing open, and nothing that says the review saw less
- * than all of the change (no stage error, no limit, no note) on the commit the pull request is at (not stale).
+ * Whether the verdict may be shown as clear: an approving label, nothing open, no question left to settle (the engine also
+ * writes its own limits there), and nothing that says the review saw less than all of the change (no stage error, no
+ * limit, no note) on the commit the pull request is at (not stale).
  */
-export function readsClear(doc: Pick<ReviewDocument, 'verdict' | 'stageErrors' | 'limits' | 'notes'>, open: readonly Finding[], stale: boolean): boolean {
-  return APPROVING.has(doc.verdict.label) && open.length === 0 && doc.stageErrors.length === 0
+export function readsClear(
+  doc: Pick<ReviewDocument, 'verdict' | 'stageErrors' | 'limits' | 'notes' | 'questions'>, open: readonly Finding[], stale: boolean,
+): boolean {
+  return APPROVING.has(doc.verdict.label) && open.length === 0 && doc.stageErrors.length === 0 && doc.questions.length === 0
     && (doc.limits ?? []).length === 0 && (doc.notes ?? []).length === 0 && !stale;
 }
 

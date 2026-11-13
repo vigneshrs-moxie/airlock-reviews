@@ -111,8 +111,8 @@ export function Verdict({
   const [openId, setOpenId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('findings');
   // About this review starts open when no finding is open, the review that could be taken for a clean one; with findings
-  // open it starts closed.
-  const [folds, setFolds] = useState<ReadonlySet<string>>(() => new Set<string>(lists.order.length === 0 ? ['about'] : []));
+  // open it starts closed. Questions for the author (under The change) starts open: the engine writes its own limits there.
+  const [folds, setFolds] = useState<ReadonlySet<string>>(() => new Set<string>(['questions', ...(lists.order.length === 0 ? ['about'] : [])]));
   const [sheet, setSheet] = useState(false);
   const droppedButton = useRef<HTMLButtonElement>(null);
   const selectButton = useRef<HTMLButtonElement>(null);

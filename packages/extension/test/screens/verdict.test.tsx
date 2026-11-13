@@ -81,7 +81,7 @@ describe('the verdict strip', () => {
     expect(strip().querySelector('[aria-label="Finding counts"]')).toBeNull();
   });
   const APPROVE = { label: 'approve' as const, sentence: 'Nothing that needs fixing was found.', counts: NO_COUNTS };
-  it('is green only for a clean approve: an approving label, nothing open, no stage error, limit or note, and not stale', () => {
+  it('is green only for a clean approve: an approving label, nothing open, no question, stage error, limit or note, and not stale', () => {
     review([], { doc: { verdict: APPROVE } });
     expect(heading('Approve').className).toContain('sev-ok');
     const notClear: [string, ReviewOptions][] = [
@@ -89,6 +89,7 @@ describe('the verdict strip', () => {
       ['a limit', { doc: { verdict: APPROVE, limits: ['82 of 673 changed lines were cut.'] } }],
       ['a stage error', { doc: { verdict: APPROVE, stageErrors: [{ stage: 'brief', cohortId: null, message: 'No reply' }] } }],
       ['a stale review', { doc: { verdict: APPROVE }, stale: true }],
+      ['a question', { doc: { verdict: APPROVE, questions: [{ text: '12 changed names were not searched for callers because the pull request is very large.', cohortId: null }] } }],
     ];
     for (const [name, opts] of notClear) {
       cleanup();
@@ -104,6 +105,12 @@ describe('the verdict strip', () => {
     cleanup();
     review([also(2)], { doc: { verdict: APPROVE } });
     expect(heading('Approve').className).toContain('sev-note');
+  });
+  it('opens Questions for the author under The change from the start, as the review is first shown', () => {
+    review([], { doc: { verdict: APPROVE, questions: [{ text: 'The review kit could not be refreshed.', cohortId: null }] } });
+    chooseTab('The change');
+    expect(fold('Questions for the author').getAttribute('aria-expanded')).toBe('true');
+    expect(within(foldSection('Questions for the author')).getByText('The review kit could not be refreshed.')).toBeTruthy();
   });
   it('keeps the verdict in words for a review that did not finish, with no colour claiming it is clear', () => {
     review([], { doc: { verdict: { label: 'incomplete', sentence: 'It stopped.', counts: NO_COUNTS } } });
@@ -337,7 +344,8 @@ describe('the change tab', () => {
     expect(titles.map((t) => fold(t).textContent)).toEqual([
       'What it does 3 points', 'Questions for the author 1', 'Whose call 1', 'Check after merge 2 steps', 'Text for your pull request copy', 'Files 4',
     ]);
-    for (const t of titles) expect(fold(t).getAttribute('aria-expanded'), t).toBe('false');
+    // Questions for the author starts open (the engine writes its own limits there); the rest start closed.
+    for (const t of titles) expect(fold(t).getAttribute('aria-expanded'), t).toBe(t === 'Questions for the author' ? 'true' : 'false');
     const before = heading('Before you merge');
     expect(follows(fold('What it does'), before)).toBe(true);
     expect(follows(before, fold('Questions for the author'))).toBe(true);
