@@ -60,6 +60,15 @@ describe('createSdkRunner options', () => {
     expect('allowedTools' in options).toBe(false);
   });
 
+  it('denies a request that needs no files every read tool by name, and leaves the others as they were', async () => {
+    const none = (await optionsFor(req({ role: 'summary', noTools: true }))).options;
+    expect(none.disallowedTools).toEqual(['Read', 'Grep', 'Glob']);
+    expect(none.outputFormat).toBeDefined(); // the structured answer is still asked for
+    expect('allowedTools' in none).toBe(false);
+    expect('disallowedTools' in (await optionsFor()).options).toBe(false);
+    expect('disallowedTools' in (await optionsFor(req({ noTools: false }))).options).toBe(false);
+  });
+
   it('turns off settings, MCP, session files and auto memory', async () => {
     const { options } = await optionsFor();
     expect(options.permissionMode).toBe('dontAsk');
@@ -261,10 +270,11 @@ describe('createSdkRunner limits and failure kinds', () => {
 
   it('sets the time and turn limits by role', () => {
     const minutes = (role: string) => roleLimits(role).timeoutMs / 60_000;
-    expect(['lens:core/a', 'sweep:k1#1', 'challenge:c_1', 'mapper', 'seams', 'brief', 'select', 'judge', 'other'].map(minutes))
-      .toEqual([10, 10, 10, 15, 15, 5, 5, 5, 10]);
-    expect(['select', 'merge', 'judge', 'challenge:c_1', 'brief', 'mapper', 'lens:core/a', 'seams'].map((r) => roleLimits(r).maxTurns))
-      .toEqual([15, 10, 6, 20, 25, 25, 40, 40]);
+    expect(['lens:core/a', 'sweep:k1#1', 'challenge:c_1', 'mapper', 'seams', 'brief', 'select', 'judge', 'summary', 'other'].map(minutes))
+      .toEqual([10, 10, 10, 15, 15, 5, 5, 5, 1.5, 10]);
+    expect(roleLimits('summary').timeoutMs).toBe(90_000);
+    expect(['select', 'merge', 'judge', 'summary', 'challenge:c_1', 'brief', 'mapper', 'lens:core/a', 'seams'].map((r) => roleLimits(r).maxTurns))
+      .toEqual([15, 10, 6, 6, 20, 25, 25, 40, 40]);
   });
 
   it('sends the role\'s turn limit unless the request names one', async () => {

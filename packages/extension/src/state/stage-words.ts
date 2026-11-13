@@ -10,9 +10,11 @@ export const STAGE_WORDS = {
   sweep: 'Checking each file against the pack rules',
   seams: 'Checking where the groups meet',
   anchor: 'Finding the lines for each finding',
+  merge: 'Joining findings that say the same thing',
   challenge: 'Challenging every finding',
   'lenses-deep': 'Taking a second, deeper look',
   select: 'Ranking and picking the top five',
+  summary: 'Writing the short version of each finding',
   store: 'Saving the review',
 } as const satisfies Record<string, string>;
 

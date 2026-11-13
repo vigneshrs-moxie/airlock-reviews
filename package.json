@@ -14,6 +14,7 @@
     "test": "vitest run",
     "check": "npm run typecheck && npm run test",
     "e2e": "npm run build:e2e -w @airlock/extension && playwright test -c packages/extension/e2e",
+    "e2e:shots": "npm run build:e2e -w @airlock/extension && playwright test -c packages/extension/e2e/shots.config.ts",
     "airlock": "node packages/engine/dist/cli.js",
     "airlock-replay": "node packages/replay/dist/cli.js",
     "service": "node packages/service/dist/cli.js",

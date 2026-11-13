@@ -3,7 +3,10 @@ import { placeText } from '../place-text';
 
 export const CODE_QUOTE_LIMIT = 160;
 
-const REASON: Record<DismissReason, string> = { wrong: 'Wrong', intended: 'Intended', 'not-now': 'Not now' };
+/** A dismissal's reason as the dismiss sheet words it (Hide it on this pull request only: hidden on it). */
+const REASON: Record<DismissReason, string> = {
+  wrong: 'The finding is mistaken', intended: 'The code is right for a reason Airlock could not know', 'not-now': 'Hidden on this pull request only',
+};
 const DEPTH: Record<Depth, string> = { quick: 'Quick', standard: 'Standard', deep: 'Deep' };
 const SIDE: Record<string, string> = {
   head: 'in the pull request', base: 'before the pull request', standard: "the team's corrections log", learned: 'a recorded decision',

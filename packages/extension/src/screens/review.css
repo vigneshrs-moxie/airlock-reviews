@@ -1,0 +1,62 @@
+/* The review screen: the verdict strip, the three tabs, one row per finding, folds and the pinned bar. The .ap-* rules are
+   the redesign's, from docs/design/panel-redesign/theme.css, made to fit the panel's real elements (buttons, lists);
+   those other screens use too (kind colours, chips, the row's parts, folds, the pinned bar) are in shared.css. */
+
+/* The verdict strip. */
+.ap-verdict { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 10px; }
+.ap-verdict p { margin: 0; }
+.ap-vword { margin: 0; font-size: 17px; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+.ap-headline { font-size: 13px; }
+.ap-verdict .label { margin: 0; }
+.ap-start { align-self: flex-start; }
+.ap-banner { display: flex; flex-direction: column; gap: 8px; border-color: var(--accent); background: var(--tint); }
+.ap-banner p, .ap-banner .bar { margin: 0; }
+
+/* The tabs. */
+.ap-tabs { display: flex; margin: 0 -12px; padding: 0 12px; border-bottom: 1px solid var(--border); }
+/* Each tab takes the room its words need, then an equal share of what is left; when the three do not fit on one line (Large
+   and Largest in a narrow panel) a tab's words wrap onto a second line rather than being cut: "Findings · n" keeps its count. */
+.ap-tab { flex: 1 1 auto; min-width: 0; min-height: 40px; padding: 9px 4px 8px; font: inherit; font-weight: 600; line-height: 1.25; color: var(--muted); text-align: center; overflow-wrap: break-word; background: none; border: 0; border-bottom: 2px solid transparent; cursor: pointer; }
+.ap-tab.on { color: var(--fg); border-bottom-color: var(--accent); }
+.ap-panel { gap: 8px; }
+.ap-label-gap { margin: 6px 0 0; }
+
+/* One row per finding. */
+.ap-list { display: flex; flex-direction: column; }
+.ap-item { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0 10px; padding: 0; border-bottom: 1px solid var(--border); }
+.plain > li.ap-item { padding: 0; }
+.ap-item > .mark, .ap-item > :not(.ap-pick-hit):not(.ap-row) { flex: 1 0 100%; padding-bottom: 8px; }
+/* The select checkbox: an 18 px box in a 32 px label, the whole label pressable; the box sits where it always did. */
+.ap-pick-hit { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin: 5px -5px 0 -5px; cursor: pointer; }
+.ap-pick { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.ap-item > .ap-row { flex: 1 1 0; min-height: 56px; padding: 10px 2px; font: inherit; color: inherit; text-align: left; background: none; border: 0; cursor: pointer; }
+.ap-row.still { cursor: default; align-items: flex-start; }
+.ap-row.still > .btn { flex: none; }
+.ap-row-sub .path { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+.ap-row > .ap-go { flex: none; align-self: center; width: 7px; height: 7px; margin-right: 4px; border-top: 2px solid var(--muted); border-right: 2px solid var(--muted); transform: rotate(45deg); }
+
+/* Folds. */
+.ap-fold-section { min-width: 0; }
+.ap-fold-title { min-width: 0; overflow-wrap: anywhere; }
+.ap-folded .ap-list { margin-top: -8px; }
+.ap-folded .ap-list > .ap-item:last-child { border-bottom: 0; }
+.ap-part { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ap-part > .label { margin: 0; }
+.ap-points { display: flex; flex-direction: column; gap: 6px; }
+.plain.ap-points > li { display: flex; gap: 8px; padding: 0; }
+.plain.ap-points > li::before { content: '•'; flex: none; color: var(--muted); }
+
+/* The review's pinned bar (Pinned.tsx; the bar itself is in shared.css). */
+.ap-pinned-review .btn { padding: 4px 10px; font-size: 13px; }
+.ap-bar > .btn { flex: 0 1 auto; }
+.ap-bar > .btn.ap-bar-main, .ap-bar-main { flex: 1 1 0; min-width: 0; }
+.ap-bar-main { display: flex; flex-direction: column; gap: 6px; }
+.ap-bar-main > .btn { width: 100%; }
+.ap-primary > .btn { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
+.ap-bar-why { flex: 1 0 100%; margin: 0; }
+@container (max-width: 300px) {
+  .ap-pinned-review .ap-bar > .btn, .ap-pinned-review .ap-bar-main { flex: 1 0 100%; }
+}
+
+/* The dismissed count among the verdict's chips: quieter than a kind. */
+.ap-chip.ap-chip-quiet { color: var(--muted); border-style: dashed; font-weight: 400; }

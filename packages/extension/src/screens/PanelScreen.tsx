@@ -14,28 +14,30 @@ import { listFindings } from '../state/selection';
 import type { Depth, Finding, LearnedReply, PackRef, PrSummary, RemoveLearnedBody, RemoveLearnedReply, ServiceStatus } from '@airlock/shared';
 import { DismissSheet, focusAfterClose, newDraft, type SheetDraft, type SheetView } from './DismissSheet';
 import { NO_REMOVE_OFFLINE, NO_REMOVE_UNPAIRED } from './LearnedList';
-import { Packs } from './Packs';
+import { Settings } from './Settings';
+import { Tour, tourMayOpen, type TourStep } from './Tour';
 import { focusAfterPost, newPostDraft, nextTicket, PostSheet, type PostDraft, type PostSheetView } from './PostSheet';
 import { PanelVisible } from './visible';
+import { DEFAULT_SIZE, type SizeSetting } from '../state/size';
 
 export interface PanelScreenProps {
   state: PanelState;
   dispatch: (action: UserAction) => void;
-  /** Called when the Packs button is pressed; the Packs screen opens either way. */
-  onOpenPacks?: () => void;
+  /** Called when the Settings button is pressed; the Settings screen opens either way. */
+  onOpenSettings?: () => void;
   /** For the Copy buttons' two seconds; the real clock unless a test passes its own. */
   timers?: Timers;
   /** Takes the person to a place on GitHub; without it the finding screen says jumping is not connected. */
   onJump?: Jump;
-  /** What the last jump found on the GitHub page, for the Packs screen; null before any jump. */
+  /** What the last jump found on the GitHub page, for the Service screen; null before any jump. */
   pageReport?: PageReport | null;
-  /** Asks the service for its status, for the Packs screen. */
+  /** Asks the service for its status, for Settings and the Service screen. */
   fetchStatus?: () => Promise<ServiceStatus>;
-  /** Reads the learned lines of a repository's packs, for the Packs screen. */
+  /** Reads the learned lines of a repository's packs, for Settings and the Packs screen. */
   fetchLearned?: (repo: string) => Promise<LearnedReply>;
   /** Removes one learned line, for the Packs screen. */
   removeLearned?: (body: RemoveLearnedBody) => Promise<RemoveLearnedReply>;
-  /** The depth stored in the Packs screen; null when none is stored. */
+  /** The depth stored in Settings; null when none is stored. */
   defaultDepth?: Depth | null;
   /** Stores the default depth; null clears it. */
   onDefaultDepth?: (depth: Depth | null) => void;
@@ -44,13 +46,22 @@ export interface PanelScreenProps {
   /** What the notes on GitHub's page did, said under the verdict. */
   notesLine?: NotesLine | null;
   onReloadNotes?: () => void;
-  /** The notes setting for the Packs screen: null until it is read. */
+  /** The notes setting for Settings: null until it is read. */
   showNotes?: boolean | null;
   onShowNotes?: (on: boolean) => void;
   notesFailed?: boolean;
   /** The finding `Open in Airlock` asked for: opened when it is an open finding of the review on screen. */
   openFinding?: OpenFinding | null;
+  /** The text and button size; without it Settings shows Default and changes nothing. */
+  size?: SizeSetting;
+  /** Whether the tour was finished or skipped; null until it is read, and then the tour does not open by itself. */
+  tourSeen?: boolean | null;
+  /** The person ended the tour (Skip, Done, Escape): it is not to open by itself again. */
+  onTourSeen?: () => void;
 }
+
+const DEFAULT_SHOWN = { size: DEFAULT_SIZE, failed: false } as const;
+const FIXED_SIZE: SizeSetting = { current: () => DEFAULT_SHOWN, subscribe: () => () => undefined, choose: () => undefined };
 
 /** Whether this panel is paired, as far as the state proves it; null when it proves nothing. */
 function pairedOf(state: PanelState): boolean | null {
@@ -98,7 +109,7 @@ const readyKey = (pr: PrSummary): string => `${pr.repo}#${pr.number}@${pr.headSh
 
 type BodyProps = Pick<PanelScreenProps, 'state' | 'dispatch' | 'timers' | 'onJump' | 'defaultDepth' | 'notesLine' | 'onReloadNotes' | 'openFinding'> & {
   onDismiss: (finding: Finding) => void;
-  /** `opener`: the finding whose Post comment was pressed, or `selected` for the bar. */
+  /** `opener`: the finding whose Comment on GitHub was pressed, or `selected` for the bar. */
   onPost: (findings: Finding[], opener: string) => void;
 };
 
@@ -151,28 +162,28 @@ function FinishedAnnouncer({ kind }: { kind: PanelState['kind'] }) {
   return null;
 }
 
-/** The frame and the screen for one state, with the Packs screen and the dismiss and post sheets over it. */
+/** The frame and the screen for one state, with the Settings screens and the dismiss and post sheets over it. */
 export function PanelScreen({
-  state, dispatch, onOpenPacks, timers, onJump, pageReport = null, fetchStatus = unreachable, fetchLearned = unreachable,
+  state, dispatch, onOpenSettings, timers, onJump, pageReport = null, fetchStatus = unreachable, fetchLearned = unreachable,
   removeLearned = unreachable, defaultDepth = null, onDefaultDepth, depthFailed = false, notesLine = null, onReloadNotes,
-  showNotes = null, onShowNotes, notesFailed = false, openFinding = null,
+  showNotes = null, onShowNotes, notesFailed = false, openFinding = null, size = FIXED_SIZE, tourSeen = null, onTourSeen,
 }: PanelScreenProps) {
-  const [packsOpen, setPacksOpen] = useState(false);
-  // `Open in Airlock` for a finding on screen: the Packs screen goes, so the finding is what the person sees.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // `Open in Airlock` for a finding on screen: Settings goes, so the finding is what the person sees.
   useEffect(() => {
-    if (openFinding !== null && isOpenFinding(state, openFinding.id)) setPacksOpen(false);
+    if (openFinding !== null && isOpenFinding(state, openFinding.id)) setSettingsOpen(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openFinding]);
   // What is in the sheet outlives the sheet being out of sight; only Cancel and Done drop it.
   const [draft, setDraft] = useState<SheetDraft | null>(null);
-  const packsButton = useRef<HTMLButtonElement>(null);
+  const settingsButton = useRef<HTMLButtonElement>(null);
   const wasOpen = useRef(false);
   // Back returns focus to the button that opened the screen.
   // A layout effect, so a move that waited in the panel while it was out of sight still happens after it.
   useLayoutEffect(() => {
-    if (packsOpen) wasOpen.current = true;
-    else if (wasOpen.current) { wasOpen.current = false; packsButton.current?.focus(); }
-  }, [packsOpen]);
+    if (settingsOpen) wasOpen.current = true;
+    else if (wasOpen.current) { wasOpen.current = false; settingsButton.current?.focus(); }
+  }, [settingsOpen]);
   // Focus goes back only when the person closes the sheet, not when the state takes it out of sight.
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -185,8 +196,10 @@ export function PanelScreen({
   postDraftRef.current = postDraft;
   const postClosing = useRef<PostDraft | null>(null);
   const closePost = useCallback((): void => { postClosing.current = postDraftRef.current; setPostDraft(null); }, []);
+  // A kept comment draft is never replaced: a second Comment on GitHub does nothing until that sheet is closed (today the
+  // sheet covering the screen is what stops it; this does not rely on that).
   const startPost = (findings: Finding[], opener: string): void => {
-    if (state.kind !== 'review' || findings.length === 0) return;
+    if (state.kind !== 'review' || findings.length === 0 || postDraftRef.current !== null) return;
     const { pr, latest } = state;
     const fingerprints = findings.map((f) => f.fingerprint);
     const ticket = nextTicket();
@@ -210,40 +223,69 @@ export function PanelScreen({
   const postView: PostSheetView | null = state.kind === 'review' && sheetView !== null ? { ...sheetView, post: state.post, stale: state.stale }
     : state.kind === 'offline' && state.review !== undefined && sheetView !== null ? { ...sheetView, stale: state.review.stale } : null;
   const known = knownOf(state);
+  // The tour: by itself the first time a finished review is on screen, or from Settings over any screen. Either way it
+  // is shown only while no dismiss or post sheet is drawn: a replay asked for then waits for the sheet to close. A draft
+  // kept while no sheet can be drawn (the Pair, problem or loading screen) does not hold the tour back. The one
+  // that opened by itself goes, without being marked seen, when the review leaves the screen (a push, the service away);
+  // a replay stays until it is ended, and ending either marks it seen, so neither follows the other.
+  const [tour, setTour] = useState<{ step: TourStep; replay: boolean } | null>(null);
+  const tourEnded = useRef(false);
+  const sheetDrawn = (draft !== null && sheetView !== null) || (postDraft !== null && postView !== null);
+  const mayOpen = tourMayOpen(state, { seen: tourSeen, ended: tourEnded.current, sheetOpen: sheetDrawn, settingsOpen });
+  useEffect(() => {
+    if (tour === null && mayOpen) setTour({ step: 1, replay: false });
+  }, [tour, mayOpen]);
+  useEffect(() => {
+    if (tour !== null && !tour.replay && state.kind !== 'review') setTour(null);
+  }, [tour, state.kind]);
+  const tourMayShow = tour !== null && !sheetDrawn && !settingsOpen;
+  const endTour = (): void => { tourEnded.current = true; setTour(null); onTourSeen?.(); };
   useEffect(() => {
     const finding = closing.current;
     if (draft !== null || finding === null) return;
     closing.current = null;
     (focusAfterClose(finding, sheetView) ?? document.querySelector<HTMLElement>('main'))?.focus();
   }, [draft, sheetView]);
+  // Shown a render after it may be, after the effects above have put focus back from a closed sheet: the tour then takes
+  // focus last, and gives it back there.
+  const [tourReady, setTourReady] = useState(false);
+  useEffect(() => { setTourReady(tourMayShow); }, [tourMayShow]);
+  const tourShown = tourMayShow && tourReady;
   return (
     <Frame
-      status={connectionOf(state)} packsRef={packsButton} {...(timers ? { timers } : {})}
-      onOpenPacks={() => { setPacksOpen(true); onOpenPacks?.(); }}
+      status={connectionOf(state)} settingsRef={settingsButton} {...(timers ? { timers } : {})}
+      onOpenSettings={() => { setSettingsOpen(true); onOpenSettings?.(); }}
     >
       <FinishedAnnouncer kind={state.kind} />
-      {/* Packs opens beside the panel, which stays as it was, out of sight and out of reach. */}
-      <div className="kept" hidden={packsOpen} inert={packsOpen}>
-        <PanelVisible value={!packsOpen}>
+      {/* Settings opens beside the panel, which stays as it was, out of sight and out of reach. */}
+      <div className="kept" hidden={settingsOpen} inert={settingsOpen}>
+        <PanelVisible value={!settingsOpen}>
         <Body
           state={state} dispatch={dispatch} timers={timers} onJump={onJump} onDismiss={startDismiss} onPost={startPost} defaultDepth={defaultDepth}
           notesLine={notesLine} onReloadNotes={onReloadNotes} openFinding={openUnderSheets.current}
         />
         {draft !== null && sheetView !== null && (
-          <DismissSheet draft={draft} onDraft={setDraft} view={sheetView} dispatch={dispatch} active={!packsOpen} onClose={closeDismiss} />
+          <DismissSheet draft={draft} onDraft={setDraft} view={sheetView} dispatch={dispatch} active={!settingsOpen} onClose={closeDismiss} />
         )}
         {postDraft !== null && postView !== null && (
-          <PostSheet draft={postDraft} onDraft={setPostDraft} view={postView} dispatch={dispatch} active={!packsOpen} onClose={closePost} />
+          <PostSheet draft={postDraft} onDraft={setPostDraft} view={postView} dispatch={dispatch} active={!settingsOpen} onClose={closePost} />
         )}
         </PanelVisible>
       </div>
-      {packsOpen && (
-        <Packs
+      {settingsOpen && (
+        <Settings
           pr={known.pr} packVersions={known.packs} paired={pairedOf(state)} fetchStatus={fetchStatus}
           fetchLearned={fetchLearned} removeLearned={removeLearned} removeBlocked={removeBlockedBy(state)}
           defaultDepth={defaultDepth} onDefaultDepth={onDefaultDepth ?? (() => undefined)} depthFailed={depthFailed} page={pageReport}
-          showNotes={showNotes} {...(onShowNotes ? { onShowNotes } : {})} notesFailed={notesFailed}
-          onBack={() => setPacksOpen(false)} {...(timers ? { timers } : {})}
+          showNotes={showNotes} {...(onShowNotes ? { onShowNotes } : {})} notesFailed={notesFailed} size={size}
+          onBack={() => setSettingsOpen(false)} {...(timers ? { timers } : {})}
+          onTour={() => { setSettingsOpen(false); setTour({ step: 1, replay: true }); }}
+        />
+      )}
+      {tourShown && (
+        <Tour
+          step={tour.step} onStep={(step) => setTour({ ...tour, step })} onEnd={endTour}
+          {...(tour.replay ? { returnFocusTo: settingsButton } : {})} {...(timers ? { timers } : {})}
         />
       )}
     </Frame>

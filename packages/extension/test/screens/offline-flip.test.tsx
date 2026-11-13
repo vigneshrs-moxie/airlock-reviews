@@ -5,17 +5,17 @@ import { PanelScreen } from '../../src/screens/PanelScreen';
 import type { PanelState } from '../../src/state/reduce';
 import { prSummary } from './fixtures';
 import { finding, reviewState } from './review-fixtures';
+import { tick } from './review-dom';
 
 afterEach(cleanup);
 
 function mount(state: PanelState) {
   const dispatch = vi.fn();
-  const view = render(<PanelScreen state={state} dispatch={dispatch} onOpenPacks={() => undefined} />);
-  const flip = (next: PanelState): void => view.rerender(<PanelScreen state={next} dispatch={dispatch} onOpenPacks={() => undefined} />);
+  const view = render(<PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} />);
+  const flip = (next: PanelState): void => view.rerender(<PanelScreen state={next} dispatch={dispatch} onOpenSettings={() => undefined} />);
   return { dispatch, flip };
 }
 
-const tick = (title: string) => fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(`${title}$`) }));
 const ticked = (): string[] =>
   screen.getAllByRole('checkbox').filter((c) => (c as HTMLInputElement).checked).map((c) => c.getAttribute('aria-label') ?? '');
 const backButton = () => screen.queryByRole('button', { name: 'Back to the review' });
@@ -44,19 +44,20 @@ describe('a flip to offline and back keeps the screen (fix round)', () => {
     const pr = prSummary({ packs: [{ id: 'generic', title: 'Generic' }, { id: 'orbit', title: 'Orbit' }] });
     const { flip, dispatch } = mount({ kind: 'ready', pr });
     fireEvent.click(screen.getByRole('radio', { name: /Deep/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Packs' }));
     fireEvent.click(screen.getByRole('switch', { name: 'Orbit' }));
 
     flip({ kind: 'offline', ready: pr });
     expect(screen.getByText("Airlock's service on this Mac is not running.")).toBeTruthy();
     expect((screen.getByRole('radio', { name: /Deep/ }) as HTMLInputElement).checked).toBe(true);
     expect((screen.getByRole('switch', { name: 'Orbit' }) as HTMLInputElement).checked).toBe(false);
-    const review = screen.getByRole('button', { name: 'Review' }) as HTMLButtonElement;
+    const review = screen.getByRole('button', { name: 'Review this pull request' }) as HTMLButtonElement;
     expect(review.disabled).toBe(true);
 
     flip({ kind: 'ready', pr });
     expect((screen.getByRole('radio', { name: /Deep/ }) as HTMLInputElement).checked).toBe(true);
     expect((screen.getByRole('switch', { name: 'Orbit' }) as HTMLInputElement).checked).toBe(false);
-    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review this pull request' }));
     expect(dispatch).toHaveBeenCalledWith({ type: 'start', depth: 'deep', packIds: ['generic'] });
   });
 });

@@ -7,7 +7,9 @@ describe('words', () => {
     expect([severityWord('block'), severityWord('fix'), severityWord('ask'), severityWord('note')]).toEqual(['Block', 'Fix', 'Ask', 'Note']);
   });
   it('says dismissal reasons in words', () => {
-    expect([dismissReasonWord('wrong'), dismissReasonWord('intended'), dismissReasonWord('not-now')]).toEqual(['Wrong', 'Intended', 'Not now']);
+    expect([dismissReasonWord('wrong'), dismissReasonWord('intended'), dismissReasonWord('not-now')]).toEqual([
+      'The finding is mistaken', 'The code is right for a reason Airlock could not know', 'Hidden on this pull request only',
+    ]);
   });
   it('says the side of a proof in words and anything else as written', () => {
     expect(proofSide('head')).toBe('in the pull request');

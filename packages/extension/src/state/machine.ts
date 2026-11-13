@@ -130,6 +130,11 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
   let records: { repo: string; number: number; posts: PostRecord[]; dismissals: LatestReply['dismissals'] } | null = null;
   const sleeping = new Set<unknown>();
   /**
+   * The runs this panel started (not ones the service reused): the depth asked for and when it was asked, so attaching to
+   * the same run again (after the tab moved and came back, or the service came back) keeps its step total and its time.
+   */
+  const ownRuns = new Map<string, { depth: Depth; startedAt: number }>();
+  /**
    * The commit the tab's page shows, as best the panel knows: `unset` until the first read of this pull request,
    * `unknown` when the read made after the page loaded or moved failed (or the service was away then).
    */
@@ -290,7 +295,8 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
       const runId = await client.running(target.repo, target.number, signal);
       if (!current(g)) return;
       if (runId !== null) {
-        await follow(g, pr, runId, now());
+        const own = ownRuns.get(runId);
+        await follow(g, pr, runId, own?.startedAt ?? now(), own?.depth);
         return;
       }
       const latest = await client.latest(target.repo, target.number, signal);
@@ -311,9 +317,9 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
    * shown only once it is at least as long, so a re-attach never flickers. A stream that broke at the network level
    * is followed by one hello: no answer means offline (the retry then reloads); an answer means re-attach.
    */
-  const follow = async (g: number, pr: PrSummary, runId: string, startedAt: number): Promise<void> => {
+  const follow = async (g: number, pr: PrSummary, runId: string, startedAt: number, depth?: Depth): Promise<void> => {
     const signal = live.signal;
-    apply({ type: 'attached', pr });
+    apply({ type: 'attached', pr, startedAt, ...(depth === undefined ? {} : { depth }) });
     let best = 0;
     let inARow = 0;
     let inAll = 0;
@@ -558,7 +564,9 @@ export function startPanel(deps: PanelDeps): { dispatch(action: UserAction): voi
     const startedAt = now();
     const reply = await client.start({ repo: pr.repo, number: pr.number, depth, ...(packIds === undefined ? {} : { packIds }), ...(since === undefined ? {} : { since }) });
     if (!current(g)) return;
-    void follow(g, pr, reply.runId, startedAt).catch((error: unknown) => fail(g, error, pr));
+    // A run the service reused was started by someone else, perhaps at another depth: its depth is not known here.
+    if (!reply.reused) ownRuns.set(reply.runId, { depth, startedAt });
+    void follow(g, pr, reply.runId, startedAt, reply.reused ? undefined : depth).catch((error: unknown) => fail(g, error, pr));
   };
 
   const dispatch = (action: UserAction): void => {

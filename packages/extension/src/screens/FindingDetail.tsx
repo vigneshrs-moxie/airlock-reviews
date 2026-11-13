@@ -2,8 +2,13 @@ import type { Finding, PostRecord, PrSummary } from '@airlock/shared';
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { Timers } from '../client/timers';
 import { connectedPlace, COULD_NOT_JUMP, ownPlace, type Jump, type JumpOptions, type JumpPlace, type JumpResult } from '../state/jump';
-import { CopyButton } from './CopyButton';
+import { RefusedCopy, useCopy } from './CopyButton';
+import { EndInView } from './EndInView';
+import { useFindingFolds, type FindingFold } from './finding-folds';
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Crosshair } from './FindingIcons';
+import { Pinned } from './Pinned';
 import { PostedMark, Reason, WAIT } from './PostedMark';
+import { gistOf, shortTitle } from './summary';
 import { useVisible } from './visible';
 import { fromText, locationText, placeText, severityWord, sourceText } from './words';
 
@@ -12,12 +17,41 @@ export type OnJump = (place: JumpPlace, options: JumpOptions) => Promise<JumpRes
 
 export const notConnected: Jump = () => Promise.resolve({ sentence: 'Jumping is not connected yet.', needsReload: false });
 
-function Part({ title, children }: { title: string; children: ReactNode }) {
+/** The three actions' quiet lines, under their buttons. */
+export const CAPTION = { copy: 'for your coding agent', post: 'you see it first', dismiss: 'hide it, teach Airlock' } as const;
+
+/** Said when the fix prompt is on the clipboard. */
+export const COPIED_PROMPT = 'Copied. Paste it to your coding agent.';
+
+/** The action whose button is filled, by the finding's kind: none for a note. */
+const MAIN: Record<Finding['severity'], 'copy' | 'post' | null> = { block: 'copy', fix: 'copy', ask: 'post', note: null };
+
+/** One fold: a heading whose button shows or hides what is under it, with a short word on its right. */
+function Fold({ fold, title, aside, open, onToggle, children }: {
+  fold: FindingFold; title: string; aside?: string; open: boolean; onToggle: (fold: FindingFold) => void; children: ReactNode;
+}) {
+  const id = useId();
   return (
-    <section className="part">
-      <h3 className="label">{title}</h3>
-      {children}
+    <section className="ap-fold-part" data-fold={fold}>
+      <h3 className="ap-fold-head">
+        <button type="button" className="ap-fold" aria-expanded={open} {...(open ? { 'aria-controls': id } : {})} onClick={() => onToggle(fold)}>
+          <ChevronRight />
+          <span>{title}</span>
+          {aside !== undefined && <span className="n ap-end"><span dir="ltr">{aside}</span></span>}
+        </button>
+      </h3>
+      {open && <div className="ap-folded" id={id}>{children}</div>}
     </section>
+  );
+}
+
+/** A label and its text inside a fold. */
+function Line({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="ap-line">
+      <h4 className="label">{label}</h4>
+      {children}
+    </div>
   );
 }
 
@@ -26,6 +60,8 @@ export interface FindingDetailProps {
   packs: PrSummary['packs'];
   previous: Finding | null;
   next: Finding | null;
+  /** Where the finding is among the open findings in list order: `index` counts from 1 (1 is the first). Shown as "n of m". */
+  position?: { index: number; total: number } | undefined;
   /** Dismiss needs the service; false when the review is shown read-only. */
   canDismiss: boolean;
   fixPrompt: () => string;
@@ -47,17 +83,25 @@ export interface FindingDetailProps {
   timers?: Timers;
 }
 
-/** One finding in full. Keyed by the caller on the finding's id, so each finding starts with its own focus and notes. */
+/**
+ * One finding: the short version first (kind, title, place, summary, what to do), the detail in folds, and the three
+ * actions pinned at the bottom. Keyed by the caller on the finding's id, so each finding starts with its own focus and
+ * notes; which folds are open is remembered across findings.
+ */
 export function FindingDetail({
-  finding, packs, previous, next, canDismiss, fixPrompt, onBack, onOpen, onJump, changedPaths, onDismiss, posted, postBlocked = null,
-  canPost = true, onPost = () => undefined, unknownMark, timers,
+  finding, packs, previous, next, position, canDismiss, fixPrompt, onBack, onOpen, onJump, changedPaths, onDismiss, posted,
+  postBlocked = null, canPost = true, onPost = () => undefined, unknownMark, timers,
 }: FindingDetailProps) {
   const title = useRef<HTMLHeadingElement>(null);
-  const postWhy = useId();
-  // Why Post comment is disabled, when the finding has no record: the review's reason, or another action in flight.
+  const ids = { copy: useId(), post: useId(), dismiss: useId(), mark: useId() };
+  // Why Comment on GitHub is disabled, when the finding has no record: the review's reason, or another action in flight.
   const postWhyText = postBlocked ?? (canPost ? null : WAIT);
   // `reloadFor`: the place to jump to again after reloading the GitHub tab, when the jump said a reload is needed.
   const [note, setNote] = useState<{ key: string; text: string; reloadFor: JumpPlace | null } | null>(null);
+  const [open, toggle] = useFindingFolds();
+  const copy = useCopy(fixPrompt, timers, COPIED_PROMPT);
+  const copyButton = useRef<HTMLButtonElement>(null);
+  const putAwayCopy = (): void => { copy.putAway(); copyButton.current?.focus(); };
   const visible = useVisible();
   const focused = useRef(false);
   useEffect(() => {
@@ -92,19 +136,70 @@ export function FindingDetail({
     );
   };
 
+  const shown = shortTitle(finding);
+  const gist = gistOf(finding);
+  const main = MAIN[finding.severity];
+  const raisedToo = finding.alsoRaisedBy ?? [];
+  const unknown = posted !== undefined && posted.outcome !== 'posted' && unknownMark !== undefined;
+  const postDisabled = posted !== undefined || postWhyText !== null;
+  // Under Comment on GitHub: the post's mark, else why it cannot be pressed, else its line. The passing wait is said to a
+  // screen reader only, so the line stays in sight.
+  const postLine = posted !== undefined ? <PostedMark record={posted} id={ids.post} />
+    : postWhyText !== null && postWhyText !== WAIT ? <Reason id={ids.post} text={postWhyText} />
+      : (
+        <>
+          <span className="cap" {...(postWhyText === null ? { id: ids.post } : {})}>{CAPTION.post}</span>
+          {postWhyText === WAIT && <Reason id={ids.post} text={WAIT} />}
+        </>
+      );
+  const filled = (action: 'copy' | 'post'): string => (main === action ? 'btn primary' : 'btn');
+
   return (
-    <>
-      <button type="button" className="btn small back" onClick={onBack}>Back to the review</button>
-      <section className="card">
-        <h2 className="title" tabIndex={-1} ref={title} data-focus="detail">{finding.title}</h2>
-        <p><span className="sev">{severityWord(finding.severity)}</span></p>
-        <code className="path block">{locationText(finding)}</code>
-        <Part title="What happens"><p>{finding.happens}</p></Part>
-        <Part title="Why"><p>{finding.why}</p></Part>
-        {finding.suggestedChange.trim() !== '' && <Part title="Suggested change"><p>{finding.suggestedChange}</p></Part>}
-        <Part title="The code"><pre className="quote"><code>{finding.quote}</code></pre></Part>
+    <div className="finding-screen">
+      <div className="ap-top">
+        <button type="button" className="ap-back" aria-label="Back to the review" onClick={onBack}><ChevronLeft />Review</button>
+        {position !== undefined && <span className="ap-count">{`${position.index} of ${position.total}`}</span>}
+        <button type="button" className="ap-icon" aria-label="Previous finding" disabled={previous === null} onClick={() => previous && onOpen(previous)}>
+          <ChevronUp />
+        </button>
+        <button type="button" className="ap-icon" aria-label="Next finding" disabled={next === null} onClick={() => next && onOpen(next)}>
+          <ChevronDown />
+        </button>
+      </div>
+
+      <section className="ap-heading">
+        <span className={`ap-tag sev-${finding.severity}`}>{severityWord(finding.severity)}</span>
+        <h2 className="ap-title" tabIndex={-1} ref={title} data-focus="detail">{shown}</h2>
+        <div className="ap-where">
+          <EndInView className="path" text={locationText(finding)} />
+          <button type="button" className="btn small" onClick={() => jump('own', ownPlace(finding, changedPaths))}><Crosshair />Show in diff</button>
+        </div>
+        {noteFor('own')}
+      </section>
+
+      {unknown && <div className="ap-onhub">{unknownMark(ids.mark)}</div>}
+      {gist !== '' && <p className="ap-short">{gist}</p>}
+      {finding.suggestedChange.trim() !== '' && (
+        <section className="ap-do">
+          <h3 className="label">What to do</h3>
+          <p>{finding.suggestedChange}</p>
+        </section>
+      )}
+
+      <div className="ap-folds">
+        <Fold fold="happens" title="What happens" open={open.has('happens')} onToggle={toggle}>
+          {shown !== finding.title && <p className="ap-whole">{finding.title}</p>}
+          <p>{finding.happens}</p>
+        </Fold>
+        <Fold fold="why" title="Why it matters" open={open.has('why')} onToggle={toggle}>
+          <p>{finding.why}</p>
+        </Fold>
+        <Fold fold="code" title="The code" aside={locationText(finding)} open={open.has('code')} onToggle={toggle}>
+          <p className="path ap-place-whole">{locationText(finding)}</p>
+          <pre className="quote"><code>{finding.quote}</code></pre>
+        </Fold>
         {finding.connected.length > 0 && (
-          <Part title="Also involves">
+          <Fold fold="involves" title="Also involves" aside={String(finding.connected.length)} open={open.has('involves')} onToggle={toggle}>
             <ul className="plain">
               {finding.connected.map((place, i) => (
                 <li key={i}>
@@ -116,42 +211,49 @@ export function FindingDetail({
                 </li>
               ))}
             </ul>
-          </Part>
+          </Fold>
         )}
-        {finding.checked.trim() !== '' && <Part title="Checked"><p>{finding.checked}</p></Part>}
-        {finding.wouldBeWrongIf.trim() !== '' && <Part title="Would be wrong if"><p>{finding.wouldBeWrongIf}</p></Part>}
-        <Part title="From"><p>{fromText(finding, packs)}</p></Part>
-        {finding.alsoRaisedBy !== undefined && finding.alsoRaisedBy.length > 0 && (
-          <Part title="Also raised by">
-            <ul className="plain">{finding.alsoRaisedBy.map((source, i) => <li key={i}>{sourceText(source, packs)}</li>)}</ul>
-          </Part>
-        )}
-      </section>
-      <div className="actions">
-        <div className="action">
-          <button type="button" className="btn" onClick={() => jump('own', ownPlace(finding, changedPaths))}>Jump to line</button>
-          {noteFor('own')}
-        </div>
-        <div className="action"><CopyButton text={fixPrompt} label="Copy fix prompt" {...(timers ? { timers } : {})} /></div>
-        <div className="action">
-          <button
-            type="button" className="btn" data-post-for={finding.id} disabled={posted !== undefined || postWhyText !== null}
-            {...(posted !== undefined || postWhyText !== null ? { 'aria-describedby': postWhy } : {})} onClick={() => onPost(finding)}
-          >
-            Post comment
+        <Fold fold="proof" title="How sure is this" open={open.has('proof')} onToggle={toggle}>
+          {finding.checked.trim() !== '' && <Line label="Checked"><p>{finding.checked}</p></Line>}
+          {finding.wouldBeWrongIf.trim() !== '' && <Line label="It would be wrong if"><p>{finding.wouldBeWrongIf}</p></Line>}
+          <Line label="From"><p>{fromText(finding, packs)}</p></Line>
+          {raisedToo.length > 0 && (
+            <Line label="Also raised by">
+              <ul className="plain">{raisedToo.map((source, i) => <li key={i}>{sourceText(source, packs)}</li>)}</ul>
+            </Line>
+          )}
+        </Fold>
+      </div>
+
+      <Pinned
+        name="finding" label="Actions on this finding"
+        above={copy.shown !== null && <RefusedCopy shown={copy.shown} box={copy.box} onClose={putAwayCopy} />}
+      >
+        <div className="ap-act">
+          <button type="button" className={filled('copy')} ref={copyButton} aria-describedby={ids.copy} onClick={copy.copy}>
+            {copy.copied ? 'Copied' : 'Copy fix prompt'}
           </button>
-          {posted !== undefined
-            ? (posted.outcome === 'posted' || unknownMark === undefined ? <PostedMark record={posted} id={postWhy} /> : unknownMark(postWhy))
-            : postWhyText !== null && <Reason id={postWhy} text={postWhyText} />}
+          <span className="cap" id={ids.copy}>{CAPTION.copy}</span>
         </div>
-        <div className="action">
-          <button type="button" className="btn" data-dismiss-for={finding.id} disabled={!canDismiss} onClick={() => onDismiss(finding)}>Dismiss</button>
+        <div className="ap-act">
+          <button
+            type="button" className={filled('post')} data-post-for={finding.id} disabled={postDisabled} aria-describedby={ids.post}
+            onClick={() => onPost(finding)}
+          >
+            Comment on GitHub
+          </button>
+          {postLine}
         </div>
-      </div>
-      <div className="actions">
-        <button type="button" className="btn" disabled={previous === null} onClick={() => previous && onOpen(previous)}>Previous</button>
-        <button type="button" className="btn" disabled={next === null} onClick={() => next && onOpen(next)}>Next</button>
-      </div>
-    </>
+        <div className="ap-act">
+          <button
+            type="button" className="btn" data-dismiss-for={finding.id} disabled={!canDismiss} aria-describedby={ids.dismiss}
+            onClick={() => onDismiss(finding)}
+          >
+            Dismiss
+          </button>
+          <span className="cap" id={ids.dismiss}>{CAPTION.dismiss}</span>
+        </div>
+      </Pinned>
+    </div>
   );
 }

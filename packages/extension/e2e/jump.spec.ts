@@ -91,7 +91,8 @@ async function besideReview(url: string): Promise<{ github: Page; panel: Page }>
   await panel.goto(`chrome-extension://${EXTENSION_ID}/sidepanel.html`);
   await panel.evaluate(async (token) => {
     const chrome = (globalThis as unknown as { chrome: typeof browser }).chrome;
-    await chrome.storage.local.set({ 'airlock.token': token });
+    // Paired, and the tour already seen, so it does not open over the review.
+    await chrome.storage.local.set({ 'airlock.token': token, 'airlock.tourSeen': true });
   }, TOKEN);
   await github.bringToFront();
   await activate(url);
@@ -102,9 +103,9 @@ async function besideReview(url: string): Promise<{ github: Page; panel: Page }>
 
 const classicCell = (github: Page, anchor: string, line: number) => github.locator(`td[id="${anchor}R${line}"]`);
 
-test('clicking Jump to line in the panel scrolls the classic fixture page to the row and marks it', async () => {
+test('clicking Show in diff in the panel scrolls the classic fixture page to the row and marks it', async () => {
   const { github, panel } = await besideReview('https://github.com/acme/widgets/pull/1/files');
-  await panel.getByRole('button', { name: 'Jump to line' }).click();
+  await panel.getByRole('button', { name: 'Show in diff' }).click();
   await expect(panel.getByText('Showing src/pause.ts:11.')).toBeVisible();
   expect(github.url().endsWith(`#${pause}R11`)).toBe(true);
   const cell = classicCell(github, pause, 11);
@@ -113,7 +114,8 @@ test('clicking Jump to line in the panel scrolls the classic fixture page to the
   await expect(cell).toBeInViewport();
   await expect(github.locator('.airlock-target')).toHaveCount(3);
 
-  // A connected place among the files moves the mark there.
+  // A connected place among the files moves the mark there; it is in the Also involves fold.
+  await panel.getByRole('button', { name: /^Also involves/ }).click();
   await panel.getByRole('button', { name: /src\/guard\.ts:4/ }).click();
   await expect(panel.getByText('Showing src/guard.ts:4.')).toBeVisible();
   await expect(cell).not.toHaveClass(/airlock-target/);
@@ -129,9 +131,9 @@ test('clicking Jump to line in the panel scrolls the classic fixture page to the
   await panel.close();
 });
 
-test('clicking Jump to line in the panel scrolls the newer-view fixture page to the row and marks it', async () => {
+test('clicking Show in diff in the panel scrolls the newer-view fixture page to the row and marks it', async () => {
   const { github, panel } = await besideReview('https://github.com/acme/widgets/pull/2/files');
-  await panel.getByRole('button', { name: 'Jump to line' }).click();
+  await panel.getByRole('button', { name: 'Show in diff' }).click();
   await expect(panel.getByText('Showing src/pause.ts:11.')).toBeVisible();
   expect(github.url().endsWith(`#${pause}R11`)).toBe(true);
   const row = github.locator('tr.airlock-target');
@@ -139,15 +141,16 @@ test('clicking Jump to line in the panel scrolls the newer-view fixture page to 
   await expect(row).toContainText('code - 11');
   await expect(row).toBeInViewport();
   await panel.getByRole('button', { name: 'Back to the review' }).click();
-  await panel.getByRole('button', { name: 'Packs' }).click();
+  await panel.getByRole('button', { name: 'Settings' }).click();
+  await panel.getByRole('button', { name: 'Service', exact: true }).click();
   await expect(panel.getByText('Recognised as the newer view.')).toBeVisible();
   await github.close();
   await panel.close();
 });
 
-test('from the conversation page, Jump to line opens the Files changed page and marks the row', async () => {
+test('from the conversation page, Show in diff opens the Files changed page and marks the row', async () => {
   const { github, panel } = await besideReview('https://github.com/acme/widgets/pull/1');
-  await panel.getByRole('button', { name: 'Jump to line' }).click();
+  await panel.getByRole('button', { name: 'Show in diff' }).click();
   await expect(panel.getByText('Showing src/pause.ts:11.')).toBeVisible({ timeout: 20_000 });
   expect(github.url()).toBe(`https://github.com/acme/widgets/pull/1/files#${pause}R11`);
   const cell = classicCell(github, pause, 11);
@@ -167,7 +170,7 @@ test('the content script posts no message to the GitHub page', async () => {
   });
   const { github, panel } = await besideReview('https://github.com/acme/widgets/pull/1/files');
   // The jump answering shows the content script has run on this page.
-  await panel.getByRole('button', { name: 'Jump to line' }).click();
+  await panel.getByRole('button', { name: 'Show in diff' }).click();
   await expect(panel.getByText('Showing src/pause.ts:11.')).toBeVisible();
   expect(posted.filter((m) => m.includes('content-script-started'))).toEqual([]);
   await github.close();

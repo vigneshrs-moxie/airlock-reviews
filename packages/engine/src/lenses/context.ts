@@ -76,7 +76,11 @@ export const descriptionCutSentence = (who: string, body: string, max: number): 
 
 /** The lines joined, or `(none)` for a block with nothing in it. */
 export const orNone = (lines: string[]): string => (lines.length === 0 ? '(none)' : lines.join('\n'));
-const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
+/**
+ * A field on one line: every run of whitespace, NEL (U+0085) and the separators U+001C to U+001F (none of which `\s`
+ * covers) becomes one space, and the ends are trimmed.
+ */
+export const oneLine = (text: string): string => text.replace(/[\s\u0085\u001c-\u001f]+/g, ' ').trim();
 
 /** A file with no recorded tier is read, so nothing is skipped by accident. */
 export function tierOf(tiers: FileFact[]): (path: string) => Tier {

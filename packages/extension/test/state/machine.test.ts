@@ -22,6 +22,10 @@ function memorySettings(token: string | null): SettingsStore & { token: string |
     async setDefaultDepth() {},
     async getShowNotes() { return true; },
     async setShowNotes() {},
+    async getSize() { return 'm'; },
+    async setSize() {},
+    async getTourSeen() { return true; },
+    async setTourSeen() {},
   };
 }
 
@@ -552,7 +556,7 @@ describe('startPanel: following a review', () => {
     await until(h, 'running', (s) => s.map !== null);
     h.svc.down = true;
     run.lose();
-    expect(await until(h, 'offline')).toEqual({ kind: 'offline', progress: { pr: prSummary(), brief, map, startedAt: T0 } });
+    expect(await until(h, 'offline')).toEqual({ kind: 'offline', progress: { pr: prSummary(), brief, map, startedAt: T0, current: 'Reading the pull request' } });
     expect(h.timers.delays()).toEqual([5000]);
     h.timers.fire();
     await settle();
@@ -665,7 +669,7 @@ describe('startPanel: the service restarting during a review', () => {
     h.svc.down = true;
     run.lose();
     const offline = await until(h, 'offline');
-    expect(offline.progress).toEqual({ pr: prSummary(), brief, map: null, startedAt: T0 });
+    expect(offline.progress).toEqual({ pr: prSummary(), brief, map: null, startedAt: T0, current: 'Reading the pull request' });
     h.svc.down = false;
     restart(h.svc);
     h.timers.fire();
@@ -1020,7 +1024,53 @@ describe('startPanel: actions', () => {
     const h = harness({ prepare: (svc) => svc.latest.set('acme/widgets#1', latestFor(prSummary(), 'd'.repeat(40))) });
     await until(h, 'review');
     h.panel.dispatch({ type: 'start', depth: 'quick' });
-    expect(await until(h, 'running')).toEqual({ kind: 'running', pr: prSummary(), stages: [], brief: null, map: null });
+    expect(await until(h, 'running')).toEqual({ kind: 'running', pr: prSummary(), stages: [], brief: null, map: null, depth: 'quick', startedAt: T0 });
+  });
+
+  it('keeps the depth it asked for on the running review, for the progress screen', async () => {
+    const h = harness();
+    await until(h, 'ready');
+    h.panel.dispatch({ type: 'start', depth: 'deep', since: 'last' });
+    expect((await until(h, 'running')).depth).toBe('deep');
+  });
+
+  it('keeps the depth and start of a run it started when it attaches to the same run again (the service away and back, the tab away and back)', async () => {
+    const pr2 = prSummary({ number: 2, title: 'Second' });
+    const h = harness({ prepare: (svc) => svc.addPr(pr2) });
+    await until(h, 'ready');
+    h.panel.dispatch({ type: 'start', depth: 'deep' });
+    const first = await until(h, 'running');
+    expect(first).toMatchObject({ depth: 'deep', startedAt: T0 });
+    const run = [...h.svc.runs.values()].at(-1)!;
+    run.emit(stage('intake', 'start'));
+    await until(h, 'running', (s) => s.stages.length === 1);
+    // The service goes away and comes back with the run still going.
+    h.clock.now = T0 + 60_000;
+    h.svc.down = true;
+    run.lose();
+    await until(h, 'offline');
+    h.svc.down = false;
+    h.timers.fire();
+    expect(await until(h, 'running', (s) => s.stages.length === 1)).toMatchObject({ depth: 'deep', startedAt: T0 });
+    // The tab moves to another pull request and back.
+    h.tab.go(prUrl('acme/widgets', 2));
+    await until(h, 'ready', (s) => s.pr.number === 2);
+    h.clock.now = T0 + 120_000;
+    h.tab.go(prUrl('acme/widgets', 1));
+    expect(await until(h, 'running', (s) => s.stages.length === 1)).toMatchObject({ depth: 'deep', startedAt: T0 });
+  });
+
+  it('does not know the depth of a run the service reused, or of one it attached to when it loaded', async () => {
+    const h = harness();
+    await until(h, 'ready');
+    // Someone else started a review of this pull request meanwhile: the service hands back that run.
+    h.svc.startRun('acme/widgets', 1);
+    h.panel.dispatch({ type: 'start', depth: 'deep' });
+    const reused = await until(h, 'running');
+    expect('depth' in reused).toBe(false);
+
+    const attached = harness({ prepare: (svc) => { svc.startRun('acme/widgets', 1); } });
+    expect('depth' in await until(attached, 'running')).toBe(false);
   });
 
   it('a refused start, dismiss or restore keeps the review on screen with the service words, and a success clears them', async () => {

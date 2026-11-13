@@ -59,39 +59,67 @@ npm run service -- token --new
 
 It prints the new token as its last line. Within a second the old token stops working, for the panel and for anyone else who has it: there is no need to restart the service, and the extension stays paired. The panel asks for the new token with the Pair screen and the sentence above, because the service now proves a token the panel does not have:
 
-- On Ready or a review, within a few seconds.
+- On the start screen or a review, within a few seconds.
 - During a review that is running, the review carries on to its end (it was started with the old token and is not cut off); the panel asks a few seconds after it finishes. Any new request needs the new token.
-- On the Problem screen, or with the panel closed, at the next thing you do: Retry, Review, or opening the panel.
+- On the Problem screen, or with the panel closed, at the next thing you do: Retry, **Review this pull request**, or opening the panel.
 
 Paste the new token and press **Pair**.
 
 ## 5. Review a pull request
 
-Open a pull request, press the Airlock button, choose a depth, and press **Review**. The panel shows what the pull request does while the findings are still being checked, then the verdict and up to five findings.
+Open a pull request and press the Airlock button.
 
-- Press a finding to read it, then **Jump to line** to see it on the Files changed page.
-- **Copy fix prompt** puts a prompt for a coding agent on the clipboard, for one finding or for the ones you ticked.
-- **Dismiss** hides a finding. Wrong and Intended also save one line to your rule pack, which the reviewer follows from the next review on. You see and can edit that line before it is saved.
+**Start.** The panel shows the pull request (its repository, number, files and lines changed), then:
 
-Airlock writes to GitHub only when you press the post button described next, and then only comments. It never approves, never requests changes and never merges.
+- **Depth**: Quick, Standard or Deep. The line under it says what the chosen depth does. The panel starts on the default depth from Settings, or on the depth Airlock suggests for this pull request.
+- **Packs**: the rule packs this review will use. Press the row to see them and switch one off; at least one stays on.
+
+Press **Review this pull request** at the bottom. It runs on your Claude login; nothing is posted to GitHub.
+
+**While it runs.** The panel names the step it is on, with a bar and "Step 4 of 15" (just "Step 4" when it cannot tell how many steps there will be, for example on a review that was already running when you opened the panel). Under it: the time since the panel started following the review, and the files and groups once Airlock has mapped the change. A step that failed is said under the bar ("A step failed: …"). **Show the steps** lists every step as Done, Now or Next. **What it has found so far** shows what the pull request does and the files in reading order, as they arrive. The panel has no Stop button: stopping the service stops a running review, and when the service is back the panel says "The review that was running stopped when the Airlock service stopped. Start it again when you are ready."
+
+**The review.** At the top: the verdict, one sentence, and the open findings counted by kind ("1 blocking", "2 to fix", "1 question"…). What limits the review stays in sight under that, never behind a tab: a review that did not finish says so, with the errors; on a first review the fold **About this review**, with its count ("1 thing the reviewer did not see", "2 notes"), holds what the reviewer was not shown and the review's notes; on a re-review the notes are printed there, and anything not shown to the reviewer is in About this review. When no finding is open, About this review starts open, so a review that read little reads as such.
+
+The verdict is green only when the review approves, nothing is open, no question for the author is left, nothing failed or was left out, there is no note, and no commit came after it. A verdict without colour is not a bad sign in itself: it means there is something under it to read before you merge. The questions for the author, under **The change**, start open. Then three tabs:
+
+- **Findings**: one line per finding: its kind (Block, Fix, Ask or Note), a short title and its place. **Also found** folds the less important ones.
+- **The change**: what the pull request does in short, then folds: what it does in full, questions for the author, whose call it is, what to check after merging, text for your pull request (with **Copy**), and the files in reading order.
+- **More**: when and how deep it was reviewed, with which packs; **Review again**; what was dismissed (with **Restore**); the timing; and **Dropped: n**, the findings the reviewer threw away and why.
+
+At the bottom, when something is to be fixed, **Copy fix prompt for the n fixes** copies one prompt for every open Block and Fix, for your coding agent. **Select** lets you tick findings, then **Copy fix prompt (n)** or **Comment on GitHub (n)**.
+
+**A finding.** Press a line. The finding opens with its kind, short title and place (**Show in diff** shows it on the Files changed page), a summary, and **What to do**. The detail is folded below: **What happens**, **Why it matters**, **The code**, **Also involves**, **How sure is this**. Folds you open stay open as you move with the arrows at the top. **Review** goes back. Three buttons stay at the bottom, each with a line under it:
+
+- **Copy fix prompt**: puts a prompt for your coding agent on the clipboard.
+- **Comment on GitHub**: shows you the exact comment and where it goes before anything is sent (next section).
+- **Dismiss**: hides the finding here and teaches Airlock. Nothing is sent to GitHub. Choose why: **The finding is mistaken** or **The code is right for a reason Airlock could not know** saves one line, which Airlock reads in every later review of this repository (you see and can edit it first); **Hide it on this pull request only** saves nothing. Bring a finding back under **More**, **Dismissed**.
+
+Short titles and summaries are written by a quick model in a step near the end of each review, and can be wrong. So the kind word (Block, Fix, Ask or Note) is always beside a short title, the full title is the first line of **What happens**, and what is posted, copied or remembered is always the full finding, never the short version. A review made before this version has no short titles or summaries: its lines show the title cut to about 60 characters, and a finding's summary is the first sentence of What happens, until you review again. A review whose summary step failed looks the same, with a note saying so.
+
+**The tour.** The first time a review is on screen, three short steps show what the screen holds. **Skip**, **Done**, Escape or a tap outside it ends it for good; if you close the panel partway through instead, it comes back the next time. **Settings**, **Show the tour again** shows it again.
+
+**Settings** (top right): **Text and button size** (Small, Default, Large, Largest; saved on this computer), **Notes in the diff**, **Default depth**, **Packs and learned lines**, **Show the tour again**, and **Service** (whether the service, Claude and GitHub are ready, and the pairing).
+
+Airlock writes to GitHub only when you press the post button described below, and then only comments. It never approves, never requests changes and never merges.
 
 ## Notes in the diff
 
 While a review is on screen, each open finding also appears as a note on the pull request's **Files changed** page, under the line it is about. A note shows the finding's severity and title, and an **Open in Airlock** button that opens the finding in the panel. A finding you dismiss loses its note; restore it and the note comes back. Notes are drawn only on a page that shows the commit the review is of: once the page shows newer commits, the older review's notes are taken off until you review again.
 
 - Notes are private to this browser. Airlock draws them on the page itself: nothing about them is sent to the service or to GitHub, and they are never posted. Only the post button posts anything.
-- To turn them off, press **Packs** and switch off **Show notes in the diff**. Switch it on again to bring them back.
+- To turn them off, press **Settings** at the top of the panel and switch off **Notes in the diff**. Switch it on again to bring them back.
 - A line under the verdict says how many notes are on the page, for example "4 notes shown in the diff". "<n> shown, <m> waiting for their lines to load" means that m findings' lines are not on the page yet: GitHub loads files as you scroll, a file may be collapsed, or the line is in folded context or outside the diff. Each note appears when its line does; Airlock never puts a note anywhere else. At most 60 notes are shown, and the line then adds "(the first 60 findings)".
-- GitHub's newer Files changed view is not fully known to Airlock yet, so notes may not appear there. When Airlock still cannot place them after a minute, the panel says "Notes cannot be shown on this version of GitHub's page (…). Jump to line still works.", naming the parts of the page it could not find.
+- GitHub's newer Files changed view is not fully known to Airlock yet, so notes may not appear there. When Airlock still cannot place them after a minute, the panel says "Notes cannot be shown on this version of GitHub's page (…). Show in diff still works.", naming the parts of the page it could not find.
 - If the GitHub page was opened before the commit the review is of (you reviewed a push without reloading the page), the panel says "The GitHub page was opened before the commit this review is of, so the notes are hidden until you reload it." Press **Reload the GitHub tab** and the notes appear.
 - If Airlock could not check which commit the page shows (for example, the service was not running when the page loaded), the panel says "Airlock could not check which commit the GitHub page shows, so the notes are hidden until you reload it." Press **Reload the GitHub tab** to try again.
 
 ## Posting comments
 
-1. Open a finding and press **Post comment**. Or tick several findings and press **Post selected (n)** above the list. One post holds at most 30 comments.
-2. The **Post to GitHub** sheet shows each comment, the summary, and "The review's own text, as it will be posted:". It says "This is the exact text. Nothing has been sent yet." It also names the GitHub account the comments will be posted as ("Posts as …"): the account `gh` is signed in as when the preview is made.
-3. You can edit any comment and the summary. A comment GitHub cannot place on a line goes in the summary, and the sheet says why. You can also tick **Put in the summary instead**. After an edit, press **Update preview** to see the exact text again.
-4. Press **Post n comments to GitHub**. Nothing is posted until you press it.
+1. Open a finding and press **Comment on GitHub**. Or press **Select** in the bar at the bottom of the review, tick several findings and press **Comment on GitHub (n)**. One post holds at most 30 comments.
+2. The sheet says first **Where it goes**, for each comment: **On the line** (it shows in Files changed, next to the code), or **In the review summary**, with the reason when GitHub cannot place it on a line. You can tick **Put in the summary instead**.
+3. Under **The exact text** are each comment, the summary, and the review's own text as it will be posted. You can edit any comment and the summary; after an edit, press **Update preview** to see the exact text again.
+4. A line names the GitHub account it posts as ("Posts as … on …, as a comment." or "…, as one review with n comments."): the account `gh` is signed in as when the preview is made. It also says "Airlock never approves, requests changes or merges." and "Nothing has been sent yet."
+5. Press **Post comment** (or **Post n comments**), or **Cancel**. Nothing is posted until you press it.
 
 Airlock posts them as one review with the **Comment** action, as the sheet says, under your own GitHub name. When it is done, the sheet says "Posted n comments." with **Open on GitHub**, and each finding shows **Posted**. A finding that is already posted cannot be posted again.
 
@@ -130,22 +158,22 @@ When the pull request has new commits since its review, the panel says "New comm
 - **Review the push** reviews only what changed since the last review. It is shown only when Airlock has an earlier review of this pull request to start from.
 - **Review everything again** reviews the whole pull request again, from the start.
 
-After **Review the push**, a line under the verdict says what was reviewed, for example "Review of the push 1a2b3c4 to 5d6e7f8". Each finding has a word on its card:
+After **Review the push**, the top of the review counts what changed **Since the last review** ("1 fixed", "2 still open", "1 new"), and a line says what was reviewed, for example "Review of the push 1a2b3c4 to 5d6e7f8". Each finding has a word on its line:
 
 - **New**: found in this review.
 - **Still open**: found before, and still there.
-- **Moved**: found before, and the same problem is now in another place. The card shows the new place.
-- **Fixed**: found before, and no longer there. These are folded under **Fixed since the last review (n)**, each with the reason.
+- **Moved**: found before, and the same problem is now in another place. The line shows the new place.
+- **Fixed**: found before, and no longer there. These are folded under **Fixed since the last review**, each with how it was confirmed.
 
 A Block or Fix finding is marked Fixed only when Airlock finds, at the new commit, the line of code that fixes it, never on a model's word alone. When it cannot tell, the finding stays open. An Ask or Note whose code is gone is marked Fixed with "The quoted code is gone; not checked further."
 
-Sometimes Airlock reviews the whole pull request again instead, for example when the branch was rewritten. A sentence under the verdict says why, and it is the only line there.
+Sometimes Airlock reviews the whole pull request again instead, for example when the branch was rewritten. A sentence under the verdict says why.
 
 When the push is only a merge (usually of the base branch), the line says what was reviewed of it:
 
 - "Review of the merge pushed since 1a2b3c4: only what was changed by hand was reviewed." when the merge had changes made by hand, and those were reviewed.
 - "The push only merged another branch in; git merged it without conflicts and nothing was changed by hand." when there was nothing to review. It names no branch, because Airlock cannot always be sure which branch the push merged.
-- No such line when Airlock could not review the merge. A note under the verdict says only that the push merges the base branch in, the verdict is Incomplete, and the error under it says why.
+- No such line when Airlock could not review the merge. A note under the verdict says only that the push merges the base branch in, the verdict says "Review incomplete", and the error under it says why.
 
 A first review of a pull request that only merges its base branch in says the same in the heading above what it does.
 
@@ -161,7 +189,7 @@ Airlock picks the packs for a pull request by its repository, ignoring letter ca
 
 ## What Airlock learned
 
-When you dismiss a finding as Wrong or Intended, Airlock saves one line to a rule pack, and the reviewer follows it from the next review on. To see these lines, press **Packs** at the top of the panel. Under **Packs for this repository**, each pack lists its lines, newest first. Each line shows its date, its kind (**Wrong** or **Product fact**), and whether it applies to this repository.
+When you dismiss a finding as mistaken, or as right for a reason Airlock could not know, Airlock saves one line to a rule pack, and the reviewer follows it from the next review on. To see these lines, press **Settings** at the top of the panel, then **Packs and learned lines**. Under **Packs for this repository**, each pack lists its lines, newest first. Each line shows its date, its kind (**Wrong** or **Product fact**), and whether it applies to this repository.
 
 To take a line out:
 
@@ -181,7 +209,7 @@ The lines are plain text files, so you can also edit them by hand (see the end o
 | "The service could not show that it holds this panel's token, so the token was not sent." | If you just ran `npm run service -- token --new`, paste the new token. Otherwise run `npm run service -- status`: another program may hold the port while Airlock is stopped. |
 | "already paired with another copy of the extension" | Run `npm run service -- unpair`, then pair again. |
 | `Airlock could not reach the GitHub page` | Press **Reload the GitHub tab** in the panel. This happens after the extension itself is reloaded, or on a tab that was open before Airlock was loaded. |
-| A jump says "Asked GitHub to show…" and nothing is marked | GitHub's page changed in a way Airlock does not recognise yet. The Packs screen lists which parts it could not find. |
+| A jump says "Asked GitHub to show…" and nothing is marked | GitHub's page changed in a way Airlock does not recognise yet. In **Settings**, **Service** lists which parts it could not find, under GitHub page. |
 | The service will not start: "Port 4611 is already in use" | Another copy of Airlock is running. `npm run service -- status` shows it. |
 | "Port 4611 is in use by another program." | Something else holds the port. Stop that program, then start Airlock again. Started at login, Airlock tries again by itself every 30 seconds. |
 

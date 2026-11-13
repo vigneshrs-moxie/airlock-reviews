@@ -313,7 +313,7 @@ describe('runReview of a pull request that only merges its base in', () => {
     expect(doc.verdict.label).toBe('approve');
     expect(doc.findings).toEqual([]);
     const skipped = events.flatMap((e) => (e.type === 'stage' && e.status === 'done' && e.detail.startsWith('skipped') ? [e.stage] : []));
-    expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge']);
+    expect(skipped).toEqual(['map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge', 'summary']);
   }, SLOW);
 
   it('the shape sentence reaches the brief and every lens request, with branch names only as material', async () => {

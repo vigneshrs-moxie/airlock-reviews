@@ -1,0 +1,30 @@
+/* The start screen (Ready.tsx) and the progress screen (Running.tsx): these screens' own rules, from
+   docs/design/panel-redesign/theme.css. The rules they share with other screens are in shared.css: the depth control
+   (.ap-seg), the Packs row and the pack switches (.ap-set, .ap-switch), the title (.ap-title), the lead card (.ap-lead),
+   the folds and their arrow (.ap-fold, .ap-arrow) and the pinned bar (.ap-pinned). */
+
+/* The Packs row opens the pack choice under it; its chevron turns down while it is open. */
+.ap-start-packs { min-width: 0; }
+.ap-start-packs .ap-fold-head { font-weight: 400; }
+.ap-start-packs .ap-set[aria-expanded='true'] > .ap-go { transform: rotate(90deg); }
+.ap-start-packs .ap-go { transition: transform 0.15s; }
+.ap-start-pack-list { padding-left: 12px; }
+.plain.ap-start-pack-list > li { padding: 0; }
+.ap-start-pack-list .ap-set { min-height: 44px; cursor: pointer; }
+
+/* The start button and the line under it, in the pinned bar. */
+.ap-start-go { flex: 1 1 100%; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.ap-start-go p { margin: 0; text-align: center; }
+.ap-pinned-start .ap-pinned-above .notice { margin: 0; }
+
+/* The progress bar: a track, filled by the share of the steps begun. When the number of steps is not known it is not
+   filled; it is striped instead, so it never reads as a share. */
+.ap-progress { height: 6px; border-radius: 999px; background: var(--bg); border: 1px solid var(--border); overflow: hidden; }
+.ap-progress i { display: block; height: 100%; background: var(--accent); }
+.ap-progress.unknown { background: repeating-linear-gradient(-45deg, var(--bg) 0 6px, var(--border) 6px 9px); }
+
+/* Show the steps: each stage with Done, Now or Next before it. */
+.plain.ap-steps-list { display: flex; flex-direction: column; gap: 6px; }
+.plain.ap-steps-list > li { display: flex; gap: 8px; min-width: 0; padding: 0; }
+.ap-step .ap-sev { flex-basis: 56px; }
+.ap-step-words { flex: 1; min-width: 0; overflow-wrap: anywhere; }

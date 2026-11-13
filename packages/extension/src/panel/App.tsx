@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { LearnedReply, RemoveLearnedBody, RemoveLearnedReply, ServiceStatus } from '@airlock/shared';
 import { ServiceClient } from '../client/service';
 import { realTimers } from '../client/timers';
@@ -9,6 +9,7 @@ import { startPanel, type PanelState } from '../state/machine';
 import { browserNoteOpen, listenNoteOpen } from '../state/note-open';
 import { startNotes, type NotesState, type PageNotes } from '../state/notes';
 import { browserSettings, type SettingsStore } from '../state/settings';
+import type { SizeSetting } from '../state/size';
 import {
   browserJumpChrome, COULD_NOT_JUMP, jumpTo, sendToPage, type Jump, type JumpPlace, type JumpPr, type JumpResult, type PageReport,
 } from '../state/jump';
@@ -31,7 +32,7 @@ export function startRealPanel(
 
 /**
  * The real notes: sent to the tab the panel sits beside, through the jump's tab messaging. What the page says it
- * recognised comes back in the notes' state (`page`), which the App gives the Packs screen.
+ * recognised comes back in the notes' state (`page`), which the App gives the Service screen.
  */
 export function browserNotes(settings: SettingsStore, tab: TabWatcher): PageNotes {
   const chrome = browserJumpChrome(() => undefined);
@@ -40,7 +41,7 @@ export function browserNotes(settings: SettingsStore, tab: TabWatcher): PageNote
 
 /**
  * What the panel needs from outside it besides the running panel: the service's status and the stored default depth for
- * the Packs screen, and jumping to a place on GitHub (which tells `onReport` what it found on the page).
+ * Settings, and jumping to a place on GitHub (which tells `onReport` what it found on the page).
  */
 export interface PanelServices {
   settings: SettingsStore;
@@ -52,6 +53,8 @@ export interface PanelServices {
   notes?: PageNotes;
   /** Calls `open` with a finding's id each time `Open in Airlock` is pressed on a note in this tab; returns the way to stop. */
   noteOpen?: (open: (id: string) => void) => () => void;
+  /** The text and button size, already applied to the page when the panel starts. */
+  size?: SizeSetting;
 }
 
 /** `reload`: the person asked to reload the GitHub tab first. `signal`: aborted when a newer jump starts. */
@@ -111,14 +114,31 @@ function useOpenFinding(state: PanelState, noteOpen: PanelServices['noteOpen']):
   return asked;
 }
 
+/** Whether the tour was seen: read once when the panel starts; null until then, or when it cannot be read. */
+function useTourSeen(settings: SettingsStore | undefined): { seen: boolean | null; markSeen: () => void } {
+  const [seen, setSeen] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    settings?.getTourSeen().then((value) => { if (live) setSeen((was) => was ?? value); }, () => undefined);
+    return () => { live = false; };
+  }, [settings]);
+  // Seen for the rest of this panel even if it cannot be stored; it may then show again next time.
+  const markSeen = useCallback((): void => {
+    setSeen(true);
+    settings?.setTourSeen().catch(() => undefined);
+  }, [settings]);
+  return { seen, markSeen };
+}
+
 export function App({ start = (onState) => startRealPanel(onState), services }: { start?: StartPanel; services?: PanelServices }) {
   const { state, dispatch } = usePanel(start);
+  const tour = useTourSeen(services?.settings);
   const { depth, failed, setDepth } = useDefaultDepth(services?.settings);
   const notes = services?.notes;
   const notesState = useSyncExternalStore(notes?.subscribe ?? noSubscribe, notes?.current ?? noNotes);
   const openFinding = useOpenFinding(state, services?.noteOpen);
   const [pageReport, setPageReport] = useState<PageReport | null>(null);
-  // The page's report on the notes is the same report as a jump's: the latest of either is what Packs shows.
+  // The page's report on the notes is the same report as a jump's: the latest of either is what the Service screen shows.
   const notesPage = notesState.page;
   useEffect(() => { if (notesPage !== undefined) setPageReport(notesPage); }, [notesPage]);
   const jump = services?.jump;
@@ -146,6 +166,8 @@ export function App({ start = (onState) => startRealPanel(onState), services }: 
       {...(services ? { fetchStatus: services.fetchStatus } : {})}
       {...(services?.fetchLearned ? { fetchLearned: services.fetchLearned } : {})}
       {...(services?.removeLearned ? { removeLearned: services.removeLearned } : {})}
+      {...(services?.size ? { size: services.size } : {})}
+      tourSeen={tour.seen} onTourSeen={tour.markSeen}
     />
   );
 }

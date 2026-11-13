@@ -1,0 +1,35 @@
+/* Settings, Packs and Service, the text and button size, and the tour: these screens' own rules. The .ap-* rules come
+   from docs/design/panel-redesign/theme.css; those other screens use too are in shared.css. The rules the size setting
+   needs on every screen (the panel's minimum width, a bottom sheet's height, the header's wrap) are in panel.css. */
+
+/* The top of Settings, Packs and Service: Back, then the screen's name. */
+.screen-head { display: flex; align-items: center; gap: 8px; min-height: 32px; }
+.screen-head .title { margin: 0 0 0 auto; }
+.screen-back { display: inline-flex; align-items: center; gap: 2px; min-height: 32px; padding-left: 4px; }
+
+.settings-screen { display: flex; flex-direction: column; gap: 10px; }
+.settings-screen[hidden] { display: none; }
+.service-screen { display: contents; }
+.settings-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin-top: 4px; }
+.settings-group .label { margin: 0; }
+
+/* The preview: one finding row and two buttons, drawn at the size on screen. */
+.ap-preview { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px dashed var(--border); border-radius: 8px; }
+.ap-preview-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.ap-preview .btn { display: inline-flex; align-items: center; min-height: 32px; cursor: default; }
+.ap-preview .ap-sev, .tour .ap-sev { flex-basis: 38px; }
+.ap-preview .ap-row-sub { display: block; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+
+/* The tour: three steps in a bottom sheet. */
+.tour { display: flex; flex-direction: column; gap: 12px; }
+.tour .label { margin: 0; }
+.tour p { margin: 0; }
+.tour-actions { display: flex; flex-direction: column; gap: 8px; }
+.tour .ap-where { align-items: flex-start; }
+.tour .ap-where .icon { margin-top: 1px; color: var(--muted); }
+.tour .ap-dots { display: flex; justify-content: center; gap: 6px; }
+.tour .ap-dots i { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
+.tour .ap-dots i.on { background: var(--accent); }
+.tour-buttons { display: flex; gap: 8px; }
+.tour-buttons .btn { min-height: 40px; }
+.tour-buttons .btn.primary { flex: 1; }

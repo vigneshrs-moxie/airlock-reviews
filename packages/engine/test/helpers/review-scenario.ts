@@ -20,7 +20,8 @@ export const NOW = new Date('2026-11-11T09:30:00.000Z');
 export const DEEP_SENTENCE = 'This is a second, closer pass over one layer: read every non-test file in it in full.';
 
 export const STANDARD_STAGES = [
-  'intake', 'packs', 'shape', 'facts', 'map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge', 'select', 'store',
+  'intake', 'packs', 'shape', 'facts', 'map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge', 'select', 'summary',
+  'store',
 ];
 
 export const BASE_FILES: Record<string, string> = {
@@ -74,6 +75,16 @@ export const DEEP_NEW = rawCandidate({
 });
 
 const none = { candidates: [], questions: [] };
+/** The sentence on the change the fake summary stage writes. */
+export const SCENARIO_IN_SHORT = 'Adds refunds and a job that pauses plans.';
+/** The ids of the findings a summary request was shown. */
+export const summaryIds = (req: AgentRequest<unknown>): string[] =>
+  [...(block(req.material, 'findings') ?? '').matchAll(/^id: (.+)$/gm)].map((m) => m[1]!);
+/** The fake summary answer: the sentence on the change, and `Short <id>` with a one-line gist for every finding shown. */
+export function scenarioSummary(req: AgentRequest<unknown>): unknown {
+  const ids = summaryIds(req);
+  return { inShort: SCENARIO_IN_SHORT, findings: ids.map((id) => ({ id, short: `Short ${id}`, gist: `What ${id} does to a member.` })) };
+}
 const cohortLine = (req: AgentRequest<unknown>): string => block(req.material, 'cohort')?.split('\n')[0] ?? '';
 
 /** Answers each request of the scenario by role. `over` replaces the answer for a role prefix. */
@@ -106,6 +117,7 @@ export function scenarioScript(over: Record<string, (req: AgentRequest<unknown>)
         checksAfterMerge: [], splitSuggested: false,
       };
     }
+    if (req.role === 'summary') return scenarioSummary(req);
     throw new Error(`unexpected role ${req.role}`);
   };
 }

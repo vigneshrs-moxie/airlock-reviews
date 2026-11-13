@@ -20,7 +20,8 @@ function Probe({ settings }: { settings: SettingsStore }) {
 
 const store = (over: Partial<SettingsStore>): SettingsStore => ({
   getToken: async () => null, setToken: async () => undefined, getDefaultDepth: async () => 'quick' as Depth | null,
-  setDefaultDepth: async () => undefined, getShowNotes: async () => true, setShowNotes: async () => undefined, ...over,
+  setDefaultDepth: async () => undefined, getShowNotes: async () => true, setShowNotes: async () => undefined,
+  getSize: async () => 'm', setSize: async () => undefined, getTourSeen: async () => true, setTourSeen: async () => undefined, ...over,
 });
 
 describe('useDefaultDepth', () => {

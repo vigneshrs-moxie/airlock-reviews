@@ -63,7 +63,7 @@ export interface JumpChrome {
   /** Starts watching when called; ends when the tab next finishes loading, after `LOAD_MS`, or when it closes. Never rejects. */
   loaded(tabId: number): Promise<Loaded>;
   timers: Timers;
-  /** Told what the page answered, for the Packs screen. */
+  /** Told what the page answered, for the Service screen. */
   onReport?(report: PageReport): void;
 }
 
@@ -315,7 +315,7 @@ export function connectedPlace(place: Place, changed: ReadonlySet<string>): Jump
   return { path: place.path, line: place.line, kind: changed.has(place.path) ? 'changed' : 'elsewhere' };
 }
 
-/** The Packs screen's words for the last jump's report. */
+/** The Service screen's words for the last jump's report. */
 export function pageWords(report: PageReport | null): string {
   if (report === null) return 'No jump made yet.';
   const nothing = report.missing.length === 0 ? '' : `Selectors that found nothing: ${report.missing.join(', ')}.`;

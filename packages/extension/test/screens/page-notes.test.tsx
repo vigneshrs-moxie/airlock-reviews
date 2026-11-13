@@ -26,7 +26,7 @@ const verdictCard = () => document.querySelector<HTMLElement>('.verdict')!;
 
 function show(state: PanelState, extra: Partial<PanelScreenProps> = {}) {
   const timers = new FakeTimers();
-  const props = (more: Partial<PanelScreenProps>) => ({ state, dispatch: vi.fn(), onOpenPacks: () => undefined, timers, ...extra, ...more });
+  const props = (more: Partial<PanelScreenProps>) => ({ state, dispatch: vi.fn(), onOpenSettings: () => undefined, timers, ...extra, ...more });
   const view = render(<PanelScreen {...props({})} />);
   return { timers, again: (more: Partial<PanelScreenProps>) => view.rerender(<PanelScreen {...props(more)} />) };
 }
@@ -38,9 +38,9 @@ describe('the notes line under the verdict', () => {
     });
     const s = show(state, { notesLine: notesLine(shown(3, 0), 0) });
     const line = within(verdictCard()).getByText('3 notes shown in the diff');
-    // With the other small lines under the verdict: after the review-of-the-push line, before the reviewed-at line.
-    expect(line.previousElementSibling?.textContent).toBe('Review of the push bbbbbbb to ccccccc');
-    expect(line.nextElementSibling?.textContent).toMatch(/^Reviewed at/);
+    // With the other small lines in the verdict strip: after the review-of-the-push line and the reviewed-at line.
+    expect(line.previousElementSibling?.textContent).toMatch(/^Reviewed at/);
+    expect(line.previousElementSibling?.previousElementSibling?.textContent).toBe('Review of the push bbbbbbb to ccccccc');
     expect(region().textContent).toBe('3 notes shown in the diff');
 
     s.again({ notesLine: notesLine(shown(2, 1), 0) });
@@ -51,7 +51,7 @@ describe('the notes line under the verdict', () => {
     expect(region().textContent).toBe('2 shown, 1 waiting for their lines to load');
     expect(s.timers.pending.size).toBe(0);
 
-    const missing = "Notes cannot be shown on this version of GitHub's page (classic-file, react-file, react-toolbar). Jump to line still works.";
+    const missing = "Notes cannot be shown on this version of GitHub's page (classic-file, react-file, react-toolbar). Show in diff still works.";
     s.again({ notesLine: notesLine(shown(0, 3, null, ['classic-file', 'react-file', 'react-toolbar']), 0) });
     expect(within(verdictCard()).getByText(missing)).toBeTruthy();
     expect(region().textContent).toBe(missing);
@@ -75,25 +75,25 @@ describe('the notes line under the verdict', () => {
   });
 });
 
-describe('the setting on the Packs screen', () => {
-  it('turns notes off and on with Show notes in the diff, on by default, and says when it could not be saved', async () => {
+describe('the setting in Settings', () => {
+  it('turns notes off and on with Notes in the diff, on by default, and says when it could not be saved', async () => {
     const onShowNotes = vi.fn();
     const s = show({ kind: 'ready', pr: prSummary() }, { showNotes: true, onShowNotes, fetchStatus: () => new Promise(() => undefined) });
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
-    const toggle = screen.getByRole('switch', { name: 'Show notes in the diff' });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Settings' })); });
+    const toggle = screen.getByRole('switch', { name: 'Notes in the diff' });
     expect((toggle as HTMLInputElement).checked).toBe(true);
     fireEvent.click(toggle);
     expect(onShowNotes).toHaveBeenCalledWith(false);
     s.again({ showNotes: false, onShowNotes });
-    expect((screen.getByRole('switch', { name: 'Show notes in the diff' }) as HTMLInputElement).checked).toBe(false);
-    fireEvent.click(screen.getByRole('switch', { name: 'Show notes in the diff' }));
+    expect((screen.getByRole('switch', { name: 'Notes in the diff' }) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole('switch', { name: 'Notes in the diff' }));
     expect(onShowNotes).toHaveBeenLastCalledWith(true);
     s.again({ showNotes: true, onShowNotes, notesFailed: true });
-    const section = screen.getByRole('region', { name: 'Notes' });
+    const section = screen.getByRole('region', { name: 'On GitHub' });
     expect(within(section).getByRole('alert').textContent).toBe('Airlock could not save that setting.');
     // Not read yet: shown on, and not to be changed until it is known.
     s.again({ showNotes: null, onShowNotes });
-    expect((screen.getByRole('switch', { name: 'Show notes in the diff' }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole('switch', { name: 'Notes in the diff' }) as HTMLInputElement).disabled).toBe(true);
   });
 });
 
@@ -109,6 +109,7 @@ function fakeStart() {
 const settings: SettingsStore = {
   getToken: async () => null, setToken: async () => undefined, getDefaultDepth: async () => null, setDefaultDepth: async () => undefined,
   getShowNotes: async () => true, setShowNotes: async () => undefined,
+  getSize: async () => 'm', setSize: async () => undefined, getTourSeen: async () => true, setTourSeen: async () => undefined,
 };
 
 /** The App with a fake source of Open in Airlock presses, and fake notes whose line and setting the test sets. */
@@ -150,14 +151,16 @@ describe('Open in Airlock in the panel', () => {
     a.press(finding(1).id);
     expect(detailHeading()?.textContent).toBe('Problem 1');
 
-    // Over the Packs screen: it goes back to the panel to show the finding.
+    // Over Settings (here its Packs screen): it goes back to the panel to show the finding.
     fireEvent.click(screen.getByRole('button', { name: 'Back to the review' }));
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Settings' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs and learned lines' })); });
     expect(document.querySelector('.packs-screen')).not.toBeNull();
     a.press('c_00000009');
     expect(document.querySelector('.packs-screen')).not.toBeNull();
     a.press(finding(2).id);
     expect(document.querySelector('.packs-screen')).toBeNull();
+    expect(document.querySelector('.settings-screen')).toBeNull();
     expect(detailHeading()?.textContent).toBe('Problem 2');
   });
 
@@ -180,11 +183,12 @@ describe('Open in Airlock in the panel', () => {
     expect(detailHeading()).toBeNull();
   });
 
-  it('gives the Packs screen what the page said it recognised when sent notes', async () => {
+  it('gives the Service screen what the page said it recognised when sent notes', async () => {
     const a = app();
     a.send(reviewState([finding(1), finding(2)]));
     a.setNotes({ on: true, line: null, failed: false, page: { view: 'react', missing: ['react-row'] } });
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Settings' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Service' })); });
     const section = within(screen.getByRole('region', { name: 'GitHub page' }));
     expect(section.getByText('Recognised as the newer view. Selectors that found nothing: react-row.')).toBeTruthy();
   });
@@ -197,8 +201,8 @@ describe('Open in Airlock in the panel', () => {
     a.setNotes({ on: true, line: { text: COULD_NOT_REACH_PAGE, reload: true }, failed: false });
     fireEvent.click(screen.getByRole('button', { name: 'Reload the GitHub tab' }));
     expect(a.notes.reload).toHaveBeenCalledTimes(1);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Packs' })); });
-    fireEvent.click(screen.getByRole('switch', { name: 'Show notes in the diff' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Settings' })); });
+    fireEvent.click(screen.getByRole('switch', { name: 'Notes in the diff' }));
     expect(a.notes.setShown).toHaveBeenCalledWith(false);
   });
 });
@@ -209,7 +213,7 @@ describe('Open in Airlock while a sheet is open', () => {
     const dispatch = vi.fn<(a: UserAction) => void>();
     let state: PanelState = reviewState([finding(1), finding(2)]);
     let asked: OpenFinding | null = null;
-    const el = () => <PanelScreen state={state} dispatch={dispatch} onOpenPacks={() => undefined} openFinding={asked} />;
+    const el = () => <PanelScreen state={state} dispatch={dispatch} onOpenSettings={() => undefined} openFinding={asked} />;
     const view = render(el());
     return {
       dispatch,
@@ -224,14 +228,14 @@ describe('Open in Airlock while a sheet is open', () => {
     const m = mount();
     fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
-    fireEvent.click(screen.getByRole('radio', { name: 'Wrong' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'The finding is mistaken' }));
     const line = 'Flagged "Problem 1" in src/file1.ts. Wrong because: the caller checks it first.';
-    fireEvent.change(textbox('The line that will be saved to your pack'), { target: { value: line } });
-    textbox('The line that will be saved to your pack').focus();
+    fireEvent.change(textbox('The line Airlock will remember'), { target: { value: line } });
+    textbox('The line Airlock will remember').focus();
     m.ask(finding(2).id, 1);
     expect(dialog()).not.toBeNull();
-    expect(textbox('The line that will be saved to your pack').value).toBe(line);
-    expect(document.activeElement).toBe(textbox('The line that will be saved to your pack'));
+    expect(textbox('The line Airlock will remember').value).toBe(line);
+    expect(document.activeElement).toBe(textbox('The line Airlock will remember'));
     expect(detailHeading()?.textContent).toBe('Problem 1');
     fireEvent.click(within(dialog()!).getByRole('button', { name: 'Cancel' }));
     expect(dialog()).toBeNull();
@@ -241,7 +245,7 @@ describe('Open in Airlock while a sheet is open', () => {
   it('waits for a post sheet to close: the sheet and its edited comment stay, then the finding opens', () => {
     const m = mount();
     fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Post comment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Comment on GitHub' }));
     const action = m.dispatch.mock.calls.at(-1)![0] as Extract<UserAction, { type: 'preview-post' }>;
     const preview = previewOf([previewItem(finding(1))]);
     m.setState({ ...reviewState([finding(1), finding(2)]), post: { ticket: action.ticket, kind: 'preview', preview } as PostReply });
@@ -281,9 +285,9 @@ describe('the GitHub tab loads again while a sheet is open', () => {
     />);
     fireEvent.click(await screen.findByRole('button', { name: /Problem 1/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
-    fireEvent.click(screen.getByRole('radio', { name: 'Wrong' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'The finding is mistaken' }));
     const line = 'Flagged "Problem 1" in src/file1.ts. Wrong because: the caller checks it first.';
-    const field = () => screen.getByRole('textbox', { name: 'The line that will be saved to your pack' }) as HTMLTextAreaElement;
+    const field = () => screen.getByRole('textbox', { name: 'The line Airlock will remember' }) as HTMLTextAreaElement;
     fireEvent.change(field(), { target: { value: line } });
     const reads = svc.calls.filter((c) => c === 'GET /pr').length;
 

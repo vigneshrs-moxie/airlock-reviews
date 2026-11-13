@@ -133,6 +133,12 @@ export function useLearned(
   };
 }
 
+/** What `useLearned` gives: the lines, their removal and what came of it. */
+export type Learned = ReturnType<typeof useLearned>;
+
+/** How many lines Airlock has learned in the packs listed for this repository, once they are read. */
+export const learnedCount = (learned: Learned): number | null => (learned.view.kind === 'ok' ? learned.view.reply.lines.length : null);
+
 /** Under the pack list's heading: that the lines are loading, or why they could not be read, with a way to read again. */
 export function LearnedStatus({ view, reload }: { view: LearnedView; reload: () => void }) {
   if (view.kind === 'loading') return <p className="muted">{LEARNED_LOADING}</p>;

@@ -1,44 +1,54 @@
-import { STATUS_WORD, type Finding, type PostRecord, type PrSummary } from '@airlock/shared';
+import { STATUS_WORD, type Finding, type PostRecord } from '@airlock/shared';
 import type { ReactNode } from 'react';
-import { PostedMark } from './PostedMark';
-import { fromText, locationText, severityWord } from './words';
+import { EndInView } from './EndInView';
+import { POSTED_WORD } from './PostedMark';
+import { shortTitle } from './summary';
+import { locationText, severityWord } from './words';
 
-/** One top finding: a checkbox for the fix prompt, and a button (the rest of the card) that opens its detail. */
-export function FindingCard({ finding, rank, packs, selected, onToggle, onOpen, register, posted, after }: {
+const STATUS_TONE: Record<NonNullable<Finding['status']>, string> = { new: 'sev-fix', 'still-open': 'sev-note', moved: 'sev-note', fixed: 'sev-ok' };
+
+/**
+ * One finding as one row: its kind as a word, a title of at most two lines and its place on one line,
+ * cut at its start when too long so the file name and the line number stay in view. The whole row is
+ * one button that opens the finding. While the list is in select mode a checkbox stands before it. On a re-review the
+ * row says New, Still open or Moved (`showStatus`); a posted finding says Posted.
+ */
+export function FindingCard({ finding, showStatus, selecting, selected, onToggle, onOpen, register, posted, after }: {
   finding: Finding;
-  /** Its post record, when it is posted; its words go inside the card's button. */
-  posted?: PostRecord | undefined;
-  /** What goes under the card's button, outside it (a mark with its own controls). */
-  after?: ReactNode;
-  rank: number;
-  packs: PrSummary['packs'];
+  showStatus: boolean;
+  /** True while the list shows a checkbox on every row. */
+  selecting: boolean;
   selected: boolean;
   onToggle: () => void;
   onOpen: () => void;
   register: (id: string, node: HTMLButtonElement | null) => void;
+  /** Its post record, when it is posted or its post's outcome is not known. */
+  posted?: PostRecord | undefined;
+  /** What goes under the row's button, outside it (a mark with its own controls). */
+  after?: ReactNode;
 }) {
-  const raisedBy = finding.alsoRaisedBy?.length ?? 0;
+  const status = showStatus ? finding.status : null;
   return (
-    <li className="card finding-card" data-severity={finding.severity}>
-      <input
-        type="checkbox" className="pick" checked={selected} onChange={onToggle}
-        aria-label={`Select: ${finding.title}`}
-      />
-      <div className="card-main">
-      <button type="button" className="open" data-finding-id={finding.id} onClick={onOpen} ref={(node) => register(finding.id, node)}>
-        <span className="head-line">
-          <span className="rank">{rank}</span>
-          <span className="sev">{severityWord(finding.severity)}</span>
-          {finding.status !== null && <span className="status" data-testid="status">{STATUS_WORD[finding.status]}</span>}
+    <li className="finding-card ap-item" data-severity={finding.severity}>
+      {selecting && (
+        // The 18 px box in a 32 px label, so the place to press is at least 32 px each way.
+        <label className="ap-pick-hit">
+          <input type="checkbox" className="ap-pick" checked={selected} onChange={onToggle} aria-label={`Select: ${finding.title}`} />
+        </label>
+      )}
+      <button type="button" className="open ap-row" data-finding-id={finding.id} onClick={onOpen} ref={(node) => register(finding.id, node)}>
+        <span className={`ap-sev sev-${finding.severity}`}>{severityWord(finding.severity)}</span>
+        <span className="ap-row-main">
+          <span className="title ap-row-title">{shortTitle(finding)}</span>
+          <span className="ap-row-sub">
+            <EndInView className="path" text={locationText(finding)} />
+            {status !== null && <span className={`ap-tag ${STATUS_TONE[status]}`} data-testid="status">{STATUS_WORD[status]}</span>}
+            {posted?.outcome === 'posted' && <span className="ap-tag sev-ok">{POSTED_WORD}</span>}
+          </span>
         </span>
-        <span className="title block">{finding.title}</span>
-        <code className="path block">{locationText(finding)}</code>
-        <span className="muted block">{`From: ${fromText(finding, packs)}`}</span>
-        {raisedBy > 0 && <span className="muted block">{`Also raised by ${raisedBy} more`}</span>}
-        {posted !== undefined && posted.outcome === 'posted' && <PostedMark record={posted} link={false} />}
+        <span className="ap-go" aria-hidden="true" />
       </button>
       {after}
-      </div>
     </li>
   );
 }

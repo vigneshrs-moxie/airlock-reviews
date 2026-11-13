@@ -2,16 +2,28 @@ import {
   checkCommentText, COMMENT_MAX, mentionsIn, SUMMARY_MAX, type Finding, type PostPreviewBody, type PostPreviewItem, type PostPreviewReply,
   type PostRecord,
 } from '@airlock/shared';
-import { useEffect, useId, useRef } from 'react';
+import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { isFor, POST_NOT_LEARNED, POST_UNKNOWN, type PostReply, type UserAction } from '../state/reduce';
 import { recordHolds } from '../state/selection';
 import type { SheetView } from './DismissSheet';
+import { FileText, MessageSquare } from './FindingIcons';
 import { useAnnounce } from './Frame';
 import { ForgetAsk, mentionNotice, NO_POST_OFFLINE, WAIT, whyNotPosting } from './PostedMark';
 import { Sheet } from './Sheet';
+import { shortTitle } from './summary';
+import { severityWord } from './words';
 
-export const POST_ONE_REVIEW = 'Airlock posts these as one review with the Comment action. It never approves or requests changes.';
-export const EXACT_TEXT = 'This is the exact text. Nothing has been sent yet.';
+export const ONLY_COMMENTS = 'Airlock never approves, requests changes or merges.';
+export const NOTHING_SENT = 'Nothing has been sent yet.';
+/**
+ * Who posts, where, and as what, with the promise that nothing else is done: one comment, or several in one review.
+ * `nothingSent` adds that nothing has been sent yet.
+ */
+export function accountLine(viewer: string, pr: { repo: string; number: number }, n: number, nothingSent: boolean): string {
+  const as = n === 1 ? 'as a comment' : `as one review with ${n} comments`;
+  const line = `Posts as ${viewer} on ${pr.repo}#${pr.number}, ${as}. ${ONLY_COMMENTS}`;
+  return nothingSent ? `${line} ${NOTHING_SENT}` : line;
+}
 export const GETTING_PREVIEW = 'Getting the preview…';
 export const NO_PREVIEW = 'Airlock got no answer for the preview. Ask again when you are ready.';
 export const OFFLINE_KEPT_POST = 'Airlock could not reach its service. Your comments are kept.';
@@ -35,6 +47,8 @@ export const nextTicket = (): number => {
 };
 
 const comments = (n: number): string => `${n} comment${n === 1 ? '' : 's'}`;
+/** The sheet's title: how many comments, when there are several. */
+export const sheetTitle = (n: number): string => (n === 1 ? 'Comment on GitHub' : `Comment on GitHub: ${comments(n)}`);
 
 /** The post sheet's request in flight. */
 export interface PendingPost {
@@ -144,11 +158,47 @@ function unanswered(
 
 const sameSet = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x) => b.includes(x));
 
-/** Where a comment goes, in words. */
-function placeOf(item: PostPreviewItem): string {
-  if (item.placement === 'summary') return item.whySummary === null ? 'In the summary' : `In the summary: ${item.whySummary}`;
-  if (item.line === null) return `On ${item.path}`;
-  return item.startLine === null ? `On ${item.path}, line ${item.line}` : `On ${item.path}, lines ${item.startLine} to ${item.line}`;
+/** Where a comment on a line shows, in words. */
+function lineOf(item: PostPreviewItem): string {
+  // The service always gives an inline comment its line (posts/preview.ts); the contract allows none, so it is handled.
+  if (item.line === null) return `${item.path}.`;
+  return item.startLine === null ? `${item.path}, line ${item.line}.` : `${item.path}, lines ${item.startLine} to ${item.line}.`;
+}
+
+export const ON_THE_LINE = 'On the line';
+export const IN_THE_SUMMARY = 'In the review summary';
+export const SHOWS_NEXT_TO_CODE = 'It shows in Files changed, next to the code.';
+export const NAMES_FILE_AND_LINE = 'The comment names the file and line.';
+
+/** A comment's heading: its finding's short title, with the kind as a word before it when the finding is on screen. */
+interface ItemHeading { short: string; severity: Finding['severity'] | null }
+
+/** The heading's words: the kind as a word (a short title is written by a quick model and can be wrong), then the title. */
+function HeadingWords({ heading }: { heading: ItemHeading }) {
+  return (
+    <>
+      {heading.severity !== null && <span className={`ap-tag sev-${heading.severity}`}>{severityWord(heading.severity)}</span>}
+      {heading.severity !== null && ' '}
+      {heading.short}
+    </>
+  );
+}
+
+/** Where one comment goes: on its line, or in the review summary with the reason, and the control that moves it. */
+function Destination({ item, heading, movable }: { item: PostPreviewItem; heading: ItemHeading; movable: ReactNode }) {
+  const inline = item.placement === 'inline';
+  const summaryLine = [item.whySummary, item.line === null ? 'The comment names the file.' : NAMES_FILE_AND_LINE].filter((s) => s !== null).join(' ');
+  return (
+    <div className="ap-dest" data-placement={item.placement}>
+      {inline ? <MessageSquare /> : <FileText />}
+      <div>
+        <p className="title ap-kinded"><HeadingWords heading={heading} /></p>
+        <p><strong>{inline ? ON_THE_LINE : IN_THE_SUMMARY}</strong></p>
+        <p>{inline ? `${lineOf(item)} ${SHOWS_NEXT_TO_CODE}` : summaryLine}</p>
+        {movable}
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -317,9 +367,11 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
   );
   const offlineLine = offline && <p className="notice">{OFFLINE_KEPT_POST}</p>;
   const shell = (children: React.ReactNode) => (
-    <Sheet labelledBy={titleId} initialFocus={heading} returnFocus={false} active={active} onClose={close}>
-      <h2 className="title" id={titleId} tabIndex={-1} ref={heading}>Post to GitHub</h2>
-      {children}
+    <Sheet labelledBy={titleId} initialFocus={heading} returnFocus={false} active={active} bottom onClose={close}>
+      <div className="ap-sheet">
+        <h2 className="ap-sheet-title" id={titleId} tabIndex={-1} ref={heading}>{sheetTitle(preview?.items.length ?? draft.fingerprints.length)}</h2>
+        {children}
+      </div>
     </Sheet>
   );
 
@@ -386,56 +438,69 @@ export function PostSheet({ draft, onDraft, view, dispatch, active, onClose }: {
   const reviewNames = reviewTextEdited ? [] : preview.reviewBodyMentions;
   const mainDisabled = !canSend || problems || blocked !== null;
   const describedByBlock = blocked === null ? {} : { 'aria-describedby': blockedId };
+  const n = preview.items.length;
+  const several = n > 1;
+  // Each comment is headed by its finding's kind as a word and its short title (the service's title, and no kind, when the
+  // finding is not on screen); the text that is posted is the field's, never this.
+  const headingOf = (item: PostPreviewItem): ItemHeading => {
+    const found = latest.document.findings.find((f) => f.fingerprint === item.fingerprint || (f.aliases ?? []).includes(item.fingerprint));
+    return { short: shortTitle(found ?? { title: item.title }), severity: found?.severity ?? null };
+  };
+  const toSummaryControl = (item: PostPreviewItem): ReactNode => {
+    const movable = item.placement === 'inline' || draft.previewToSummary.includes(item.fingerprint) || draft.toSummary.includes(item.fingerprint);
+    if (!movable) return null;
+    return (
+      <label className="choice">
+        <input
+          type="checkbox" checked={draft.toSummary.includes(item.fingerprint)} disabled={locked}
+          onChange={(e) => choose(item.fingerprint, e.target.checked)}
+        />
+        <span>{TO_SUMMARY}</span>
+      </label>
+    );
+  };
   return shell(
     <>
-      <p>{`Posts as ${preview.viewer} on ${pr.repo}#${pr.number}.`}</p>
-      {!needsUpdate && pending === null && !draft.sent && <p className="muted">{EXACT_TEXT}</p>}
-      {preview.items.map((item, i) => {
-        const movable = item.placement === 'inline' || draft.previewToSummary.includes(item.fingerprint) || draft.toSummary.includes(item.fingerprint);
-        return (
-          <section key={item.fingerprint} className="part">
-            <p className="title">{item.title}</p>
-            <p className="muted">{placeOf(item)}</p>
+      <div className="ap-group">
+        <p className="label">{several ? 'Where they go' : 'Where it goes'}</p>
+        {preview.items.map((item) => <Destination key={item.fingerprint} item={item} heading={headingOf(item)} movable={toSummaryControl(item)} />)}
+      </div>
+      <div className="ap-group">
+        <p className="label">The exact text</p>
+        {preview.items.map((item, i) => (
+          <div key={item.fingerprint} className="ap-field">
+            {several && <p className="muted ap-kinded"><HeadingWords heading={headingOf(item)} /></p>}
             <TextField
               label={`Comment ${i + 1}`} value={draft.texts[item.fingerprint] ?? ''} max={COMMENT_MAX} locked={locked}
               names={draft.texts[item.fingerprint] === item.body ? item.mentions : undefined}
               onChange={(value) => editText(item.fingerprint, value)}
             />
-            {movable && (
-              <label className="choice">
-                <input
-                  type="checkbox" checked={draft.toSummary.includes(item.fingerprint)} disabled={locked}
-                  onChange={(e) => choose(item.fingerprint, e.target.checked)}
-                />
-                <span>{TO_SUMMARY}</span>
-              </label>
-            )}
-          </section>
-        );
-      })}
-      <section className="part">
-        <TextField
-          label="Summary" value={draft.summary} max={SUMMARY_MAX} locked={locked}
-          // The summary as the service showed it is counted in the review's own text below.
-          names={draft.summary === preview.summary ? [] : undefined} onChange={editSummary}
-        />
-      </section>
-      <section className="part">
-        <p className="label">{REVIEW_TEXT}</p>
-        <div className={edited ? 'quote muted' : 'quote'} data-review-body data-stale={edited ? 'true' : 'false'}>{preview.reviewBody}</div>
-        {edited && <p className="muted">{REVIEW_TEXT_OLD}</p>}
-        {reviewNames.length > 0 && <p className="notice">{mentionNotice(reviewNames)}</p>}
-      </section>
-      <p>{POST_ONE_REVIEW}</p>
+          </div>
+        ))}
+        <div className="ap-field">
+          <TextField
+            label="Summary" value={draft.summary} max={SUMMARY_MAX} locked={locked}
+            // The summary as the service showed it is counted in the review's own text below.
+            names={draft.summary === preview.summary ? [] : undefined} onChange={editSummary}
+          />
+        </div>
+        <div className="ap-field">
+          <p className="label">{REVIEW_TEXT}</p>
+          <div className={edited ? 'quote muted' : 'quote'} data-review-body data-stale={edited ? 'true' : 'false'}>{preview.reviewBody}</div>
+          {edited && <p className="muted">{REVIEW_TEXT_OLD}</p>}
+          {reviewNames.length > 0 && <p className="notice">{mentionNotice(reviewNames)}</p>}
+        </div>
+      </div>
+      <p className="muted">{accountLine(preview.viewer, pr, n, !needsUpdate && pending === null && !draft.sent)}</p>
       {saidLine}
       {offlineLine}
       {draft.waiting !== null && pending?.kind === 'post' && <p role="status">{draft.waiting}</p>}
-      <div className="actions">
+      <div className="ap-buttons">
         {needsUpdate
           ? <button type="button" className="btn primary" ref={mainButton} disabled={mainDisabled} {...describedByBlock} onClick={update}>Update preview</button>
           : (
             <button type="button" className="btn primary" ref={mainButton} disabled={mainDisabled} {...describedByBlock} onClick={post}>
-              {`Post ${comments(preview.items.length)} to GitHub`}
+              {several ? `Post ${comments(n)}` : 'Post comment'}
             </button>
           )}
         <button type="button" className="btn" disabled={inFlight} onClick={onClose}>Cancel</button>

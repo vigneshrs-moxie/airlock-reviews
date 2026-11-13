@@ -20,7 +20,7 @@ function dismissal(fingerprint: string): Dismissal {
 
 describe('stage words', () => {
   it('names every stage the engine emits in words, with the raw name as the fallback', () => {
-    const engineStages = ['intake', 'packs', 'shape', 'facts', 'map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'challenge', 'lenses-deep', 'select', 'store'];
+    const engineStages = ['intake', 'packs', 'shape', 'facts', 'map', 'brief', 'lenses', 'sweep', 'seams', 'anchor', 'merge', 'challenge', 'lenses-deep', 'select', 'summary', 'store'];
     expect(Object.keys(STAGE_WORDS).sort()).toEqual([...engineStages].sort());
     for (const name of engineStages) {
       expect(stageWords(name)).not.toBe(name);
@@ -117,9 +117,9 @@ describe('reduce', () => {
       kind: 'offline', review: { pr, latest, stale: true },
     });
     expect(reduce({ ...running, brief, map, stages: withStage([], stage('intake', 'start')) }, { type: 'offline', startedAt: 1234 })).toEqual({
-      kind: 'offline', progress: { pr, brief, map, startedAt: 1234 },
+      kind: 'offline', progress: { pr, brief, map, startedAt: 1234, current: 'Reading the pull request' },
     });
-    expect(reduce(running, { type: 'offline' })).toEqual({ kind: 'offline', progress: { pr, brief: null, map: null, startedAt: null } });
+    expect(reduce(running, { type: 'offline' })).toEqual({ kind: 'offline', progress: { pr, brief: null, map: null, startedAt: null, current: null } });
     const offline: PanelState = { kind: 'offline' };
     expect(reduce(offline, { type: 'offline' })).toBe(offline);
   });

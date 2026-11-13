@@ -215,6 +215,11 @@ const noteRows = () => github.locator('tr[data-airlock-note]');
 const noteRow = (id: string) => github.locator(`tr[data-airlock-note="${id}"]`);
 /** The small lines under the verdict. */
 const verdictLines = () => panel.locator('.verdict');
+/** One of the review's three tabs, and a fold by its title (its name goes on with its count). */
+const reviewTab = (name: 'Findings' | 'The change' | 'More') => panel.getByRole('tab', { name: name === 'Findings' ? /^Findings · / : name });
+const foldButton = (title: string) => panel.getByRole('button', { name: new RegExp(`^${title}( |$)`) });
+/** The rows inside an open fold (Also found). */
+const foldedRows = () => panel.locator('.ap-folded .finding-card button.open');
 
 test('1. not paired: the pairing screen, and the token typed into it pairs the panel', async () => {
   if (context === undefined) throw new Error('no browser');
@@ -249,12 +254,13 @@ test('1. not paired: the pairing screen, and the token typed into it pairs the p
 test('2. Ready: the stage in words, the packs, the suggested depth chosen; Review starts it', async () => {
   await expect(panel.getByRole('heading', { name: pr.title })).toBeVisible();
   await expect(panel.getByText("Your pull request, first stage: your branch into the team's branch.")).toBeVisible();
+  await panel.getByRole('button', { name: 'Packs', exact: true }).click();
   await expect(panel.getByRole('switch', { name: 'Orbit' })).toBeChecked();
   await expect(panel.getByRole('switch', { name: 'Generic' })).toBeChecked();
   await expect(panel.getByRole('radio', { name: /^Standard/ })).toBeChecked();
   await expect(panel.getByRole('radio', { name: /^Quick/ })).not.toBeChecked();
 
-  await panel.getByRole('button', { name: 'Review', exact: true }).click();
+  await panel.getByRole('button', { name: 'Review this pull request', exact: true }).click();
   await expect.poll(() => bodiesOf('POST', '/reviews')).toHaveLength(1);
   const body = StartReviewBodySchema.parse(bodiesOf('POST', '/reviews')[0]);
   // All packs on, so the service chooses them.
@@ -263,10 +269,12 @@ test('2. Ready: the stage in words, the packs, the suggested depth chosen; Revie
 
 test('3. Running: stage lines arrive, and the brief and map are shown while a later stage still works', async () => {
   await expect(panel.getByRole('heading', { name: 'Reviewing' })).toBeVisible();
+  await panel.getByRole('button', { name: /^Show the steps/ }).click();
   const stages = panel.getByRole('list', { name: 'Stages' });
   await expect(stages.locator('li').filter({ hasText: 'Reading the pull request' })).toHaveAttribute('data-status', 'done');
-  await expect(stages.locator('li').filter({ hasText: 'Looking through each lens' })).toHaveAttribute('data-status', 'working');
-  await expect(stages.locator('li').filter({ hasText: 'Looking through each lens' })).toContainText('Working');
+  await expect(stages.locator('li').filter({ hasText: 'Looking through each lens' })).toHaveAttribute('data-status', 'now');
+  await expect(stages.locator('li').filter({ hasText: 'Looking through each lens' })).toContainText('Now');
+  await panel.getByRole('button', { name: 'What it has found so far' }).click();
   await expect(panel.getByText('Lets a person pause a subscription from the account page.')).toBeVisible();
   await expect(panel.getByText('Paused accounts are never billed')).toBeVisible();
   await expect(panel.getByText('billing.ts still bills a paused account.')).toBeVisible();
@@ -280,10 +288,12 @@ test('3. Running: stage lines arrive, and the brief and map are shown while a la
   expect(run?.written.some((item) => 'type' in item && item.type === 'done')).toBe(false);
   expect(run?.written).toContainEqual({ comment: 'keep-alive' });
 
-  // The service's status, seen from Packs, lists the running review; Back returns to it.
-  await panel.getByRole('button', { name: 'Packs' }).click();
+  // The service's status, seen from Settings' Service screen, lists the running review; Back and Back return to it.
+  await panel.getByRole('button', { name: 'Settings' }).click();
+  await panel.getByRole('button', { name: 'Service', exact: true }).click();
   await expect(panel.getByText('Running, version test')).toBeVisible();
   await expect(panel.getByText(`${REPO} #${NUMBER}`)).toBeVisible();
+  await panel.getByRole('button', { name: 'Back', exact: true }).click();
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(panel.getByRole('heading', { name: 'Reviewing' })).toBeVisible();
 
@@ -293,19 +303,20 @@ test('3. Running: stage lines arrive, and the brief and map are shown while a la
 test('4. the verdict: its words and sentence, three top findings in rank order, Also found collapsed with two', async () => {
   const words = verdictWords(document.verdict.label, document.pr.stage);
   await expect(panel.getByRole('heading', { name: words })).toBeVisible();
+  // The tour opens over the first finished review; Skip ends it for good (settings.spec.ts walks it).
+  await panel.getByRole('dialog', { name: 'Start at the top' }).getByRole('button', { name: 'Skip' }).click();
   await expect(panel.getByText(document.verdict.sentence)).toBeVisible();
   await expect(frameStatus()).toHaveText('Connected');
   await expect(cardTitles()).toHaveText(top.map((f) => f.title));
-  await expect(cards().locator('.sev')).toHaveText(['Block', 'Fix', 'Ask']);
+  await expect(cards().locator('.ap-sev')).toHaveText(['Block', 'Fix', 'Ask']);
   // The notes: each open finding under its line on the Files changed page beside the panel. The fixture has no line 15,
   // so the last one waits for its line.
   await expect(noteRows()).toHaveCount(4);
   for (const f of [...top, alsoFound[0]!]) await expect(noteRow(f.id)).toHaveCount(1);
   await expect(noteRow(alsoFound[1]!.id)).toHaveCount(0);
   await expect(verdictLines().getByText('4 shown, 1 waiting for their lines to load')).toBeVisible();
-  await expect(cards().first()).toContainText('Also raised by 1 more');
-  await expect(panel.getByRole('button', { name: 'Not shown to the reviewer' })).toHaveAttribute('aria-expanded', 'false');
-  const notes = panel.getByRole('button', { name: 'Notes (1)' });
+  // What the reviewer was not shown and the review's note, in one closed fold above the tabs.
+  const notes = panel.getByRole('button', { name: 'About this review 1 thing the reviewer did not see, 1 note' });
   await expect(notes).toHaveAttribute('aria-expanded', 'false');
   await expect(panel.getByText(NOTE, { exact: true })).toHaveCount(0);
   await notes.click();
@@ -313,11 +324,11 @@ test('4. the verdict: its words and sentence, three top findings in rank order, 
   await notes.click();
   await expect(notes).toHaveAttribute('aria-expanded', 'false');
 
-  const fold = panel.getByRole('button', { name: 'Also found' });
+  const fold = foldButton('Also found');
   await expect(fold).toHaveAttribute('aria-expanded', 'false');
   await expect(panel.getByText(alsoFound[0]!.title)).toHaveCount(0);
   await fold.click();
-  await expect(panel.locator('button.line .title')).toHaveText(alsoFound.map((f) => f.title));
+  await expect(foldedRows().locator('.title')).toHaveText(alsoFound.map((f) => f.title));
   await fold.click();
   await expect(fold).toHaveAttribute('aria-expanded', 'false');
 });
@@ -326,13 +337,19 @@ test('5. the first finding: its fields, and Copy fix prompt puts exactly its pro
   const first = top[0]!;
   await cards().first().getByRole('button').click();
   await expect(panel.getByRole('heading', { name: first.title })).toBeVisible();
-  await expect(panel.locator('.sev')).toHaveText('Block');
-  await expect(panel.getByText('src/pause.ts:11', { exact: true })).toBeVisible();
-  for (const text of [first.happens, first.why, first.suggestedChange, first.checked, first.wouldBeWrongIf, 'Orbit · R-12']) {
-    await expect(panel.getByText(text, { exact: true })).toBeVisible();
+  await expect(panel.locator('.ap-tag')).toHaveText('Block');
+  await expect(panel.locator('.ap-where').getByText('src/pause.ts:11', { exact: true })).toBeVisible();
+  await expect(panel.locator('.ap-do').getByText(first.suggestedChange, { exact: true })).toBeVisible();
+  // The detail is folded: each fold opens with its button.
+  for (const name of ['What happens', 'Why it matters', 'The code', 'Also involves', 'How sure is this']) {
+    await panel.getByRole('button', { name: new RegExp(`^${name}`) }).click();
+  }
+  for (const text of [first.happens, first.why, first.checked, first.wouldBeWrongIf, 'Orbit · R-12']) {
+    await expect(panel.locator('.ap-folds').getByText(text, { exact: true })).toBeVisible();
   }
   await expect(panel.locator('pre.quote code')).toHaveText(first.quote);
   await expect(panel.getByRole('button', { name: /src\/guard\.ts:4/ })).toBeVisible();
+  await expect(panel.getByRole('heading', { name: 'Also raised by' })).toBeVisible();
 
   await panel.getByRole('button', { name: 'Copy fix prompt' }).click();
   await expect(panel.getByRole('button', { name: 'Copied' })).toBeVisible();
@@ -344,8 +361,8 @@ test('6. dismissed as Not now it leaves the list and Dismissed: 1 appears; Resto
   const first = top[0]!;
   await panel.getByRole('button', { name: 'Dismiss' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('radio', { name: 'Not now' }).check();
-  await sheet.getByRole('button', { name: 'Save' }).click();
+  await sheet.getByRole('radio', { name: 'Hide it on this pull request only' }).check();
+  await sheet.getByRole('button', { name: 'Dismiss', exact: true }).click();
   await expect(sheet.getByText('Hidden on this pull request.')).toBeVisible();
   await sheet.getByRole('button', { name: 'Done' }).click();
   await expect(sheet).toHaveCount(0);
@@ -354,16 +371,18 @@ test('6. dismissed as Not now it leaves the list and Dismissed: 1 appears; Resto
   // Its note is gone from the page; the others stay.
   await expect(noteRow(first.id)).toHaveCount(0);
   await expect(noteRows()).toHaveCount(3);
-  const dismissed = panel.getByRole('button', { name: 'Dismissed: 1' });
-  await expect(dismissed).toBeVisible();
+  await reviewTab('More').click();
+  const dismissed = foldButton('Dismissed');
+  await expect(dismissed).toHaveText('Dismissed 1');
   expect(bodiesOf('POST', '/dismissals').map((b) => DismissBodySchema.parse(b))).toEqual([
     { repo: REPO, number: NUMBER, reviewId: document.id, findingId: first.id, reason: 'not-now', text: '' },
   ]);
 
   await dismissed.click();
   await panel.getByRole('button', { name: `Restore ${first.title}` }).click();
-  await expect(cardTitles()).toHaveText(top.map((f) => f.title));
   await expect(panel.getByRole('button', { name: /^Dismissed/ })).toHaveCount(0);
+  await reviewTab('Findings').click();
+  await expect(cardTitles()).toHaveText(top.map((f) => f.title));
   await expect(noteRow(first.id)).toHaveCount(1);
   await expect(noteRows()).toHaveCount(4);
   expect(bodiesOf('POST', '/dismissals/restore').map((b) => RestoreBodySchema.parse(b))).toEqual([
@@ -378,9 +397,9 @@ test('7. dismissed as Wrong: Save waits for a valid line, the service gets exact
   await expect(panel.getByRole('heading', { name: second.title })).toBeVisible();
   await panel.getByRole('button', { name: 'Dismiss' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('radio', { name: 'Wrong' }).check();
-  const field = sheet.getByRole('textbox', { name: 'The line that will be saved to your pack' });
-  const save = sheet.getByRole('button', { name: 'Save' });
+  await sheet.getByRole('radio', { name: 'The finding is mistaken' }).check();
+  const field = sheet.getByRole('textbox', { name: 'The line Airlock will remember' });
+  const save = sheet.getByRole('button', { name: 'Dismiss', exact: true });
   // The draft ends with a space, so it cannot be saved as it is.
   await expect(field).toHaveValue(`Flagged "${second.title}" in ${second.path}. Wrong because: `);
   await expect(save).toBeDisabled();
@@ -399,7 +418,9 @@ test('7. dismissed as Wrong: Save waits for a valid line, the service gets exact
 
   await sheet.getByRole('button', { name: 'Done' }).click();
   await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
-  await expect(panel.getByRole('button', { name: 'Dismissed: 1' })).toBeVisible();
+  await reviewTab('More').click();
+  await expect(foldButton('Dismissed')).toHaveText('Dismissed 1');
+  await reviewTab('Findings').click();
   await expect(noteRow(second.id)).toHaveCount(0);
   await expect(verdictLines().getByText('3 shown, 1 waiting for their lines to load')).toBeVisible();
 });
@@ -412,7 +433,9 @@ test('8. the service stops: the frame says Not running, the offline message show
   await expect(panel.getByText('Shown from before the service stopped.')).toBeVisible();
   await expect(panel.getByRole('heading', { name: verdictWords(document.verdict.label, document.pr.stage) })).toBeVisible();
   await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
+  await reviewTab('More').click();
   await expect(panel.getByRole('button', { name: 'Review again' })).toBeDisabled();
+  await reviewTab('Findings').click();
   // The notes need no service: they stay with the review on screen.
   await expect(noteRows()).toHaveCount(3);
 });
@@ -424,9 +447,10 @@ test('9. the service starts again: the panel returns to the review by itself, th
   await expect(panel.getByRole('heading', { name: verdictWords(document.verdict.label, document.pr.stage) })).toBeVisible();
   await expect(cardTitles()).toHaveText([top[0]!.title, top[2]!.title]);
   // The Dismissed fold was left open in step 6, and the review is the same one on screen, so it is still open.
-  await expect(panel.getByRole('button', { name: 'Dismissed: 1' })).toHaveAttribute('aria-expanded', 'true');
+  await reviewTab('More').click();
+  await expect(foldButton('Dismissed')).toHaveAttribute('aria-expanded', 'true');
   await expect(panel.getByText(top[1]!.title, { exact: true })).toBeVisible();
-  await expect(panel.getByText('Wrong', { exact: true })).toBeVisible();
+  await expect(panel.getByText('The finding is mistaken', { exact: true })).toBeVisible();
   await expect(panel.getByText(WRONG_LINE, { exact: true })).toBeVisible();
   await expect(panel.getByRole('button', { name: `Restore ${top[1]!.title}` })).toBeEnabled();
   // The review came back from the service: the last thing the panel read was the stored review.
@@ -435,14 +459,14 @@ test('9. the service starts again: the panel returns to the review by itself, th
   expect(LatestReplySchema.shape.dismissals.parse(svc().dismissals(REPO, NUMBER))).toHaveLength(1);
 });
 
-test('10. notes: Show notes in the diff turned off removes them all and on brings them back; Open in Airlock on a note opens its finding', async () => {
+test('10. notes: Notes in the diff turned off removes them all and on brings them back; Open in Airlock on a note opens its finding', async () => {
   if (context === undefined) throw new Error('no browser');
   const stepStart = svc().requests.length;
   await expect(noteRows()).toHaveCount(3);
-  await panel.getByRole('button', { name: 'Packs' }).click();
-  const toggle = panel.getByRole('switch', { name: 'Show notes in the diff' });
+  await panel.getByRole('button', { name: 'Settings' }).click();
+  const toggle = panel.getByRole('switch', { name: 'Notes in the diff' });
   await expect(toggle).toBeChecked();
-  // The Packs screen's own reads are made before the notes are turned off and on.
+  // The Settings screen's own reads are made before the notes are turned off and on.
   const since = (from: number) => svc().requests.slice(from).map((r) => `${r.method} ${r.url.split('?')[0]}`);
   await expect.poll(() => since(stepStart)).toEqual(expect.arrayContaining(['GET /status', 'GET /learned']));
   const before = svc().requests.length;
@@ -522,7 +546,7 @@ test('10. notes: Show notes in the diff turned off removes them all and on bring
   }
 });
 
-const POST_ONE_REVIEW = 'Airlock posts these as one review with the Comment action. It never approves or requests changes.';
+const ONLY_COMMENTS = 'Airlock never approves, requests changes or merges.';
 const UNKNOWN = 'Airlock could not tell whether GitHub accepted the comments. Look at the pull request before posting again.';
 const EDITED = 'Please call the guard before pausing; a paused account can still place an order.';
 const SUMMARY = 'Notes from my review of the pause change, for @carol.';
@@ -530,23 +554,23 @@ const NAMES_CAROL = 'Names @carol: GitHub notifies them unless the name is insid
 const postBodies = () => bodiesOf('POST', '/posts').map((b) => PostBodySchema.parse(b));
 const previewBodies = () => bodiesOf('POST', '/posts/preview').map((b) => PostPreviewBodySchema.parse(b));
 
-test('11. Post comment: the preview, an edit, Update preview, then the post; the finding is marked Posted', async () => {
+test('11. Comment on GitHub: the preview, an edit, Update preview, then the post; the finding is marked Posted', async () => {
   const first = top[0]!;
   await cards().first().getByRole('button').click();
   await expect(panel.getByRole('heading', { name: first.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await expect(sheet.getByText(`Posts as alice on ${REPO}#${NUMBER}.`)).toBeVisible();
-  await expect(sheet.getByText('On src/pause.ts, line 11')).toBeVisible();
+  await expect(sheet.getByText(`Posts as alice on ${REPO}#${NUMBER}, as a comment. ${ONLY_COMMENTS} Nothing has been sent yet.`)).toBeVisible();
+  await expect(sheet.getByText('On the line', { exact: true })).toBeVisible();
+  await expect(sheet.getByText('src/pause.ts, line 11. It shows in Files changed, next to the code.')).toBeVisible();
   const comment = sheet.getByRole('textbox', { name: 'Comment 1' });
   await expect(comment).toHaveValue(commentBody(first));
   await expect(sheet.getByRole('textbox', { name: 'Summary' })).toHaveValue('Review notes from Airlock: 1 comment.');
-  await expect(sheet.getByText(POST_ONE_REVIEW)).toBeVisible();
 
   await comment.fill(EDITED);
-  await expect(sheet.getByRole('button', { name: /^Post 1 comment/ })).toHaveCount(0);
+  await expect(sheet.getByRole('button', { name: 'Post comment', exact: true })).toHaveCount(0);
   await sheet.getByRole('button', { name: 'Update preview' }).click();
-  const post = sheet.getByRole('button', { name: 'Post 1 comment to GitHub' });
+  const post = sheet.getByRole('button', { name: 'Post comment', exact: true });
   await expect(post).toBeEnabled();
   expect(previewBodies()).toEqual([
     { repo: REPO, number: NUMBER, reviewId: document.id, items: [{ fingerprint: first.fingerprint }] },
@@ -576,21 +600,22 @@ test('11. Post comment: the preview, an edit, Update preview, then the post; the
   await sheet.getByRole('button', { name: 'Done' }).click();
   await expect(sheet).toHaveCount(0);
   await expect(panel.locator('.mark').getByText('Posted', { exact: true })).toBeVisible();
-  await expect(panel.getByRole('button', { name: 'Post comment' })).toBeDisabled();
+  await expect(panel.getByRole('button', { name: 'Comment on GitHub' })).toBeDisabled();
   await panel.getByRole('button', { name: 'Back to the review' }).click();
   await expect(cards().first()).toContainText('Posted');
 });
 
-test('12. Post selected skips the posted finding; GitHub refuses, and every text is kept', async () => {
+test('12. Comment on GitHub for the selected findings skips the posted one; GitHub refuses, and every text is kept', async () => {
   const third = top[2]!;
   svc().answerNextPost({ refuse: 'Line 13 is not part of the diff' });
+  await panel.getByRole('button', { name: 'Select', exact: true }).click();
   await panel.getByRole('checkbox', { name: `Select: ${top[0]!.title}`, exact: true }).check();
   await panel.getByRole('checkbox', { name: `Select: ${third.title}`, exact: true }).check();
-  await panel.getByRole('button', { name: 'Post selected (1)' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub (1)' }).click();
   const sheet = panel.getByRole('dialog');
   const comment = sheet.getByRole('textbox', { name: 'Comment 1' });
   await expect(comment).toHaveValue(commentBody(third));
-  await expect(sheet.getByText('In the summary: The line is not part of the diff GitHub shows.')).toBeVisible();
+  await expect(sheet.getByText('The line is not part of the diff GitHub shows. The comment names the file and line.')).toBeVisible();
   expect(previewBodies().at(-1)).toEqual({ repo: REPO, number: NUMBER, reviewId: document.id, items: [{ fingerprint: third.fingerprint }] });
   // Airlock's own texts only: the service names no one in the drafted comment or the review text.
   expect(svc().previews.at(-1)?.items[0]?.mentions).toEqual([]);
@@ -600,7 +625,7 @@ test('12. Post selected skips the posted finding; GitHub refuses, and every text
   // Unsent: the summary field says the name it holds.
   await expect(sheet.getByText(NAMES_CAROL)).toHaveCount(1);
   await sheet.getByRole('button', { name: 'Update preview' }).click();
-  const post = sheet.getByRole('button', { name: 'Post 1 comment to GitHub' });
+  const post = sheet.getByRole('button', { name: 'Post comment', exact: true });
   await expect(post).toBeEnabled();
   // Sent and previewed: the service's list for the review's own text says it now.
   expect(svc().previews.at(-1)?.reviewBodyMentions).toEqual(['@carol']);
@@ -624,7 +649,7 @@ test('13. a post whose outcome is not known: the sentence and Open the pull requ
   await sheet.getByRole('button', { name: 'Update preview' }).click();
   await expect(sheet.getByText("The review's own text, as it will be posted:")).toBeVisible();
   await expect(sheet.locator('[data-review-body]')).toHaveText(svc().previews.at(-1)?.reviewBody ?? 'missing');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   await expect(sheet.getByRole('alert')).toHaveText(UNKNOWN);
   await expect(sheet.getByRole('link', { name: 'Open the pull request' })).toHaveAttribute('href', `https://github.com/${REPO}/pull/${NUMBER}`);
   const [, unknown] = svc().posts(REPO, NUMBER);
@@ -668,9 +693,9 @@ test('14. GitHub has the review after all: It was not posted finds it, nothing i
   svc().answerNextPost({ unknown: true });
   await cards().nth(1).getByRole('button').click();
   await expect(panel.getByRole('heading', { name: third.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   await expect(sheet.getByRole('alert')).toHaveText(UNKNOWN);
   await sheet.getByRole('button', { name: 'Close' }).click();
   await expect(sheet).toHaveCount(0);
@@ -693,12 +718,12 @@ test('14. GitHub has the review after all: It was not posted finds it, nothing i
 
 test('15. a post whose proof gets no answer was never sent: it says so, and the same post goes through once the service answers', async () => {
   const fourth = alsoFound[0]!;
-  await panel.getByRole('button', { name: 'Also found' }).click();
-  await panel.locator('button.line').filter({ hasText: fourth.title }).click();
+  await foldButton('Also found').click();
+  await foldedRows().filter({ hasText: fourth.title }).click();
   await expect(panel.getByRole('heading', { name: fourth.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  const post = sheet.getByRole('button', { name: 'Post 1 comment to GitHub' });
+  const post = sheet.getByRole('button', { name: 'Post comment', exact: true });
   await expect(post).toBeEnabled();
   // The service stops answering /hello, and the proof of a second ago has run out: the post proves first, and gets no answer.
   svc().hellosDown(true);
@@ -723,22 +748,22 @@ test('15. a post whose proof gets no answer was never sent: it says so, and the 
 test('16. GitHub refuses a post and the service cannot clear its record: the records are read again, so It was not posted is offered', async () => {
   const fifth = alsoFound[1]!;
   svc().answerNextPost({ refuseKept: 'Validation Failed' });
-  await panel.locator('button.line').filter({ hasText: fifth.title }).click();
+  await foldedRows().filter({ hasText: fifth.title }).click();
   await expect(panel.getByRole('heading', { name: fifth.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   await expect(sheet.getByRole('alert')).toHaveText(
     'GitHub refused the comments: Validation Failed. Nothing was posted, but Airlock could not clear its own record: press "It was not posted" before trying again.',
   );
   await sheet.getByRole('button', { name: 'Cancel' }).click();
   await expect(sheet).toHaveCount(0);
   // The record the service kept is on screen without a reload, and can be cleared where the finding is.
-  await expect(panel.getByText('Not known whether this was posted')).toBeVisible();
+  await expect(panel.locator('.ap-onhub').getByText('Not known whether this was posted')).toBeVisible();
   await panel.getByRole('button', { name: 'It was not posted' }).click();
   await panel.getByRole('button', { name: 'It was not posted' }).click();
   await expect(panel.getByText('Not known whether this was posted')).toHaveCount(0);
-  await expect(panel.getByRole('button', { name: 'Post comment' })).toBeEnabled();
+  await expect(panel.getByRole('button', { name: 'Comment on GitHub' })).toBeEnabled();
   expect(svc().posts(REPO, NUMBER).map((r) => r.outcome)).toEqual(['posted', 'posted', 'posted']);
   expect(svc().sent).toHaveLength(6);
   await panel.getByRole('button', { name: 'Back to the review' }).click();
@@ -777,7 +802,7 @@ test('18. a push: the banner, Review the push starts with since last, and the re
 
   const line = `Review of the push ${'b'.repeat(7)} to ${'d'.repeat(7)}`;
   await expect(panel.getByText(line)).toBeVisible();
-  await expect(panel.getByText(PUSH_NOTE)).toBeVisible();
+  await expect(verdictLines().getByText(PUSH_NOTE)).toBeVisible();
   await expect(panel.getByText('New commits since this review.')).toHaveCount(0);
   await expect(cards()).toHaveCount(2);
   // Neither finding's file is on the fixture page: both notes wait for their lines.
@@ -788,7 +813,7 @@ test('18. a push: the banner, Review the push starts with since last, and the re
   await expect(cards().nth(0)).toContainText('Posted');
   await expect(cards().nth(1)).not.toContainText('Posted');
 
-  const toggle = panel.getByRole('button', { name: 'Fixed since the last review (1)' });
+  const toggle = panel.getByRole('button', { name: 'Fixed since the last review 1' });
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await toggle.click();
   const fixed = toggle.locator('xpath=ancestor::section[1]');
@@ -820,9 +845,9 @@ test('19. a post whose connection is cut before any answer: the panel waits, rea
   svc().answerNextPost({ cut: true, recordAfterMs: 2_000 });
   await cards().nth(1).getByRole('button').click();
   await expect(panel.getByRole('heading', { name: NEW_FINDING.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   // Chromium may send the cut post again by itself; that copy finds the preview taken (404), and the panel then checks
   // whether the post already went through instead of waiting to hear. Either way it reads the records.
   await expect(sheet.getByRole('status').filter({
@@ -838,7 +863,8 @@ test('19. a post whose connection is cut before any answer: the panel waits, rea
 });
 
 test('20. Packs shows the learned lines under their packs; Remove asks, removes and shows the note; a line already gone says so', async () => {
-  await panel.getByRole('button', { name: 'Packs' }).click();
+  await panel.getByRole('button', { name: 'Settings' }).click();
+  await panel.getByRole('button', { name: 'Packs and learned lines' }).click();
   const generic = panel.locator('.packs-screen li').filter({ hasText: 'Generic' });
   const orbit = panel.locator('.packs-screen li').filter({ hasText: 'Orbit' });
   await expect(generic.locator('.learned-line')).toHaveCount(2);
@@ -878,6 +904,7 @@ test('20. Packs shows the learned lines under their packs; Remove asks, removes 
   await last.getByRole('button', { name: 'Remove' }).click();
   await expect(panel.locator('.packs-screen .notice').first()).toHaveText("That line was no longer in Generic's product-knowledge.md; nothing was removed.");
   await expect(generic.getByText('Nothing learned yet.')).toBeVisible();
+  await panel.getByRole('button', { name: 'Back', exact: true }).click();
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
 });
 
@@ -922,25 +949,34 @@ test('21. a merge review says it reviewed what was changed by hand only when its
     svc().addPull(mergePull(one));
     await context.route(`https://github.com/${REPO}/pull/${one.number}/files`, (route) => route.fulfill({ contentType: 'text/html', body: classic }));
   }
-  const expected: Record<number, { heading: string; line: string | null }> = {
+  // `heading`: the merge's heading in What it does, on The change tab; null for the brief under its usual name.
+  const expected: Record<number, { heading: string | null; line: string | null; note?: string }> = {
     8: { heading: 'A merge of main: only what was changed by hand was reviewed', line: null },
     9: { heading: 'A merge of main: git merged it without conflicts and nothing was changed by hand.', line: null },
-    10: { heading: 'What this does', line: null },
-    11: { heading: 'What this does', line: null },
-    12: { heading: 'What this does', line: `Review of the merge pushed since ${'f'.repeat(7)}: only what was changed by hand was reviewed.` },
-    13: { heading: 'What this does', line: 'The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.' },
+    10: { heading: null, line: null },
+    11: { heading: null, line: null },
+    12: { heading: null, line: `Review of the merge pushed since ${'f'.repeat(7)}: only what was changed by hand was reviewed.` },
+    13: { heading: null, line: 'The push only merged another branch in; git merged it without conflicts and nothing was changed by hand.' },
     // A pull request of only a merge reviewed again in full: its note is the only line, and no merge sentence.
-    14: { heading: 'What this does', line: EVERYTHING_NOTE },
+    14: { heading: null, line: null, note: EVERYTHING_NOTE },
   };
   for (const { number } of MERGE_PULLS) {
+    // A new review on screen starts on the Findings tab, which says this pull request's review has replaced the last one.
+    await reviewTab('More').click();
     await github.goto(`https://github.com/${REPO}/pull/${number}/files`);
     await activate(`https://github.com/${REPO}/pull/${number}/files`);
     const want = expected[number]!;
-    await expect(panel.getByRole('heading', { name: want.heading })).toBeVisible();
+    await expect(reviewTab('Findings')).toHaveAttribute('aria-selected', 'true');
+    await reviewTab('The change').click();
+    await foldButton('What it does').click();
+    await expect(panel.getByText('This branch only merges its target branch into itself.', { exact: true })).toHaveCount(2);
+    if (want.heading !== null) await expect(panel.getByRole('heading', { name: want.heading })).toBeVisible();
+    else await expect(panel.getByRole('heading', { name: /^A merge of/ })).toHaveCount(0);
     const sentences = panel.locator('main').getByText(/changed by hand/);
     if (want.line !== null) await expect(panel.getByText(want.line, { exact: true })).toBeVisible();
-    const count = (want.heading.includes('by hand') ? 1 : 0) + (want.line?.includes('by hand') === true ? 1 : 0);
+    const count = (want.heading?.includes('by hand') === true ? 1 : 0) + (want.line?.includes('by hand') === true ? 1 : 0);
     await expect(sentences).toHaveCount(count);
+    if (want.note !== undefined) await expect(verdictLines().getByText(want.note, { exact: true })).toBeVisible();
   }
 });
 
@@ -965,9 +1001,9 @@ test('22. a post the browser sent twice: the copy the panel hears is told the pr
   const before = svc().sent.length;
   await cards().first().getByRole('button').click();
   await expect(panel.getByRole('heading', { name: top[0]!.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   await expect(sheet.getByText('Checking whether this post already went through…')).toBeVisible();
   await expect(sheet.getByRole('button', { name: 'Cancel' })).toBeDisabled();
   await expect(sheet.getByText('Posted 1 comment.')).toBeVisible(RETRY_WAIT);
@@ -987,9 +1023,9 @@ test('23. a preview that really expired: the panel checks for 20 seconds, finds 
   const before = svc().sent.length;
   await cards().nth(1).getByRole('button').click();
   await expect(panel.getByRole('heading', { name: top[1]!.title })).toBeVisible();
-  await panel.getByRole('button', { name: 'Post comment' }).click();
+  await panel.getByRole('button', { name: 'Comment on GitHub' }).click();
   const sheet = panel.getByRole('dialog');
-  await sheet.getByRole('button', { name: 'Post 1 comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Post comment', exact: true }).click();
   await expect(sheet.getByText('Checking whether this post already went through…')).toBeVisible();
   // A first read, then four more five seconds apart: the answer comes after about twenty seconds, not ninety.
   const started = Date.now();
@@ -1018,11 +1054,12 @@ test('24. an extension repository whose review kit cannot be had: Extensions and
   await github.goto(EXT_FILES);
   await activate(EXT_FILES);
   await expect(panel.getByRole('heading', { name: ext.title })).toBeVisible();
+  await panel.getByRole('button', { name: 'Packs', exact: true }).click();
   await expect(panel.getByRole('switch', { name: 'Extensions' })).toBeChecked();
   await expect(panel.getByRole('switch', { name: 'Generic' })).toBeChecked();
   await expect(panel.getByRole('switch')).toHaveCount(2);
 
-  await panel.getByRole('button', { name: 'Review', exact: true }).click();
+  await panel.getByRole('button', { name: 'Review this pull request', exact: true }).click();
   await expect.poll(() => bodiesOf('POST', '/reviews').length).toBe(3);
   expect(StartReviewBodySchema.parse(bodiesOf('POST', '/reviews').at(-1))).toMatchObject({ repo: EXT_REPO, number: EXT_NUMBER });
   // The person reads the service's sentence, naming the kit, with Retry; nothing else stands in for it.
@@ -1037,7 +1074,8 @@ test('24. an extension repository whose review kit cannot be had: Extensions and
 test('25. Packs on that repository: the Extensions pack\'s learned line has Remove, no pack there is managed by the team, and Remove takes it out', async () => {
   const line = learnedLine(4, { pack: 'extensions', packTitle: 'Extensions', repo: EXT_REPO, text: 'The popup reads the active tab on purpose.' });
   svc().learned.push(line);
-  await panel.getByRole('button', { name: 'Packs' }).click();
+  await panel.getByRole('button', { name: 'Settings' }).click();
+  await panel.getByRole('button', { name: 'Packs and learned lines' }).click();
   const extensions = panel.locator('.packs-screen li').filter({ hasText: 'Extensions' });
   await expect(extensions.locator('.learned-line')).toHaveCount(1);
   await expect(extensions.locator('.learned-line')).toContainText(line.text);
@@ -1049,5 +1087,6 @@ test('25. Packs on that repository: the Extensions pack\'s learned line has Remo
   await expect(panel.locator('.packs-screen .notice').first()).toHaveText('Removed.');
   await expect(extensions.getByText('Nothing learned yet.')).toBeVisible();
   expect(RemoveLearnedBodySchema.parse(bodiesOf('POST', '/learned/remove').at(-1))).toEqual({ repo: EXT_REPO, pack: 'extensions', kind: 'wrong', key: line.key });
+  await panel.getByRole('button', { name: 'Back', exact: true }).click();
   await panel.getByRole('button', { name: 'Back', exact: true }).click();
 });
