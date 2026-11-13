@@ -8,9 +8,10 @@ export const COPY_REFUSED = 'Copying was refused. Select this text and copy it y
 /**
  * Copying `text()` (read when `copy` is called): `copied` is true for two seconds after it worked, and `said` is
  * announced. When copying is refused, or there is no clipboard, `shown` holds the text, and the box given `box` has it
- * selected, to copy by hand; `putAway` takes the box away.
+ * selected, to copy by hand; `putAway` takes the box away. A new `resetOn` (what is to be copied changed) takes the box
+ * away and ends Copied.
  */
-export function useCopy(text: () => string, timers: Timers = realTimers, said = 'Copied'): {
+export function useCopy(text: () => string, timers: Timers = realTimers, said = 'Copied', resetOn?: string): {
   copied: boolean; shown: string | null; copy: () => void; putAway: () => void; box: RefObject<HTMLPreElement | null>;
 } {
   const box = useRef<HTMLPreElement>(null);
@@ -29,6 +30,15 @@ export function useCopy(text: () => string, timers: Timers = realTimers, said = 
       reset.current = null;
     };
   }, [timers]);
+  const resetWas = useRef(resetOn);
+  useEffect(() => {
+    if (resetWas.current === resetOn) return;
+    resetWas.current = resetOn;
+    setShown(null);
+    setCopied(false);
+    if (reset.current !== null) timers.clearTimeout(reset.current);
+    reset.current = null;
+  }, [resetOn, timers]);
   useEffect(() => {
     const node = box.current;
     const selection = window.getSelection();

@@ -1,5 +1,5 @@
 import { POST_MAX_ITEMS, type Finding } from '@airlock/shared';
-import { useId, type Ref } from 'react';
+import { useId, useRef, type Ref } from 'react';
 import type { Timers } from '../client/timers';
 import { RefusedCopy, useCopy } from './CopyButton';
 import { COPIED_PROMPT } from './FindingDetail';
@@ -8,20 +8,6 @@ import { ALL_POSTED, Reason, TOO_MANY, WAIT } from './PostedMark';
 
 /** The bar's label for one prompt covering every open Block and Fix. */
 export const fixesLabel = (n: number): string => `Copy fix prompt for the ${n} ${n === 1 ? 'fix' : 'fixes'}`;
-
-/**
- * A fix prompt's Copy button in the bar: it says Copied for two seconds and announces where the prompt goes, as the
- * finding screen's does. A refused copy shows the prompt to copy by hand, with Close.
- */
-function CopyPrompt({ text, label, timers }: { text: () => string; label: string; timers?: Timers | undefined }) {
-  const { copied, shown, copy, putAway, box } = useCopy(text, timers, COPIED_PROMPT);
-  return (
-    <>
-      <button type="button" className="btn small" onClick={copy}>{copied ? 'Copied' : label}</button>
-      {shown !== null && <RefusedCopy shown={shown} box={box} onClose={putAway} />}
-    </>
-  );
-}
 
 /**
  * Why Comment on GitHub cannot be pressed for the ticked findings; null when it can. The rules of the old Post selected:
@@ -36,6 +22,9 @@ export function whyNotCommenting(ticked: number, postable: number, blocked: stri
 /**
  * The bar pinned to the bottom of the review. Out of select mode: one prompt for every open Block and Fix, when there is
  * one, and Select. In select mode: a prompt for the ticked findings, Comment on GitHub for those not yet posted, and Done.
+ * A fix prompt's Copy button says Copied for two seconds and announces where the prompt goes, as the finding screen's
+ * does. A refused copy shows the prompt to copy by hand above the buttons (it scrolls on its own; the buttons stay), and
+ * its Close puts focus back on the Copy button.
  */
 export function ReviewBar({ selecting, fixes, ticked, postable, blocked, busy, prompt, onSelect, onDone, onPost, selectRef, timers }: {
   selecting: boolean;
@@ -56,14 +45,20 @@ export function ReviewBar({ selecting, fixes, ticked, postable, blocked, busy, p
   timers?: Timers | undefined;
 }) {
   const whyId = useId();
+  const copying = selecting ? ticked : fixes;
+  // What the prompt covers: a change (a tick, a mode) takes a refused prompt's box away, as it no longer matches.
+  const copyKey = `${selecting ? 'ticked' : 'fixes'}:${copying.map((f) => f.id).join()}`;
+  const { copied, shown, copy, putAway, box } = useCopy(prompt(copying), timers, COPIED_PROMPT, copyKey);
+  const copyButton = useRef<HTMLButtonElement>(null);
+  const putAwayCopy = (): void => { putAway(); copyButton.current?.focus(); };
+  const above = shown !== null && <RefusedCopy shown={shown} box={box} onClose={putAwayCopy} />;
+  const copyPrompt = (label: string) => (
+    <button type="button" className="btn small" ref={copyButton} onClick={copy}>{copied ? 'Copied' : label}</button>
+  );
   if (!selecting) {
     return (
-      <Pinned name="review" label="Findings actions">
-        {fixes.length > 0 && (
-          <div className="ap-bar-main ap-primary">
-            <CopyPrompt key={fixes.map((f) => f.id).join()} text={prompt(fixes)} label={fixesLabel(fixes.length)} timers={timers} />
-          </div>
-        )}
+      <Pinned name="review" label="Findings actions" above={above}>
+        {fixes.length > 0 && <div className="ap-bar-main ap-primary">{copyPrompt(fixesLabel(fixes.length))}</div>}
         <button type="button" className="btn" ref={selectRef} onClick={onSelect}>Select</button>
       </Pinned>
     );
@@ -71,11 +66,11 @@ export function ReviewBar({ selecting, fixes, ticked, postable, blocked, busy, p
   const why = whyNotCommenting(ticked.length, postable.length, blocked, busy);
   const disabled = ticked.length === 0 || why !== null;
   return (
-    <Pinned name="review" label="Actions on the selected findings">
+    <Pinned name="review" label="Actions on the selected findings" above={above}>
       <div className="ap-bar-main">
         {ticked.length === 0
           ? <button type="button" className="btn" disabled>Copy fix prompt (0)</button>
-          : <CopyPrompt key={ticked.map((f) => f.id).join()} text={prompt(ticked)} label={`Copy fix prompt (${ticked.length})`} timers={timers} />}
+          : copyPrompt(`Copy fix prompt (${ticked.length})`)}
       </div>
       <button
         type="button" className="btn primary ap-bar-main" data-post-selected disabled={disabled}

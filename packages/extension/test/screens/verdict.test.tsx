@@ -1292,4 +1292,40 @@ describe('the bar\'s copy', () => {
     await screen.findByRole('button', { name: 'Copied' });
     expect(document.querySelector('[aria-live="polite"]')!.textContent).toBe('Copied. Paste it to your coding agent.');
   });
+  it.each([
+    ['out of select mode', 'Copy fix prompt for the 2 fixes', false],
+    ['in select mode', 'Copy fix prompt (1)', true],
+  ] as const)('%s, a refused copy shows the prompt above the buttons, not in their row, and Close puts focus back on Copy', async (_mode, label, selecting) => {
+    clipboard(vi.fn().mockRejectedValue(new Error('denied')));
+    review([finding(1), finding(2)]);
+    if (selecting) {
+      fireEvent.click(button('Select'));
+      tick('Problem 1');
+    }
+    fireEvent.click(button(label));
+    const box = await waitFor(() => {
+      const pre = document.querySelector<HTMLElement>('.ap-pinned-review pre');
+      if (pre === null) throw new Error('no box yet');
+      return pre;
+    });
+    expect(box.textContent).toBe(fixPrompt(reviewState([finding(1), finding(2)]).latest.document, selecting ? [finding(1)] : [finding(1), finding(2)]));
+    const above = box.closest('.ap-pinned-above') as HTMLElement;
+    expect(above).not.toBeNull();
+    // Not inside the row of buttons.
+    expect(box.closest('.ap-bar')).toBeNull();
+    expect(follows(above, document.querySelector('.ap-pinned-review .ap-bar')!)).toBe(true);
+    fireEvent.click(within(above).getByRole('button', { name: 'Close' }));
+    expect(document.querySelector('.ap-pinned-review pre')).toBeNull();
+    expect(document.activeElement).toBe(button(label));
+  });
+  it('takes a refused prompt away when the ticks change, as it no longer matches', async () => {
+    clipboard(vi.fn().mockRejectedValue(new Error('denied')));
+    review([finding(1), finding(2)]);
+    fireEvent.click(button('Select'));
+    tick('Problem 1');
+    fireEvent.click(button('Copy fix prompt (1)'));
+    await waitFor(() => { if (document.querySelector('.ap-pinned-review pre') === null) throw new Error('no box yet'); });
+    tick('Problem 2');
+    expect(document.querySelector('.ap-pinned-review pre')).toBeNull();
+  });
 });
