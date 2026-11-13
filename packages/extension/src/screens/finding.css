@@ -22,9 +22,6 @@
 .ap-title:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .ap-heading .ap-where { align-items: center; align-self: stretch; }
 .ap-where .path { flex: 1; min-width: 0; }
-/* A place too long for its row is cut at its start, so the file name and the line number stay in view. */
-.ap-end { direction: rtl; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ap-end > span { direction: ltr; unicode-bidi: isolate; }
 .ap-place-whole { overflow-wrap: anywhere; }
 .ap-where .btn { display: inline-flex; align-items: center; gap: 5px; flex: none; min-height: 32px; }
 

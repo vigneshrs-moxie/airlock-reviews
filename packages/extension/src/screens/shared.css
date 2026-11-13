@@ -40,6 +40,11 @@
 .ap-lead > .notice { margin: 0; }
 .btn.ap-main { width: 100%; min-height: 40px; margin-top: 4px; }
 
+/* A place too long for its row is cut at its start, so the file name and the line number stay in view (EndInView.tsx): a
+   finding's heading, The code's fold, and every review row (the top list, Also found and Fixed). */
+.ap-end { direction: rtl; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ap-end > span { direction: ltr; unicode-bidi: isolate; }
+
 /* A labelled group, and a finding's summary. */
 .ap-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .ap-group > .label, .ap-group > p { margin: 0; }

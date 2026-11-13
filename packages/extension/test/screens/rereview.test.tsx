@@ -318,6 +318,8 @@ describe('fixed findings', () => {
     expect(within(section).getByText('Problem 7')).toBeTruthy();
     expect(within(section).getAllByText('Fixed')).toHaveLength(2);
     expect(within(section).getByText('src/file7.ts:70')).toBeTruthy();
+    // The place is cut at its start when too long, as in the open rows.
+    expect(within(section).getByText('src/file7.ts:70').closest('code')!.classList.contains('ap-end')).toBe(true);
     expect(within(section).getByText('The quoted code is gone; not checked further.')).toBeTruthy();
     expect(within(section).getByText('The line now reads differently.')).toBeTruthy();
     expect(within(section).queryAllByRole('checkbox')).toHaveLength(0);

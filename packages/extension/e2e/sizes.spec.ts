@@ -64,11 +64,20 @@ async function fits(where: string): Promise<void> {
       return new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top))).size;
     };
     const squeezed = drawn('.ap-tag, .ap-chip, .tag, .ap-sev').filter((el) => lines(el) > 1).map(name);
-    return { scroll: root.scrollWidth, client: root.clientWidth, cut, squeezed };
+    // A place (a path and its line) too long for its box is cut at its start: its words' right edge is inside the box, so the
+    // file name and the line number are in view.
+    const endLost = drawn('.path').filter((el) => {
+      if (el.scrollWidth <= el.clientWidth + 1) return false;
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      return range.getBoundingClientRect().right > el.getBoundingClientRect().right + 1;
+    }).map(name);
+    return { scroll: root.scrollWidth, client: root.clientWidth, cut, squeezed, endLost };
   });
   expect(m.scroll, `${where}: sideways scroll`).toBeLessThanOrEqual(m.client);
   expect(m.cut, `${where}: words cut`).toEqual([]);
   expect(m.squeezed, `${where}: on more than one line`).toEqual([]);
+  expect(m.endLost, `${where}: a place cut at its end`).toEqual([]);
 }
 
 /** At Default, every button and choice row drawn is at least 32 px high (40 in a pinned bar). */
@@ -166,7 +175,13 @@ test('2. the progress screen, with Show the steps and What it has found so far o
 
 test('3. the review: each tab with its folds open, the bar in and out of select mode, Tab clear of the bar', async () => {
   await s.review();
-  await atEverySize(async (where, size) => {
+  await atEverySize(async (where, size, width) => {
+    if (size === 'Largest' && width === 320) {
+      // Some rows' places are too long here, so fits() proves they are cut at their start.
+      const cutPlaces = await panel().evaluate(() => [...document.querySelectorAll<HTMLElement>('.ap-row-sub .path')]
+        .filter((el) => el.getClientRects().length > 0 && el.scrollWidth > el.clientWidth + 1).length);
+      expect(cutPlaces, `${where}: rows with a cut place`).toBeGreaterThan(0);
+    }
     for (const name of ['Findings', 'The change', 'More'] as const) {
       await s.tab(name).click();
       await s.openFolds();

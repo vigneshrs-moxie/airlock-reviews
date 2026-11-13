@@ -1,4 +1,5 @@
 import type { Finding } from '@airlock/shared';
+import { EndInView } from './EndInView';
 import { locationText } from './words';
 
 /**
@@ -15,7 +16,7 @@ export function FixedList({ findings }: { findings: readonly Finding[] }) {
             <div className="ap-row-main">
               <span className="title ap-row-title whole">{f.title}</span>
               <span className="muted">{f.checked}</span>
-              <span className="ap-row-sub"><code className="path">{locationText(f)}</code></span>
+              <span className="ap-row-sub"><EndInView className="path" text={locationText(f)} /></span>
             </div>
           </div>
         </li>

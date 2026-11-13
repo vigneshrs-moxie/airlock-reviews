@@ -1,5 +1,6 @@
 import { STATUS_WORD, type Finding, type PostRecord } from '@airlock/shared';
 import type { ReactNode } from 'react';
+import { EndInView } from './EndInView';
 import { POSTED_WORD } from './PostedMark';
 import { shortTitle } from './summary';
 import { locationText, severityWord } from './words';
@@ -7,7 +8,8 @@ import { locationText, severityWord } from './words';
 const STATUS_TONE: Record<NonNullable<Finding['status']>, string> = { new: 'sev-fix', 'still-open': 'sev-note', moved: 'sev-note', fixed: 'sev-ok' };
 
 /**
- * One finding as one row: its kind as a word, a title of at most two lines and its place on one line. The whole row is
+ * One finding as one row: its kind as a word, a title of at most two lines and its place on one line,
+ * cut at its start when too long so the file name and the line number stay in view. The whole row is
  * one button that opens the finding. While the list is in select mode a checkbox stands before it. On a re-review the
  * row says New, Still open or Moved (`showStatus`); a posted finding says Posted.
  */
@@ -36,7 +38,7 @@ export function FindingCard({ finding, showStatus, selecting, selected, onToggle
         <span className="ap-row-main">
           <span className="title ap-row-title">{shortTitle(finding)}</span>
           <span className="ap-row-sub">
-            <code className="path">{locationText(finding)}</code>
+            <EndInView className="path" text={locationText(finding)} />
             {status !== null && <span className={`ap-tag ${STATUS_TONE[status]}`} data-testid="status">{STATUS_WORD[status]}</span>}
             {posted?.outcome === 'posted' && <span className="ap-tag sev-ok">{POSTED_WORD}</span>}
           </span>

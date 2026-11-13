@@ -133,6 +133,16 @@ describe('the rows', () => {
     expect(within(card).queryByRole('checkbox')).toBeNull();
     expect(within(card).getAllByRole('button')).toHaveLength(1);
   });
+  it('draws each row\'s place, in the top list and in Also found, to be cut at its start (the file name and line stay in view)', () => {
+    review([finding(1), also(2)]);
+    openFold('Also found');
+    for (const card of cards()) {
+      const place = card.querySelector('.ap-row-sub .path')!;
+      expect(place.classList.contains('ap-end')).toBe(true);
+      expect(place.firstElementChild?.getAttribute('dir')).toBe('ltr');
+    }
+    expect(cards()).toHaveLength(2);
+  });
   it.each([['block', 'Block'], ['fix', 'Fix'], ['ask', 'Ask'], ['note', 'Note']] as const)('words the kind %s as %s', (severity, word) => {
     review([finding(1, { severity })]);
     expect(within(cards()[0]!).getByText(word).className).toContain(`sev-${severity}`);

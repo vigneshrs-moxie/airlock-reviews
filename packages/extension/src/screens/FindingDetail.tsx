@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { Timers } from '../client/timers';
 import { connectedPlace, COULD_NOT_JUMP, ownPlace, type Jump, type JumpOptions, type JumpPlace, type JumpResult } from '../state/jump';
 import { RefusedCopy, useCopy } from './CopyButton';
+import { EndInView } from './EndInView';
 import { useFindingFolds, type FindingFold } from './finding-folds';
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Crosshair } from './FindingIcons';
 import { Pinned } from './Pinned';
@@ -21,11 +22,6 @@ export const CAPTION = { copy: 'for your coding agent', post: 'you see it first'
 
 /** Said when the fix prompt is on the clipboard. */
 export const COPIED_PROMPT = 'Copied. Paste it to your coding agent.';
-
-/** A place that, when too long for its row, is cut at its start, so the file name and the line stay in view. */
-function EndInView({ className, text }: { className: string; text: string }) {
-  return <code className={`${className} ap-end`}><span dir="ltr">{text}</span></code>;
-}
 
 /** The action whose button is filled, by the finding's kind: none for a note. */
 const MAIN: Record<Finding['severity'], 'copy' | 'post' | null> = { block: 'copy', fix: 'copy', ask: 'post', note: null };
