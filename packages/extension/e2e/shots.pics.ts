@@ -121,6 +121,50 @@ for (const [i, { size, scheme }] of VARIANTS.entries()) {
     await shot('finding-posted');
     await s.button('Back to the review').click();
 
+    // The comment sheet with several comments, from Select.
+    await s.tab('Findings').click();
+    await s.button('Select').click();
+    await panel().getByRole('checkbox').nth(0).check();
+    await panel().getByRole('checkbox').nth(1).check();
+    await panel().getByRole('button', { name: /^Comment on GitHub \(\d+\)$/ }).click();
+    const several = panel().getByRole('dialog', { name: /^Comment on GitHub: \d+ comments$/ });
+    await expect(several.getByRole('button', { name: /^Post \d+ comments$/ })).toBeVisible();
+    await shot('sheet-comment-several', false);
+    await several.getByRole('button', { name: 'Cancel' }).click();
+    await s.button('Done').click();
+
+    // A refused copy on each bar: the prompt to copy by hand above the buttons. Copying works again after a reload.
+    await s.refuseCopy();
+    const refused = panel().locator('.ap-pinned-above pre');
+    const closeRefused = () => panel().locator('.ap-pinned-above').getByRole('button', { name: 'Close' }).click();
+    await top();
+    await panel().getByRole('button', { name: /^Copy fix prompt for the \d+ fixes$/ }).click();
+    await expect(refused).toBeVisible();
+    await shot('review-refused-copy', false);
+    await closeRefused();
+    await s.button('Select').click();
+    await panel().getByRole('checkbox').first().check();
+    await s.button('Copy fix prompt (1)').click();
+    await expect(refused).toBeVisible();
+    await shot('review-select-refused-copy', false);
+    await closeRefused();
+    await s.button('Done').click();
+    await s.finding(0);
+    await top();
+    await s.button('Copy fix prompt').click();
+    await expect(refused).toBeVisible();
+    await shot('finding-refused-copy', false);
+    await closeRefused();
+    await s.button('Back to the review').click();
+    await panel().reload();
+    await s.review();
+
+    // A first review with nothing open: About this review starts open.
+    await s.firstReview();
+    await top();
+    await shot('review-first');
+    await s.review();
+
     await s.button('Settings').click();
     await top();
     await shot('settings');
