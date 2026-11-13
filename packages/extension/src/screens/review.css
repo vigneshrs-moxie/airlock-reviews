@@ -14,7 +14,9 @@
 
 /* The tabs. */
 .ap-tabs { display: flex; margin: 0 -12px; padding: 0 12px; border-bottom: 1px solid var(--border); }
-.ap-tab { flex: 1 1 0; min-width: 0; min-height: 40px; padding: 9px 4px 8px; font: inherit; font-weight: 600; color: var(--muted); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: none; border: 0; border-bottom: 2px solid transparent; cursor: pointer; }
+/* Each tab takes the room its words need, then an equal share of what is left; when the three do not fit on one line (Large
+   and Largest in a narrow panel) a tab's words wrap onto a second line rather than being cut: "Findings · n" keeps its count. */
+.ap-tab { flex: 1 1 auto; min-width: 0; min-height: 40px; padding: 9px 4px 8px; font: inherit; font-weight: 600; line-height: 1.25; color: var(--muted); text-align: center; overflow-wrap: break-word; background: none; border: 0; border-bottom: 2px solid transparent; cursor: pointer; }
 .ap-tab.on { color: var(--fg); border-bottom-color: var(--accent); }
 .ap-panel { gap: 8px; }
 .ap-label-gap { margin: 6px 0 0; }

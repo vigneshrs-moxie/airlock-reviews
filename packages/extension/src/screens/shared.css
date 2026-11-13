@@ -19,6 +19,8 @@
 /* Counts as chips: the verdict strip, and the tour's picture of it. */
 .ap-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .ap-chip { display: inline-flex; align-items: center; padding: 2px 9px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; border-radius: 999px; background: var(--bg); }
+/* The verdict strip's chips are items of a .plain list, whose own padding must not take the chip's. */
+.plain > li.ap-chip { padding: 2px 9px; }
 
 /* A finding's row: the kind as a word, then its title and its place. The review's rows, and the pictures of one in
    Settings and the tour. */
@@ -29,6 +31,14 @@
 .ap-row-title { font-weight: 600; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .ap-row-title.whole { display: block; -webkit-line-clamp: none; overflow: visible; }
 .ap-row-sub { display: flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--muted); }
+
+/* A screen's lead card, its parts spaced by the gap alone: the start and progress screens' card, and Pair, a problem and
+   offline, whose main button is as tall and as wide as the start screen's. */
+.ap-lead { display: flex; flex-direction: column; gap: 6px; padding: 12px; border-radius: 10px; }
+.ap-lead p, .ap-lead .title, .ap-lead .input { margin: 0; }
+.ap-lead .label { margin: 0; }
+.ap-lead > .notice { margin: 0; }
+.btn.ap-main { width: 100%; min-height: 40px; margin-top: 4px; }
 
 /* A labelled group, and a finding's summary. */
 .ap-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
@@ -48,6 +58,9 @@
 .ap-fold-heading, .ap-fold-head { margin: 0; font-size: inherit; }
 .ap-fold { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 2px; font: inherit; font-weight: 600; color: var(--fg); text-align: left; background: none; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
 .ap-fold .n { margin-left: auto; flex: none; font-weight: 400; font-size: 12px; color: var(--muted); }
+/* A fold of the review and the progress screen whose count is long ("1 not shown to the reviewer") puts the count on a
+   second line, at the right, when the two do not fit side by side, rather than squeeze the fold's name into one word a line. */
+.ap-fold-heading > .ap-fold { flex-wrap: wrap; row-gap: 2px; }
 .ap-folded { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 8px 2px 12px; border-bottom: 1px solid var(--border); }
 .ap-folded p, .ap-folded .quote { margin: 0; }
 

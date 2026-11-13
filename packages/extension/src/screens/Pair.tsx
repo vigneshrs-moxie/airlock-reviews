@@ -17,7 +17,7 @@ export function Pair({ state, dispatch, timers }: { state: Extract<PanelState, {
     setToken('');
   };
   return (
-    <section className="card">
+    <section className="card ap-lead">
       <h2 className="title">Pair this panel with Airlock</h2>
       <CommandBox intro="In the airlock-reviews folder, run:" command="npm run service -- token" {...(timers ? { timers } : {})} />
       <label htmlFor={id} className="label">Pairing token</label>
@@ -27,7 +27,7 @@ export function Pair({ state, dispatch, timers }: { state: Extract<PanelState, {
         value={token} onChange={(e) => setToken(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); pair(); } }}
       />
-      <button type="button" className="btn primary" disabled={token.trim() === ''} onClick={pair}>Pair</button>
+      <button type="button" className="btn primary ap-main" disabled={token.trim() === ''} onClick={pair}>Pair</button>
       {state.message !== undefined && <p role="alert" className="notice">{state.message}</p>}
     </section>
   );

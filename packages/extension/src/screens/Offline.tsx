@@ -12,7 +12,7 @@ export function OfflineCard({ state, timers }: { state: Extract<PanelState, { ki
   const t = timers ? { timers } : {};
   return (
     <>
-      <section className="card alert">
+      <section className="card alert ap-lead">
         <h2 className="title">Airlock's service on this Mac is not running.</h2>
         <CommandBox intro="In the airlock-reviews folder, run:" command="npm run service" {...t} />
         <p className="muted">Airlock checks again every few seconds.</p>
