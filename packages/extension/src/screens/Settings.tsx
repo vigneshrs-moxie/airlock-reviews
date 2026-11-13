@@ -12,6 +12,7 @@ export const NOT_SAVED = 'Airlock could not save that setting.';
 export const SIZE_NOTE = 'Changes everything in the panel: text, buttons and spacing. Saved on this computer.';
 export const NOTES_NOTE = 'Private notes under the lines of Files changed. Only you see them.';
 export const NO_PR_PACKS = 'Open a pull request to see its packs.';
+export const UNPAIRED_PACKS = 'Pair Airlock to see its packs.';
 
 const DEPTHS: { depth: Depth | null; name: string }[] = [
   { depth: null, name: 'Suggested for each pull request' },
@@ -22,8 +23,12 @@ const DEPTHS: { depth: Depth | null; name: string }[] = [
 
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
-/** The Packs row's line: how many packs this repository has, and how many lines were learned once they are read. */
-export function packsLine(pr: PrSummary | null, lines: number | null): string {
+/**
+ * The Packs row's line: how many packs this repository has, and how many lines were learned once they are read. An
+ * unpaired panel cannot read its packs, whether or not a pull request is open.
+ */
+export function packsLine(pr: PrSummary | null, lines: number | null, paired: boolean | null = null): string {
+  if (paired === false) return UNPAIRED_PACKS;
   if (pr === null) return NO_PR_PACKS;
   const packs = `${plural(pr.packs.length, 'pack', 'packs')} for this repository`;
   return lines === null ? packs : `${packs} · ${plural(lines, 'line', 'lines')} learned`;
@@ -192,7 +197,7 @@ export function Settings(props: SettingsProps) {
       <div className="settings-screen" hidden={at !== 'settings'}>
         <SettingsList
           {...props} onBack={onBack}
-          packsLineText={packsLine(pr, learnedCount(learned))} serviceLineText={serviceLine(status.fetched, paired)}
+          packsLineText={packsLine(pr, learnedCount(learned), paired)} serviceLineText={serviceLine(status.fetched, paired)}
           onPacks={() => setAt('packs')} onService={() => setAt('service')} packsRow={packsRow} serviceRow={serviceRow}
         />
       </div>

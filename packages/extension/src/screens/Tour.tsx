@@ -1,6 +1,7 @@
-import { useEffect, useId, useRef, type ReactNode, type RefObject } from 'react';
+import { useEffect, useId, useRef, type RefObject } from 'react';
+import { realTimers, type Timers } from '../client/timers';
 import type { PanelState } from '../state/reduce';
-import { useAnnounce } from './Frame';
+import { Icon, useAnnounce } from './Frame';
 import { Sheet } from './Sheet';
 
 export type TourStep = 1 | 2 | 3;
@@ -24,20 +25,12 @@ export function tourMayOpen(state: PanelState, { seen, ended, sheetOpen, setting
   return seen === false && !ended && state.kind === 'review' && !sheetOpen && !settingsOpen;
 }
 
-const Icon = ({ children }: { children: ReactNode }) => (
-  <svg
-    className="icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"
-    strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"
-  >
-    {children}
-  </svg>
-);
 const CopyIcon = () => (
-  <Icon><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></Icon>
+  <Icon size={16}><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></Icon>
 );
-const CommentIcon = () => <Icon><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></Icon>;
+const CommentIcon = () => <Icon size={16}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></Icon>;
 const HideIcon = () => (
-  <Icon>
+  <Icon size={16}>
     <path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49" />
     <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" />
     <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" />
@@ -82,26 +75,42 @@ function StepBody({ step }: { step: TourStep }) {
   );
 }
 
+/** How long after a step changes a press of the primary button is taken for the second half of a double press. */
+export const STEP_SETTLE_MS = 300;
+
 /**
  * The three-step tour, in a sheet that rises from the bottom over whatever is on screen. Skip, Done, Escape and a click
  * on the backdrop end it (`onEnd`); Next moves on (`onStep`). It traps focus while open and gives it back on close.
  */
-export function Tour({ step, onStep, onEnd, returnFocusTo }: {
+export function Tour({ step, onStep, onEnd, returnFocusTo, timers = realTimers }: {
   step: TourStep;
   onStep: (step: TourStep) => void;
   onEnd: () => void;
   /** Where focus goes on close, when the control that opened the tour is gone (Show the tour again in Settings). */
   returnFocusTo?: RefObject<HTMLElement | null>;
+  timers?: Timers;
 }) {
   const titleId = useId();
   const primary = useRef<HTMLButtonElement>(null);
   const announce = useAnnounce();
-  const first = useRef(true);
-  // The primary button keeps focus from step to step, so the new step is said.
+  // The primary button keeps focus from step to step, so the new step is said. Compared with the step last said, so a
+  // repeated effect (StrictMode) says nothing.
+  const said = useRef(step);
   useEffect(() => {
-    if (first.current) { first.current = false; return; }
+    if (said.current === step) return;
+    said.current = step;
     announce(`Step ${step} of 3. ${TOUR_TITLES[step]}`);
   }, [step, announce]);
+  // Next becomes Done on the same button: a second press within STEP_SETTLE_MS of the step changing is ignored, so a
+  // double press on step 2 cannot end the tour unread.
+  const settling = useRef<unknown>(null);
+  useEffect(() => () => { if (settling.current !== null) timers.clearTimeout(settling.current); }, [timers]);
+  const pressPrimary = (): void => {
+    if (settling.current !== null) return;
+    if (step === 3) { onEnd(); return; }
+    settling.current = timers.setTimeout(() => { settling.current = null; }, STEP_SETTLE_MS);
+    onStep((step + 1) as TourStep);
+  };
   return (
     <Sheet labelledBy={titleId} initialFocus={primary} bottom onClose={onEnd} {...(returnFocusTo ? { returnFocusTo } : {})}>
       <div className="tour">
@@ -115,7 +124,7 @@ export function Tour({ step, onStep, onEnd, returnFocusTo }: {
         </div>
         <div className="tour-buttons">
           {step < 3 && <button type="button" className="btn" onClick={onEnd}>Skip</button>}
-          <button type="button" className="btn primary" ref={primary} onClick={() => (step < 3 ? onStep((step + 1) as TourStep) : onEnd())}>
+          <button type="button" className="btn primary" ref={primary} onClick={pressPrimary}>
             {step < 3 ? 'Next' : 'Done'}
           </button>
         </div>

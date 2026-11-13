@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import type { LearnedLine, LearnedReply, ServiceStatus } from '@airlock/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PanelScreen, type PanelScreenProps } from '../../src/screens/PanelScreen';
+import { packsLine } from '../../src/screens/Settings';
 import type { PanelState } from '../../src/state/reduce';
 import { startSize, type Size } from '../../src/state/size';
 import { prSummary, running } from './fixtures';
@@ -75,7 +76,7 @@ describe('the Settings screen', () => {
       const packs = lineOf('Packs and learned lines');
       const service = lineOf('Service');
       if (name === 'not paired') {
-        expect(packs).toBe('Open a pull request to see its packs.');
+        expect(packs).toBe('Pair Airlock to see its packs.');
         expect(service).toBe('Not paired');
       } else if (name === 'offline') {
         expect(packs).toBe('2 packs for this repository');
@@ -95,6 +96,13 @@ describe('the Settings screen', () => {
     await act(async () => { resolve({ ...STATUS, claude: false, gh: false }); });
     // No pull request on screen proves the pairing either way, so the line says nothing of it.
     expect(lineOf('Service')).toBe('Running · Claude not found · GitHub not signed in');
+  });
+
+  it('says to pair, not to open a pull request, on an unpaired panel, whether or not a pull request is known', () => {
+    expect(packsLine(TWO_PACKS, 4, false)).toBe('Pair Airlock to see its packs.');
+    expect(packsLine(null, null, false)).toBe('Pair Airlock to see its packs.');
+    expect(packsLine(null, null, null)).toBe('Open a pull request to see its packs.');
+    expect(packsLine(TWO_PACKS, 4, true)).toBe('2 packs for this repository · 4 lines learned');
   });
 
   it('counts one pack and one line in the singular, and says the lines once they are read', async () => {

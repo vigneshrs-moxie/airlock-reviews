@@ -3,7 +3,8 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App, type PanelServices } from '../../src/panel/App';
 import { PanelScreen, type PanelScreenProps } from '../../src/screens/PanelScreen';
-import { tourMayOpen } from '../../src/screens/Tour';
+import { STEP_SETTLE_MS, tourMayOpen } from '../../src/screens/Tour';
+import { FakeTimers } from '../helpers/fake-timers';
 import type { PanelState, UserAction } from '../../src/state/machine';
 import type { SettingsStore } from '../../src/state/settings';
 import { prSummary, running } from './fixtures';
@@ -40,6 +41,8 @@ async function app(settings: SettingsStore) {
 
 const tour = () => screen.queryByRole('dialog', { name: /^(Start at the top|Three things you can do with a finding|Notes and size)$/ });
 const press = (name: string) => fireEvent.click(screen.getByRole('button', { name }));
+/** Waits out the pause after a step changes, in which a second press of the primary button is ignored. */
+const settle = () => act(() => new Promise<void>((resolve) => { setTimeout(resolve, STEP_SETTLE_MS + 20); }));
 
 describe('the tour', () => {
   it('opens by itself with the first finished review, not before, and walks its three steps to Done', async () => {
@@ -68,11 +71,13 @@ describe('the tour', () => {
     expect(within(two).getByText('Dismiss').parentElement?.textContent).toBe('Dismiss hides the finding here and teaches Airlock. Nothing goes to GitHub.');
     expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe('Step 2 of 3. Three things you can do with a finding');
 
+    await settle();
     press('Next');
     const three = screen.getByRole('dialog', { name: 'Notes and size' });
     expect(within(three).getByText(STEP_3)).toBeTruthy();
     expect(within(three).queryByRole('button', { name: 'Skip' })).toBeNull();
     expect(setTourSeen).not.toHaveBeenCalled();
+    await settle();
     press('Done');
     expect(tour()).toBeNull();
     expect(setTourSeen).toHaveBeenCalledTimes(1);
@@ -164,6 +169,27 @@ describe('the tour', () => {
     expect(setTourSeen).toHaveBeenCalledTimes(1);
   });
 
+  it('a replay stays open while the state changes under it, the tour that opens by itself never follows it, and ending it marks the tour seen', async () => {
+    const { settings, setTourSeen } = memory();
+    const a = await app(settings);
+    a.send(running());
+    await act(async () => { press('Settings'); });
+    press('Show the tour again');
+    press('Next');
+    // The run finishes, the service goes away and comes back: the same replay, at the same step.
+    a.send(REVIEW);
+    a.send({ kind: 'offline', review: { pr: REVIEW.pr, latest: REVIEW.latest, stale: false } });
+    a.send(REVIEW);
+    expect(screen.getAllByRole('dialog').map((d) => d.querySelector('h2')?.textContent)).toEqual(['Three things you can do with a finding']);
+    press('Skip');
+    expect(tour()).toBeNull();
+    expect(setTourSeen).toHaveBeenCalledTimes(1);
+    // Not seen before the replay, but the replay was the tour: it does not open by itself after it.
+    a.send(running());
+    a.send(REVIEW);
+    expect(tour()).toBeNull();
+  });
+
   it('traps focus while open: Tab goes round its buttons, and focus on the page behind comes back into it', async () => {
     const { settings } = memory();
     const a = await app(settings);
@@ -187,7 +213,7 @@ describe('the tour', () => {
     a.send(REVIEW);
     for (let step = 1; step <= 3; step++) {
       expect(tour()!.querySelectorAll('img, a, script')).toHaveLength(0);
-      if (step < 3) press('Next');
+      if (step < 3) { press('Next'); await settle(); }
     }
   });
 });
@@ -212,6 +238,40 @@ describe('the tour and the sheets', () => {
     expect(screen.getByRole('dialog', { name: 'Start at the top' })).toBeTruthy();
   });
 
+  it('Show the tour again waits for a kept dismiss draft: one dialog, the sheet; the tour opens once it closes, and its Escape leaves a later draft alone', async () => {
+    const onTourSeen = vi.fn();
+    const m = mount({ tourSeen: true, onTourSeen });
+    // As dismiss.test.tsx does: a dismiss sheet with a reason chosen, hidden by a state that is not a review, Settings
+    // opened from there, and the review back while Settings is open, so the kept sheet waits under Settings.
+    fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'The code is right for a reason Airlock could not know' }));
+    m.again({ state: { kind: 'unpaired' } });
+    await act(async () => { press('Settings'); });
+    m.again({ state: REVIEW });
+    press('Show the tour again');
+    expect(screen.getAllByRole('dialog').map((d) => d.querySelector('h2')?.textContent)).toEqual(['Dismiss this finding']);
+    expect(tour()).toBeNull();
+    // The draft is kept as it was.
+    expect((screen.getByRole('radio', { name: 'The code is right for a reason Airlock could not know' }) as HTMLInputElement).checked).toBe(true);
+    press('Cancel');
+    const dialog = screen.getByRole('dialog', { name: 'Start at the top' });
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'Next' }));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(tour()).toBeNull();
+    expect(onTourSeen).toHaveBeenCalledTimes(1);
+    // A later dismiss sheet is not touched by the tour, which is gone, and the tour does not come back after it. The
+    // review was drawn again on its list when the state changed, so the finding is opened again first.
+    fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'The code is right for a reason Airlock could not know' }));
+    expect(screen.getAllByRole('dialog').map((d) => d.querySelector('h2')?.textContent)).toEqual(['Dismiss this finding']);
+    expect((screen.getByRole('radio', { name: 'The code is right for a reason Airlock could not know' }) as HTMLInputElement).checked).toBe(true);
+    press('Cancel');
+    expect(tour()).toBeNull();
+  });
+
   it('opens only on a finished review with nothing over it, while not seen and not ended', () => {
     const at = { seen: false, ended: false, sheetOpen: false, settingsOpen: false };
     expect(tourMayOpen(REVIEW, at)).toBe(true);
@@ -232,6 +292,30 @@ describe('the tour and the sheets', () => {
     expect(tour()).toBeNull();
     await act(async () => { press('Back'); });
     expect(screen.getByRole('dialog', { name: 'Start at the top' })).toBeTruthy();
+  });
+
+  it('ignores a second press of Next within 300 ms of the step changing, so a double press cannot end it unread', () => {
+    const timers = new FakeTimers();
+    const onTourSeen = vi.fn();
+    mount({ tourSeen: false, onTourSeen, timers });
+    press('Next');
+    expect(screen.getByRole('dialog', { name: 'Three things you can do with a finding' })).toBeTruthy();
+    expect(timers.delays()).toContain(STEP_SETTLE_MS);
+    expect(STEP_SETTLE_MS).toBe(300);
+    // The second half of a double press: still step 2.
+    press('Next');
+    expect(screen.getByRole('dialog', { name: 'Three things you can do with a finding' })).toBeTruthy();
+    act(() => timers.fire());
+    press('Next');
+    const three = screen.getByRole('dialog', { name: 'Notes and size' });
+    // The same on step 3: a press that follows at once does not end it.
+    press('Done');
+    expect(three.isConnected).toBe(true);
+    expect(onTourSeen).not.toHaveBeenCalled();
+    act(() => timers.fire());
+    press('Done');
+    expect(tour()).toBeNull();
+    expect(onTourSeen).toHaveBeenCalledTimes(1);
   });
 
   it('without onTourSeen, Skip still ends it for this panel', () => {

@@ -21,11 +21,11 @@ const Announce = createContext<(text: string) => void>(() => undefined);
 /** Screens say a change to the one live region the frame holds. */
 export const useAnnounce = (): ((text: string) => void) => useContext(Announce);
 
-/** A small inline icon: drawn with the text's colour, and hidden from screen readers. */
-function Icon({ children }: { children: ReactNode }) {
+/** A small inline icon, `size` pixels square (14 by default): drawn with the text's colour, and hidden from screen readers. */
+export function Icon({ size = 14, children }: { size?: number; children: ReactNode }) {
   return (
     <svg
-      className="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"
+      className="icon" viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="2"
       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"
     >
       {children}

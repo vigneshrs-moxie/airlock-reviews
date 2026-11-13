@@ -18,6 +18,8 @@ const TOKEN = 'a'.repeat(64);
 const HEAD = 'c'.repeat(40);
 const PR_URL = 'https://github.com/acme/widgets/pull/3';
 const TITLE = 'Pause skips the guard';
+/** Longer than the tour's 300 ms after a step changes, in which a second press of Next or Done is ignored. */
+const SETTLE = 350;
 
 function pull(): { pr: PrSummary; latest: LatestReply } {
   const pr = PrSummarySchema.parse({
@@ -109,9 +111,14 @@ test('1. the tour opens by itself over the first finished review, walks three st
   const two = panel.getByRole('dialog', { name: 'Three things you can do with a finding' });
   await expect(two.getByText('Step 2 of 3', { exact: true })).toBeVisible();
   await expect(two.getByText('hides the finding here and teaches Airlock. Nothing goes to GitHub.')).toBeVisible();
-  await two.getByRole('button', { name: 'Next' }).click();
+  // A double click on step 2's Next lands on step 3 and stays there: the second click, on what is now Done, is ignored.
+  await panel.waitForTimeout(SETTLE);
+  await two.getByRole('button', { name: 'Next' }).dblclick();
   const three = panel.getByRole('dialog', { name: 'Notes and size' });
+  await expect(three).toBeVisible();
   await expect(three.getByRole('button', { name: 'Skip' })).toHaveCount(0);
+  await panel.waitForTimeout(SETTLE);
+  await expect(three).toBeVisible();
   await three.getByRole('button', { name: 'Done' }).click();
   await expect(tour()).toHaveCount(0);
   await expect.poll(() => stored('airlock.tourSeen')).toBe(true);
@@ -177,6 +184,8 @@ test('4. at Largest in a 320 px panel nothing scrolls sideways, and the tour and
     const primary = dialog.getByRole('button', { name: step === 'Notes and size' ? 'Done' : 'Next' });
     await primary.scrollIntoViewIfNeeded();
     await expect(primary).toBeInViewport();
+    // A press within 300 ms of the step changing is ignored.
+    await panel.waitForTimeout(SETTLE);
     await primary.click();
   }
   await expect(tour()).toHaveCount(0);
