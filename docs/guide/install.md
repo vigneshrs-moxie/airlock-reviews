@@ -76,9 +76,11 @@ Open a pull request and press the Airlock button.
 
 Press **Review this pull request** at the bottom. It runs on your Claude login; nothing is posted to GitHub.
 
-**While it runs.** The panel names the step it is on, with a bar and "Step 4 of 15" (just "Step 4" when it cannot tell how many steps there will be, for example on a review that was already running when you opened the panel). Under it: the time so far, and the files and groups once Airlock has mapped the change. **Show the steps** lists every step as Done, Now or Next. **What it has found so far** shows what the pull request does and the files in reading order, as they arrive. A review cannot be stopped from the panel yet.
+**While it runs.** The panel names the step it is on, with a bar and "Step 4 of 15" (just "Step 4" when it cannot tell how many steps there will be, for example on a review that was already running when you opened the panel). Under it: the time since the panel started following the review, and the files and groups once Airlock has mapped the change. A step that failed is said under the bar ("A step failed: …"). **Show the steps** lists every step as Done, Now or Next. **What it has found so far** shows what the pull request does and the files in reading order, as they arrive. The panel has no Stop button: stopping the service stops a running review, and when the service is back the panel says "The review that was running stopped when the Airlock service stopped. Start it again when you are ready."
 
-**The review.** At the top: the verdict, one sentence, and the open findings counted by kind ("1 blocking", "2 to fix", "1 question"…). What limits the review stays in sight under that, never behind a tab: a review that did not finish says so, with the errors; on a first review the fold **About this review**, with its count, holds what the reviewer was not shown and the review's notes; on a re-review the notes are printed there. Then three tabs:
+**The review.** At the top: the verdict, one sentence, and the open findings counted by kind ("1 blocking", "2 to fix", "1 question"…). What limits the review stays in sight under that, never behind a tab: a review that did not finish says so, with the errors; on a first review the fold **About this review**, with its count ("1 thing the reviewer did not see", "2 notes"), holds what the reviewer was not shown and the review's notes; on a re-review the notes are printed there, and anything not shown to the reviewer is in About this review. When no finding is open, About this review starts open, so a review that read little reads as such.
+
+The verdict is green only when the review approves, nothing is open, no question for the author is left, nothing failed or was left out, there is no note, and no commit came after it. A verdict without colour is not a bad sign in itself: it means there is something under it to read before you merge. The questions for the author, under **The change**, start open. Then three tabs:
 
 - **Findings**: one line per finding: its kind (Block, Fix, Ask or Note), a short title and its place. **Also found** folds the less important ones.
 - **The change**: what the pull request does in short, then folds: what it does in full, questions for the author, whose call it is, what to check after merging, text for your pull request (with **Copy**), and the files in reading order.
@@ -92,9 +94,9 @@ At the bottom, when something is to be fixed, **Copy fix prompt for the n fixes*
 - **Comment on GitHub**: shows you the exact comment and where it goes before anything is sent (next section).
 - **Dismiss**: hides the finding here and teaches Airlock. Nothing is sent to GitHub. Choose why: **The finding is mistaken** or **The code is right for a reason Airlock could not know** saves one line, which Airlock reads in every later review of this repository (you see and can edit it first); **Hide it on this pull request only** saves nothing. Bring a finding back under **More**, **Dismissed**.
 
-Short titles and summaries are written by a step near the end of each review. A review made before this version has none: its lines show the title cut to about 60 characters, and a finding's summary is the first sentence of What happens, until you review again.
+Short titles and summaries are written by a quick model in a step near the end of each review, and can be wrong. So the kind word (Block, Fix, Ask or Note) is always beside a short title, the full title is the first line of **What happens**, and what is posted, copied or remembered is always the full finding, never the short version. A review made before this version has no short titles or summaries: its lines show the title cut to about 60 characters, and a finding's summary is the first sentence of What happens, until you review again. A review whose summary step failed looks the same, with a note saying so.
 
-**The tour.** The first time a review is on screen, three short steps show what the screen holds. **Skip** or **Done** ends it for good; **Settings**, **Show the tour again** shows it again.
+**The tour.** The first time a review is on screen, three short steps show what the screen holds. **Skip**, **Done**, Escape or a tap outside it ends it for good; if you close the panel partway through instead, it comes back the next time. **Settings**, **Show the tour again** shows it again.
 
 **Settings** (top right): **Text and button size** (Small, Default, Large, Largest; saved on this computer), **Notes in the diff**, **Default depth**, **Packs and learned lines**, **Show the tour again**, and **Service** (whether the service, Claude and GitHub are ready, and the pairing).
 
@@ -116,7 +118,7 @@ While a review is on screen, each open finding also appears as a note on the pul
 1. Open a finding and press **Comment on GitHub**. Or press **Select** in the bar at the bottom of the review, tick several findings and press **Comment on GitHub (n)**. One post holds at most 30 comments.
 2. The sheet says first **Where it goes**, for each comment: **On the line** (it shows in Files changed, next to the code), or **In the review summary**, with the reason when GitHub cannot place it on a line. You can tick **Put in the summary instead**.
 3. Under **The exact text** are each comment, the summary, and the review's own text as it will be posted. You can edit any comment and the summary; after an edit, press **Update preview** to see the exact text again.
-4. A line names the GitHub account it posts as ("Posts as … on …, as a comment." or "…, as n comments in one review."): the account `gh` is signed in as when the preview is made. It also says "Airlock never approves, requests changes or merges." and "Nothing has been sent yet."
+4. A line names the GitHub account it posts as ("Posts as … on …, as a comment." or "…, as one review with n comments."): the account `gh` is signed in as when the preview is made. It also says "Airlock never approves, requests changes or merges." and "Nothing has been sent yet."
 5. Press **Post comment** (or **Post n comments**), or **Cancel**. Nothing is posted until you press it.
 
 Airlock posts them as one review with the **Comment** action, as the sheet says, under your own GitHub name. When it is done, the sheet says "Posted n comments." with **Open on GitHub**, and each finding shows **Posted**. A finding that is already posted cannot be posted again.
@@ -165,13 +167,13 @@ After **Review the push**, the top of the review counts what changed **Since the
 
 A Block or Fix finding is marked Fixed only when Airlock finds, at the new commit, the line of code that fixes it, never on a model's word alone. When it cannot tell, the finding stays open. An Ask or Note whose code is gone is marked Fixed with "The quoted code is gone; not checked further."
 
-Sometimes Airlock reviews the whole pull request again instead, for example when the branch was rewritten. A sentence under the verdict says why, and it is the only line there.
+Sometimes Airlock reviews the whole pull request again instead, for example when the branch was rewritten. A sentence under the verdict says why.
 
 When the push is only a merge (usually of the base branch), the line says what was reviewed of it:
 
 - "Review of the merge pushed since 1a2b3c4: only what was changed by hand was reviewed." when the merge had changes made by hand, and those were reviewed.
 - "The push only merged another branch in; git merged it without conflicts and nothing was changed by hand." when there was nothing to review. It names no branch, because Airlock cannot always be sure which branch the push merged.
-- No such line when Airlock could not review the merge. A note under the verdict says only that the push merges the base branch in, the verdict is Incomplete, and the error under it says why.
+- No such line when Airlock could not review the merge. A note under the verdict says only that the push merges the base branch in, the verdict says "Review incomplete", and the error under it says why.
 
 A first review of a pull request that only merges its base branch in says the same in the heading above what it does.
 
