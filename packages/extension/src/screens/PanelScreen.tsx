@@ -224,20 +224,21 @@ export function PanelScreen({
     : state.kind === 'offline' && state.review !== undefined && sheetView !== null ? { ...sheetView, stale: state.review.stale } : null;
   const known = knownOf(state);
   // The tour: by itself the first time a finished review is on screen, or from Settings over any screen. Either way it
-  // is shown only while no dismiss or post draft is kept: a replay asked for then waits for the draft to close. The one
+  // is shown only while no dismiss or post sheet is drawn: a replay asked for then waits for the sheet to close. A draft
+  // kept while no sheet can be drawn (the Pair, problem or loading screen) does not hold the tour back. The one
   // that opened by itself goes, without being marked seen, when the review leaves the screen (a push, the service away);
   // a replay stays until it is ended, and ending either marks it seen, so neither follows the other.
   const [tour, setTour] = useState<{ step: TourStep; replay: boolean } | null>(null);
   const tourEnded = useRef(false);
-  const draftKept = draft !== null || postDraft !== null;
-  const mayOpen = tourMayOpen(state, { seen: tourSeen, ended: tourEnded.current, sheetOpen: draftKept, settingsOpen });
+  const sheetDrawn = (draft !== null && sheetView !== null) || (postDraft !== null && postView !== null);
+  const mayOpen = tourMayOpen(state, { seen: tourSeen, ended: tourEnded.current, sheetOpen: sheetDrawn, settingsOpen });
   useEffect(() => {
     if (tour === null && mayOpen) setTour({ step: 1, replay: false });
   }, [tour, mayOpen]);
   useEffect(() => {
     if (tour !== null && !tour.replay && state.kind !== 'review') setTour(null);
   }, [tour, state.kind]);
-  const tourMayShow = tour !== null && !draftKept && !settingsOpen;
+  const tourMayShow = tour !== null && !sheetDrawn && !settingsOpen;
   const endTour = (): void => { tourEnded.current = true; setTour(null); onTourSeen?.(); };
   useEffect(() => {
     const finding = closing.current;

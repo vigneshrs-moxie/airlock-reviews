@@ -272,6 +272,24 @@ describe('the tour and the sheets', () => {
     expect(tour()).toBeNull();
   });
 
+  it('Show the tour again over the Pair screen, with a dismiss draft kept that cannot be drawn there, opens at once', async () => {
+    const m = mount({ tourSeen: true });
+    fireEvent.click(screen.getByRole('button', { name: /Problem 1/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'The code is right for a reason Airlock could not know' }));
+    m.again({ state: { kind: 'unpaired' } });
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0);
+    await act(async () => { press('Settings'); });
+    press('Show the tour again');
+    expect(screen.getAllByRole('dialog').map((d) => d.querySelector('h2')?.textContent)).toEqual(['Start at the top']);
+    // The review back: its kept sheet is drawn and the tour steps aside, one dialog at a time; the draft is as it was.
+    m.again({ state: REVIEW });
+    expect(screen.getAllByRole('dialog').map((d) => d.querySelector('h2')?.textContent)).toEqual(['Dismiss this finding']);
+    expect((screen.getByRole('radio', { name: 'The code is right for a reason Airlock could not know' }) as HTMLInputElement).checked).toBe(true);
+    press('Cancel');
+    expect(screen.getByRole('dialog', { name: 'Start at the top' })).toBeTruthy();
+  });
+
   it('opens only on a finished review with nothing over it, while not seen and not ended', () => {
     const at = { seen: false, ended: false, sheetOpen: false, settingsOpen: false };
     expect(tourMayOpen(REVIEW, at)).toBe(true);
