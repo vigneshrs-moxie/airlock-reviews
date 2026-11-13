@@ -89,7 +89,7 @@ describe('the verdict strip', () => {
       ['a limit', { doc: { verdict: APPROVE, limits: ['82 of 673 changed lines were cut.'] } }],
       ['a stage error', { doc: { verdict: APPROVE, stageErrors: [{ stage: 'brief', cohortId: null, message: 'No reply' }] } }],
       ['a stale review', { doc: { verdict: APPROVE }, stale: true }],
-      ['a question', { doc: { verdict: APPROVE, questions: [{ text: '12 changed names were not searched for callers because the pull request is very large.', cohortId: null }] } }],
+      ['a question', { doc: { verdict: APPROVE, questions: [{ text: '12 changed names were not searched for callers because the pull request is very large.', cohortId: null, source: { pack: 'engine', lens: null, ruleId: null } }] } }],
     ];
     for (const [name, opts] of notClear) {
       cleanup();
@@ -107,7 +107,7 @@ describe('the verdict strip', () => {
     expect(heading('Approve').className).toContain('sev-note');
   });
   it('opens Questions for the author under The change from the start, as the review is first shown', () => {
-    review([], { doc: { verdict: APPROVE, questions: [{ text: 'The review kit could not be refreshed.', cohortId: null }] } });
+    review([], { doc: { verdict: APPROVE, questions: [{ text: 'The review kit could not be refreshed.', cohortId: null, source: { pack: 'engine', lens: null, ruleId: null } }] } });
     chooseTab('The change');
     expect(fold('Questions for the author').getAttribute('aria-expanded')).toBe('true');
     expect(within(foldSection('Questions for the author')).getByText('The review kit could not be refreshed.')).toBeTruthy();
