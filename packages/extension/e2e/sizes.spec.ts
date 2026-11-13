@@ -1,14 +1,18 @@
 import { expect, test, type Locator } from '@playwright/test';
-import { Screens, SIZES, type SizeName } from './screens-fixture';
+import { NOTHING_READ, RUNNING, Screens, SIZES, type SizeName } from './screens-fixture';
 
 // Every screen of the panel at 320 and 420 px wide and at each of the four text and button sizes, chosen in Settings as a
-// person would: nothing scrolls sideways, no button's words are cut, a pinned bar is wholly in view on the bottom edge and
-// a control reached with Tab is never under it, and a sheet is never taller than the panel. At Default every button and
-// choice row is at least 32 px high. One browser, one fake service; the steps run in order.
+// person would: nothing scrolls sideways, no button's words are cut or broken inside a word, a place too long for its
+// box keeps its end in view, a pinned bar is wholly in view on the bottom edge and a control reached with Tab is never
+// under it, and a sheet is never taller than the panel. At Default every button, choice row and checkbox is at least
+// 32 px high. A refused copy, in each bar, is also tried in a panel 480 px tall. One browser, one fake service; the steps
+// run in order.
 test.describe.configure({ mode: 'serial' });
 
 const WIDTHS = [320, 420] as const;
 const HEIGHT = 600;
+/** A short panel, where a bar with a refused prompt reaches its cap of 60% of the panel. */
+const SHORT = 480;
 /** Longer than the tour's 300 ms after a step changes, in which a second press of Next or Done is ignored. */
 const SETTLE = 350;
 
@@ -33,15 +37,18 @@ test.beforeEach(() => {
 });
 
 /** Runs `check` at each width and each size, the size chosen in Settings from the screen `ready` brings back. */
-async function atEverySize(check: (where: string, size: SizeName, width: number) => Promise<void>, ready?: () => Promise<void>): Promise<void> {
+async function atEverySize(
+  check: (where: string, size: SizeName, width: number) => Promise<void>, ready?: () => Promise<void>, height: number = HEIGHT,
+): Promise<void> {
   for (const width of WIDTHS) {
-    await panel().setViewportSize({ width, height: HEIGHT });
+    await panel().setViewportSize({ width, height });
     for (const size of SIZES) {
       await s.size(size);
       if (ready !== undefined) await ready();
-      await check(`${width} px, ${size}`, size, width);
+      await check(`${width} px${height === HEIGHT ? '' : ` by ${height}`}, ${size}`, size, width);
     }
   }
+  await panel().setViewportSize({ width: WIDTHS[0], height: HEIGHT });
 }
 
 /**
@@ -64,6 +71,22 @@ async function fits(where: string): Promise<void> {
       return new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top))).size;
     };
     const squeezed = drawn('.ap-tag, .ap-chip, .tag, .ap-sev').filter((el) => lines(el) > 1).map(name);
+    // A word broken inside (overflow-wrap lets a button break one rather than spill): the word's own box is taller than
+    // one line of the button's text.
+    const brokenWord = drawn('button').filter((el) => {
+      const line = parseFloat(getComputedStyle(el).lineHeight) || parseFloat(getComputedStyle(el).fontSize) * 1.2;
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        if ((node.parentElement?.closest('[aria-hidden="true"]') ?? null) !== null) continue;
+        for (const match of (node.textContent ?? '').matchAll(/\S+/g)) {
+          const range = document.createRange();
+          range.setStart(node, match.index);
+          range.setEnd(node, match.index + match[0].length);
+          if (range.getBoundingClientRect().height > line * 1.5) return true;
+        }
+      }
+      return false;
+    }).map(name);
     // A place (a path and its line) too long for its box is cut at its start: its words' right edge is inside the box, so the
     // file name and the line number are in view.
     const endLost = drawn('.path').filter((el) => {
@@ -72,17 +95,18 @@ async function fits(where: string): Promise<void> {
       range.selectNodeContents(el);
       return range.getBoundingClientRect().right > el.getBoundingClientRect().right + 1;
     }).map(name);
-    return { scroll: root.scrollWidth, client: root.clientWidth, cut, squeezed, endLost };
+    return { scroll: root.scrollWidth, client: root.clientWidth, cut, squeezed, endLost, brokenWord };
   });
   expect(m.scroll, `${where}: sideways scroll`).toBeLessThanOrEqual(m.client);
   expect(m.cut, `${where}: words cut`).toEqual([]);
   expect(m.squeezed, `${where}: on more than one line`).toEqual([]);
   expect(m.endLost, `${where}: a place cut at its end`).toEqual([]);
+  expect(m.brokenWord, `${where}: a word broken inside`).toEqual([]);
 }
 
-/** At Default, every button and choice row drawn is at least 32 px high (40 in a pinned bar). */
+/** At Default, every button, choice row and checkbox's label drawn is at least 32 px high (40 in a pinned bar). */
 async function bigEnough(where: string): Promise<void> {
-  const small = await panel().evaluate(() => [...document.querySelectorAll<HTMLElement>('button, .ap-seg > label, label.choice')]
+  const small = await panel().evaluate(() => [...document.querySelectorAll<HTMLElement>('button, .ap-seg > label, label.choice, label.ap-pick-hit')]
     .filter((el) => el.getClientRects().length > 0 && el.closest('[aria-hidden="true"]') === null)
     .map((el) => ({ what: `${el.tagName.toLowerCase()}.${el.className}: ${el.textContent ?? ''}`, height: el.getBoundingClientRect().height, pinned: el.closest('.ap-pinned') !== null }))
     .filter((b) => b.height < (b.pinned ? 40 : 32) - 0.5)
@@ -96,7 +120,8 @@ async function barInView(where: string): Promise<void> {
     document.querySelector<HTMLElement>('.ap-pinned-room')!.offsetHeight - document.querySelector<HTMLElement>('.ap-pinned')!.offsetHeight), { message: `${where}: room` }).toBe(0);
   const m = await panel().evaluate(() => {
     const bar = document.querySelector<HTMLElement>('.ap-pinned')!.getBoundingClientRect();
-    const outside = [...document.querySelectorAll<HTMLElement>('.ap-pinned button')]
+    // The bar's own buttons; what sits above them (a prompt to copy by hand, with its Close) scrolls on its own.
+    const outside = [...document.querySelectorAll<HTMLElement>('.ap-pinned > .ap-bar button')]
       .filter((b) => { const r = b.getBoundingClientRect(); return r.left < bar.left - 0.5 || r.right > bar.right + 0.5 || r.top < bar.top - 0.5 || r.bottom > bar.bottom + 0.5; })
       .map((b) => b.textContent);
     return { left: bar.left, right: bar.right, top: bar.top, bottom: bar.bottom, width: innerWidth, height: innerHeight, outside };
@@ -189,12 +214,18 @@ test('3. the review: each tab with its folds open, the bar in and out of select 
       if (size === 'Default') await bigEnough(`${where}, ${name}`);
       await barInView(`${where}, ${name}`);
     }
-    // The tab's count is never cut ("Findings…").
-    await expect(s.tab('Findings')).toHaveText(/^Findings · \d+$/);
+    // The tab's count is never cut ("Findings…"): its words are no wider than its box.
+    expect(await s.tab('Findings').evaluate((el) => el.scrollWidth <= el.clientWidth + 1), `${where}: Findings tab cut`).toBe(true);
     await s.tab('Findings').click();
     await tabClear(`${where}, Findings`);
     await s.button('Select').click();
     await fits(`${where}, selecting`);
+    if (size === 'Default') await bigEnough(`${where}, selecting`);
+    // Each checkbox's label, the place to press, is at least 32 px each way at every size.
+    const hits = await panel().evaluate(() => [...document.querySelectorAll<HTMLElement>('label.ap-pick-hit')]
+      .map((el) => Math.min(el.offsetWidth, el.offsetHeight)));
+    expect(hits.length, `${where}: checkboxes`).toBeGreaterThan(0);
+    for (const side of hits) expect(side, `${where}: checkbox hit area`).toBeGreaterThanOrEqual(32);
     await barInView(`${where}, selecting`);
     await s.button('Done').click();
   });
@@ -274,6 +305,8 @@ test('7. Settings, Packs and Service; at Largest in a 320 px panel the four size
     await s.button('Settings').click();
     const sizes = panel().getByRole('radiogroup', { name: 'Text and button size' });
     await expect(sizes.getByRole('radio', { name: size, exact: true })).toBeChecked();
+    // The review's bar is hidden behind Settings, so it gives Settings no scroll padding.
+    expect(await panel().evaluate(() => getComputedStyle(document.documentElement).scrollPaddingBottom), `${where}: scroll padding`).toBe('auto');
     await fits(`${where}, Settings`);
     if (size === 'Default') await bigEnough(`${where}, Settings`);
     if (size === 'Largest' && width === 320) {
@@ -334,4 +367,146 @@ test('10. offline, over the review', async () => {
   await s.online();
   // Back to Default for whatever runs next in this browser.
   await s.size('Default');
+});
+
+/** The Copy button that was pressed, and the bar's other button that must not stretch with the refused prompt. */
+async function refusedIn(where: string, copy: Locator, other: Locator | null): Promise<void> {
+  await copy.click();
+  const box = panel().locator('.ap-pinned-above pre');
+  await expect(box, `${where}: the prompt to copy by hand`).toBeVisible();
+  // Above the buttons, not in their row.
+  expect(await box.evaluate((el) => el.closest('.ap-bar') === null), `${where}: prompt outside the row`).toBe(true);
+  if (other !== null) {
+    const [copyHeight, otherHeight] = [await copy.evaluate((el) => (el as HTMLElement).offsetHeight), await other.evaluate((el) => (el as HTMLElement).offsetHeight)];
+    expect(otherHeight, `${where}: the other button stretched`).toBeLessThanOrEqual(copyHeight + 1);
+  }
+  await fits(where);
+  await barInView(where);
+  await panel().locator('.ap-pinned-above').getByRole('button', { name: 'Close' }).click();
+  await expect(box).toHaveCount(0);
+  await expect(copy, `${where}: focus back on Copy`).toBeFocused();
+}
+
+test('11. a refused copy in each bar, in a 600 px and a 480 px tall panel: the prompt above the buttons, nothing stretched, Close back to Copy', async () => {
+  await s.review();
+  await s.refuseCopy();
+  for (const height of [HEIGHT, SHORT]) {
+    await atEverySize(async (where) => {
+      await s.tab('Findings').click();
+      await refusedIn(`${where}, review bar`, panel().getByRole('button', { name: /^Copy fix prompt for the \d+ fixes$/ }), s.button('Select'));
+      await s.button('Select').click();
+      await panel().getByRole('checkbox').first().check();
+      await refusedIn(`${where}, select bar`, s.button('Copy fix prompt (1)'), s.button('Done'));
+      await s.button('Done').click();
+      await s.finding(0);
+      await refusedIn(`${where}, finding bar`, s.button('Copy fix prompt'), null);
+      await s.button('Back to the review').click();
+    }, undefined, height);
+  }
+  // Copying works again for what runs next in this browser.
+  await panel().reload();
+  await s.review();
+});
+
+test('12. the comment sheet with several comments fits the panel', async () => {
+  await s.review();
+  await s.tab('Findings').click();
+  await atEverySize(async (where, size) => {
+    await s.button('Select').click();
+    const boxes = panel().getByRole('checkbox');
+    await boxes.nth(0).check();
+    await boxes.nth(1).check();
+    await panel().getByRole('button', { name: /^Comment on GitHub \(\d+\)$/ }).click();
+    const sheet = panel().getByRole('dialog', { name: /^Comment on GitHub: \d+ comments$/ });
+    await expect(sheet.getByRole('button', { name: /^Post \d+ comments$/ })).toBeVisible();
+    await expect(sheet.getByText('Where they go')).toBeVisible();
+    await sheetFits(`${where}, several comments`, sheet);
+    if (size === 'Default') await bigEnough(`${where}, several comments`);
+    await sheet.getByRole('button', { name: 'Cancel' }).click();
+    await expect(sheet).toHaveCount(0);
+    await s.button('Done').click();
+  });
+});
+
+test('13. the finding with a very long place, and the posted finding', async () => {
+  await s.review();
+  for (const index of [1, 2]) {
+    await s.finding(index);
+    await s.openFolds();
+    await atEverySize(async (where, size) => {
+      await expect(s.button('Back to the review')).toBeVisible();
+      await fits(`${where}, finding ${index + 1}`);
+      if (size === 'Default') await bigEnough(`${where}, finding ${index + 1}`);
+      await barInView(`${where}, finding ${index + 1}`);
+    });
+    await s.button('Back to the review').click();
+  }
+  // The long place is cut at its start in the heading.
+  await s.finding(1);
+  await s.size('Largest');
+  const place = panel().locator('.ap-heading .path');
+  expect(await place.evaluate((el) => el.scrollWidth > el.clientWidth + 1), 'the long place is cut').toBe(true);
+  await s.size('Default');
+  await s.button('Back to the review').click();
+});
+
+test('14. the start screen with a refusal in its bar, and offline over it', async () => {
+  await s.start();
+  // The fake has no review to run for this pull request: the start is refused, and the notice is in the bar.
+  await s.button('Review this pull request').click();
+  const notice = panel().locator('.ap-pinned-above [role="alert"]');
+  await expect(notice).toBeVisible();
+  await atEverySize(async (where, size) => {
+    await expect(notice).toBeVisible();
+    await fits(`${where}, refused`);
+    if (size === 'Default') await bigEnough(`${where}, refused`);
+    await barInView(`${where}, refused`);
+    await tabClear(`${where}, refused`);
+  });
+  await s.offline();
+  await atEverySize(async (where, size) => {
+    await expect(panel().getByRole('heading', { name: "Airlock's service on this Mac is not running." })).toBeVisible();
+    await fits(`${where}, offline over start`);
+    if (size === 'Default') await bigEnough(`${where}, offline over start`);
+    await barInView(`${where}, offline over start`);
+  });
+  await s.online();
+  await s.size('Default');
+});
+
+test('15. the progress screen with no total (followed after the panel was loaded again), and offline over it', async () => {
+  // A panel loaded again does not know the depth of the run it started before, so it counts only the steps it sees.
+  await panel().reload();
+  await s.progress(RUNNING);
+  const bar = panel().getByRole('progressbar', { name: 'Progress' });
+  await expect(bar).toHaveAttribute('aria-valuetext', 'Step 7');
+  await expect(bar).toHaveClass(/unknown/);
+  await atEverySize(async (where, size) => {
+    await expect(bar).toHaveAttribute('aria-valuetext', 'Step 7');
+    await fits(`${where}, no total`);
+    if (size === 'Default') await bigEnough(`${where}, no total`);
+  });
+  await s.offline();
+  await s.openFolds();
+  await atEverySize(async (where, size) => {
+    await expect(panel().getByRole('heading', { name: 'Reviewing' })).toBeVisible();
+    await fits(`${where}, offline over progress`);
+    if (size === 'Default') await bigEnough(`${where}, offline over progress`);
+  });
+  await s.online();
+  await s.size('Default');
+});
+
+test('16. a first review with nothing open: About this review open, the empty Findings tab with Show dismissed', async () => {
+  await s.firstReview();
+  const about = panel().getByRole('button', { name: /^About this review/ });
+  await expect(about).toHaveAttribute('aria-expanded', 'true');
+  await expect(panel().getByText(NOTHING_READ)).toBeVisible();
+  await atEverySize(async (where, size) => {
+    await s.tab('Findings').click();
+    await expect(about).toHaveAttribute('aria-expanded', 'true');
+    await expect(s.button('Show dismissed')).toBeVisible();
+    await fits(where);
+    if (size === 'Default') await bigEnough(where);
+  });
 });

@@ -27,6 +27,9 @@ export const REVIEWED = 43;
 export const UNKNOWN = 44;
 /** More pull requests like RUNNING, so a picture can show a review this panel started (its number of steps known). */
 export const RUNNING_TOO = [45, 46] as const;
+/** A first review with nothing open: its one finding dismissed, and a note that nothing was read closely. */
+export const FIRST = 47;
+export const NOTHING_READ = 'Nothing in this pull request was read closely: all 3 changed files are of kinds Airlock trusts.';
 const address = (n: number): string => `https://github.com/${REPO}/pull/${n}/files`;
 const PAGE = '<!doctype html><title>files</title><p>Files changed.</p>';
 
@@ -161,6 +164,29 @@ function reviewed(): LatestReply {
   });
 }
 
+/** A first review (no earlier one) that approves, its only finding dismissed, with the nothing-read note. */
+function firstReviewed(): LatestReply {
+  const base = minimalDocument();
+  const only = finding(40, { severity: 'fix', status: null, title: 'The pause copy says "suspend" in one place', short: 'One place says suspend' });
+  const document = ReviewDocumentSchema.parse({
+    ...base, id: 'r_0000000047', createdAt: '2026-11-12T11:02:00.000Z', startedAt: '2026-11-12T11:00:00.000Z',
+    pr: {
+      ...base.pr, repo: REPO, number: FIRST, title: 'Reword the pause screen', author: 'alice', viewer: 'bob', headSha: HEAD,
+      url: `https://github.com/${REPO}/pull/${FIRST}`, additions: 12, deletions: 9, changedFiles: 3,
+    },
+    packs: [{ id: 'generic', version: 'v1', title: 'Generic' }],
+    brief: { whatItDoes: ['Rewords the pause screen.'], claims: [], inShort: 'Rewords the pause screen.' },
+    verdict: { label: 'approve', sentence: 'Nothing that needs fixing was found.', counts: { block: 0, fix: 1, ask: 0, note: 0 } },
+    findings: [only],
+    notes: [NOTHING_READ],
+  });
+  return LatestReplySchema.parse({
+    document,
+    dismissals: [{ fingerprint: only.fingerprint, findingId: only.id, reviewId: document.id, reason: 'not-now', text: '', at: '2026-11-12T11:05:00.000Z', learned: null }],
+    posts: [],
+  });
+}
+
 const stage = (name: string, status: 'start' | 'done', detail = ''): RunStep => ({ event: { type: 'stage', stage: name, status, detail } satisfies ServiceEvent });
 
 const LEARNED: LearnedLine[] = [
@@ -198,6 +224,7 @@ export class Screens {
         { pr: prOf(START, LONG_TITLE) },
         ...[RUNNING, ...RUNNING_TOO].map((n) => ({ pr: prOf(n, 'Let a person pause a subscription', { additions: 120, deletions: 4, changedFiles: 3 }), script })),
         { pr: prOf(REVIEWED, LONG_TITLE), latest: reviewed() },
+        { pr: prOf(FIRST, 'Reword the pause screen', { additions: 12, deletions: 9, changedFiles: 3 }), latest: firstReviewed() },
       ],
     });
     this.profile = await mkdtemp(join(tmpdir(), 'airlock-e2e-'));
@@ -272,6 +299,19 @@ export class Screens {
   async review(): Promise<void> {
     await this.goTo(REVIEWED);
     await expect(this.panel.getByRole('heading', { name: 'Request changes' })).toBeVisible();
+  }
+
+  /** The first review with nothing open (FIRST). */
+  async firstReview(): Promise<void> {
+    await this.goTo(FIRST);
+    await expect(this.panel.getByRole('heading', { name: 'Approve' })).toBeVisible();
+  }
+
+  /** Copying is refused from now until the panel is loaded again: each Copy shows its text to copy by hand. */
+  async refuseCopy(): Promise<void> {
+    await this.panel.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.reject(new Error('denied')) }, configurable: true });
+    });
   }
 
   async problem(): Promise<void> {
