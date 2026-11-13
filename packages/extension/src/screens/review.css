@@ -25,8 +25,10 @@
 .ap-list { display: flex; flex-direction: column; }
 .ap-item { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0 10px; padding: 0; border-bottom: 1px solid var(--border); }
 .plain > li.ap-item { padding: 0; }
-.ap-item > .mark, .ap-item > :not(.ap-pick):not(.ap-row) { flex: 1 0 100%; padding-bottom: 8px; }
-.ap-pick { flex: none; width: 18px; height: 18px; margin: 12px 0 0 2px; accent-color: var(--accent); }
+.ap-item > .mark, .ap-item > :not(.ap-pick-hit):not(.ap-row) { flex: 1 0 100%; padding-bottom: 8px; }
+/* The select checkbox: an 18 px box in a 32 px label, the whole label pressable; the box sits where it always did. */
+.ap-pick-hit { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin: 5px -5px 0 -5px; cursor: pointer; }
+.ap-pick { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .ap-item > .ap-row { flex: 1 1 0; min-height: 56px; padding: 10px 2px; font: inherit; color: inherit; text-align: left; background: none; border: 0; cursor: pointer; }
 .ap-row.still { cursor: default; align-items: flex-start; }
 .ap-row.still > .btn { flex: none; }
@@ -36,8 +38,6 @@
 /* Folds. */
 .ap-fold-section { min-width: 0; }
 .ap-fold-title { min-width: 0; overflow-wrap: anywhere; }
-.ap-arrow { flex: none; width: 7px; height: 7px; margin: 0 3px; border-top: 2px solid var(--muted); border-right: 2px solid var(--muted); transform: rotate(45deg); transition: transform 0.15s; }
-.ap-fold[aria-expanded='true'] .ap-arrow { transform: rotate(135deg); }
 .ap-folded .ap-list { margin-top: -8px; }
 .ap-folded .ap-list > .ap-item:last-child { border-bottom: 0; }
 .ap-part { display: flex; flex-direction: column; gap: 6px; min-width: 0; }

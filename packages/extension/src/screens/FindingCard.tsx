@@ -31,7 +31,10 @@ export function FindingCard({ finding, showStatus, selecting, selected, onToggle
   return (
     <li className="finding-card ap-item" data-severity={finding.severity}>
       {selecting && (
-        <input type="checkbox" className="ap-pick" checked={selected} onChange={onToggle} aria-label={`Select: ${finding.title}`} />
+        // The 18 px box in a 32 px label, so the place to press is at least 32 px each way.
+        <label className="ap-pick-hit">
+          <input type="checkbox" className="ap-pick" checked={selected} onChange={onToggle} aria-label={`Select: ${finding.title}`} />
+        </label>
       )}
       <button type="button" className="open ap-row" data-finding-id={finding.id} onClick={onOpen} ref={(node) => register(finding.id, node)}>
         <span className={`ap-sev sev-${finding.severity}`}>{severityWord(finding.severity)}</span>

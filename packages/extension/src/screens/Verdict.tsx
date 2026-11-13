@@ -66,7 +66,7 @@ const short = (sha: string): string => sha.slice(0, 7);
  * pushed merge, said to be reviewed by hand only when the document says so (`mergeReview`) and naming no branch (the
  * push may have merged one other than the base), and nothing for one Airlock could not review or a document that does
  * not say (the stage error says what happened). Nothing for a full review (its note says why), nor when everything was
- * reviewed again (its note, under More, says why).
+ * reviewed again (its note, printed in the strip, says why).
  */
 function rangeLine(doc: ReviewDocument): string | null {
   const covered = rereviewCovered(doc);

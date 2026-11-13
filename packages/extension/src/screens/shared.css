@@ -1,6 +1,6 @@
 /* The redesign's rules that more than one screen uses (from docs/design/panel-redesign/theme.css). Each screen's own
    rules stay in its own file: settings.css (Settings, Packs, Service, the tour), review.css (the review), finding.css
-   (a finding and its two sheets). Imported after panel.css and before those three. */
+   (a finding and its two sheets), start.css (the start and progress screens). Imported after panel.css and before those. */
 
 /* The header's Settings button and the small inline icons beside words. */
 .head .settings { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; min-height: 32px; }
@@ -52,6 +52,35 @@
 
 /* An icon beside its words: a finding's place, and the tour's three actions. */
 .ap-where { display: flex; gap: 8px; min-width: 0; }
+
+/* A screen's title in large words: a finding's heading, and the start and progress screens' lead cards. */
+.ap-title { margin: 0; font-size: 16px; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
+.ap-title:focus { outline: none; }
+.ap-title:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* A choice of a few, one control, the chosen one filled (the four sizes in Settings, the depth on the start screen). Each
+   is a real radio button over its whole part. */
+.ap-seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.ap-seg > label { position: relative; flex: 1 1 0; min-width: 0; min-height: 32px; padding: 6px 2px; display: flex; align-items: center; justify-content: center; text-align: center; font-weight: 600; color: var(--muted); border-left: 1px solid var(--border); cursor: pointer; }
+.ap-seg > label:first-child { border-left: 0; }
+.ap-seg > label.on { background: var(--accent); color: var(--accent-fg); }
+.ap-seg input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.ap-seg > label:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: -3px; }
+
+/* A row with a name, a line under it, and a switch or a chevron: Settings, and the start screen's Packs row and switches. */
+.ap-set { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 2px; font: inherit; color: inherit; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.ap-set .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; }
+.ap-set.ap-set-block { flex-direction: column; align-items: stretch; gap: 2px; cursor: default; }
+.ap-set > .ap-go { flex: none; display: inline-flex; color: var(--muted); }
+.ap-switch { appearance: none; position: relative; flex: none; width: 36px; height: 20px; margin: 0; border-radius: 999px; background: var(--border); cursor: pointer; }
+.ap-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--bg); }
+.ap-switch:checked { background: var(--accent); }
+.ap-switch:checked::after { left: 18px; background: var(--accent-fg); }
+.ap-switch:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* A fold's arrow: the review's folds and the progress screen's. */
+.ap-arrow { flex: none; width: 7px; height: 7px; margin: 0 3px; border-top: 2px solid var(--muted); border-right: 2px solid var(--muted); transform: rotate(45deg); transition: transform 0.15s; }
+.ap-fold[aria-expanded='true'] .ap-arrow { transform: rotate(135deg); }
 
 /* A bottom sheet's title: the comment and dismiss sheets, and the tour. */
 .ap-sheet-title { margin: 0; font-size: 15px; font-weight: 700; overflow-wrap: anywhere; }

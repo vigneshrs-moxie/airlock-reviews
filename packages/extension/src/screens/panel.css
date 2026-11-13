@@ -56,9 +56,6 @@ p { margin: 4px 0; overflow-wrap: anywhere; }
 .file { display: flex; gap: 8px; align-items: baseline; }
 .path, .code { font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 .tag { flex: none; margin-left: auto; font-size: 11px; white-space: nowrap; border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; }
-.stage { display: flex; gap: 8px; }
-.stage .word { flex: 0 0 64px; font-size: 11px; font-weight: 700; }
-.stage[data-status='failed'] .word { color: var(--danger); }
 .command { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
 .code { flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); user-select: all; }
 .input { display: block; width: 100%; min-height: 32px; margin: 4px 0 8px; padding: 4px 8px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
@@ -81,7 +78,6 @@ p { margin: 4px 0; overflow-wrap: anywhere; }
 .masked { -webkit-text-security: disc; }
 .row { flex-wrap: wrap; }
 .banner { border-color: var(--accent); }
-.sev { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
 .status { font-size: 11px; font-weight: 600; margin-left: 8px; padding: 0 6px; border: 1px solid currentColor; border-radius: 8px; }
 .open, .line, .place, .fold { font: inherit; color: inherit; text-align: left; background: none; border: 0; padding: 0; cursor: pointer; }
 .open { flex: 1; min-width: 0; overflow-wrap: anywhere; }

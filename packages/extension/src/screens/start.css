@@ -1,7 +1,7 @@
 /* The start screen (Ready.tsx) and the progress screen (Running.tsx): these screens' own rules, from
-   docs/design/panel-redesign/theme.css. They also use rules other screens own: the depth control is Settings' .ap-seg, the
-   Packs row and the pack switches are Settings' .ap-set and .ap-switch (settings.css), the title is .ap-title
-   (finding.css), the lead card is .ap-lead (shared.css), the folds are Collapsible's (shared.css and review.css), and the pinned bar is Pinned's (shared.css). */
+   docs/design/panel-redesign/theme.css. The rules they share with other screens are in shared.css: the depth control
+   (.ap-seg), the Packs row and the pack switches (.ap-set, .ap-switch), the title (.ap-title), the lead card (.ap-lead),
+   the folds and their arrow (.ap-fold, .ap-arrow) and the pinned bar (.ap-pinned). */
 
 /* The Packs row opens the pack choice under it; its chevron turns down while it is open. */
 .ap-start-packs { min-width: 0; }

@@ -143,6 +143,16 @@ describe('the rows', () => {
     }
     expect(cards()).toHaveLength(2);
   });
+  it('puts each select checkbox in a label of its own, so the whole label (32 px, sizes.spec.ts) ticks it', () => {
+    review([finding(1)]);
+    fireEvent.click(button('Select'));
+    const box = screen.getByRole('checkbox', { name: 'Select: Problem 1' }) as HTMLInputElement;
+    const hit = box.parentElement!;
+    expect(hit.tagName).toBe('LABEL');
+    expect(hit.className).toBe('ap-pick-hit');
+    fireEvent.click(hit);
+    expect(box.checked).toBe(true);
+  });
   it.each([['block', 'Block'], ['fix', 'Fix'], ['ask', 'Ask'], ['note', 'Note']] as const)('words the kind %s as %s', (severity, word) => {
     review([finding(1, { severity })]);
     expect(within(cards()[0]!).getByText(word).className).toContain(`sev-${severity}`);
