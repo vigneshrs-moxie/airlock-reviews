@@ -30,9 +30,9 @@ export const RUNNING_TOO = [45, 46] as const;
 const address = (n: number): string => `https://github.com/${REPO}/pull/${n}/files`;
 const PAGE = '<!doctype html><title>files</title><p>Files changed.</p>';
 
-/** 141 characters: longer than any line the panel has room for. */
+/** 141 characters (as the controller asked for): longer than any line the panel has room for. */
 export const LONG_TITLE =
-  'Let a person pause a subscription from the account page, keep the plan and the seat while paused, and resume it later without paying again';
+  'Let a person pause a subscription from the account page, keep the plan and the seat while paused, and resume it later on without paying again';
 /** A place too long for any row. */
 export const LONG_PATH = `packages/billing/src/${'subscriptions-and-accounts/'.repeat(3)}pause/limit-of-pauses-per-year.ts`;
 
