@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startFakeService, type FakeService } from './fake-service';
 
-// Settings, the text and button size and the tour, in the built extension, in a side panel 320 px wide beside a pull
+// Settings, the text size and the tour, in the built extension, in a side panel 320 px wide beside a pull
 // request with a stored review. The steps share one browser, whose storage carries from one to the next, and run in order.
 test.describe.configure({ mode: 'serial' });
 
@@ -141,19 +141,19 @@ test('2. Show the tour again in Settings closes Settings and opens it at step 1;
   await expect(button('Settings')).toBeFocused();
 });
 
-test('3. the size: Largest zooms the whole panel at once, is stored, and the panel opens at it again', async () => {
+test('3. the size: Largest grows the text at once, is stored, and the panel opens at it again', async () => {
   await button('Settings').click();
-  const sizes = panel.getByRole('radiogroup', { name: 'Text and button size' });
+  const sizes = panel.getByRole('radiogroup', { name: 'Text size' });
   await expect(sizes.getByRole('radio', { name: 'Default' })).toBeChecked();
   await sizes.getByRole('radio', { name: 'Largest' }).check();
-  await expect.poll(() => panel.evaluate(() => document.documentElement.style.zoom)).toBe('1.3');
+  await expect.poll(() => panel.evaluate(() => document.documentElement.style.getPropertyValue('--text-scale'))).toBe('1.3');
   await expect.poll(() => stored('airlock.size')).toBe('xl');
   expect(await panel.evaluate(() => localStorage.getItem('airlock.size'))).toBe('xl');
   await expect(panel.getByRole('alert')).toHaveCount(0);
 
   await panel.reload();
   // Applied from the page's own copy before the panel draws anything.
-  expect(await panel.evaluate(() => document.documentElement.style.zoom)).toBe('1.3');
+  expect(await panel.evaluate(() => document.documentElement.style.getPropertyValue('--text-scale'))).toBe('1.3');
   await button('Settings').click();
   await expect(panel.getByRole('radio', { name: 'Largest' })).toBeChecked();
   await button('Back').click();
@@ -212,11 +212,11 @@ async function pinnedBarFits(tall = false): Promise<void> {
     const scroller = document.scrollingElement ?? document.documentElement;
     return {
       scrolls: scroller.scrollHeight > scroller.clientHeight,
-      zoom: document.documentElement.style.zoom, width: innerWidth, height: innerHeight, box: box.toJSON() as DOMRect, buttons,
+      scale: document.documentElement.style.getPropertyValue('--text-scale'), width: innerWidth, height: innerHeight, box: box.toJSON() as DOMRect, buttons,
       room: room.offsetHeight, bar: bar.offsetHeight, contentBottom: content.bottom,
     };
   });
-  expect(m.zoom).toBe('1.3');
+  expect(m.scale).toBe('1.3');
   expect(m.box.left).toBeGreaterThanOrEqual(0);
   expect(m.box.right).toBeLessThanOrEqual(m.width + 0.5);
   expect(Math.abs(m.box.bottom - m.height)).toBeLessThanOrEqual(1);
@@ -234,7 +234,7 @@ async function pinnedBarFits(tall = false): Promise<void> {
 test('5. at Largest in a 320 px panel the review\'s bar and a finding\'s actions keep their buttons whole, with room above them', async () => {
   await button('Settings').click();
   await panel.getByRole('radio', { name: 'Largest' }).check();
-  await expect.poll(() => panel.evaluate(() => document.documentElement.style.zoom)).toBe('1.3');
+  await expect.poll(() => panel.evaluate(() => document.documentElement.style.getPropertyValue('--text-scale'))).toBe('1.3');
   await button('Back').click();
 
   await expect(button('Select')).toBeVisible();
@@ -256,5 +256,5 @@ test('5. at Largest in a 320 px panel the review\'s bar and a finding\'s actions
   // Back to Default, which the next run of this spec starts from anyway.
   await button('Settings').click();
   await panel.getByRole('radio', { name: 'Default' }).check();
-  await expect.poll(() => panel.evaluate(() => document.documentElement.style.zoom)).toBe('1');
+  await expect.poll(() => panel.evaluate(() => document.documentElement.style.getPropertyValue('--text-scale'))).toBe('1');
 });

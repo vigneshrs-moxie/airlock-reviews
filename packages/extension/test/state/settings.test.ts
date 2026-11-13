@@ -59,7 +59,7 @@ describe('settings', () => {
     for (const odd of ['false', 0, null]) expect(await createSettingsStore(fakeArea({ 'airlock.showNotes': odd })).getShowNotes()).toBe(true);
   });
 
-  it('keeps the text and button size under airlock.size, Default when missing or not one of the four', async () => {
+  it('keeps the text size under airlock.size, Default when missing or not one of the four', async () => {
     const area = fakeArea();
     const settings = createSettingsStore(area);
     expect(await settings.getSize()).toBe('m');

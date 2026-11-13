@@ -71,7 +71,7 @@ function StepBody({ step }: { step: TourStep }) {
     );
   }
   return (
-    <p>Open findings also appear as private notes under their lines on GitHub&apos;s Files changed page. Settings changes the text and button size, and shows this tour again.</p>
+    <p>Open findings also appear as private notes under their lines on GitHub&apos;s Files changed page. Settings changes the text size, and shows this tour again.</p>
   );
 }
 

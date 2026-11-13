@@ -1,7 +1,7 @@
 import { expect, test, type Locator } from '@playwright/test';
 import { NOTHING_READ, RUNNING, Screens, SIZES, type SizeName } from './screens-fixture';
 
-// Every screen of the panel at 320 and 420 px wide and at each of the four text and button sizes, chosen in Settings as a
+// Every screen of the panel at 320 and 420 px wide and at each of the four text sizes, chosen in Settings as a
 // person would: nothing scrolls sideways, no button's words are cut or broken inside a word, a place too long for its
 // box keeps its end in view, a pinned bar is wholly in view on the bottom edge and a control reached with Tab is never
 // under it, and a sheet is never taller than the panel. At Default every button, choice row and checkbox is at least
@@ -303,7 +303,7 @@ test('7. Settings, Packs and Service; at Largest in a 320 px panel the four size
   await s.review();
   await atEverySize(async (where, size, width) => {
     await s.button('Settings').click();
-    const sizes = panel().getByRole('radiogroup', { name: 'Text and button size' });
+    const sizes = panel().getByRole('radiogroup', { name: 'Text size' });
     await expect(sizes.getByRole('radio', { name: size, exact: true })).toBeChecked();
     // The review's bar is hidden behind Settings, so it gives Settings no scroll padding.
     expect(await panel().evaluate(() => getComputedStyle(document.documentElement).scrollPaddingBottom), `${where}: scroll padding`).toBe('auto');

@@ -1,6 +1,6 @@
 import type { SettingsStore } from './settings';
 
-/** The text and button size of the whole panel. */
+/** The text size of the whole panel. */
 export type Size = 's' | 'm' | 'l' | 'xl';
 export const SIZES: readonly Size[] = ['s', 'm', 'l', 'xl'];
 export const SIZE_SCALE: Record<Size, number> = { s: 0.9, m: 1, l: 1.15, xl: 1.3 };
@@ -12,9 +12,9 @@ const HINT_KEY = 'airlock.size';
 
 export const isSize = (value: unknown): value is Size => typeof value === 'string' && (SIZES as readonly string[]).includes(value);
 
-/** Scales everything in the panel (text, buttons and spacing) by zooming the root element. */
+/** Scales the panel's text only: the styles multiply every font size by `--text-scale`. Boxes and spacing keep their size. */
 export function applySize(size: Size, root: HTMLElement = document.documentElement): void {
-  root.style.zoom = String(SIZE_SCALE[size]);
+  root.style.setProperty('--text-scale', String(SIZE_SCALE[size]));
   root.dataset.size = size;
 }
 

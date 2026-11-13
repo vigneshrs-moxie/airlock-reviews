@@ -10,7 +10,7 @@
 .ap-top { display: flex; align-items: center; gap: 4px; margin: -4px 0 0; }
 .ap-back { display: inline-flex; align-items: center; gap: 4px; min-height: 34px; padding: 4px 6px 4px 2px; font: inherit; font-weight: 600; color: var(--fg); background: none; border: 0; border-radius: 6px; cursor: pointer; }
 .ap-back:hover, .ap-icon:hover:not(:disabled) { background: var(--card); }
-.ap-count { margin-left: auto; padding-right: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.ap-count { margin-left: auto; padding-right: 4px; font-size: calc(12px * var(--text-scale, 1)); color: var(--muted); white-space: nowrap; }
 .ap-icon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 34px; height: 34px; padding: 0; color: var(--fg); background: none; border: 0; border-radius: 6px; cursor: pointer; }
 .ap-top > .ap-back + .ap-icon { margin-left: auto; }
 .ap-icon:disabled { opacity: 0.3; cursor: not-allowed; }
@@ -43,7 +43,7 @@
 .ap-pinned-finding > .ap-bar { flex-wrap: nowrap; }
 .ap-act { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; }
 .ap-act .btn { width: 100%; min-height: 44px; padding: 4px 6px; line-height: 1.2; overflow-wrap: break-word; }
-.ap-act .cap, .ap-act > .muted, .ap-act > .mark { font-size: 11px; line-height: 1.25; color: var(--muted); text-align: center; overflow-wrap: anywhere; }
+.ap-act .cap, .ap-act > .muted, .ap-act > .mark { font-size: calc(11px * var(--text-scale, 1)); line-height: 1.25; color: var(--muted); text-align: center; overflow-wrap: anywhere; }
 .ap-act > .mark { color: var(--fg); }
 /* Narrow (Large and Largest in a narrow panel): the three actions stack, each with its line beside it. */
 @container (max-width: 300px) {

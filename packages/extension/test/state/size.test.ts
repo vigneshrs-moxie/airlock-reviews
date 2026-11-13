@@ -41,21 +41,21 @@ describe('the sizes', () => {
     expect(SIZE_LABEL).toEqual({ s: 'Small', m: 'Default', l: 'Large', xl: 'Largest' });
   });
 
-  it('each applies its scale as the zoom of the root, and names itself on it', () => {
+  it('each applies its scale as the text scale of the root, and names itself on it', () => {
     for (const size of SIZES) {
       const el = root();
       applySize(size, el);
-      expect(el.style.zoom).toBe(String(SIZE_SCALE[size]));
+      expect(el.style.getPropertyValue('--text-scale')).toBe(String(SIZE_SCALE[size]));
       expect(el.dataset.size).toBe(size);
     }
   });
 
   it('applies to the document by default', () => {
     applySize('xl');
-    expect(document.documentElement.style.zoom).toBe('1.3');
+    expect(document.documentElement.style.getPropertyValue('--text-scale')).toBe('1.3');
     expect(document.documentElement.dataset.size).toBe('xl');
     applySize('m');
-    expect(document.documentElement.style.zoom).toBe('1');
+    expect(document.documentElement.style.getPropertyValue('--text-scale')).toBe('1');
   });
 });
 
@@ -95,7 +95,7 @@ describe('start-up', () => {
     release('xl');
     await settle();
     expect(el.dataset.size).toBe('xl');
-    expect(el.style.zoom).toBe('1.3');
+    expect(el.style.getPropertyValue('--text-scale')).toBe('1.3');
     expect(storage.data['airlock.size']).toBe('xl');
     expect(size.current()).toEqual({ size: 'xl', failed: false });
     expect(heard).toHaveBeenCalled();
@@ -120,7 +120,7 @@ describe('start-up', () => {
     refuse(new Error('storage error'));
     await settle();
     expect(el.dataset.size).toBe('m');
-    expect(el.style.zoom).toBe('1');
+    expect(el.style.getPropertyValue('--text-scale')).toBe('1');
     expect(size.current()).toEqual({ size: 'm', failed: false });
   });
 
@@ -145,7 +145,7 @@ describe('choosing a size', () => {
     release('m');
     await settle();
     size.choose('xl');
-    expect(el.style.zoom).toBe('1.3');
+    expect(el.style.getPropertyValue('--text-scale')).toBe('1.3');
     expect(storage.data['airlock.size']).toBe('xl');
     expect(setSize).toHaveBeenCalledWith('xl');
     await settle();

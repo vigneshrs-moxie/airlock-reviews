@@ -53,7 +53,7 @@ export interface PanelServices {
   notes?: PageNotes;
   /** Calls `open` with a finding's id each time `Open in Airlock` is pressed on a note in this tab; returns the way to stop. */
   noteOpen?: (open: (id: string) => void) => () => void;
-  /** The text and button size, already applied to the page when the panel starts. */
+  /** The text size, already applied to the page when the panel starts. */
   size?: SizeSetting;
 }
 

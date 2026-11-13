@@ -30,38 +30,38 @@
   }
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: calc(13px * var(--text-scale, 1))/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
 .panel { max-width: 420px; min-width: 320px; margin: 0 auto; }
-/* At Large and Largest the panel is narrower in CSS pixels than the side panel is wide (zoom): it never asks for more. */
+/* With a size chosen the panel never asks for more width than the side panel has. */
 :root[data-size] .panel { min-width: 0; }
 /* The row wraps rather than overflow at a large size: the Settings button moves to a second line. */
 .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; row-gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
 .brand-mark { flex: none; width: 18px; height: 18px; background: url(/icon/32.png) center / contain no-repeat; }
-.name { margin: 0; font-size: 14px; font-weight: 700; }
-.status { margin-left: auto; font-size: 12px; color: var(--muted); }
+.name { margin: 0; font-size: calc(14px * var(--text-scale, 1)); font-weight: 700; }
+.status { margin-left: auto; font-size: calc(12px * var(--text-scale, 1)); color: var(--muted); }
 .body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 .card { border: 1px solid var(--border); background: var(--card); border-radius: 8px; padding: 10px 12px; margin: 0; min-width: 0; }
 .card.alert { border-color: var(--danger); }
-.title { margin: 0 0 4px; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
-.label { margin: 0 0 4px; padding: 0; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
-.group { margin: 8px 0 2px; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
-.layer { margin: 4px 0 2px; font-size: 12px; font-weight: 600; color: var(--muted); overflow-wrap: anywhere; }
+.title { margin: 0 0 4px; font-size: calc(14px * var(--text-scale, 1)); font-weight: 600; overflow-wrap: anywhere; }
+.label { margin: 0 0 4px; padding: 0; font-size: calc(11px * var(--text-scale, 1)); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.group { margin: 8px 0 2px; font-size: calc(13px * var(--text-scale, 1)); font-weight: 600; overflow-wrap: anywhere; }
+.layer { margin: 4px 0 2px; font-size: calc(12px * var(--text-scale, 1)); font-weight: 600; color: var(--muted); overflow-wrap: anywhere; }
 p { margin: 4px 0; overflow-wrap: anywhere; }
-.muted { color: var(--muted); font-size: 12px; }
+.muted { color: var(--muted); font-size: calc(12px * var(--text-scale, 1)); }
 .block { display: block; }
-.detail { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.detail { color: var(--danger); font-size: calc(12px * var(--text-scale, 1)); overflow-wrap: anywhere; }
 .plain { list-style: none; margin: 0; padding: 0; }
 .plain > li { padding: 3px 0; overflow-wrap: anywhere; }
 .nested { padding-left: 12px; }
 .file { display: flex; gap: 8px; align-items: baseline; }
-.path, .code { font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
-.tag { flex: none; margin-left: auto; font-size: 11px; white-space: nowrap; border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; }
+.path, .code { font: calc(11px * var(--text-scale, 1))/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.tag { flex: none; margin-left: auto; font-size: calc(11px * var(--text-scale, 1)); white-space: nowrap; border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; }
 .command { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
 .code { flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); user-select: all; }
 .input { display: block; width: 100%; min-height: 32px; margin: 4px 0 8px; padding: 4px 8px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
 /* Every button is at least 32 px high at the Default size (40 in a pinned bar), the small ones too. */
 .btn { min-height: 32px; padding: 4px 12px; font: inherit; font-weight: 600; color: var(--fg); background: var(--card); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
-.btn.small { padding: 2px 8px; font-size: 12px; }
+.btn.small { padding: 2px 8px; font-size: calc(12px * var(--text-scale, 1)); }
 .btn.primary { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
 .btn.wide { width: 100%; min-height: 34px; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
@@ -69,7 +69,7 @@ p { margin: 4px 0; overflow-wrap: anywhere; }
 .choice { padding: 3px 0; cursor: pointer; }
 .switch { align-items: center; cursor: pointer; }
 .notice { color: var(--danger); font-weight: 600; }
-.mark { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.mark { font-size: calc(12px * var(--text-scale, 1)); font-weight: 600; overflow-wrap: anywhere; }
 .mark a, .sheet-body a { color: var(--accent); }
 .mark p { margin: 2px 0; font-weight: 400; }
 .card-main { flex: 1; min-width: 0; }
@@ -78,18 +78,18 @@ p { margin: 4px 0; overflow-wrap: anywhere; }
 .masked { -webkit-text-security: disc; }
 .row { flex-wrap: wrap; }
 .banner { border-color: var(--accent); }
-.status { font-size: 11px; font-weight: 600; margin-left: 8px; padding: 0 6px; border: 1px solid currentColor; border-radius: 8px; }
+.status { font-size: calc(11px * var(--text-scale, 1)); font-weight: 600; margin-left: 8px; padding: 0 6px; border: 1px solid currentColor; border-radius: 8px; }
 .open, .line, .place, .fold { font: inherit; color: inherit; text-align: left; background: none; border: 0; padding: 0; cursor: pointer; }
 .open { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .line, .place { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; align-content: center; width: 100%; min-height: 32px; padding: 3px 0; overflow-wrap: anywhere; }
 .bar, .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 6px 0; }
 .action { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
 .part { margin-top: 8px; }
-.quote { margin: 4px 0; padding: 6px 8px; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; white-space: pre; max-width: 100%; }
+.quote { margin: 4px 0; padding: 6px 8px; font: calc(11px * var(--text-scale, 1))/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; white-space: pre; max-width: 100%; }
 div.quote { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible; }
 .steps { margin: 0; padding-left: 20px; }
 .steps > li { padding: 3px 0; overflow-wrap: anywhere; }
-.timing { width: 100%; border-collapse: collapse; font-size: 12px; }
+.timing { width: 100%; border-collapse: collapse; font-size: calc(12px * var(--text-scale, 1)); }
 .timing th, .timing td { padding: 2px 4px; text-align: right; border-bottom: 1px solid var(--border); }
 .timing th[scope='row'], .timing th[scope='col']:first-child { text-align: left; overflow-wrap: anywhere; }
 .sheet { position: fixed; inset: 0; z-index: 10; display: flex; background: rgba(0, 0, 0, 0.45); }
@@ -97,7 +97,7 @@ div.quote { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible;
 .sheet-body > .row { justify-content: space-between; align-items: center; }
 /* A sheet that rises from the bottom edge and leaves the screen behind it in view. */
 .sheet.bottom { align-items: flex-end; }
-/* A bottom sheet is at most 90% of the panel: a share of the panel, not vh, which the size setting's zoom grows. */
+/* A bottom sheet is at most 90% of the panel: a share of the panel, not vh. */
 .sheet.bottom .sheet-body { margin: 0; max-height: 90%; padding: 16px 14px 18px; border-bottom: 0; border-radius: 14px 14px 0 0; }
 .sheet-body li { padding: 8px 0; border-bottom: 1px solid var(--border); }
 .proof { margin-top: 4px; overflow-wrap: anywhere; }

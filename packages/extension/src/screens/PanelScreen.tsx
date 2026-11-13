@@ -52,7 +52,7 @@ export interface PanelScreenProps {
   notesFailed?: boolean;
   /** The finding `Open in Airlock` asked for: opened when it is an open finding of the review on screen. */
   openFinding?: OpenFinding | null;
-  /** The text and button size; without it Settings shows Default and changes nothing. */
+  /** The text size; without it Settings shows Default and changes nothing. */
   size?: SizeSetting;
   /** Whether the tour was finished or skipped; null until it is read, and then the tour does not open by itself. */
   tourSeen?: boolean | null;

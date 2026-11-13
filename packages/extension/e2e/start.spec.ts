@@ -179,8 +179,8 @@ test('1. the start screen: the pull request, the depth as three choices, the pac
 
 test('2. at Largest, set in Settings, the start screen still fits the panel and keeps its button in view', async () => {
   await button('Settings').click();
-  await panel.getByRole('radiogroup', { name: 'Text and button size' }).getByRole('radio', { name: 'Largest' }).check();
-  await expect.poll(() => panel.evaluate(() => document.documentElement.style.zoom)).toBe('1.3');
+  await panel.getByRole('radiogroup', { name: 'Text size' }).getByRole('radio', { name: 'Largest' }).check();
+  await expect.poll(() => panel.evaluate(() => document.documentElement.style.getPropertyValue('--text-scale'))).toBe('1.3');
   await button('Back').click();
 
   // The choices made before Settings are kept.

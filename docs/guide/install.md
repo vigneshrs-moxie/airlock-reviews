@@ -98,7 +98,7 @@ Short titles and summaries are written by a quick model in a step near the end o
 
 **The tour.** The first time a review is on screen, three short steps show what the screen holds. **Skip**, **Done**, Escape or a tap outside it ends it for good; if you close the panel partway through instead, it comes back the next time. **Settings**, **Show the tour again** shows it again.
 
-**Settings** (top right): **Text and button size** (Small, Default, Large, Largest; saved on this computer), **Notes in the diff**, **Default depth**, **Packs and learned lines**, **Show the tour again**, and **Service** (whether the service, Claude and GitHub are ready, and the pairing).
+**Settings** (top right): **Text size** (Small, Default, Large, Largest; saved on this computer), **Notes in the diff**, **Default depth**, **Packs and learned lines**, **Show the tour again**, and **Service** (whether the service, Claude and GitHub are ready, and the pairing).
 
 Airlock writes to GitHub only when you press the post button described below, and then only comments. It never approves, never requests changes and never merges.
 

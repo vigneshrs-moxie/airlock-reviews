@@ -67,9 +67,9 @@ describe('the Settings screen', () => {
       await openSettings();
       expect(screen.getByRole('heading', { level: 2, name: 'Settings' })).toBe(document.activeElement);
       expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Display', 'On GitHub', 'Reviews', 'Help']);
-      const sizes = screen.getByRole('radiogroup', { name: 'Text and button size' });
+      const sizes = screen.getByRole('radiogroup', { name: 'Text size' });
       expect(within(sizes).getAllByRole('radio').map((r) => r.parentElement?.textContent)).toEqual(['Small', 'Default', 'Large', 'Largest']);
-      expect(screen.getByText('Changes everything in the panel: text, buttons and spacing. Saved on this computer.')).toBeTruthy();
+      expect(screen.getByText('Changes the size of the text in the panel. Saved on this computer.')).toBeTruthy();
       expect(screen.getByRole('switch', { name: 'Notes in the diff' })).toBeTruthy();
       expect(screen.getByText('Private notes under the lines of Files changed. Only you see them.')).toBeTruthy();
       expect(within(screen.getByRole('radiogroup', { name: 'Default depth' })).getAllByRole('radio')).toHaveLength(4);
@@ -179,17 +179,17 @@ describe('the Settings screen', () => {
   });
 });
 
-describe('the text and button size', () => {
-  it('changes the zoom at once, stores it, and the panel opens at it again after a remount', async () => {
+describe('the text size', () => {
+  it('changes the text scale at once, stores it, and the panel opens at it again after a remount', async () => {
     const store = sizeStore();
     const storage = memoryStorage();
     const size = startSize(store, { pageStorage: storage });
     const first = show({ kind: 'ready', pr: TWO_PACKS }, { size });
     await openSettings();
-    const group = within(screen.getByRole('radiogroup', { name: 'Text and button size' }));
+    const group = within(screen.getByRole('radiogroup', { name: 'Text size' }));
     expect((group.getByRole('radio', { name: 'Default' }) as HTMLInputElement).checked).toBe(true);
     await act(async () => { fireEvent.click(group.getByRole('radio', { name: 'Largest' })); });
-    expect(document.documentElement.style.zoom).toBe('1.3');
+    expect(document.documentElement.style.getPropertyValue('--text-scale')).toBe('1.3');
     expect(document.documentElement.dataset.size).toBe('xl');
     expect(store.setSize).toHaveBeenCalledWith('xl');
     expect(storage.getItem('airlock.size')).toBe('xl');
@@ -199,7 +199,7 @@ describe('the text and button size', () => {
     // A new panel: the hint applies before anything is drawn.
     document.documentElement.removeAttribute('style');
     const again = startSize(store, { pageStorage: storage });
-    expect(document.documentElement.style.zoom).toBe('1.3');
+    expect(document.documentElement.style.getPropertyValue('--text-scale')).toBe('1.3');
     show({ kind: 'ready', pr: TWO_PACKS }, { size: again });
     await openSettings();
     expect((screen.getByRole('radio', { name: 'Largest' }) as HTMLInputElement).checked).toBe(true);
@@ -215,7 +215,7 @@ describe('the text and button size', () => {
     expect((screen.getByRole('radio', { name: 'Large' }) as HTMLInputElement).checked).toBe(true);
     await act(async () => { fireEvent.click(screen.getByRole('radio', { name: 'Small' })); });
     expect((screen.getByRole('radio', { name: 'Large' }) as HTMLInputElement).checked).toBe(true);
-    expect(document.documentElement.style.zoom).toBe('1.15');
+    expect(document.documentElement.style.getPropertyValue('--text-scale')).toBe('1.15');
     expect(within(screen.getByRole('region', { name: 'Display' })).getByRole('alert').textContent).toBe('Airlock could not save that setting.');
   });
 
@@ -224,6 +224,6 @@ describe('the text and button size', () => {
     await openSettings();
     fireEvent.click(screen.getByRole('radio', { name: 'Large' }));
     expect((screen.getByRole('radio', { name: 'Default' }) as HTMLInputElement).checked).toBe(true);
-    expect(document.documentElement.style.zoom).toBe('');
+    expect(document.documentElement.style.getPropertyValue('--text-scale')).toBe('');
   });
 });

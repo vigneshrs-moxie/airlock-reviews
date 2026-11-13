@@ -9,7 +9,7 @@ import { Packs } from './Packs';
 import { ServiceInfo, serviceLine, useServiceStatus } from './ServiceInfo';
 
 export const NOT_SAVED = 'Airlock could not save that setting.';
-export const SIZE_NOTE = 'Changes everything in the panel: text, buttons and spacing. Saved on this computer.';
+export const SIZE_NOTE = 'Changes the size of the text in the panel. Saved on this computer.';
 export const NOTES_NOTE = 'Private notes under the lines of Files changed. Only you see them.';
 export const NO_PR_PACKS = 'Open a pull request to see its packs.';
 export const UNPAIRED_PACKS = 'Pair Airlock to see its packs.';
@@ -83,7 +83,7 @@ function SizeControl({ size }: { size: SizeSetting }) {
   const name = useId();
   return (
     <div className="ap-group">
-      <b id={titleId}>Text and button size</b>
+      <b id={titleId}>Text size</b>
       <div className="ap-seg" role="radiogroup" aria-labelledby={titleId}>
         {SIZES.map((s) => (
           <label key={s} className={s === shown ? 'on' : undefined}>

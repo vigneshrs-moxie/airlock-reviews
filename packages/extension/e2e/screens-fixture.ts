@@ -196,7 +196,7 @@ const LEARNED: LearnedLine[] = [
 
 export const SIZES = ['Small', 'Default', 'Large', 'Largest'] as const;
 export type SizeName = typeof SIZES[number];
-const ZOOM: Record<SizeName, string> = { Small: '0.9', Default: '1', Large: '1.15', Largest: '1.3' };
+const SCALE: Record<SizeName, string> = { Small: '0.9', Default: '1', Large: '1.15', Largest: '1.3' };
 
 /** One browser with the built extension, a GitHub tab and the side panel as a page of its own, against the fake service. */
 export class Screens {
@@ -346,12 +346,12 @@ export class Screens {
     await expect(this.panel.getByRole('heading', { name: "Airlock's service on this Mac is not running." })).toHaveCount(0, { timeout: 25_000 });
   }
 
-  /** The text and button size, chosen in Settings as a person would; back to the screen it was opened from. */
+  /** The text size, chosen in Settings as a person would; back to the screen it was opened from. */
   async size(size: SizeName): Promise<void> {
     await this.button('Settings').click();
-    const choice = this.panel.getByRole('radiogroup', { name: 'Text and button size' }).getByRole('radio', { name: size, exact: true });
+    const choice = this.panel.getByRole('radiogroup', { name: 'Text size' }).getByRole('radio', { name: size, exact: true });
     await choice.check();
-    await expect.poll(() => this.panel.evaluate(() => document.documentElement.style.zoom)).toBe(ZOOM[size]);
+    await expect.poll(() => this.panel.evaluate(() => document.documentElement.style.getPropertyValue('--text-scale'))).toBe(SCALE[size]);
     await this.button('Back').click();
     await expect(this.panel.getByRole('heading', { name: 'Settings', level: 2 })).toHaveCount(0);
   }

@@ -9,7 +9,7 @@ const lastRoom = new Map<string, number>();
  * content, so nothing scrolls out of reach under it. The review's bar and a finding's actions are both this.
  *
  * Its height is measured (its buttons wrap at narrow widths and large sizes) in the panel's own CSS pixels
- * (`offsetHeight`, which the size setting's zoom does not scale), and is also kept on the root as `--ap-pinned-height`,
+ * (`offsetHeight`), and is also kept on the root as `--ap-pinned-height`,
  * so a control reached with Tab is scrolled clear of the bar (shared.css). While the screen is kept out of sight (Settings
  * open) the bar is not drawn: its last height is kept, and it is measured again when the screen comes back.
  *

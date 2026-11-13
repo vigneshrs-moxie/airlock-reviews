@@ -1,4 +1,4 @@
-/* Settings, Packs and Service, the text and button size, and the tour: these screens' own rules. The .ap-* rules come
+/* Settings, Packs and Service, the text size, and the tour: these screens' own rules. The .ap-* rules come
    from docs/design/panel-redesign/theme.css; those other screens use too are in shared.css. The rules the size setting
    needs on every screen (the panel's minimum width, a bottom sheet's height, the header's wrap) are in panel.css. */
 
@@ -18,7 +18,7 @@
 .ap-preview-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 .ap-preview .btn { display: inline-flex; align-items: center; min-height: 32px; cursor: default; }
 .ap-preview .ap-sev, .tour .ap-sev { flex-basis: 38px; }
-.ap-preview .ap-row-sub { display: block; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.ap-preview .ap-row-sub { display: block; font: calc(11px * var(--text-scale, 1))/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 
 /* The tour: three steps in a bottom sheet. */
 .tour { display: flex; flex-direction: column; gap: 12px; }

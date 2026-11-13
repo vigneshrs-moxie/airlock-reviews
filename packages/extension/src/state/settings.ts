@@ -17,7 +17,7 @@ export interface SettingsStore {
   /** Whether the review's notes are shown in the diff on GitHub's page: on unless the person turned them off. */
   getShowNotes(): Promise<boolean>;
   setShowNotes(on: boolean): Promise<void>;
-  /** The text and button size: Default when none is stored or the stored value is not one of the four. */
+  /** The text size: Default when none is stored or the stored value is not one of the four. */
   getSize(): Promise<Size>;
   setSize(size: Size): Promise<void>;
   /** Whether the tour was finished or skipped; it shows by itself until then. */

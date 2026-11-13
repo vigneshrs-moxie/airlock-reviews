@@ -5,8 +5,8 @@
 /* The verdict strip. */
 .ap-verdict { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 10px; }
 .ap-verdict p { margin: 0; }
-.ap-vword { margin: 0; font-size: 17px; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
-.ap-headline { font-size: 13px; }
+.ap-vword { margin: 0; font-size: calc(17px * var(--text-scale, 1)); font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+.ap-headline { font-size: calc(13px * var(--text-scale, 1)); }
 .ap-verdict .label { margin: 0; }
 .ap-start { align-self: flex-start; }
 .ap-banner { display: flex; flex-direction: column; gap: 8px; border-color: var(--accent); background: var(--tint); }
@@ -47,7 +47,7 @@
 .plain.ap-points > li::before { content: '•'; flex: none; color: var(--muted); }
 
 /* The review's pinned bar (Pinned.tsx; the bar itself is in shared.css). */
-.ap-pinned-review .btn { padding: 4px 10px; font-size: 13px; }
+.ap-pinned-review .btn { padding: 4px 10px; font-size: calc(13px * var(--text-scale, 1)); }
 .ap-bar > .btn { flex: 0 1 auto; }
 .ap-bar > .btn.ap-bar-main, .ap-bar-main { flex: 1 1 0; min-width: 0; }
 .ap-bar-main { display: flex; flex-direction: column; gap: 6px; }

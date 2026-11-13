@@ -14,7 +14,7 @@ afterEach(cleanup);
 
 const REVIEW = reviewState([finding(1), finding(2)]);
 const STEP_1 = 'The verdict says whether this can merge. Under it, each finding is one line. Tap a line for the short version; the detail is folded below it.';
-const STEP_3 = 'Open findings also appear as private notes under their lines on GitHub\'s Files changed page. Settings changes the text and button size, and shows this tour again.';
+const STEP_3 = 'Open findings also appear as private notes under their lines on GitHub\'s Files changed page. Settings changes the text size, and shows this tour again.';
 
 /** A settings store whose tour flag the test reads, kept across panels like chrome.storage.local. */
 function memory(seen = false) {
